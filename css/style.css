@@ -343,14 +343,6 @@ button {
   pointer-events: auto;
 }
 
-.empty-state-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  pointer-events: auto;
-}
-
 .empty-state strong {
   color: var(--text);
   font-size: 18px;

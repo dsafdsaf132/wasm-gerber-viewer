@@ -4,6 +4,34 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 
 [Website](https://wasm-gerber-viewer.vercel.app/)
 
+## Samples
+
+These sample links open remote Gerber zip archives with the viewer's `?url=`
+query parameter. The archives are loaded from their upstream sources and are not
+bundled in this repository.
+
+### Sample 1
+
+[Open KLP-5e ESP32 Sensor Board](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffutureshocked%2FKLP-5e-ESP32-sensor-board%2Fmain%2FKiCad%2520project%2Fdfm%2Fgerber.zip)
+
+Source:
+
+- Project: [KLP-5e ESP32 Sensor Board](https://github.com/futureshocked/KLP-5e-ESP32-sensor-board)
+- Copyright: Copyright (c) 2025, Peter Dalmaris
+- License: CERN-OHL-S v2.0
+- Archive: <https://raw.githubusercontent.com/futureshocked/KLP-5e-ESP32-sensor-board/main/KiCad%20project/dfm/gerber.zip>
+
+### Sample 2
+
+[Open Xassette-Asterisk](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fprocessor-cdn.kitspace.org%2Fv6%2FSdtElectronics%2FXassette-Asterisk%2F6ccd88501c99e2339571de744d003d571be47fad%2F_%2FXassette-Asterisk-6ccd885-gerbers.zip)
+
+Source:
+
+- Project: [Xassette-Asterisk](https://github.com/SdtElectronics/Xassette-Asterisk)
+- Copyright: SdtElectronics
+- License: CERN-OHL-W v2.0
+- Archive: <https://processor-cdn.kitspace.org/v6/SdtElectronics/Xassette-Asterisk/6ccd88501c99e2339571de744d003d571be47fad/_/Xassette-Asterisk-6ccd885-gerbers.zip>
+
 ## Features
 
 - High-performance rendering for large Gerber files (>10 MB)
@@ -78,18 +106,6 @@ The following Gerber commands are not implemented yet:
 
 - **%AB** - Aperture Block definitions
 - **%LR** - Layer Rotation transformations
-
-## Source
-
-The Demo button loads Gerber files from the
-[KLP-5e ESP32 Sensor Board](https://github.com/futureshocked/KLP-5e-ESP32-sensor-board)
-project.
-
-- Copyright: Copyright (c) 2025, Peter Dalmaris
-- License: CERN-OHL-S v2.0
-- Source archive:
-  <https://raw.githubusercontent.com/futureshocked/KLP-5e-ESP32-sensor-board/main/KiCad%20project/dfm/gerber.zip>
-- The demo archive is loaded from the upstream repository and is not bundled in this repository.
 
 ## License
 

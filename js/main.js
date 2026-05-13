@@ -1,8 +1,5 @@
 const NOTIFICATION_DURATION_MS = 2000;
 const MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024;
-const DEMO_ARCHIVE_NAME = "ucamco-librepcb-sample-2.zip";
-const DEMO_ARCHIVE_PATH =
-  "https://raw.githubusercontent.com/futureshocked/KLP-5e-ESP32-sensor-board/main/KiCad%20project/dfm/gerber.zip";
 const ZIP_MIME_TYPES = new Set([
   "application/zip",
   "application/x-zip-compressed",
@@ -68,7 +65,6 @@ export class GerberViewer {
     this.workspaceStatus = document.getElementById("workspace-status");
     this.emptyState = document.getElementById("empty-state");
     this.emptyFileSizeLimit = document.getElementById("empty-file-size-limit");
-    this.emptyDemoBtn = document.getElementById("empty-demo-btn");
     this.dropOverlay = document.getElementById("drop-overlay");
     this.measurementOverlay = document.getElementById("measurement-overlay");
     this.visibleLayerCount = document.getElementById("visible-layer-count");
@@ -192,6 +188,7 @@ export class GerberViewer {
     this.updateMeasurementUnitControl();
     this.updateViewFlipControls();
     this.render();
+    this.loadInitialUrlSource();
   }
 
   resizeCanvas() {
@@ -223,10 +220,6 @@ export class GerberViewer {
 
     this.emptyUploadBtn.addEventListener("click", () => {
       this.fileInput.click();
-    });
-
-    this.emptyDemoBtn.addEventListener("click", () => {
-      this.loadDemoArchive();
     });
 
     this.fileInput.addEventListener("change", (e) => {
@@ -829,43 +822,56 @@ export class GerberViewer {
       `Max ${this.formatFileSize(MAX_FILE_SIZE_BYTES)} per file`;
   }
 
-  async loadDemoArchive() {
-    if (this.layers.length > 0 || this.emptyDemoBtn.disabled) {
+  async loadInitialUrlSource() {
+    const sourceUrl = this.getInitialSourceUrl();
+    if (!sourceUrl) return;
+
+    try {
+      const url = new URL(sourceUrl);
+      await this.loadRemoteSource(url);
+    } catch (error) {
+      this.handleLayerLoadError(sourceUrl, error);
+    }
+  }
+
+  getInitialSourceUrl() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("url") || params.get("source") || params.get("file");
+  }
+
+  async loadRemoteSource(url) {
+    this.setWorkspaceStatus("Loading remote file");
+    const response = await fetch(url.href);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} while loading ${url.href}`);
+    }
+
+    const fileName = this.getBaseFileName(decodeURIComponent(url.pathname));
+    const file = new File([await response.blob()], fileName, {
+      type: response.headers.get("content-type") || "",
+    });
+
+    const layerSources = await this.collectLayerSources([file]);
+    if (layerSources.length === 0) {
+      this.updateUiState();
       return;
     }
 
-    this.emptyDemoBtn.disabled = true;
-    this.setWorkspaceStatus("Loading demo");
+    const results = await Promise.all(
+      layerSources.map((source) =>
+        this.loadLayerSource(source.name, source.readText),
+      ),
+    );
+    const loadedCount = results.filter(Boolean).length;
 
-    try {
-      const response = await fetch(DEMO_ARCHIVE_PATH);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} while loading ${DEMO_ARCHIVE_PATH}`);
-      }
-
-      const demoArchive = new File([await response.blob()], DEMO_ARCHIVE_NAME, {
-        type: "application/zip",
-      });
-      const layerSources = await this.collectZipLayerSources(demoArchive);
-      const results = await Promise.all(
-        layerSources.map((source) =>
-          this.loadLayerSource(source.name, source.readText),
-        ),
-      );
-      const loadedCount = results.filter(Boolean).length;
-
-      if (loadedCount > 0) {
-        this.renderLayerList();
-        this.render();
-        this.fitView();
-        this.addDiagnostic("info", "Demo loaded", `${loadedCount} processed`);
-      }
-    } catch (error) {
-      this.handleLayerLoadError(DEMO_ARCHIVE_NAME, error);
-    } finally {
-      this.emptyDemoBtn.disabled = false;
-      this.updateUiState();
+    if (loadedCount > 0) {
+      this.renderLayerList();
+      this.render();
+      this.fitView();
+      this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
     }
+
+    this.updateUiState();
   }
 
   async handleFileUpload(files) {
