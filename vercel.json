@@ -1,5 +1,0 @@
-{
-  "buildCommand": "./scripts/vercel-build.sh",
-  "ignoreCommand": "test \"$GITHUB_ACTIONS\" != \"true\"",
-  "outputDirectory": "."
-}
