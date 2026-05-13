@@ -125,8 +125,12 @@ export class GerberViewer {
     this.drawerPendingHeight = null;
     this.drawerMinWidth = 200;
     this.drawerMaxWidth = 600;
-    this.drawerMinHeight = 180;
+    this.drawerMinHeight = 300;
     this.drawerMaxHeight = 560;
+    this.drawerCollapsedWidth = 156;
+    this.drawerCollapsedHeight = 95;
+    this.drawerSnapThreshold = 50;
+    this.drawerBottomCollapseThreshold = 200;
 
     // Colors
     this.colorPalette = [
@@ -2101,6 +2105,42 @@ export class GerberViewer {
     return window.matchMedia("(max-width: 760px)").matches;
   }
 
+  getCssPixelValue(propertyName, fallback) {
+    const rawValue = getComputedStyle(this.dropZone)
+      .getPropertyValue(propertyName)
+      .trim();
+    const parsedValue = parseFloat(rawValue);
+    return Number.isFinite(parsedValue) ? parsedValue : fallback;
+  }
+
+  getDrawerCollapsedWidth() {
+    return this.getCssPixelValue(
+      "--panel-collapsed-width",
+      this.drawerCollapsedWidth,
+    );
+  }
+
+  getDrawerCollapsedHeight() {
+    return this.getCssPixelValue(
+      "--panel-collapsed-height",
+      this.drawerCollapsedHeight,
+    );
+  }
+
+  getDrawerSnapThreshold() {
+    return this.getCssPixelValue(
+      "--panel-snap-threshold",
+      this.drawerSnapThreshold,
+    );
+  }
+
+  getDrawerBottomCollapseThreshold() {
+    return this.getCssPixelValue(
+      "--panel-bottom-collapse-threshold",
+      this.drawerBottomCollapseThreshold,
+    );
+  }
+
   getDrawerMaxWidth() {
     const viewportLimit = Math.max(this.drawerMinWidth, window.innerWidth - 48);
     return Math.min(this.drawerMaxWidth, viewportLimit);
@@ -2166,10 +2206,6 @@ export class GerberViewer {
 
   startDrawerResize(e) {
     e.preventDefault();
-    if (this.drawer.classList.contains("collapsed")) {
-      return;
-    }
-
     this.isResizingDrawer = true;
     this.drawer.classList.add("resizing");
     document.body.style.userSelect = "none";
@@ -2185,21 +2221,66 @@ export class GerberViewer {
 
     if (this.isMobileDrawerLayout()) {
       const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      this.setDrawerHeight(window.innerHeight - clientY, {
-        commitLayout: false,
-      });
+      this.previewDrawerResize(window.innerHeight - clientY, "height");
       return;
     }
 
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const newWidth = window.innerWidth - clientX;
-    this.setDrawerWidth(newWidth, { commitLayout: false });
+    this.previewDrawerResize(window.innerWidth - clientX, "width");
+  }
+
+  previewDrawerResize(rawSize, axis) {
+    const wasCollapsed = this.drawer.classList.contains("collapsed");
+    const collapsedSize =
+      axis === "height"
+        ? this.getDrawerCollapsedHeight()
+        : this.getDrawerCollapsedWidth();
+    const collapseThreshold =
+      axis === "height"
+        ? this.getDrawerBottomCollapseThreshold()
+        : collapsedSize + this.getDrawerSnapThreshold();
+
+    if (rawSize <= collapseThreshold) {
+      this.drawer.classList.add("collapsed");
+      if (axis === "height") {
+        this.drawerPendingHeight = null;
+        this.dropZone.style.setProperty(
+          "--panel-overlay-height",
+          `${collapsedSize}px`,
+        );
+        this.drawer.style.height = `${this.drawerCurrentHeight}px`;
+      } else {
+        this.drawerPendingWidth = null;
+        this.dropZone.style.setProperty(
+          "--panel-overlay-width",
+          `${collapsedSize}px`,
+        );
+        this.drawer.style.width = `${this.drawerCurrentWidth}px`;
+      }
+      if (!wasCollapsed) {
+        this.updateDrawerToggleState();
+      }
+      return;
+    }
+
+    this.drawer.classList.remove("collapsed");
+    if (axis === "height") {
+      this.setDrawerHeight(rawSize, { commitLayout: false });
+    } else {
+      this.setDrawerWidth(rawSize, { commitLayout: false });
+    }
+    if (wasCollapsed) {
+      this.updateDrawerToggleState();
+    }
   }
 
   stopDrawerResize(e) {
     if (!this.isResizingDrawer) return;
 
-    if (this.isMobileDrawerLayout()) {
+    if (this.drawer.classList.contains("collapsed")) {
+      this.drawerPendingHeight = null;
+      this.drawerPendingWidth = null;
+    } else if (this.isMobileDrawerLayout()) {
       if (this.drawerPendingHeight !== null) {
         this.setDrawerHeight(this.drawerPendingHeight);
       }
@@ -2213,6 +2294,7 @@ export class GerberViewer {
     requestAnimationFrame(() => {
       this.drawer.classList.remove("resizing");
     });
+    this.render();
   }
 
   triggerCanvasResize() {
