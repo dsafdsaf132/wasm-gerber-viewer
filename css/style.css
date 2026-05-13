@@ -15,6 +15,7 @@
   --warning: #facc15;
   --panel-width: 381px;
   --panel-height: 420px;
+  --panel-collapsed-height: 95px;
   --toolbar-height: 58px;
   --status-height: 34px;
   --radius: 8px;
@@ -133,6 +134,7 @@ button {
 
 .primary-actions {
   justify-self: stretch;
+  justify-content: flex-end;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -244,15 +246,18 @@ button {
 }
 
 .workspace {
+  width: 100%;
+  height: 100%;
   min-height: 0;
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--panel-width);
+  position: relative;
+  display: block;
   overflow: hidden;
-  transition: grid-template-columns 180ms ease;
 }
 
 .viewer-surface {
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   position: relative;
@@ -312,7 +317,7 @@ button {
 .measurement-overlay text {
   fill: #fff;
   stroke: #000;
-  stroke-width: 1px;
+  stroke-width: 2px;
   paint-order: stroke;
   font-size: 12px;
   font-weight: 700;
@@ -428,10 +433,19 @@ button {
   z-index: 5;
 }
 
+.workspace:has(.side-panel:not(.collapsed)) .empty-state,
+.workspace:has(.side-panel:not(.collapsed)) .canvas-status {
+  right: var(--panel-width);
+}
+
 .side-panel {
+  width: var(--panel-width);
   min-width: 0;
   min-height: 0;
-  position: relative;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   container-type: inline-size;
@@ -439,6 +453,7 @@ button {
   background: var(--surface);
   transform: translateX(0);
   transition: transform 180ms ease;
+  z-index: 30;
 }
 
 .side-panel.collapsed {
@@ -449,11 +464,6 @@ button {
   border-left: 0;
 }
 
-.workspace:has(.side-panel.collapsed) {
-  grid-template-columns: minmax(0, 1fr) 0;
-}
-
-.app-shell:has(.side-panel.resizing) .workspace,
 .side-panel.resizing {
   transition: none;
 }
@@ -845,13 +855,13 @@ button {
   }
 
   .top-toolbar {
-    grid-template-columns: minmax(118px, max-content) minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     padding: 8px;
     gap: 6px;
   }
 
-  .brand-lockup h1 {
-    font-size: 14px;
+  .brand-lockup {
+    display: none;
   }
 
   .toolbar-divider {
@@ -873,20 +883,24 @@ button {
   }
 
   .workspace {
-    position: relative;
-    display: block;
     overflow: hidden;
   }
 
-  .viewer-surface {
-    width: 100%;
-    height: 100%;
+  .workspace:has(.side-panel:not(.collapsed)) .empty-state {
+    right: 0;
+    bottom: var(--panel-height);
+  }
+
+  .workspace:has(.side-panel:not(.collapsed)) .canvas-status {
+    right: 0;
+    bottom: var(--panel-height);
   }
 
   .side-panel {
     position: fixed;
     left: 0;
     right: 0;
+    top: auto;
     bottom: 0;
     width: auto !important;
     height: var(--panel-height);
@@ -898,12 +912,108 @@ button {
     transform: translateY(0);
   }
 
+  .panel-tabs {
+    gap: 4px;
+    padding: 6px 8px;
+  }
+
+  .panel-tab {
+    height: 38px;
+    gap: 2px;
+    padding: 3px;
+  }
+
+  .panel-section {
+    padding: 8px 10px;
+  }
+
+  .panel-section.active,
+  .layer-panel-controls {
+    gap: 8px;
+  }
+
+  .alpha-control {
+    gap: 6px;
+    padding: 5px 10px;
+  }
+
+  .info-grid {
+    gap: 6px;
+  }
+
+  .info-grid > div,
+  .file-note,
+  .filter-form {
+    padding: 8px;
+  }
+
+  .filter-form {
+    gap: 8px;
+  }
+
   .side-panel.collapsed {
     width: auto;
-    transform: translateY(calc(100% - 65px));
+    transform: translateY(calc(100% - var(--panel-collapsed-height)));
     overflow: hidden;
     pointer-events: auto;
     border-top: 1px solid var(--line);
+  }
+
+  .side-panel.collapsed .panel-tabs,
+  .side-panel.collapsed .layer-list-scroll {
+    display: none;
+  }
+
+  .side-panel.collapsed .panel-section {
+    display: none;
+  }
+
+  .side-panel.collapsed .panel-section[data-panel="layers"] {
+    display: flex;
+    padding: 8px 10px;
+  }
+
+  .side-panel.collapsed .layer-panel-controls {
+    gap: 8px;
+  }
+
+  .side-panel.collapsed .section-toolbar .chip-button {
+    display: inline-flex;
+  }
+
+  .side-panel.collapsed .section-toolbar .chip-button:nth-child(n + 4) {
+    display: none;
+  }
+
+  .side-panel.collapsed .section-toolbar .chip-button span {
+    display: inline;
+  }
+
+  .side-panel.collapsed .alpha-control {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+  }
+
+  .side-panel.collapsed .alpha-control .field-row {
+    display: contents;
+  }
+
+  .side-panel.collapsed .alpha-control .field-row span {
+    display: none;
+  }
+
+  .side-panel.collapsed .alpha-control .field-row strong {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 38px;
+    text-align: right;
+  }
+
+  .side-panel.collapsed #alpha-slider {
+    grid-column: 1;
+    grid-row: 1;
   }
 
   .resize-handle {

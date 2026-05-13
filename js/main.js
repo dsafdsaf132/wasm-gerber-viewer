@@ -96,6 +96,8 @@ export class GerberViewer {
     this.isResizingDrawer = false;
     this.drawerCurrentWidth = 381;
     this.drawerCurrentHeight = 420;
+    this.drawerPendingWidth = null;
+    this.drawerPendingHeight = null;
     this.drawerMinWidth = 200;
     this.drawerMaxWidth = 600;
     this.drawerMinHeight = 180;
@@ -698,7 +700,7 @@ export class GerberViewer {
     context.font = "700 12px Inter, ui-sans-serif, system-ui, sans-serif";
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.lineWidth = 2;
+    context.lineWidth = 4;
     context.strokeStyle = "#000";
     context.fillStyle = "#fff";
     context.strokeText(this.formatMeasurementLength(distance), x, y);
@@ -1829,12 +1831,17 @@ export class GerberViewer {
     );
   }
 
-  setDrawerWidth(width) {
+  setDrawerWidth(width, { commitLayout = true } = {}) {
     const clampedWidth = this.clampDrawerWidth(width);
-    this.drawerCurrentWidth = clampedWidth;
+    if (commitLayout) {
+      this.drawerCurrentWidth = clampedWidth;
+      this.drawerPendingWidth = null;
+      this.dropZone.style.setProperty("--panel-width", `${clampedWidth}px`);
+    } else {
+      this.drawerPendingWidth = clampedWidth;
+    }
     this.drawer.style.height = "";
     this.drawer.style.width = `${clampedWidth}px`;
-    this.dropZone.style.setProperty("--panel-width", `${clampedWidth}px`);
   }
 
   getDrawerMaxHeight() {
@@ -1856,12 +1863,17 @@ export class GerberViewer {
     );
   }
 
-  setDrawerHeight(height) {
+  setDrawerHeight(height, { commitLayout = true } = {}) {
     const clampedHeight = this.clampDrawerHeight(height);
-    this.drawerCurrentHeight = clampedHeight;
+    if (commitLayout) {
+      this.drawerCurrentHeight = clampedHeight;
+      this.drawerPendingHeight = null;
+      this.dropZone.style.setProperty("--panel-height", `${clampedHeight}px`);
+    } else {
+      this.drawerPendingHeight = clampedHeight;
+    }
     this.drawer.style.width = "";
     this.drawer.style.height = `${clampedHeight}px`;
-    this.dropZone.style.setProperty("--panel-height", `${clampedHeight}px`);
   }
 
   startDrawerResize(e) {
@@ -1885,25 +1897,34 @@ export class GerberViewer {
 
     if (this.isMobileDrawerLayout()) {
       const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      this.setDrawerHeight(window.innerHeight - clientY);
+      this.setDrawerHeight(window.innerHeight - clientY, {
+        commitLayout: false,
+      });
       return;
     }
 
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const newWidth = window.innerWidth - clientX;
-    this.setDrawerWidth(newWidth);
+    this.setDrawerWidth(newWidth, { commitLayout: false });
   }
 
   stopDrawerResize(e) {
     if (!this.isResizingDrawer) return;
 
+    if (this.isMobileDrawerLayout()) {
+      if (this.drawerPendingHeight !== null) {
+        this.setDrawerHeight(this.drawerPendingHeight);
+      }
+    } else if (this.drawerPendingWidth !== null) {
+      this.setDrawerWidth(this.drawerPendingWidth);
+    }
+
     this.isResizingDrawer = false;
-    this.drawer.classList.remove("resizing");
     document.body.style.userSelect = "";
     document.body.style.cursor = "";
-
-    // Trigger canvas resize
-    this.triggerCanvasResize();
+    requestAnimationFrame(() => {
+      this.drawer.classList.remove("resizing");
+    });
   }
 
   triggerCanvasResize() {
@@ -1939,14 +1960,6 @@ export class GerberViewer {
     }
 
     this.updateDrawerToggleState();
-
-    // Trigger canvas resize immediately after toggle
-    requestAnimationFrame(() => {
-      this.triggerCanvasResize();
-    });
-    window.setTimeout(() => {
-      this.triggerCanvasResize();
-    }, 220);
   }
 
   updateDrawerToggleState() {
