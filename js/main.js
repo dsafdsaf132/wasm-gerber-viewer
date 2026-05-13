@@ -1111,8 +1111,10 @@ export class GerberViewer {
 
     this.camera.zoom = this.clampZoom(fitView.zoom);
     this.fitViewZoom = this.camera.zoom;
-    this.camera.offsetX = -fitView.centerX * this.getViewScaleX();
-    this.camera.offsetY = -fitView.centerY * this.getViewScaleY();
+    this.camera.offsetX =
+      fitView.targetX - fitView.centerX * this.getViewScaleX();
+    this.camera.offsetY =
+      fitView.targetY - fitView.centerY * this.getViewScaleY();
 
     this.render();
     this.updateUiState();
@@ -1158,30 +1160,104 @@ export class GerberViewer {
       return null;
     }
 
+    const viewport = this.getVisibleCanvasViewport();
+    if (!viewport) return null;
+
     const boundsWidth = maxX - minX;
     const boundsHeight = maxY - minY;
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
+    const targetX = (viewport.left + viewport.right) / 2;
+    const targetY = (viewport.top + viewport.bottom) / 2;
 
     if (boundsWidth === 0 && boundsHeight === 0) {
-      return { centerX, centerY, zoom: 2.0 };
+      return { centerX, centerY, targetX, targetY, zoom: 2.0 };
     }
 
     let zoom;
     if (boundsWidth === 0) {
-      zoom = (2.0 / boundsHeight) * 0.9;
+      zoom = (viewport.height / boundsHeight) * 0.9;
     } else if (boundsHeight === 0) {
-      zoom = (2.0 / boundsWidth) * 0.9;
+      zoom = (viewport.width / boundsWidth) * 0.9;
     } else {
-      const canvasAspect = this.canvas.width / this.canvas.height;
-      const boundsAspect = boundsWidth / boundsHeight;
       zoom =
-        boundsAspect > canvasAspect
-          ? (2.0 / boundsWidth) * 0.9
-          : (2.0 / boundsHeight) * 0.9;
+        Math.min(viewport.width / boundsWidth, viewport.height / boundsHeight) *
+        0.9;
     }
 
-    return { centerX, centerY, zoom };
+    return { centerX, centerY, targetX, targetY, zoom };
+  }
+
+  getVisibleCanvasViewport() {
+    const rect = this.canvas.getBoundingClientRect();
+    if (
+      rect.width === 0 ||
+      rect.height === 0 ||
+      this.canvas.width === 0 ||
+      this.canvas.height === 0
+    ) {
+      return null;
+    }
+
+    const visibleRect = {
+      left: 0,
+      top: 0,
+      right: rect.width,
+      bottom: rect.height,
+    };
+    const drawerRect = this.drawer.getBoundingClientRect();
+    const intersectsCanvas =
+      drawerRect.right > rect.left &&
+      drawerRect.left < rect.right &&
+      drawerRect.bottom > rect.top &&
+      drawerRect.top < rect.bottom;
+
+    if (intersectsCanvas) {
+      if (this.isMobileDrawerLayout()) {
+        visibleRect.bottom = Math.max(
+          visibleRect.top + 1,
+          Math.min(visibleRect.bottom, drawerRect.top - rect.top),
+        );
+      } else {
+        visibleRect.right = Math.max(
+          visibleRect.left + 1,
+          Math.min(visibleRect.right, drawerRect.left - rect.left),
+        );
+      }
+    }
+
+    const topLeft = this.canvasLocalPointToCorrected(
+      visibleRect.left,
+      visibleRect.top,
+      rect,
+    );
+    const bottomRight = this.canvasLocalPointToCorrected(
+      visibleRect.right,
+      visibleRect.bottom,
+      rect,
+    );
+
+    return {
+      left: topLeft.x,
+      right: bottomRight.x,
+      top: topLeft.y,
+      bottom: bottomRight.y,
+      width: Math.abs(bottomRight.x - topLeft.x),
+      height: Math.abs(topLeft.y - bottomRight.y),
+    };
+  }
+
+  canvasLocalPointToCorrected(x, y, rect) {
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    const ndcX = ((x - centerX) / rect.width) * 2;
+    const ndcY = -((y - centerY) / rect.height) * 2;
+    const aspect = this.canvas.width / this.canvas.height;
+
+    return {
+      x: aspect > 1.0 ? ndcX * aspect : ndcX,
+      y: aspect > 1.0 ? ndcY : ndcY / aspect,
+    };
   }
 
   handleWheel(e) {
