@@ -1,5 +1,5 @@
 {
   "buildCommand": "./scripts/vercel-build.sh",
-  "ignoreCommand": "if [ -n \"$VERCEL_GIT_COMMIT_SHA\" ] && [ \"$GITHUB_ACTIONS\" != \"true\" ]; then exit 0; fi; exit 1",
+  "ignoreCommand": "test \"$GITHUB_ACTIONS\" != \"true\"",
   "outputDirectory": "."
 }
