@@ -45,6 +45,21 @@ impl GerberProcessor {
         Ok("init_done".to_string())
     }
 
+    /// Recreate WebGL-owned resources after browser context restoration.
+    ///
+    /// Parsed Gerber geometry is kept in Rust memory, so this does not require
+    /// JS to retain or reparse the original uploaded file contents.
+    pub fn restore_context(&mut self, gl: WebGl2RenderingContext) -> Result<String, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.restore_context(gl.clone())?;
+        } else {
+            self.renderer = Some(Renderer::new(gl.clone())?);
+        }
+
+        self.gl = Some(gl);
+        Ok("restore_done".to_string())
+    }
+
     /// Add a new layer to the renderer
     ///
     /// # Arguments

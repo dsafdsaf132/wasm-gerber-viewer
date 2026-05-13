@@ -82,33 +82,7 @@ impl Renderer {
         let fbo = Self::create_fbo(&self.gl, width, height)?;
 
         // Create buffer caches for each polarity sublayer
-        let mut buffer_caches = Vec::new();
-        for _ in 0..gerber_data.len() {
-            buffer_caches.push(BufferCache {
-                triangle_vao: None,
-                triangle_vertex_buffer: None,
-                triangle_index_buffer: None,
-                triangle_hole_center_buffer: None,
-                triangle_hole_radius_buffer: None,
-                circle_vao: None,
-                circle_center_buffer: None,
-                circle_radius_buffer: None,
-                circle_hole_center_buffer: None,
-                circle_hole_radius_buffer: None,
-                arc_vao: None,
-                arc_center_buffer: None,
-                arc_radius_buffer: None,
-                arc_start_angle_buffer: None,
-                arc_sweep_angle_buffer: None,
-                arc_thickness_buffer: None,
-                thermal_vao: None,
-                thermal_center_buffer: None,
-                thermal_outer_diameter_buffer: None,
-                thermal_inner_diameter_buffer: None,
-                thermal_gap_thickness_buffer: None,
-                thermal_rotation_buffer: None,
-            });
-        }
+        let buffer_caches = Self::create_buffer_caches(gerber_data.len());
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -365,14 +339,7 @@ impl Renderer {
 
         // Remove layer metadata (which will drop cached WebGL resources)
         if let Some(layer) = self.layers[layer_id].take() {
-            // Delete framebuffer and texture
-            self.gl.delete_framebuffer(Some(&layer.fbo.framebuffer));
-            self.gl.delete_texture(Some(&layer.fbo.texture));
-
-            // Delete all cached buffers and VAOs
-            for cache in layer.buffer_caches {
-                self.delete_buffer_cache(cache);
-            }
+            Self::delete_layer_gpu_resources(&self.gl, layer);
         }
 
         self.layer_count -= 1;
@@ -385,87 +352,105 @@ impl Renderer {
 
         // Delete all cached resources for each layer
         for layer in layers {
-            // Delete framebuffer and texture
-            self.gl.delete_framebuffer(Some(&layer.fbo.framebuffer));
-            self.gl.delete_texture(Some(&layer.fbo.texture));
-
-            // Delete all cached buffers and VAOs
-            for cache in layer.buffer_caches {
-                self.delete_buffer_cache(cache);
-            }
+            Self::delete_layer_gpu_resources(&self.gl, layer);
         }
         self.layer_count = 0;
     }
 
-    fn delete_buffer_cache(&self, cache: BufferCache) {
+    fn create_buffer_caches(count: usize) -> Vec<BufferCache> {
+        (0..count).map(|_| BufferCache::default()).collect()
+    }
+
+    fn delete_layer_gpu_resources(gl: &WebGl2RenderingContext, layer: LayerMetadata) {
+        Self::delete_fbo(gl, layer.fbo);
+
+        for cache in layer.buffer_caches {
+            Self::delete_buffer_cache(gl, cache);
+        }
+    }
+
+    fn delete_fbo(gl: &WebGl2RenderingContext, fbo: Fbo) {
+        gl.delete_framebuffer(Some(&fbo.framebuffer));
+        gl.delete_texture(Some(&fbo.texture));
+    }
+
+    fn delete_shader_programs(gl: &WebGl2RenderingContext, programs: &ShaderPrograms) {
+        gl.delete_program(Some(&programs.triangle.program));
+        gl.delete_program(Some(&programs.circle.program));
+        gl.delete_program(Some(&programs.arc.program));
+        gl.delete_program(Some(&programs.thermal.program));
+        gl.delete_program(Some(&programs.texture.program));
+    }
+
+    fn delete_buffer_cache(gl: &WebGl2RenderingContext, cache: BufferCache) {
         if let Some(vao) = cache.triangle_vao {
-            self.gl.delete_vertex_array(Some(&vao));
+            gl.delete_vertex_array(Some(&vao));
         }
         if let Some(buf) = cache.triangle_vertex_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.triangle_index_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.triangle_hole_center_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.triangle_hole_radius_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
 
         if let Some(vao) = cache.circle_vao {
-            self.gl.delete_vertex_array(Some(&vao));
+            gl.delete_vertex_array(Some(&vao));
         }
         if let Some(buf) = cache.circle_center_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.circle_radius_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.circle_hole_center_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.circle_hole_radius_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
 
         if let Some(vao) = cache.arc_vao {
-            self.gl.delete_vertex_array(Some(&vao));
+            gl.delete_vertex_array(Some(&vao));
         }
         if let Some(buf) = cache.arc_center_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.arc_radius_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.arc_start_angle_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.arc_sweep_angle_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.arc_thickness_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
 
         if let Some(vao) = cache.thermal_vao {
-            self.gl.delete_vertex_array(Some(&vao));
+            gl.delete_vertex_array(Some(&vao));
         }
         if let Some(buf) = cache.thermal_center_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.thermal_outer_diameter_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.thermal_inner_diameter_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.thermal_gap_thickness_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.thermal_rotation_buffer {
-            self.gl.delete_buffer(Some(&buf));
+            gl.delete_buffer(Some(&buf));
         }
     }
 
@@ -1424,9 +1409,58 @@ impl Renderer {
         for layer in self.layers.iter_mut().flatten() {
             let old_fbo =
                 std::mem::replace(&mut layer.fbo, Self::create_fbo(&self.gl, width, height)?);
-            self.gl.delete_framebuffer(Some(&old_fbo.framebuffer));
-            self.gl.delete_texture(Some(&old_fbo.texture));
+            Self::delete_fbo(&self.gl, old_fbo);
         }
+
+        Ok(())
+    }
+
+    /// Recreate WebGL-owned resources after the browser restores a lost context.
+    /// Parsed Gerber geometry and stable layer IDs are preserved.
+    pub fn restore_context(&mut self, gl: WebGl2RenderingContext) -> Result<(), JsValue> {
+        let programs = ShaderPrograms::new(&gl)?;
+        let quad_buffer = Self::create_quad_buffer(&gl)?;
+        let (width, height) = Self::get_canvas_size_from_gl(&gl)?;
+        let mut new_fbos = Vec::with_capacity(self.layers.len());
+
+        for layer in &self.layers {
+            if layer.is_some() {
+                let fbo = match Self::create_fbo(&gl, width, height) {
+                    Ok(fbo) => fbo,
+                    Err(error) => {
+                        for fbo in new_fbos.into_iter().flatten() {
+                            Self::delete_fbo(&gl, fbo);
+                        }
+                        gl.delete_buffer(Some(&quad_buffer));
+                        Self::delete_shader_programs(&gl, &programs);
+                        return Err(error);
+                    }
+                };
+                new_fbos.push(Some(fbo));
+            } else {
+                new_fbos.push(None);
+            }
+        }
+
+        let old_gl = self.gl.clone();
+        let old_programs = std::mem::replace(&mut self.programs, programs);
+        let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
+
+        for (layer, new_fbo) in self.layers.iter_mut().zip(new_fbos) {
+            if let (Some(layer), Some(new_fbo)) = (layer, new_fbo) {
+                let old_fbo = std::mem::replace(&mut layer.fbo, new_fbo);
+                Self::delete_fbo(&old_gl, old_fbo);
+
+                for cache in std::mem::take(&mut layer.buffer_caches) {
+                    Self::delete_buffer_cache(&old_gl, cache);
+                }
+                layer.buffer_caches = Self::create_buffer_caches(layer.gerber_data.len());
+            }
+        }
+
+        old_gl.delete_buffer(Some(&old_quad_buffer));
+        Self::delete_shader_programs(&old_gl, &old_programs);
+        self.gl = gl;
 
         Ok(())
     }
@@ -1436,11 +1470,6 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         self.clear_all();
         self.gl.delete_buffer(Some(&self.quad_buffer));
-        self.gl
-            .delete_program(Some(&self.programs.triangle.program));
-        self.gl.delete_program(Some(&self.programs.circle.program));
-        self.gl.delete_program(Some(&self.programs.arc.program));
-        self.gl.delete_program(Some(&self.programs.thermal.program));
-        self.gl.delete_program(Some(&self.programs.texture.program));
+        Self::delete_shader_programs(&self.gl, &self.programs);
     }
 }

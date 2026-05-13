@@ -194,12 +194,16 @@ export class GerberViewer {
     this.loadInitialUrlSource();
   }
 
-  createWebGlProcessor() {
-    this.gl = this.canvas.getContext("webgl2", { preserveDrawingBuffer: true });
-    if (!this.gl) {
+  createWebGlContext() {
+    const gl = this.canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+    if (!gl) {
       throw new Error("WebGL2 not supported");
     }
+    return gl;
+  }
 
+  createWebGlProcessor() {
+    this.gl = this.createWebGlContext();
     this.wasmProcessor = new this.wasmModule.GerberProcessor();
     this.wasmProcessor.init(this.gl);
   }
@@ -424,7 +428,6 @@ export class GerberViewer {
     e.preventDefault();
     this.isWebGlContextLost = true;
     this.isRestoringWebGlContext = false;
-    this.wasmProcessor = null;
     this.gl = null;
     this.addDiagnostic(
       "warning",
@@ -440,7 +443,8 @@ export class GerberViewer {
     const layerSnapshot = this.layers.map((layer) => ({
       id: layer.id,
       name: layer.name,
-      sourceContent: layer.sourceContent,
+      layerId: layer.layerId,
+      bounds: layer.bounds ? { ...layer.bounds } : null,
       visible: layer.visible,
       color: [...layer.color],
     }));
@@ -449,22 +453,18 @@ export class GerberViewer {
     this.updateUiState();
 
     try {
-      this.createWebGlProcessor();
+      this.gl = this.createWebGlContext();
+      if (!this.wasmProcessor) {
+        throw new Error("No parsed layer data available for WebGL restore");
+      }
+      this.wasmProcessor.restore_context(this.gl);
       this.isWebGlContextLost = false;
       this.resizeCanvas({ allowProcessorResize: true });
-      this.layers = [];
-
-      for (const layer of layerSnapshot) {
-        await this.addLayer(layer.name, layer.sourceContent, {
-          id: layer.id,
-          visible: layer.visible,
-          color: layer.color,
-        });
-      }
+      this.layers = layerSnapshot;
 
       this.renderLayerList();
-      this.render();
     } catch (error) {
+      this.isWebGlContextLost = true;
       const message = this.getErrorMessage(error);
       console.error("[Render] Failed to restore WebGL context:", error);
       this.addDiagnostic("error", "WebGL restore failed", message);
@@ -472,6 +472,7 @@ export class GerberViewer {
     } finally {
       this.isRestoringWebGlContext = false;
       this.updateUiState();
+      this.render();
     }
   }
 
@@ -1289,7 +1290,6 @@ export class GerberViewer {
         id: options.id ?? `layer-${this.nextLayerDomId++}`,
         layerId: layerId, // WASM layer_id
         name: name,
-        sourceContent: content,
         visible: options.visible ?? true,
         color: color,
         bounds: {
