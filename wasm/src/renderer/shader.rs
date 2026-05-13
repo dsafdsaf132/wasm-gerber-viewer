@@ -217,12 +217,12 @@ uniform lowp vec4 color;
 out lowp vec4 fragColor;
 
 void main() {
-    // Apply rotation to vPosition
+    // Inverse-rotate the fragment point into thermal-local space.
     float cosR = cos(vRotation);
     float sinR = sin(vRotation);
     vec2 rotated = vec2(
-        vPosition.x * cosR - vPosition.y * sinR,
-        vPosition.x * sinR + vPosition.y * cosR
+        vPosition.x * cosR + vPosition.y * sinR,
+        -vPosition.x * sinR + vPosition.y * cosR
     );
 
     float dist = length(rotated);

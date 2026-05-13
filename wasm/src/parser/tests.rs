@@ -555,6 +555,45 @@ M02*";
 }
 
 #[test]
+fn macro_thermal_rotation_from_ucamco_sample_is_preserved() {
+    let data = "\
+%FSLAX36Y36*%
+%MOMM*%
+%AMTHERS4T*
+7,0,0,$1,$2,$3,$4*%
+%ADD40THERS4T,0.1000X0.0500X0.0200X0.00*%
+%ADD41THERS4T,0.2000X0.1000X0.0200X10.00*%
+%ADD42THERS4T,0.2500X0.2000X0.0600X30.00*%
+%ADD43THERS4T,0.2700X0.2000X0.0600X45.00*%
+D40*
+X0Y1100000D03*
+D41*
+X400000D03*
+D42*
+X800000D03*
+D43*
+X1200000D03*
+M02*";
+
+    let layers = parse_gerber(data).expect("thermal macro sample should parse");
+    let thermals = &layers[0].thermals;
+
+    assert_eq!(thermals.x.len(), 4);
+    assert_approx_eq(thermals.x[0], 0.0);
+    assert_approx_eq(thermals.x[1], 0.4);
+    assert_approx_eq(thermals.x[2], 0.8);
+    assert_approx_eq(thermals.x[3], 1.2);
+    assert_approx_eq(thermals.y[0], 1.1);
+    assert_approx_eq(thermals.outer_diameter[2], 0.25);
+    assert_approx_eq(thermals.inner_diameter[2], 0.2);
+    assert_approx_eq(thermals.gap_thickness[2], 0.06);
+    assert_approx_eq(thermals.rotation[0], 0.0);
+    assert_approx_eq(thermals.rotation[1], 10.0_f32.to_radians());
+    assert_approx_eq(thermals.rotation[2], 30.0_f32.to_radians());
+    assert_approx_eq(thermals.rotation[3], 45.0_f32.to_radians());
+}
+
+#[test]
 fn macro_expressions_support_lowercase_multiply_and_parentheses() {
     let data = "\
 %FSLAX26Y26*%
