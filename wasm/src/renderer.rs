@@ -391,6 +391,14 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Layer deallocated"))
     }
 
+    fn shader_attribute(program: &ShaderProgram, attr_name: &str) -> Result<u32, JsValue> {
+        program
+            .attributes
+            .get(attr_name)
+            .copied()
+            .ok_or_else(|| JsValue::from_str(&format!("Missing shader attribute: {}", attr_name)))
+    }
+
     /// Update camera state
     fn update_camera(&mut self, zoom_x: f32, zoom_y: f32, offset_x: f32, offset_y: f32) {
         self.camera.zoom_x = zoom_x;
@@ -406,7 +414,7 @@ impl Renderer {
 
         // Use the shared quad buffer
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
-        let pos_loc = *program.attributes.get("position").unwrap();
+        let pos_loc = Self::shader_attribute(program, "position")?;
         self.gl.enable_vertex_attrib_array(pos_loc);
         self.gl
             .vertex_attrib_pointer_with_i32(pos_loc, 2, FLOAT, false, 0, 0);
@@ -499,7 +507,7 @@ impl Renderer {
                 }
 
                 // Set up attributes
-                let position_loc = *program.attributes.get("position").unwrap();
+                let position_loc = Self::shader_attribute(program, "position")?;
                 self.gl.enable_vertex_attrib_array(position_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
@@ -516,7 +524,7 @@ impl Renderer {
                     self.gl
                         .buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
                 }
-                let hole_center_loc = *program.attributes.get("hole_center_instance").unwrap();
+                let hole_center_loc = Self::shader_attribute(program, "hole_center_instance")?;
                 self.gl.enable_vertex_attrib_array(hole_center_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(hole_center_loc, 2, FLOAT, false, 0, 0);
@@ -531,7 +539,7 @@ impl Renderer {
                     self.gl
                         .buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
                 }
-                let hole_radius_loc = *program.attributes.get("hole_radius_instance").unwrap();
+                let hole_radius_loc = Self::shader_attribute(program, "hole_radius_instance")?;
                 self.gl.enable_vertex_attrib_array(hole_radius_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(hole_radius_loc, 1, FLOAT, false, 0, 0);
@@ -616,7 +624,7 @@ impl Renderer {
 
             // Bind shared quad buffer for position attribute
             self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
-            let position_loc = *program.attributes.get("position").unwrap();
+            let position_loc = Self::shader_attribute(program, "position")?;
             self.gl.enable_vertex_attrib_array(position_loc);
             self.gl
                 .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
@@ -724,7 +732,7 @@ impl Renderer {
 
             // Bind shared quad buffer for position attribute
             self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
-            let position_loc = *program.attributes.get("position").unwrap();
+            let position_loc = Self::shader_attribute(program, "position")?;
             self.gl.enable_vertex_attrib_array(position_loc);
             self.gl
                 .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
@@ -839,7 +847,7 @@ impl Renderer {
 
             // Bind shared quad buffer for position attribute
             self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
-            let position_loc = *program.attributes.get("position").unwrap();
+            let position_loc = Self::shader_attribute(program, "position")?;
             self.gl.enable_vertex_attrib_array(position_loc);
             self.gl
                 .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
