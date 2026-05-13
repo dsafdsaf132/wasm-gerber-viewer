@@ -1360,8 +1360,7 @@ pub fn parse_graphic_command(
 
                     // If in region mode, add coordinates to contour
                     if state.region_mode {
-                        if !region_contours.is_empty() {
-                            let last_contour = region_contours.last_mut().unwrap();
+                        if let Some(last_contour) = region_contours.last_mut() {
                             append_region_segment(last_contour, state, x, y, i, j);
                         }
                     } else {
@@ -1401,8 +1400,7 @@ pub fn parse_graphic_command(
     } else if (x_match.is_some() || y_match.is_some()) && state.pen_state == "down" {
         // If there is only X/Y without D-code and the pen is down, execute interpolation
         if state.region_mode {
-            if !region_contours.is_empty() {
-                let last_contour = region_contours.last_mut().unwrap();
+            if let Some(last_contour) = region_contours.last_mut() {
                 append_region_segment(last_contour, state, x, y, i, j);
             }
         } else {

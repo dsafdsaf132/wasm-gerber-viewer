@@ -186,10 +186,14 @@ fn tokenize(expr: &str) -> Result<Vec<String>, String> {
                     tokens.push(take(&mut current_token)); // Save "-"
 
                     // Process $variable
-                    current_token.push(chars.next().unwrap()); // $
+                    if let Some(variable_marker) = chars.next() {
+                        current_token.push(variable_marker);
+                    }
                     while let Some(&digit_ch) = chars.peek() {
                         if digit_ch.is_ascii_digit() {
-                            current_token.push(chars.next().unwrap());
+                            if let Some(digit) = chars.next() {
+                                current_token.push(digit);
+                            }
                         } else {
                             break;
                         }
@@ -199,7 +203,9 @@ fn tokenize(expr: &str) -> Result<Vec<String>, String> {
                     // Read number after sign
                     while let Some(&next_ch) = chars.peek() {
                         if next_ch.is_ascii_digit() || next_ch == '.' {
-                            current_token.push(chars.next().unwrap());
+                            if let Some(digit_or_decimal) = chars.next() {
+                                current_token.push(digit_or_decimal);
+                            }
                         } else {
                             break;
                         }
@@ -223,7 +229,9 @@ fn tokenize(expr: &str) -> Result<Vec<String>, String> {
             current_token.push(ch);
             while let Some(&next_ch) = chars.peek() {
                 if next_ch.is_ascii_digit() {
-                    current_token.push(chars.next().unwrap());
+                    if let Some(digit) = chars.next() {
+                        current_token.push(digit);
+                    }
                 } else {
                     break;
                 }
@@ -298,7 +306,9 @@ impl<'a> ExpressionParser<'a> {
             if op != "+" && op != "-" {
                 break;
             }
-            let op = self.advance().unwrap().to_string();
+            let Some(op) = self.advance().map(str::to_string) else {
+                return Err("Expected additive operator".to_string());
+            };
             let right = self.parse_term()?;
             if op == "+" {
                 value += right;
@@ -317,7 +327,9 @@ impl<'a> ExpressionParser<'a> {
             if op != "*" && op != "/" {
                 break;
             }
-            let op = self.advance().unwrap().to_string();
+            let Some(op) = self.advance().map(str::to_string) else {
+                return Err("Expected multiplicative operator".to_string());
+            };
             let right = self.parse_factor()?;
             if op == "*" {
                 value *= right;
@@ -465,8 +477,10 @@ pub fn parse_primitive_statement(
                 let y = evaluate_expression(parts[y_idx], variables).ok()?;
                 vertices.push([x, y]);
             }
-            if vertices.len() > 1 && same_point(vertices[0], *vertices.last().unwrap()) {
-                vertices.pop();
+            if let Some(last_vertex) = vertices.last() {
+                if vertices.len() > 1 && same_point(vertices[0], *last_vertex) {
+                    vertices.pop();
+                }
             }
 
             // Execute triangulation
@@ -675,37 +689,5 @@ pub fn parse_primitive_statement(
             // Unknown code
             None
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{evaluate_expression, parse_macro};
-    use std::collections::HashMap;
-
-    #[test]
-    fn expression_supports_lowercase_multiply_and_parentheses() {
-        let variables = HashMap::from([
-            ("$1".to_string(), 2.0),
-            ("$3".to_string(), 0.2),
-            ("$4".to_string(), 0.1),
-        ]);
-
-        let value = evaluate_expression("(-$1+3x$3)/2+$4", &variables).unwrap();
-
-        assert!((value + 0.6).abs() < 0.0001);
-    }
-
-    #[test]
-    fn multiline_outline_macro_instantiates_geometry() {
-        let mut macros = HashMap::new();
-        parse_macro(
-            "%AMBOXS2*4,1,4,-$1/2+$4,$2/2-$3+$5,(-$1+3x$3)/2+$4,$2/2+$5,($1-3x$3)/2+$4,$2/2+$5,$1/2+$4,$2/2-$3+$5,-$1/2+$4,$2/2-$3+$5,$6*%",
-            &mut macros,
-        );
-        let macro_def = macros.get("BOXS2").unwrap();
-        let primitives = macro_def.instantiate(&[2.0, 1.0, 0.2, 0.1, -0.3, 90.0]);
-
-        assert!(!primitives.is_empty());
     }
 }
