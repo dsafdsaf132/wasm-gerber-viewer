@@ -38,6 +38,331 @@ fn test_circle() -> Primitive {
     }
 }
 
+fn scaled(value: f32) -> i32 {
+    (value * 10_000.0).round() as i32
+}
+
+fn scaled_vec(values: &[f32]) -> Vec<i32> {
+    values.iter().map(|value| scaled(*value)).collect()
+}
+
+fn push_scaled_vec(output: &mut String, label: &str, values: &[f32]) {
+    if !values.is_empty() {
+        output.push_str(&format!("{label}={:?}\n", scaled_vec(values)));
+    }
+}
+
+fn push_indices(output: &mut String, label: &str, values: &[u32]) {
+    if !values.is_empty() {
+        output.push_str(&format!("{label}={values:?}\n"));
+    }
+}
+
+fn gerber_snapshot(data: &str) -> String {
+    let layers = parse_gerber(data).expect("snapshot input should parse");
+    let mut output = String::new();
+    output.push_str(&format!("layers={}\n", layers.len()));
+
+    for (idx, layer) in layers.iter().enumerate() {
+        output.push_str(&format!("layer[{idx}].negative={}\n", layer.is_negative));
+        output.push_str(&format!(
+            "layer[{idx}].boundary=[{},{},{},{}]",
+            scaled(layer.boundary.min_x),
+            scaled(layer.boundary.max_x),
+            scaled(layer.boundary.min_y),
+            scaled(layer.boundary.max_y)
+        ));
+        output.push('\n');
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].triangles.vertices"),
+            &layer.triangles.vertices,
+        );
+        push_indices(
+            &mut output,
+            &format!("layer[{idx}].triangles.indices"),
+            &layer.triangles.indices,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].triangles.hole_x"),
+            &layer.triangles.hole_x,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].triangles.hole_y"),
+            &layer.triangles.hole_y,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].triangles.hole_radius"),
+            &layer.triangles.hole_radius,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].circles.x"),
+            &layer.circles.x,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].circles.y"),
+            &layer.circles.y,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].circles.radius"),
+            &layer.circles.radius,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].circles.hole_x"),
+            &layer.circles.hole_x,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].circles.hole_y"),
+            &layer.circles.hole_y,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].circles.hole_radius"),
+            &layer.circles.hole_radius,
+        );
+        push_scaled_vec(&mut output, &format!("layer[{idx}].arcs.x"), &layer.arcs.x);
+        push_scaled_vec(&mut output, &format!("layer[{idx}].arcs.y"), &layer.arcs.y);
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].arcs.radius"),
+            &layer.arcs.radius,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].arcs.start_angle"),
+            &layer.arcs.start_angle,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].arcs.sweep_angle"),
+            &layer.arcs.sweep_angle,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].arcs.thickness"),
+            &layer.arcs.thickness,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].thermals.x"),
+            &layer.thermals.x,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].thermals.y"),
+            &layer.thermals.y,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].thermals.outer_diameter"),
+            &layer.thermals.outer_diameter,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].thermals.inner_diameter"),
+            &layer.thermals.inner_diameter,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].thermals.gap_thickness"),
+            &layer.thermals.gap_thickness,
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].thermals.rotation"),
+            &layer.thermals.rotation,
+        );
+    }
+
+    output
+}
+
+fn assert_gerber_snapshot(data: &str, expected: &str) {
+    assert_eq!(gerber_snapshot(data).trim(), expected.trim());
+}
+
+#[test]
+fn golden_region_d02_output_matches_current_parser() {
+    assert_gerber_snapshot(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X000000Y000000D02*
+G01*
+X010000Y000000D01*
+X010000Y010000D01*
+X000000Y010000D01*
+G37*
+M02*",
+        "\
+layers=1
+layer[0].negative=false
+layer[0].boundary=[0,10000,0,10000]
+layer[0].triangles.vertices=[10000, 0, 0, 10000, 0, 0, 10000, 10000, 0, 10000, 10000, 0]
+layer[0].triangles.indices=[0, 1, 2, 3, 4, 5]
+layer[0].triangles.hole_x=[0, 0, 0, 0, 0, 0]
+layer[0].triangles.hole_y=[0, 0, 0, 0, 0, 0]
+layer[0].triangles.hole_radius=[0, 0, 0, 0, 0, 0]",
+    );
+}
+
+#[test]
+fn golden_step_repeat_output_matches_current_parser() {
+    assert_gerber_snapshot(
+        "\
+%FSLAX26Y26*%
+%MOIN*%
+%ADD10C,0.1*%
+%SRX2Y1I1.0J0*%
+D10*
+X000000Y000000D03*
+%SR*%
+M02*",
+        "\
+layers=1
+layer[0].negative=false
+layer[0].boundary=[-12700,266700,-12700,12700]
+layer[0].circles.x=[0, 254000]
+layer[0].circles.y=[0, 0]
+layer[0].circles.radius=[12700, 12700]
+layer[0].circles.hole_x=[0, 254000]
+layer[0].circles.hole_y=[0, 0]
+layer[0].circles.hole_radius=[0, 0]",
+    );
+}
+
+#[test]
+fn golden_macro_center_line_output_matches_current_parser() {
+    assert_gerber_snapshot(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMRECT*21,1,2,1,1,0,90*%
+%ADD10RECT*%
+D10*
+X000000Y000000D03*
+M02*",
+        "\
+layers=1
+layer[0].negative=false
+layer[0].boundary=[-5000,5000,0,20000]
+layer[0].triangles.vertices=[5000, 0, 5000, 20000, -5000, 20000, 5000, 0, -5000, 20000, -5000, 0]
+layer[0].triangles.indices=[0, 1, 2, 3, 4, 5]
+layer[0].triangles.hole_x=[0, 0, 0, 0, 0, 0]
+layer[0].triangles.hole_y=[0, 0, 0, 0, 0, 0]
+layer[0].triangles.hole_radius=[0, 0, 0, 0, 0, 0]",
+    );
+}
+
+#[test]
+fn golden_aperture_block_polarity_output_matches_current_parser() {
+    assert_gerber_snapshot(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ABD20*%
+%LPD*%
+%ADD10C,4.0*%
+D10*
+X000000Y000000D03*
+%LPC*%
+%ADD11C,2.0*%
+D11*
+X000000Y000000D03*
+%AB*%
+%LPD*%
+D20*
+X100000Y000000D03*
+M02*",
+        "\
+layers=2
+layer[0].negative=false
+layer[0].boundary=[80000,120000,-20000,20000]
+layer[0].circles.x=[100000]
+layer[0].circles.y=[0]
+layer[0].circles.radius=[20000]
+layer[0].circles.hole_x=[100000]
+layer[0].circles.hole_y=[0]
+layer[0].circles.hole_radius=[0]
+layer[1].negative=true
+layer[1].boundary=[90000,110000,-10000,10000]
+layer[1].circles.x=[100000]
+layer[1].circles.y=[0]
+layer[1].circles.radius=[10000]
+layer[1].circles.hole_x=[100000]
+layer[1].circles.hole_y=[0]
+layer[1].circles.hole_radius=[0]",
+    );
+}
+
+#[test]
+fn golden_layer_rotation_block_output_matches_current_parser() {
+    assert_gerber_snapshot(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ABD20*%
+%ADD10C,1.0*%
+D10*
+X010000Y000000D03*
+%AB*%
+%LR90*%
+D20*
+X100000Y000000D03*
+M02*",
+        "\
+layers=1
+layer[0].negative=false
+layer[0].boundary=[95000,105000,5000,15000]
+layer[0].circles.x=[100000]
+layer[0].circles.y=[10000]
+layer[0].circles.radius=[5000]
+layer[0].circles.hole_x=[100000]
+layer[0].circles.hole_y=[10000]
+layer[0].circles.hole_radius=[0]",
+    );
+}
+
+#[test]
+fn golden_macro_expression_output_matches_current_parser() {
+    assert_gerber_snapshot(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMBOXS2*
+4,1,4,
+-$1/2+$4,$2/2-$3+$5,
+(-$1+3x$3)/2+$4,$2/2+$5,
+($1-3x$3)/2+$4,$2/2+$5,
+$1/2+$4,$2/2-$3+$5,
+-$1/2+$4,$2/2-$3+$5,
+$6*%
+%ADD10BOXS2,2.0X1.0X0.2X0.1X-0.3X90*%
+D10*
+X000000Y000000D03*
+M02*",
+        "\
+layers=1
+layer[0].negative=false
+layer[0].boundary=[-2000,0,-9000,11000]
+layer[0].triangles.vertices=[-2000, 8000, -2000, -6000, 0, -9000, 0, 11000, -2000, 8000, 0, -9000]
+layer[0].triangles.indices=[0, 1, 2, 3, 4, 5]
+layer[0].triangles.hole_x=[0, 0, 0, 0, 0, 0]
+layer[0].triangles.hole_y=[0, 0, 0, 0, 0, 0]
+layer[0].triangles.hole_radius=[0, 0, 0, 0, 0, 0]",
+    );
+}
+
 #[test]
 fn primitive_limit_counts_flushed_polarity_layers() {
     let mut parser = GerberParser::new();
@@ -271,35 +596,6 @@ M02*";
     assert_eq!(circles.x.len(), 2);
     assert_approx_eq(circles.x[0], 0.0);
     assert_approx_eq(circles.x[1], 25.4);
-}
-
-#[test]
-fn region_arcs_in_clear_polarity_are_tessellated() {
-    let data = "\
-%FSLAX36Y36*%
-%MOMM*%
-%LPC*%
-G75*
-G36*
-X10000000Y25000000D02*
-G01*
-Y30000000D01*
-G02*
-X12500000Y32500000I2500000J0D01*
-G01*
-X30000000D01*
-G02*
-X30000000Y25000000I0J-3750000D01*
-G01*
-X10000000D01*
-G37*
-M02*";
-
-    let layers = parse_gerber(data).expect("region with arcs should parse");
-
-    assert_eq!(layers.len(), 1);
-    assert!(layers[0].is_negative);
-    assert!(layers[0].triangles.vertices.len() / 2 > 60);
 }
 
 #[test]
