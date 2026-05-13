@@ -1,6 +1,7 @@
 /// Camera transformation for viewport control
 pub struct Camera {
-    pub zoom: f32,
+    pub zoom_x: f32,
+    pub zoom_y: f32,
     pub offset_x: f32,
     pub offset_y: f32,
 }
@@ -9,7 +10,8 @@ impl Camera {
     /// Create a new camera with default settings
     pub fn new() -> Camera {
         Camera {
-            zoom: 2.0,
+            zoom_x: 2.0,
+            zoom_y: 2.0,
             offset_x: 0.0,
             offset_y: 0.0,
         }
@@ -27,9 +29,9 @@ impl Camera {
         let aspect = canvas_width as f32 / canvas_height as f32;
 
         let (scale_x, scale_y) = if aspect > 1.0 {
-            (self.zoom / aspect, self.zoom)
+            (self.zoom_x / aspect, self.zoom_y)
         } else {
-            (self.zoom, self.zoom * aspect)
+            (self.zoom_x, self.zoom_y * aspect)
         };
 
         let (offset_x, offset_y) = if aspect > 1.0 {
@@ -47,5 +49,27 @@ impl Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Camera;
+
+    #[test]
+    fn transform_matrix_preserves_signed_axis_zoom() {
+        let camera = Camera {
+            zoom_x: -4.0,
+            zoom_y: 3.0,
+            offset_x: 1.0,
+            offset_y: -2.0,
+        };
+
+        let transform = camera.get_transform_matrix(200, 100);
+
+        assert_eq!(transform[0], -2.0);
+        assert_eq!(transform[4], 3.0);
+        assert_eq!(transform[6], 0.5);
+        assert_eq!(transform[7], -2.0);
     }
 }

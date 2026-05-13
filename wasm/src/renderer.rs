@@ -392,8 +392,9 @@ impl Renderer {
     }
 
     /// Update camera state
-    fn update_camera(&mut self, zoom: f32, offset_x: f32, offset_y: f32) {
-        self.camera.zoom = zoom;
+    fn update_camera(&mut self, zoom_x: f32, zoom_y: f32, offset_x: f32, offset_y: f32) {
+        self.camera.zoom_x = zoom_x;
+        self.camera.zoom_y = zoom_y;
         self.camera.offset_x = offset_x;
         self.camera.offset_y = offset_y;
     }
@@ -964,13 +965,13 @@ impl Renderer {
         active_layer_ids: &[u32],
         color_data: &[f32],
         zoom_x: f32,
-        _zoom_y: f32,
+        zoom_y: f32,
         offset_x: f32,
         offset_y: f32,
         alpha: f32,
     ) -> Result<(), JsValue> {
         // Update camera state
-        self.update_camera(zoom_x, offset_x, offset_y);
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
 
         // Get canvas dimensions
         let (width, height) = self.get_canvas_size()?;

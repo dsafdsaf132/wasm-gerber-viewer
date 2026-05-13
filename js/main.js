@@ -12,6 +12,8 @@ export class GerberViewer {
     this.selectFilesBtn = document.getElementById("select-files-btn");
     this.emptyUploadBtn = document.getElementById("empty-upload-btn");
     this.fitViewBtn = document.getElementById("fit-view-btn");
+    this.flipHorizontalBtn = document.getElementById("flip-horizontal-btn");
+    this.flipVerticalBtn = document.getElementById("flip-vertical-btn");
     this.canvasThemeToggle = document.getElementById("canvas-theme-toggle");
     this.screenshotBtn = document.getElementById("screenshot-btn");
     this.rulerToggleBtn = document.getElementById("ruler-toggle-btn");
@@ -72,6 +74,8 @@ export class GerberViewer {
       zoom: 1.0,
       offsetX: 0.0,
       offsetY: 0.0,
+      flipX: false,
+      flipY: false,
     };
     this.fitViewZoom = null;
     this.minZoom = 0.000001;
@@ -148,6 +152,7 @@ export class GerberViewer {
     this.updateUiState();
     this.updateRulerControls();
     this.updateMeasurementUnitControl();
+    this.updateViewFlipControls();
     this.render();
   }
 
@@ -187,6 +192,14 @@ export class GerberViewer {
     // Fit view button
     this.fitViewBtn.addEventListener("click", () => {
       this.fitView();
+    });
+
+    this.flipHorizontalBtn.addEventListener("click", () => {
+      this.toggleViewFlip("x");
+    });
+
+    this.flipVerticalBtn.addEventListener("click", () => {
+      this.toggleViewFlip("y");
     });
 
     this.canvasThemeToggle.addEventListener("click", () => {
@@ -532,6 +545,38 @@ export class GerberViewer {
     this.panelSections.forEach((section) => {
       section.classList.toggle("active", section.dataset.panel === panelName);
     });
+  }
+
+  getViewScaleX() {
+    return this.camera.zoom * (this.camera.flipX ? -1 : 1);
+  }
+
+  getViewScaleY() {
+    return this.camera.zoom * (this.camera.flipY ? -1 : 1);
+  }
+
+  toggleViewFlip(axis) {
+    if (axis === "x") {
+      this.camera.flipX = !this.camera.flipX;
+      this.camera.offsetX = -this.camera.offsetX;
+    } else if (axis === "y") {
+      this.camera.flipY = !this.camera.flipY;
+      this.camera.offsetY = -this.camera.offsetY;
+    }
+
+    this.render();
+    this.updateViewFlipControls();
+  }
+
+  updateViewFlipControls() {
+    this.flipHorizontalBtn.setAttribute(
+      "aria-pressed",
+      String(this.camera.flipX),
+    );
+    this.flipVerticalBtn.setAttribute(
+      "aria-pressed",
+      String(this.camera.flipY),
+    );
   }
 
   toggleCanvasTheme() {
@@ -931,8 +976,8 @@ export class GerberViewer {
       this.wasmProcessor.render(
         new Uint32Array(activeLayerIds),
         new Float32Array(colorData),
-        this.camera.zoom,
-        this.camera.zoom,
+        this.getViewScaleX(),
+        this.getViewScaleY(),
         this.camera.offsetX,
         this.camera.offsetY,
         this.globalAlpha,
@@ -1054,8 +1099,8 @@ export class GerberViewer {
 
     this.camera.zoom = this.clampZoom(fitView.zoom);
     this.fitViewZoom = this.camera.zoom;
-    this.camera.offsetX = -fitView.centerX * this.camera.zoom;
-    this.camera.offsetY = -fitView.centerY * this.camera.zoom;
+    this.camera.offsetX = -fitView.centerX * this.getViewScaleX();
+    this.camera.offsetY = -fitView.centerY * this.getViewScaleY();
 
     this.render();
     this.updateUiState();
@@ -1258,8 +1303,8 @@ export class GerberViewer {
     const aspect = this.canvas.width / this.canvas.height;
     const correctedX = aspect > 1.0 ? mouseXNDC * aspect : mouseXNDC;
     const correctedY = aspect > 1.0 ? mouseYNDC : mouseYNDC / aspect;
-    const worldX = (correctedX - this.camera.offsetX) / this.camera.zoom;
-    const worldY = (correctedY - this.camera.offsetY) / this.camera.zoom;
+    const worldX = (correctedX - this.camera.offsetX) / this.getViewScaleX();
+    const worldY = (correctedY - this.camera.offsetY) / this.getViewScaleY();
     return { x: worldX, y: worldY };
   }
 
@@ -1270,8 +1315,8 @@ export class GerberViewer {
     }
 
     const aspect = this.canvas.width / this.canvas.height;
-    const correctedX = point.x * this.camera.zoom + this.camera.offsetX;
-    const correctedY = point.y * this.camera.zoom + this.camera.offsetY;
+    const correctedX = point.x * this.getViewScaleX() + this.camera.offsetX;
+    const correctedY = point.y * this.getViewScaleY() + this.camera.offsetY;
     const ndcX = aspect > 1.0 ? correctedX / aspect : correctedX;
     const ndcY = aspect > 1.0 ? correctedY : correctedY * aspect;
     return {
