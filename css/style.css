@@ -533,7 +533,7 @@ button {
 .alpha-control {
   display: grid;
   gap: 8px;
-  padding: 12px;
+  padding: 6px 12px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-2);
@@ -757,7 +757,7 @@ button {
 .notification {
   display: none;
   position: fixed;
-  top: calc(var(--toolbar-height) + 12px);
+  bottom: calc(var(--status-height) + 12px);
   right: calc(var(--panel-width) + 12px);
   width: min(460px, calc(100vw - var(--panel-width) - 24px));
   max-height: min(48vh, 320px);
@@ -894,7 +894,7 @@ button {
   }
 
   .notification {
-    top: calc(var(--toolbar-height) + 8px);
+    bottom: calc(var(--status-height) + 8px);
     left: 8px;
     right: 8px;
     width: auto;

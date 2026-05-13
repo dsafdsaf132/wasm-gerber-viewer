@@ -1,3 +1,5 @@
+const NOTIFICATION_DURATION_MS = 2000;
+
 export class GerberViewer {
   constructor() {
     // Main canvas (WebGL2)
@@ -798,30 +800,40 @@ export class GerberViewer {
   }
 
   showFileSizeWarning(oversizedFiles) {
-    this.showNotification("Warning", "warning", 8000, (messageElement) => {
-      const list = document.createElement("ul");
-      list.className = "mb-0 mt-2 ps-3";
+    this.showNotification(
+      "Warning",
+      "warning",
+      NOTIFICATION_DURATION_MS,
+      (messageElement) => {
+        const list = document.createElement("ul");
+        list.className = "mb-0 mt-2 ps-3";
 
-      oversizedFiles.forEach((file) => {
-        const item = document.createElement("li");
-        const fileName = document.createElement("strong");
-        fileName.textContent = file.name;
+        oversizedFiles.forEach((file) => {
+          const item = document.createElement("li");
+          const fileName = document.createElement("strong");
+          fileName.textContent = file.name;
 
-        item.appendChild(fileName);
-        item.append(
-          document.createTextNode(`: ${file.size} (limit: ${file.limit})`),
-        );
-        list.appendChild(item);
-      });
+          item.appendChild(fileName);
+          item.append(
+            document.createTextNode(`: ${file.size} (limit: ${file.limit})`),
+          );
+          list.appendChild(item);
+        });
 
-      messageElement.appendChild(list);
-    });
+        messageElement.appendChild(list);
+      },
+    );
   }
 
   showError(message) {
-    this.showNotification("Error", "danger", 5000, (messageElement) => {
-      messageElement.textContent = message;
-    });
+    this.showNotification(
+      "Error",
+      "danger",
+      NOTIFICATION_DURATION_MS,
+      (messageElement) => {
+        messageElement.textContent = message;
+      },
+    );
   }
 
   showNotification(title, variant, duration, renderMessage) {
