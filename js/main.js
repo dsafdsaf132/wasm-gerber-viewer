@@ -401,26 +401,43 @@ export class GerberViewer {
 
   loadLayerFilters() {
     const defaults = {
+      top: "top -f .gtl .gto .gts .gtp #TOP",
+      bottom: "bottom -b .gbl .gbo .gbs .gbp #BOT",
+    };
+    const previousDefaults = {
       top: "top .gtl .gto .gts .gtp #TOP",
       bottom: "bottom .gbl .gbo .gbs .gbp #BOT",
+      front: "front .gtl .gto .gts .gtp #TOP",
+      back: "back .gbl .gbo .gbs .gbp #BOT",
     };
 
     try {
       const stored = JSON.parse(
         window.localStorage.getItem(this.layerFilterStorageKey) || "{}",
       );
+      const normalizeFilter = (value, previousDefault, currentDefault) =>
+        value === previousDefault ? currentDefault : value;
+
       return {
         top:
           typeof stored.top === "string"
-            ? stored.top
+            ? normalizeFilter(stored.top, previousDefaults.top, defaults.top)
             : typeof stored.front === "string"
-              ? stored.front
+              ? normalizeFilter(stored.front, previousDefaults.front, defaults.top)
               : defaults.top,
         bottom:
           typeof stored.bottom === "string"
-            ? stored.bottom
+            ? normalizeFilter(
+                stored.bottom,
+                previousDefaults.bottom,
+                defaults.bottom,
+              )
             : typeof stored.back === "string"
-              ? stored.back
+              ? normalizeFilter(
+                  stored.back,
+                  previousDefaults.back,
+                  defaults.bottom,
+                )
               : defaults.bottom,
       };
     } catch {
