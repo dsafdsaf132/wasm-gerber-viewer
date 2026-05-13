@@ -6,7 +6,12 @@ const ZIP_MIME_TYPES = new Set([
 ]);
 const GERBER_FILE_EXTENSIONS = new Set([
   ".art",
+  ".bot",
+  ".bsk",
+  ".bsm",
   ".cmp",
+  ".crc",
+  ".crs",
   ".drd",
   ".gbl",
   ".gbo",
@@ -16,14 +21,31 @@ const GERBER_FILE_EXTENSIONS = new Set([
   ".gdo",
   ".ger",
   ".gko",
+  ".gpb",
+  ".gpt",
   ".gtl",
   ".gto",
   ".gtp",
   ".gts",
+  ".pastebot",
+  ".pastetop",
+  ".pho",
+  ".plb",
   ".plc",
+  ".pls",
+  ".plt",
+  ".smb",
+  ".smt",
   ".sol",
+  ".spb",
+  ".spt",
+  ".ssb",
+  ".sst",
   ".stc",
   ".sts",
+  ".top",
+  ".tsk",
+  ".tsm",
 ]);
 
 export class GerberViewer {
@@ -484,22 +506,30 @@ export class GerberViewer {
 
   loadLayerFilters() {
     const defaults = {
-      top: "top -f .gtl .gto .gts .gtp #TOP",
-      bottom: "bottom -b .gbl .gbo .gbs .gbp #BOT",
+      top:
+        "top front -f .gtl .gto .gts .gtp .gpt .cmp .plc .stc .crc .top .smt .sst .spt .tsm .tsk .plt .pastetop f.cu f_cu f.mask f_mask f.silks f_silks f.paste f_paste mt.pho st.pho pt.pho #TOP",
+      bottom:
+        "bottom back -b .gbl .gbo .gbs .gbp .gpb .sol .pls .sts .crs .bot .smb .ssb .spb .bsm .bsk .plb .pastebot b.cu b_cu b.mask b_mask b.silks b_silks b.paste b_paste mb.pho sb.pho pb.pho #BOT",
     };
     const previousDefaults = {
-      top: "top .gtl .gto .gts .gtp #TOP",
-      bottom: "bottom .gbl .gbo .gbs .gbp #BOT",
-      front: "front .gtl .gto .gts .gtp #TOP",
-      back: "back .gbl .gbo .gbs .gbp #BOT",
+      top: [
+        "top -f .gtl .gto .gts .gtp #TOP",
+        "top .gtl .gto .gts .gtp #TOP",
+      ],
+      bottom: [
+        "bottom -b .gbl .gbo .gbs .gbp #BOT",
+        "bottom .gbl .gbo .gbs .gbp #BOT",
+      ],
+      front: ["front .gtl .gto .gts .gtp #TOP"],
+      back: ["back .gbl .gbo .gbs .gbp #BOT"],
     };
 
     try {
       const stored = JSON.parse(
         window.localStorage.getItem(this.layerFilterStorageKey) || "{}",
       );
-      const normalizeFilter = (value, previousDefault, currentDefault) =>
-        value === previousDefault ? currentDefault : value;
+      const normalizeFilter = (value, previousDefaultValues, currentDefault) =>
+        previousDefaultValues.includes(value) ? currentDefault : value;
 
       return {
         top:
