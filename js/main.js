@@ -1478,8 +1478,22 @@ export class GerberViewer {
   handleWheel(e) {
     e.preventDefault();
 
-    const zoomChange = Math.exp(-e.deltaY * 0.001);
+    const zoomChange = Math.exp(-e.deltaY * this.getWheelZoomSensitivity(e));
     this.zoomAtCanvasPoint(e.clientX, e.clientY, zoomChange);
+  }
+
+  getWheelZoomSensitivity(e) {
+    const baseSensitivity = 0.001;
+    const trackpadSensitivity = 0.007;
+    const isPixelMode = e.deltaMode === WheelEvent.DOM_DELTA_PIXEL;
+    const absDeltaY = Math.abs(e.deltaY);
+    const absDeltaX = Math.abs(e.deltaX);
+    const hasFineDelta = absDeltaY > 0 && absDeltaY < 50;
+    const hasFineHorizontalDelta = absDeltaX > 0 && absDeltaX < 50;
+
+    return isPixelMode && (hasFineDelta || hasFineHorizontalDelta)
+      ? trackpadSensitivity
+      : baseSensitivity;
   }
 
   clampZoom(zoom) {
