@@ -116,6 +116,9 @@ export class GerberViewer {
     this.initialPinchDistance = null;
     this.lastPinchDistance = null;
     this.lastTouchCenter = { x: 0, y: 0 };
+    this.activeRulerTouchIdentifier = null;
+    this.rulerTouchStartPoint = null;
+    this.rulerTouchPoint = null;
 
     // Drawer resize state
     this.isResizingDrawer = false;
@@ -612,16 +615,30 @@ export class GerberViewer {
   }
 
   toggleViewFlip(axis) {
+    const viewportCenter = this.getVisibleCanvasViewportCenter();
+
     if (axis === "x") {
       this.camera.flipX = !this.camera.flipX;
-      this.camera.offsetX = -this.camera.offsetX;
+      this.camera.offsetX = 2 * viewportCenter.x - this.camera.offsetX;
     } else if (axis === "y") {
       this.camera.flipY = !this.camera.flipY;
-      this.camera.offsetY = -this.camera.offsetY;
+      this.camera.offsetY = 2 * viewportCenter.y - this.camera.offsetY;
     }
 
     this.render();
     this.updateViewFlipControls();
+  }
+
+  getVisibleCanvasViewportCenter() {
+    const viewport = this.getVisibleCanvasViewport();
+    if (!viewport) {
+      return { x: 0, y: 0 };
+    }
+
+    return {
+      x: (viewport.left + viewport.right) / 2,
+      y: (viewport.top + viewport.bottom) / 2,
+    };
   }
 
   updateViewFlipControls() {
@@ -774,6 +791,7 @@ export class GerberViewer {
   toggleRuler() {
     this.isRulerActive = !this.isRulerActive;
     if (!this.isRulerActive) {
+      this.resetRulerTouch();
       this.rulerStartPoint = null;
       this.rulerHoverPoint = null;
     }
@@ -784,6 +802,7 @@ export class GerberViewer {
 
   clearRulerMeasurements() {
     this.measurements = [];
+    this.resetRulerTouch();
     this.rulerStartPoint = null;
     this.rulerHoverPoint = null;
     this.renderMeasurements();
@@ -1698,6 +1717,15 @@ export class GerberViewer {
     this.isTouching = true;
     this.touches = Array.from(e.touches);
 
+    if (this.isRulerActive) {
+      if (this.touches.length === 1) {
+        this.startRulerTouch(this.touches[0]);
+        return;
+      }
+
+      this.resetRulerTouch();
+    }
+
     if (this.touches.length === 2) {
       // Two-finger gesture: pinch-to-zoom
       this.initialPinchDistance = this.calculateTouchDistance(
@@ -1723,6 +1751,21 @@ export class GerberViewer {
     if (!this.isTouching) return;
 
     this.touches = Array.from(e.touches);
+
+    if (this.activeRulerTouchIdentifier !== null) {
+      const touch = this.findTouchByIdentifier(
+        this.touches,
+        this.activeRulerTouchIdentifier,
+      );
+
+      if (!this.isRulerActive || this.touches.length !== 1 || !touch) {
+        this.resetRulerTouch();
+        return;
+      }
+
+      this.updateRulerTouch(touch);
+      return;
+    }
 
     if (this.touches.length === 2) {
       // Two-finger gesture: pinch-to-zoom + pan
@@ -1765,6 +1808,10 @@ export class GerberViewer {
       this.lastTouchCenter = currentCenter;
       this.render();
     } else if (this.touches.length === 1) {
+      if (this.isRulerActive) {
+        return;
+      }
+
       // Single finger: pan
       const currentPos = {
         x: this.touches[0].clientX,
@@ -1799,6 +1846,27 @@ export class GerberViewer {
 
     this.touches = Array.from(e.touches);
 
+    if (this.activeRulerTouchIdentifier !== null) {
+      const activeTouch = this.findTouchByIdentifier(
+        this.touches,
+        this.activeRulerTouchIdentifier,
+      );
+
+      if (!activeTouch) {
+        if (e.type === "touchend") {
+          this.commitRulerTouch();
+        } else {
+          this.resetRulerTouch();
+        }
+      }
+
+      if (this.touches.length === 0) {
+        this.isTouching = false;
+      }
+
+      return;
+    }
+
     if (this.touches.length < 2) {
       // Reset pinch state
       this.initialPinchDistance = null;
@@ -1815,6 +1883,59 @@ export class GerberViewer {
         y: this.touches[0].clientY,
       };
     }
+  }
+
+  startRulerTouch(touch) {
+    const point = {
+      x: touch.clientX,
+      y: touch.clientY,
+    };
+
+    this.activeRulerTouchIdentifier = touch.identifier;
+    this.rulerTouchStartPoint = point;
+    this.rulerTouchPoint = point;
+    this.updateCursorReadout(point.x, point.y);
+    this.updateRulerTouchPreview(point.x, point.y);
+  }
+
+  updateRulerTouch(touch) {
+    const point = {
+      x: touch.clientX,
+      y: touch.clientY,
+    };
+
+    this.rulerTouchPoint = point;
+    this.updateCursorReadout(point.x, point.y);
+    this.updateRulerTouchPreview(point.x, point.y);
+  }
+
+  updateRulerTouchPreview(clientX, clientY) {
+    if (!this.rulerStartPoint) return;
+
+    this.rulerHoverPoint = this.canvasPointToWorld(clientX, clientY);
+    this.renderMeasurements();
+  }
+
+  commitRulerTouch() {
+    const touchPoint = this.rulerStartPoint
+      ? this.rulerTouchPoint
+      : this.rulerTouchStartPoint;
+
+    this.resetRulerTouch();
+
+    if (!touchPoint) return;
+
+    this.handleRulerCanvasClick(touchPoint.x, touchPoint.y);
+  }
+
+  resetRulerTouch() {
+    this.activeRulerTouchIdentifier = null;
+    this.rulerTouchStartPoint = null;
+    this.rulerTouchPoint = null;
+  }
+
+  findTouchByIdentifier(touches, identifier) {
+    return touches.find((touch) => touch.identifier === identifier) ?? null;
   }
 
   calculateTouchDistance(touch1, touch2) {

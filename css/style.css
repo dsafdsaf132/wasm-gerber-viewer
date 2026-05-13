@@ -179,12 +179,6 @@ button {
   background: #14313a;
 }
 
-.icon-button[aria-pressed="true"] {
-  border-color: rgba(94, 234, 212, 0.54);
-  background: #14313a;
-  color: var(--text);
-}
-
 .chip-button {
   min-height: 32px;
   min-width: 0;
@@ -220,13 +214,15 @@ button {
   text-transform: uppercase;
 }
 
-.tool-button:hover,
-.chip-button:hover,
-.icon-button:hover,
-.unit-toggle:hover,
-.panel-tab:hover {
-  border-color: var(--line-strong);
-  background: var(--surface-3);
+@media (hover: hover) and (pointer: fine) {
+  .tool-button:hover,
+  .chip-button:hover,
+  .icon-button:hover,
+  .unit-toggle:hover,
+  .panel-tab:hover {
+    border-color: var(--line-strong);
+    background: var(--surface-3);
+  }
 }
 
 .tool-button:disabled,
@@ -237,9 +233,18 @@ button {
   cursor: not-allowed;
 }
 
-.tool-button.primary:hover {
-  border-color: rgba(94, 234, 212, 0.7);
-  background: #173b45;
+@media (hover: hover) and (pointer: fine) {
+  .tool-button.primary:hover {
+    border-color: rgba(94, 234, 212, 0.7);
+    background: #173b45;
+  }
+}
+
+.icon-button[aria-pressed="true"],
+.icon-button[aria-pressed="true"]:hover {
+  border-color: rgba(94, 234, 212, 0.54);
+  background: #14313a;
+  color: var(--text);
 }
 
 .app-shell svg {
