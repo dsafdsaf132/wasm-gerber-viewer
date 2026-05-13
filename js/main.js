@@ -2084,7 +2084,7 @@ export class GerberViewer {
 
       try {
         // remove from WASM processor and handle errors
-        if (this.wasmProcessor && !this.isWebGlContextLost) {
+        if (this.wasmProcessor) {
           this.wasmProcessor.remove_layer(layer.layerId);
         }
 
@@ -2107,7 +2107,7 @@ export class GerberViewer {
   clearAllLayers() {
     try {
       // remove all layers from WASM processor
-      if (this.wasmProcessor && !this.isWebGlContextLost) {
+      if (this.wasmProcessor) {
         this.wasmProcessor.clear();
       }
 
