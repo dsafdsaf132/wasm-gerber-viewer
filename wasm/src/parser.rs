@@ -30,7 +30,6 @@ pub struct GerberParser {
     pub polarity_layers: Vec<(Polarity, Vec<Primitive>)>,
     pub current_primitives: Vec<Primitive>, // Accumulating primitives for current polarity
     pub region_contours: Vec<Vec<[f32; 2]>>, // Contour points collected in Region mode
-    total_primitives: usize,                // Track total primitives for security limit
 }
 
 impl GerberParser {
@@ -43,7 +42,6 @@ impl GerberParser {
             polarity_layers: Vec::new(),
             current_primitives: Vec::new(),
             region_contours: Vec::new(),
-            total_primitives: 0,
         }
     }
 
@@ -92,23 +90,19 @@ impl GerberParser {
                 );
             }
 
+            self.enforce_primitive_limit(MAX_TOTAL_PRIMITIVES)
+                .map_err(|message| JsValue::from_str(&message))?;
             i += 1;
         }
 
         // Save last accumulated primitives by polarity
         if !self.current_primitives.is_empty() {
-            self.total_primitives += self.current_primitives.len();
-            if self.total_primitives > MAX_TOTAL_PRIMITIVES {
-                return Err(JsValue::from_str(&format!(
-                    "Too many total primitives: {} (max: {})",
-                    self.total_primitives, MAX_TOTAL_PRIMITIVES
-                )));
-            }
-
             self.polarity_layers.push((
                 self.current_state.polarity,
                 take(&mut self.current_primitives),
             ));
+            self.enforce_primitive_limit(MAX_TOTAL_PRIMITIVES)
+                .map_err(|message| JsValue::from_str(&message))?;
         }
 
         // Convert each layer to individual GerberData
@@ -121,6 +115,24 @@ impl GerberParser {
         }
 
         Ok(gerber_data_layers)
+    }
+
+    fn enforce_primitive_limit(&self, max_total_primitives: usize) -> Result<(), String> {
+        let flushed_primitives = self
+            .polarity_layers
+            .iter()
+            .map(|(_, primitives)| primitives.len())
+            .sum::<usize>();
+        let total_primitives = flushed_primitives + self.current_primitives.len();
+
+        if total_primitives > max_total_primitives {
+            return Err(format!(
+                "Too many total primitives: {} (max: {})",
+                total_primitives, max_total_primitives
+            ));
+        }
+
+        Ok(())
     }
 
     /// Convert a vector of primitives to GerberData
@@ -521,7 +533,8 @@ pub fn parse_gerber(data: &str) -> Result<Vec<GerberData>, JsValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_gerber;
+    use super::geometry::Primitive;
+    use super::{parse_gerber, GerberParser, Polarity};
 
     fn assert_approx_eq(actual: f32, expected: f32) {
         assert!(
@@ -544,6 +557,29 @@ mod tests {
         }
 
         (min_x, max_x, min_y, max_y)
+    }
+
+    fn test_circle() -> Primitive {
+        Primitive::Circle {
+            x: 0.0,
+            y: 0.0,
+            radius: 0.5,
+            exposure: 1.0,
+            hole_x: 0.0,
+            hole_y: 0.0,
+            hole_radius: 0.0,
+        }
+    }
+
+    #[test]
+    fn primitive_limit_counts_flushed_polarity_layers() {
+        let mut parser = GerberParser::new();
+        parser
+            .polarity_layers
+            .push((Polarity::Positive, vec![test_circle()]));
+        parser.current_primitives.push(test_circle());
+
+        assert!(parser.enforce_primitive_limit(1).is_err());
     }
 
     #[test]
