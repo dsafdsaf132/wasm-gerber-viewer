@@ -49,6 +49,7 @@ jobs:
             ${{ runner.os }}-cargo-build-target-
 
       - name: Cache WASM package
+        id: wasm-pkg-cache
         uses: actions/cache@v4
         with:
           path: wasm/pkg
@@ -57,12 +58,17 @@ jobs:
       - name: Build or reuse WASM package
         run: ./scripts/vercel-build.sh
 
+      - name: Check JavaScript syntax
+        run: node --check js/main.js
+
       - name: Install Rust toolchain for tests
+        if: steps.wasm-pkg-cache.outputs.cache-hit != 'true'
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
 
       - name: Run tests
+        if: steps.wasm-pkg-cache.outputs.cache-hit != 'true'
         working-directory: ./wasm
         run: cargo test --verbose
 
