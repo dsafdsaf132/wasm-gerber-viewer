@@ -1,4 +1,5 @@
 const NOTIFICATION_DURATION_MS = 2000;
+const MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024;
 
 export class GerberViewer {
   constructor() {
@@ -28,7 +29,6 @@ export class GerberViewer {
     this.alphaSlider = document.getElementById("alpha-slider");
     this.alphaValue = document.getElementById("alpha-value");
     this.layerList = document.getElementById("layer-list");
-    this.fileList = document.getElementById("file-list");
     this.diagnosticList = document.getElementById("diagnostic-list");
     this.notification = document.getElementById("file-size-warning");
     this.notificationTitle = document.getElementById("warning-title");
@@ -38,14 +38,13 @@ export class GerberViewer {
     );
     this.workspaceStatus = document.getElementById("workspace-status");
     this.emptyState = document.getElementById("empty-state");
+    this.emptyFileSizeLimit = document.getElementById("empty-file-size-limit");
     this.dropOverlay = document.getElementById("drop-overlay");
     this.measurementOverlay = document.getElementById("measurement-overlay");
     this.visibleLayerCount = document.getElementById("visible-layer-count");
     this.zoomReadout = document.getElementById("zoom-readout");
     this.cursorReadout = document.getElementById("cursor-readout");
     this.boundsReadout = document.getElementById("bounds-readout");
-    this.loadedFileCount = document.getElementById("loaded-file-count");
-    this.visibleFileCount = document.getElementById("visible-file-count");
     this.diagnosticsCount = document.getElementById("diagnostics-count");
     this.frontFilterInput = document.getElementById("front-filter-input");
     this.backFilterInput = document.getElementById("back-filter-input");
@@ -155,6 +154,7 @@ export class GerberViewer {
     this.setupEventListeners();
 
     // Initial render
+    this.updateEmptyStateHint();
     this.refreshIcons();
     this.syncFilterInputs();
     this.updateUiState();
@@ -429,13 +429,10 @@ export class GerberViewer {
         ? "Ready"
         : `${visibleLayers} visible / ${totalLayers} loaded`;
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;
-    this.loadedFileCount.textContent = String(totalLayers);
-    this.visibleFileCount.textContent = String(visibleLayers);
     this.diagnosticsCount.textContent = String(this.diagnostics.length);
     this.emptyState.classList.toggle("is-hidden", totalLayers > 0);
     this.zoomReadout.textContent = this.formatZoom();
     this.boundsReadout.textContent = this.formatCombinedBounds();
-    this.renderFileList();
     this.renderDiagnostics();
     this.refreshIcons();
   }
@@ -519,31 +516,6 @@ export class GerberViewer {
       item.append(title, detail);
       this.diagnosticList.appendChild(item);
     }
-  }
-
-  renderFileList() {
-    this.fileList.replaceChildren();
-
-    if (this.layers.length === 0) {
-      const item = document.createElement("li");
-      const title = document.createElement("strong");
-      const detail = document.createElement("span");
-      title.textContent = "No files";
-      detail.textContent = "Ready";
-      item.append(title, detail);
-      this.fileList.appendChild(item);
-      return;
-    }
-
-    this.layers.forEach((layer, index) => {
-      const item = document.createElement("li");
-      const title = document.createElement("strong");
-      const detail = document.createElement("span");
-      title.textContent = layer.name;
-      detail.textContent = `#${index + 1} · ${layer.visible ? "visible" : "hidden"}`;
-      item.append(title, detail);
-      this.fileList.appendChild(item);
-    });
   }
 
   setActivePanel(panelName) {
@@ -795,8 +767,12 @@ export class GerberViewer {
     this.refreshIcons();
   }
 
+  updateEmptyStateHint() {
+    this.emptyFileSizeLimit.textContent =
+      `Max ${this.formatFileSize(MAX_FILE_SIZE_BYTES)} per file`;
+  }
+
   async handleFileUpload(files) {
-    const MAX_FILE_SIZE = 300 * 1024 * 1024; // 300 MB
     const oversizedFiles = [];
     const validFiles = [];
 
@@ -804,11 +780,11 @@ export class GerberViewer {
 
     // Validate file sizes
     for (const file of files) {
-      if (file.size > MAX_FILE_SIZE) {
+      if (file.size > MAX_FILE_SIZE_BYTES) {
         oversizedFiles.push({
           name: file.name,
           size: this.formatFileSize(file.size),
-          limit: this.formatFileSize(MAX_FILE_SIZE),
+          limit: this.formatFileSize(MAX_FILE_SIZE_BYTES),
         });
       } else {
         validFiles.push(file);
@@ -827,9 +803,16 @@ export class GerberViewer {
           const content = await file.text();
           await this.addLayer(file.name, content);
         } catch (error) {
+          const message = this.getErrorMessage(error);
+          if (this.isNoGeometryError(message)) {
+            console.warn(`Skipped file ${file.name}:`, error);
+            this.addDiagnostic("warning", file.name, message);
+            return;
+          }
+
           console.error(`Failed to load file ${file.name}:`, error);
-          this.addDiagnostic("error", file.name, error.message);
-          this.showError(`Failed to load file ${file.name}: ${error.message}`);
+          this.addDiagnostic("error", file.name, message);
+          this.showError(`Failed to load file ${file.name}: ${message}`);
         }
       });
 
@@ -891,6 +874,18 @@ export class GerberViewer {
         messageElement.textContent = message;
       },
     );
+  }
+
+  getErrorMessage(error) {
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return String(error);
+  }
+
+  isNoGeometryError(message) {
+    return message.toLowerCase().includes("no geometry found");
   }
 
   showNotification(title, variant, duration, renderMessage) {

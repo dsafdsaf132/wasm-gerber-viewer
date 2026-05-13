@@ -143,6 +143,7 @@
           <div class="empty-state" id="empty-state">
             <div class="empty-state-icon"><i data-lucide="layers-3"></i></div>
             <strong>No Layers Loaded</strong>
+            <span class="empty-state-note" id="empty-file-size-limit"></span>
             <button type="button" class="tool-button primary" id="empty-upload-btn">
               <i data-lucide="folder-open"></i>
               <span>Open Files</span>
@@ -178,10 +179,6 @@
             <button type="button" class="panel-tab active" data-panel-tab="layers">
               <i data-lucide="layers"></i>
               <span>Layers</span>
-            </button>
-            <button type="button" class="panel-tab" data-panel-tab="files">
-              <i data-lucide="files"></i>
-              <span>Files</span>
             </button>
             <button type="button" class="panel-tab" data-panel-tab="filter">
               <i data-lucide="list-filter"></i>
@@ -230,24 +227,6 @@
               <div class="layer-list-scroll">
                 <ul class="layer-list" id="layer-list"></ul>
               </div>
-            </section>
-
-            <section class="panel-section" data-panel="files">
-              <div class="info-grid">
-                <div>
-                  <span>Loaded</span>
-                  <strong id="loaded-file-count">0</strong>
-                </div>
-                <div>
-                  <span>Visible</span>
-                  <strong id="visible-file-count">0</strong>
-                </div>
-              </div>
-              <div class="file-note">
-                <span>Max file size</span>
-                <strong>300 MB</strong>
-              </div>
-              <ol class="file-list" id="file-list"></ol>
             </section>
 
             <section class="panel-section" data-panel="filter">

@@ -95,8 +95,6 @@ button {
 }
 
 #workspace-status,
-.file-note span,
-.info-grid span,
 .alpha-control span {
   display: block;
   color: var(--muted);
@@ -348,6 +346,13 @@ button {
   font-size: 18px;
 }
 
+.empty-state-note {
+  margin-top: -8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
 .empty-state-icon {
   width: 56px;
   height: 56px;
@@ -488,14 +493,14 @@ button {
 }
 
 .panel-tabs {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: flex;
   gap: 6px;
   padding: 10px;
   border-bottom: 1px solid var(--line);
 }
 
 .panel-tab {
+  flex: 1 1 0;
   min-width: 0;
   height: 48px;
   display: grid;
@@ -587,7 +592,6 @@ button {
 }
 
 .layer-list,
-.file-list,
 .diagnostic-list {
   list-style: none;
   margin: 0;
@@ -686,8 +690,7 @@ button {
   user-select: none;
 }
 
-.layer-label strong,
-.file-list strong {
+.layer-label strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -697,7 +700,6 @@ button {
 }
 
 .layer-label span,
-.file-list span,
 .diagnostic-list span {
   color: var(--muted);
   font-size: 11px;
@@ -708,46 +710,24 @@ button {
   color: #fecaca;
 }
 
-.info-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.info-grid > div,
-.file-note,
 .filter-form,
 .notification,
-.file-list li,
 .diagnostic-list li {
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-2);
 }
 
-.info-grid > div,
-.file-note,
 .filter-form {
   padding: 12px;
 }
 
-.info-grid strong,
-.file-note strong {
-  display: block;
-  margin-top: 5px;
-  color: var(--text);
-  font-size: 18px;
-  line-height: 1;
-}
-
-.file-list,
 .diagnostic-list {
   display: flex;
   flex-direction: column;
   gap: 7px;
 }
 
-.file-list li,
 .diagnostic-list li {
   display: grid;
   gap: 3px;
@@ -937,12 +917,6 @@ button {
     padding: 5px 10px;
   }
 
-  .info-grid {
-    gap: 6px;
-  }
-
-  .info-grid > div,
-  .file-note,
   .filter-form {
     padding: 8px;
   }
@@ -1039,7 +1013,6 @@ button {
   }
 
   .panel-tabs {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
     padding: 8px;
   }
 
