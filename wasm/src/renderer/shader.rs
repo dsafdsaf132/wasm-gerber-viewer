@@ -20,13 +20,14 @@ pub const ZERO: u32 = WebGl2RenderingContext::ZERO;
 
 // Shader sources
 pub const TRIANGLE_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
 in vec2 position;
 in vec2 hole_center_instance;
 in float hole_radius_instance;
 uniform mat3 transform;
-out lowp vec2 vPosition;
-out lowp vec2 vHoleCenter;
-out lowp float vHoleRadius;
+out highp vec2 vPosition;
+out highp vec2 vHoleCenter;
+out highp float vHoleRadius;
 void main() {
     vec3 transformed = transform * vec3(position, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
@@ -37,12 +38,12 @@ void main() {
 "#;
 
 pub const TRIANGLE_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision lowp float;
-in lowp vec2 vPosition;
-in lowp vec2 vHoleCenter;
-in lowp float vHoleRadius;
-uniform vec4 color;
-out vec4 fragColor;
+precision highp float;
+in highp vec2 vPosition;
+in highp vec2 vHoleCenter;
+in highp float vHoleRadius;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
 void main() {
     if (vHoleRadius > 0.0) {
         vec2 diff = vPosition - vHoleCenter;
@@ -53,32 +54,34 @@ void main() {
 "#;
 
 pub const CIRCLE_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
 in vec2 position;
 in vec2 center_instance;
 in float radius_instance;
 in vec2 hole_center_instance;
 in float hole_radius_instance;
 uniform mat3 transform;
-out lowp vec2 vPosition;
-out lowp vec2 vHoleCenter;
-out lowp float vHoleRadius;
+out highp vec2 vPosition;
+out highp vec2 vHoleCenter;
+out highp float vHoleRadius;
 void main() {
     vec2 scaledPos = position * radius_instance + center_instance;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
-    vHoleCenter = (hole_center_instance - center_instance) / radius_instance;
-    vHoleRadius = hole_radius_instance / radius_instance;
+    float safeRadius = max(radius_instance, 0.000000001);
+    vHoleCenter = (hole_center_instance - center_instance) / safeRadius;
+    vHoleRadius = hole_radius_instance / safeRadius;
 }
 "#;
 
 pub const CIRCLE_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision lowp float;
-in lowp vec2 vPosition;
-in lowp vec2 vHoleCenter;
-in lowp float vHoleRadius;
-uniform vec4 color;
-out vec4 fragColor;
+precision highp float;
+in highp vec2 vPosition;
+in highp vec2 vHoleCenter;
+in highp float vHoleRadius;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
 void main() {
     float dist = dot(vPosition, vPosition);
     if (dist > 1.0) discard;
@@ -91,6 +94,7 @@ void main() {
 "#;
 
 pub const ARC_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
 in vec2 position;
 in vec2 center_instance;
 in float radius_instance;
@@ -98,13 +102,13 @@ in float startAngle_instance;
 in float sweepAngle_instance;
 in float thickness_instance;
 uniform mat3 transform;
-out lowp vec2 vPosition;
-out lowp float vRadius;
-out lowp float vStartAngle;
-out lowp float vSweepAngle;
-out lowp float vThickness;
+out highp vec2 vPosition;
+out highp float vRadius;
+out highp float vStartAngle;
+out highp float vSweepAngle;
+out highp float vThickness;
 void main() {
-    float maxRadius = radius_instance + thickness_instance;
+    float maxRadius = max(radius_instance + thickness_instance * 0.5, 0.0);
     vec2 scaledPos = position * maxRadius + center_instance;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
@@ -117,14 +121,14 @@ void main() {
 "#;
 
 pub const ARC_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision lowp float;
-in lowp vec2 vPosition;
-in lowp float vRadius;
-in lowp float vStartAngle;
-in lowp float vSweepAngle;
-in lowp float vThickness;
-uniform vec4 color;
-out vec4 fragColor;
+precision highp float;
+in highp vec2 vPosition;
+in highp float vRadius;
+in highp float vStartAngle;
+in highp float vSweepAngle;
+in highp float vThickness;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
 
 const float PI = 3.14159265359;
 const float TWO_PI = 6.28318530718;
@@ -176,6 +180,7 @@ void main() {
 "#;
 
 pub const THERMAL_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
 in vec2 position;
 in vec2 center_instance;
 in float outer_diameter_instance;
@@ -183,13 +188,13 @@ in float inner_diameter_instance;
 in float gap_thickness_instance;
 in float rotation_instance;
 uniform mat3 transform;
-out lowp vec2 vPosition;
-out lowp float vInnerDiameter;
-out lowp float vOuterDiameter;
-out lowp float vGapThickness;
-out lowp float vRotation;
+out highp vec2 vPosition;
+out highp float vInnerDiameter;
+out highp float vOuterDiameter;
+out highp float vGapThickness;
+out highp float vRotation;
 void main() {
-    float outer_radius = outer_diameter_instance / 2.0;
+    float outer_radius = max(outer_diameter_instance, 0.0) * 0.5;
     vec2 scaledPos = position * outer_radius + center_instance;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
@@ -202,14 +207,14 @@ void main() {
 "#;
 
 pub const THERMAL_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision lowp float;
-in lowp vec2 vPosition;
-in lowp float vInnerDiameter;
-in lowp float vOuterDiameter;
-in lowp float vGapThickness;
-in lowp float vRotation;
-uniform vec4 color;
-out vec4 fragColor;
+precision highp float;
+in highp vec2 vPosition;
+in highp float vInnerDiameter;
+in highp float vOuterDiameter;
+in highp float vGapThickness;
+in highp float vRotation;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
 
 void main() {
     // Apply rotation to vPosition
@@ -221,8 +226,9 @@ void main() {
     );
 
     float dist = length(rotated);
-    float inner_radius = vInnerDiameter / (2.0 * vOuterDiameter);
-    float outer_radius = 0.5;
+    float safeOuterDiameter = max(vOuterDiameter, 0.000000001);
+    float inner_radius = clamp(vInnerDiameter / safeOuterDiameter, 0.0, 1.0);
+    float outer_radius = 1.0;
 
     // Discard if outside outer radius or inside inner radius
     if (dist > outer_radius || dist < inner_radius) {
@@ -230,7 +236,7 @@ void main() {
     }
 
     // Compute half gap thickness in normalized space
-    float half_gap = vGapThickness / (2.0 * vOuterDiameter);
+    float half_gap = max(vGapThickness / safeOuterDiameter, 0.0);
 
     // Discard if in cross-shaped gap region
     if (abs(rotated.x) < half_gap || abs(rotated.y) < half_gap) {
@@ -242,8 +248,9 @@ void main() {
 "#;
 
 pub const TEXTURE_VERTEX_SHADER: &str = r#"#version 300 es
+precision mediump float;
 in vec2 position;
-out vec2 v_uv;
+out mediump vec2 v_uv;
 void main() {
     v_uv = position * 0.5 + 0.5;
     gl_Position = vec4(position, 0.0, 1.0);
@@ -251,11 +258,11 @@ void main() {
 "#;
 
 pub const TEXTURE_FRAGMENT_SHADER: &str = r#"#version 300 es
-precision lowp float;
-in vec2 v_uv;
+precision mediump float;
+in mediump vec2 v_uv;
 uniform sampler2D u_texture;
-uniform vec4 u_color;
-out vec4 fragColor;
+uniform lowp vec4 u_color;
+out lowp vec4 fragColor;
 void main() {
     vec4 texColor = texture(u_texture, v_uv);
     // Pre-multiply alpha: color * alpha for additive blending
@@ -362,11 +369,22 @@ fn compile_program(
     uniforms: &[&str],
 ) -> Result<ShaderProgram, JsValue> {
     let vert_shader = compile_shader(gl, VERTEX_SHADER, vertex_src)?;
-    let frag_shader = compile_shader(gl, FRAGMENT_SHADER, fragment_src)?;
+    let frag_shader = match compile_shader(gl, FRAGMENT_SHADER, fragment_src) {
+        Ok(shader) => shader,
+        Err(error) => {
+            gl.delete_shader(Some(&vert_shader));
+            return Err(error);
+        }
+    };
 
-    let program = gl
-        .create_program()
-        .ok_or_else(|| JsValue::from_str("Unable to create shader program"))?;
+    let program = match gl.create_program() {
+        Some(program) => program,
+        None => {
+            gl.delete_shader(Some(&vert_shader));
+            gl.delete_shader(Some(&frag_shader));
+            return Err(JsValue::from_str("Unable to create shader program"));
+        }
+    };
 
     gl.attach_shader(&program, &vert_shader);
     gl.attach_shader(&program, &frag_shader);
@@ -385,6 +403,9 @@ fn compile_program(
         let error = gl
             .get_program_info_log(&program)
             .unwrap_or_else(|| "Unknown error".to_string());
+        gl.delete_shader(Some(&vert_shader));
+        gl.delete_shader(Some(&frag_shader));
+        gl.delete_program(Some(&program));
         return Err(JsValue::from_str(&format!("Shader link error: {}", error)));
     }
 
@@ -398,9 +419,14 @@ fn compile_program(
 
     let mut uniform_map = HashMap::new();
     for uniform_name in uniforms.iter() {
-        if let Some(loc) = gl.get_uniform_location(&program, uniform_name) {
-            uniform_map.insert(uniform_name.to_string(), loc);
-        }
+        let loc = gl
+            .get_uniform_location(&program, uniform_name)
+            .ok_or_else(|| {
+                let message = format!("Missing shader uniform: {}", uniform_name);
+                gl.delete_program(Some(&program));
+                JsValue::from_str(&message)
+            })?;
+        uniform_map.insert(uniform_name.to_string(), loc);
     }
 
     Ok(ShaderProgram {

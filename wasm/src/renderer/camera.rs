@@ -26,7 +26,9 @@ impl Camera {
     /// # Returns
     /// A 3x3 transformation matrix as [f32; 9]
     pub fn get_transform_matrix(&self, canvas_width: u32, canvas_height: u32) -> [f32; 9] {
-        let aspect = canvas_width as f32 / canvas_height as f32;
+        let width = canvas_width.max(1) as f32;
+        let height = canvas_height.max(1) as f32;
+        let aspect = width / height;
 
         let (scale_x, scale_y) = if aspect > 1.0 {
             (self.zoom_x / aspect, self.zoom_y)
@@ -71,5 +73,13 @@ mod tests {
         assert_eq!(transform[4], 3.0);
         assert_eq!(transform[6], 0.5);
         assert_eq!(transform[7], -2.0);
+    }
+
+    #[test]
+    fn transform_matrix_handles_zero_canvas_dimensions() {
+        let camera = Camera::default();
+        let transform = camera.get_transform_matrix(0, 0);
+
+        assert!(transform.iter().all(|value| value.is_finite()));
     }
 }

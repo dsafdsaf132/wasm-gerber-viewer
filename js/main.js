@@ -88,9 +88,12 @@ export class GerberViewer {
     // WASM module and single processor
     this.wasmModule = null;
     this.wasmProcessor = null;
+    this.isWebGlContextLost = false;
+    this.isRestoringWebGlContext = false;
 
     // Layers
     this.layers = [];
+    this.nextLayerDomId = 0;
     this.draggedLayerId = null;
     this.layerDropIndex = null;
 
@@ -168,15 +171,7 @@ export class GerberViewer {
     await this.wasmModule.default();
     this.wasmModule.init_panic_hook();
 
-    // Create WebGL2 context
-    this.gl = this.canvas.getContext("webgl2", { preserveDrawingBuffer: true });
-    if (!this.gl) {
-      throw new Error("WebGL2 not supported");
-    }
-
-    // Initialize Gerber processor
-    this.wasmProcessor = new this.wasmModule.GerberProcessor();
-    this.wasmProcessor.init(this.gl);
+    this.createWebGlProcessor();
 
     // Resize Canvas
     this.resizeCanvas();
@@ -199,7 +194,17 @@ export class GerberViewer {
     this.loadInitialUrlSource();
   }
 
-  resizeCanvas() {
+  createWebGlProcessor() {
+    this.gl = this.canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+    if (!this.gl) {
+      throw new Error("WebGL2 not supported");
+    }
+
+    this.wasmProcessor = new this.wasmModule.GerberProcessor();
+    this.wasmProcessor.init(this.gl);
+  }
+
+  resizeCanvas({ allowProcessorResize = false } = {}) {
     if (this.drawer && !this.drawer.classList.contains("collapsed")) {
       if (this.isMobileDrawerLayout()) {
         this.setDrawerHeight(this.drawerCurrentHeight);
@@ -213,14 +218,33 @@ export class GerberViewer {
     this.canvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
     this.canvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
 
-    if (this.wasmProcessor) {
-      this.wasmProcessor.resize();
+    const canResizeProcessor =
+      this.wasmProcessor &&
+      !this.isWebGlContextLost &&
+      (!this.isRestoringWebGlContext || allowProcessorResize);
+    if (canResizeProcessor) {
+      try {
+        this.wasmProcessor.resize();
+      } catch (error) {
+        const message = this.getErrorMessage(error);
+        console.error("[Render] Failed to resize renderer:", error);
+        this.addDiagnostic("error", "Resize failed", message);
+      }
     }
 
     this.render();
   }
 
   setupEventListeners() {
+    this.canvas.addEventListener(
+      "webglcontextlost",
+      (e) => this.handleWebGlContextLost(e),
+      { passive: false },
+    );
+    this.canvas.addEventListener("webglcontextrestored", () => {
+      void this.handleWebGlContextRestored();
+    });
+
     // File input
     this.selectFilesBtn.addEventListener("click", () => {
       this.fileInput.click();
@@ -396,6 +420,61 @@ export class GerberViewer {
     this.dropZone.addEventListener("drop", (e) => this.handleDrop(e));
   }
 
+  handleWebGlContextLost(e) {
+    e.preventDefault();
+    this.isWebGlContextLost = true;
+    this.isRestoringWebGlContext = false;
+    this.wasmProcessor = null;
+    this.gl = null;
+    this.addDiagnostic(
+      "warning",
+      "WebGL context lost",
+      "Waiting for the browser to restore the GPU context.",
+    );
+    this.updateUiState();
+  }
+
+  async handleWebGlContextRestored() {
+    if (this.isRestoringWebGlContext) return;
+
+    const layerSnapshot = this.layers.map((layer) => ({
+      id: layer.id,
+      name: layer.name,
+      sourceContent: layer.sourceContent,
+      visible: layer.visible,
+      color: [...layer.color],
+    }));
+
+    this.isRestoringWebGlContext = true;
+    this.updateUiState();
+
+    try {
+      this.createWebGlProcessor();
+      this.isWebGlContextLost = false;
+      this.resizeCanvas({ allowProcessorResize: true });
+      this.layers = [];
+
+      for (const layer of layerSnapshot) {
+        await this.addLayer(layer.name, layer.sourceContent, {
+          id: layer.id,
+          visible: layer.visible,
+          color: layer.color,
+        });
+      }
+
+      this.renderLayerList();
+      this.render();
+    } catch (error) {
+      const message = this.getErrorMessage(error);
+      console.error("[Render] Failed to restore WebGL context:", error);
+      this.addDiagnostic("error", "WebGL restore failed", message);
+      this.showError(`Failed to restore WebGL context: ${message}`);
+    } finally {
+      this.isRestoringWebGlContext = false;
+      this.updateUiState();
+    }
+  }
+
   refreshIcons() {
     if (window.lucide) {
       window.lucide.createIcons();
@@ -490,10 +569,22 @@ export class GerberViewer {
     const totalLayers = this.layers.length;
     const visibleLayers = this.layers.filter((layer) => layer.visible).length;
 
-    this.workspaceStatus.textContent =
-      totalLayers === 0
-        ? "Ready"
-        : `${visibleLayers} visible / ${totalLayers} loaded`;
+    if (this.isRestoringWebGlContext) {
+      this.workspaceStatus.textContent = "Restoring WebGL";
+    } else if (this.isWebGlContextLost) {
+      this.workspaceStatus.textContent = "WebGL context lost";
+    } else {
+      this.workspaceStatus.textContent =
+        totalLayers === 0
+          ? "Ready"
+          : `${visibleLayers} visible / ${totalLayers} loaded`;
+    }
+
+    const rendererBusy = this.isWebGlContextLost || this.isRestoringWebGlContext;
+    this.fileInput.disabled = rendererBusy;
+    this.selectFilesBtn.disabled = rendererBusy;
+    this.emptyUploadBtn.disabled = rendererBusy;
+
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;
     this.diagnosticsCount.textContent = String(this.diagnostics.length);
     this.emptyState.classList.toggle("is-hidden", totalLayers > 0);
@@ -1172,8 +1263,12 @@ export class GerberViewer {
     this.notificationTitle.textContent = "Notice";
   }
 
-  async addLayer(name, content) {
+  async addLayer(name, content, options = {}) {
     try {
+      if (!this.wasmProcessor || this.isWebGlContextLost) {
+        throw new Error("WebGL renderer is not available");
+      }
+
       // add layer to WASM processor and get layer ID
       const layerId = this.wasmProcessor.add_layer(content);
       if (layerId === undefined || layerId === null) {
@@ -1183,15 +1278,19 @@ export class GerberViewer {
       // Get this layer's boundary from WASM
       const bounds = this.wasmProcessor.get_layer_boundary(layerId);
 
-      const color =
-        this.colorPalette[this.nextColorIndex % this.colorPalette.length];
-      this.nextColorIndex++;
+      const color = options.color
+        ? [...options.color]
+        : this.colorPalette[this.nextColorIndex % this.colorPalette.length];
+      if (!options.color) {
+        this.nextColorIndex++;
+      }
 
       const layer = {
-        id: `layer-${layerId}`,
+        id: options.id ?? `layer-${this.nextLayerDomId++}`,
         layerId: layerId, // WASM layer_id
         name: name,
-        visible: true,
+        sourceContent: content,
+        visible: options.visible ?? true,
         color: color,
         bounds: {
           minX: bounds.min_x,
@@ -1215,7 +1314,14 @@ export class GerberViewer {
   }
 
   render() {
-    if (!this.wasmProcessor) return;
+    if (
+      !this.wasmProcessor ||
+      this.isWebGlContextLost ||
+      this.isRestoringWebGlContext
+    ) {
+      this.renderMeasurements();
+      return;
+    }
 
     try {
       // Get selected layers
@@ -1247,8 +1353,9 @@ export class GerberViewer {
       );
       this.zoomReadout.textContent = this.formatZoom();
     } catch (error) {
+      const message = this.getErrorMessage(error);
       console.error("[Render] Failed to render:", error);
-      this.addDiagnostic("error", "Render failed", error.message);
+      this.addDiagnostic("error", "Render failed", message);
     }
 
     this.renderMeasurements();
@@ -1977,7 +2084,9 @@ export class GerberViewer {
 
       try {
         // remove from WASM processor and handle errors
-        this.wasmProcessor.remove_layer(layer.layerId);
+        if (this.wasmProcessor && !this.isWebGlContextLost) {
+          this.wasmProcessor.remove_layer(layer.layerId);
+        }
 
         // remove from JS array only if WASM removal succeeded
         this.layers.splice(index, 1);
@@ -1998,10 +2107,13 @@ export class GerberViewer {
   clearAllLayers() {
     try {
       // remove all layers from WASM processor
-      this.wasmProcessor.clear();
+      if (this.wasmProcessor && !this.isWebGlContextLost) {
+        this.wasmProcessor.clear();
+      }
 
       this.layers = [];
       this.nextColorIndex = 0;
+      this.nextLayerDomId = 0;
       this.fitViewZoom = null;
       this.renderLayerList();
       this.render();

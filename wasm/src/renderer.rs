@@ -10,7 +10,7 @@ use shader::{
     FLOAT, FUNC_ADD, ONE, ONE_MINUS_SRC_ALPHA, STATIC_DRAW, TRIANGLES, UNSIGNED_INT, ZERO,
 };
 
-use crate::shape::{Boundary, GerberData};
+use crate::shape::{Arcs, Boundary, Circles, GerberData, Thermals, Triangles};
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
 use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlTexture};
@@ -56,6 +56,7 @@ impl Renderer {
     /// Returns the layer index (layer_id)
     pub fn add_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
         let (width, height) = self.get_canvas_size()?;
+        Self::validate_gerber_data_layers(&gerber_data)?;
 
         // Calculate combined boundary from all polarity sublayers
         let mut min_x = f32::INFINITY;
@@ -69,6 +70,10 @@ impl Renderer {
             max_x = max_x.max(b.max_x);
             min_y = min_y.min(b.min_y);
             max_y = max_y.max(b.max_y);
+        }
+
+        if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+            return Err(JsValue::from_str("Layer boundary is not finite"));
         }
 
         let boundary = Boundary::new(min_x, max_x, min_y, max_y);
@@ -122,6 +127,231 @@ impl Renderer {
             self.layer_count += 1;
             Ok(self.layers.len() - 1)
         }
+    }
+
+    fn validate_gerber_data_layers(gerber_data: &[GerberData]) -> Result<(), JsValue> {
+        if gerber_data.is_empty() {
+            return Err(JsValue::from_str("Layer does not contain any sublayers"));
+        }
+
+        for (sublayer_idx, data) in gerber_data.iter().enumerate() {
+            Self::validate_gerber_data(data, sublayer_idx)?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_gerber_data(data: &GerberData, sublayer_idx: usize) -> Result<(), JsValue> {
+        Self::validate_triangle_data(&data.triangles, sublayer_idx)?;
+        Self::validate_circle_data(&data.circles, sublayer_idx)?;
+        Self::validate_arc_data(&data.arcs, sublayer_idx)?;
+        Self::validate_thermal_data(&data.thermals, sublayer_idx)?;
+        Self::validate_finite_value("boundary.min_x", data.boundary.min_x)?;
+        Self::validate_finite_value("boundary.max_x", data.boundary.max_x)?;
+        Self::validate_finite_value("boundary.min_y", data.boundary.min_y)?;
+        Self::validate_finite_value("boundary.max_y", data.boundary.max_y)?;
+        Ok(())
+    }
+
+    fn validate_triangle_data(triangles: &Triangles, sublayer_idx: usize) -> Result<(), JsValue> {
+        if !triangles.vertices.len().is_multiple_of(2) {
+            return Err(JsValue::from_str(&format!(
+                "Sublayer {} triangle vertex buffer has an odd number of coordinates",
+                sublayer_idx
+            )));
+        }
+        if !triangles.indices.len().is_multiple_of(3) {
+            return Err(JsValue::from_str(&format!(
+                "Sublayer {} triangle index buffer is not divisible by 3",
+                sublayer_idx
+            )));
+        }
+
+        let vertex_count = triangles.vertices.len() / 2;
+        Self::validate_len(
+            "triangle hole_x",
+            sublayer_idx,
+            triangles.hole_x.len(),
+            vertex_count,
+        )?;
+        Self::validate_len(
+            "triangle hole_y",
+            sublayer_idx,
+            triangles.hole_y.len(),
+            vertex_count,
+        )?;
+        Self::validate_len(
+            "triangle hole_radius",
+            sublayer_idx,
+            triangles.hole_radius.len(),
+            vertex_count,
+        )?;
+        Self::validate_finite_slice("triangle vertices", &triangles.vertices)?;
+        Self::validate_finite_slice("triangle hole_x", &triangles.hole_x)?;
+        Self::validate_finite_slice("triangle hole_y", &triangles.hole_y)?;
+        Self::validate_non_negative_slice("triangle hole_radius", &triangles.hole_radius)?;
+
+        if triangles
+            .indices
+            .iter()
+            .any(|&index| index as usize >= vertex_count)
+        {
+            return Err(JsValue::from_str(&format!(
+                "Sublayer {} triangle index references a missing vertex",
+                sublayer_idx
+            )));
+        }
+
+        if triangles.indices.len() > i32::MAX as usize {
+            return Err(JsValue::from_str(&format!(
+                "Sublayer {} triangle index count exceeds WebGL draw limits",
+                sublayer_idx
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn validate_circle_data(circles: &Circles, sublayer_idx: usize) -> Result<(), JsValue> {
+        let count = circles.x.len();
+        Self::validate_instance_count("circle", sublayer_idx, count)?;
+        Self::validate_len("circle y", sublayer_idx, circles.y.len(), count)?;
+        Self::validate_len("circle radius", sublayer_idx, circles.radius.len(), count)?;
+        Self::validate_len("circle hole_x", sublayer_idx, circles.hole_x.len(), count)?;
+        Self::validate_len("circle hole_y", sublayer_idx, circles.hole_y.len(), count)?;
+        Self::validate_len(
+            "circle hole_radius",
+            sublayer_idx,
+            circles.hole_radius.len(),
+            count,
+        )?;
+        Self::validate_finite_slice("circle x", &circles.x)?;
+        Self::validate_finite_slice("circle y", &circles.y)?;
+        Self::validate_non_negative_slice("circle radius", &circles.radius)?;
+        Self::validate_finite_slice("circle hole_x", &circles.hole_x)?;
+        Self::validate_finite_slice("circle hole_y", &circles.hole_y)?;
+        Self::validate_non_negative_slice("circle hole_radius", &circles.hole_radius)?;
+        Ok(())
+    }
+
+    fn validate_arc_data(arcs: &Arcs, sublayer_idx: usize) -> Result<(), JsValue> {
+        let count = arcs.x.len();
+        Self::validate_instance_count("arc", sublayer_idx, count)?;
+        Self::validate_len("arc y", sublayer_idx, arcs.y.len(), count)?;
+        Self::validate_len("arc radius", sublayer_idx, arcs.radius.len(), count)?;
+        Self::validate_len(
+            "arc start_angle",
+            sublayer_idx,
+            arcs.start_angle.len(),
+            count,
+        )?;
+        Self::validate_len(
+            "arc sweep_angle",
+            sublayer_idx,
+            arcs.sweep_angle.len(),
+            count,
+        )?;
+        Self::validate_len("arc thickness", sublayer_idx, arcs.thickness.len(), count)?;
+        Self::validate_finite_slice("arc x", &arcs.x)?;
+        Self::validate_finite_slice("arc y", &arcs.y)?;
+        Self::validate_non_negative_slice("arc radius", &arcs.radius)?;
+        Self::validate_finite_slice("arc start_angle", &arcs.start_angle)?;
+        Self::validate_finite_slice("arc sweep_angle", &arcs.sweep_angle)?;
+        Self::validate_non_negative_slice("arc thickness", &arcs.thickness)?;
+        Ok(())
+    }
+
+    fn validate_thermal_data(thermals: &Thermals, sublayer_idx: usize) -> Result<(), JsValue> {
+        let count = thermals.x.len();
+        Self::validate_instance_count("thermal", sublayer_idx, count)?;
+        Self::validate_len("thermal y", sublayer_idx, thermals.y.len(), count)?;
+        Self::validate_len(
+            "thermal outer_diameter",
+            sublayer_idx,
+            thermals.outer_diameter.len(),
+            count,
+        )?;
+        Self::validate_len(
+            "thermal inner_diameter",
+            sublayer_idx,
+            thermals.inner_diameter.len(),
+            count,
+        )?;
+        Self::validate_len(
+            "thermal gap_thickness",
+            sublayer_idx,
+            thermals.gap_thickness.len(),
+            count,
+        )?;
+        Self::validate_len(
+            "thermal rotation",
+            sublayer_idx,
+            thermals.rotation.len(),
+            count,
+        )?;
+        Self::validate_finite_slice("thermal x", &thermals.x)?;
+        Self::validate_finite_slice("thermal y", &thermals.y)?;
+        Self::validate_non_negative_slice("thermal outer_diameter", &thermals.outer_diameter)?;
+        Self::validate_non_negative_slice("thermal inner_diameter", &thermals.inner_diameter)?;
+        Self::validate_non_negative_slice("thermal gap_thickness", &thermals.gap_thickness)?;
+        Self::validate_finite_slice("thermal rotation", &thermals.rotation)?;
+        Ok(())
+    }
+
+    fn validate_len(
+        label: &str,
+        sublayer_idx: usize,
+        actual: usize,
+        expected: usize,
+    ) -> Result<(), JsValue> {
+        if actual != expected {
+            return Err(JsValue::from_str(&format!(
+                "Sublayer {} {} length mismatch: expected {}, got {}",
+                sublayer_idx, label, expected, actual
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_instance_count(
+        label: &str,
+        sublayer_idx: usize,
+        count: usize,
+    ) -> Result<(), JsValue> {
+        if count > i32::MAX as usize {
+            return Err(JsValue::from_str(&format!(
+                "Sublayer {} {} instance count exceeds WebGL draw limits",
+                sublayer_idx, label
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_finite_slice(label: &str, values: &[f32]) -> Result<(), JsValue> {
+        for &value in values {
+            Self::validate_finite_value(label, value)?;
+        }
+        Ok(())
+    }
+
+    fn validate_non_negative_slice(label: &str, values: &[f32]) -> Result<(), JsValue> {
+        for &value in values {
+            Self::validate_finite_value(label, value)?;
+            if value < 0.0 {
+                return Err(JsValue::from_str(&format!(
+                    "{} contains a negative value",
+                    label
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_finite_value(label: &str, value: f32) -> Result<(), JsValue> {
+        if !value.is_finite() {
+            return Err(JsValue::from_str(&format!("{} is not finite", label)));
+        }
+        Ok(())
     }
 
     /// Remove a layer by index
@@ -240,22 +470,48 @@ impl Renderer {
     }
 
     fn create_fbo(gl: &WebGl2RenderingContext, width: u32, height: u32) -> Result<Fbo, JsValue> {
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot create an FBO with zero size"));
+        }
+
+        let max_texture_size = gl
+            .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)?
+            .as_f64()
+            .unwrap_or(0.0) as u32;
+        if max_texture_size > 0 && (width > max_texture_size || height > max_texture_size) {
+            return Err(JsValue::from_str(&format!(
+                "Canvas size {}x{} exceeds MAX_TEXTURE_SIZE {}",
+                width, height, max_texture_size
+            )));
+        }
+
         let texture = gl.create_texture().ok_or("Failed to create texture")?;
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
-        gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-            WebGl2RenderingContext::TEXTURE_2D,
-            0,
-            WebGl2RenderingContext::RGBA as i32,
-            width as i32,
-            height as i32,
-            0,
-            WebGl2RenderingContext::RGBA,
-            WebGl2RenderingContext::UNSIGNED_BYTE,
-            None,
-        )?;
+        if let Err(error) = gl
+            .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                WebGl2RenderingContext::TEXTURE_2D,
+                0,
+                WebGl2RenderingContext::RGBA as i32,
+                width as i32,
+                height as i32,
+                0,
+                WebGl2RenderingContext::RGBA,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                None,
+            )
+        {
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+            gl.delete_texture(Some(&texture));
+            return Err(error);
+        }
         gl.tex_parameteri(
             WebGl2RenderingContext::TEXTURE_2D,
             WebGl2RenderingContext::TEXTURE_MIN_FILTER,
+            WebGl2RenderingContext::LINEAR as i32,
+        );
+        gl.tex_parameteri(
+            WebGl2RenderingContext::TEXTURE_2D,
+            WebGl2RenderingContext::TEXTURE_MAG_FILTER,
             WebGl2RenderingContext::LINEAR as i32,
         );
         gl.tex_parameteri(
@@ -278,6 +534,18 @@ impl Renderer {
             Some(&texture),
             0,
         );
+
+        let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
+        if status != WebGl2RenderingContext::FRAMEBUFFER_COMPLETE {
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+            gl.delete_framebuffer(Some(&framebuffer));
+            gl.delete_texture(Some(&texture));
+            return Err(JsValue::from_str(&format!(
+                "Framebuffer is incomplete: 0x{:x}",
+                status
+            )));
+        }
 
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
@@ -405,6 +673,46 @@ impl Renderer {
         self.camera.zoom_y = zoom_y;
         self.camera.offset_x = offset_x;
         self.camera.offset_y = offset_y;
+    }
+
+    fn validate_render_inputs(
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<(), JsValue> {
+        let required_color_len = active_layer_ids
+            .len()
+            .checked_mul(3)
+            .ok_or_else(|| JsValue::from_str("Active layer count is too large"))?;
+        if color_data.len() < required_color_len {
+            return Err(JsValue::from_str(&format!(
+                "Color data is too short: expected at least {}, got {}",
+                required_color_len,
+                color_data.len()
+            )));
+        }
+
+        Self::validate_finite_value("zoom_x", zoom_x)?;
+        Self::validate_finite_value("zoom_y", zoom_y)?;
+        Self::validate_finite_value("offset_x", offset_x)?;
+        Self::validate_finite_value("offset_y", offset_y)?;
+        Self::validate_finite_value("alpha", alpha)?;
+
+        if zoom_x.abs() <= f32::EPSILON || zoom_y.abs() <= f32::EPSILON {
+            return Err(JsValue::from_str("Camera zoom must be non-zero"));
+        }
+
+        if !(0.0..=1.0).contains(&alpha) {
+            return Err(JsValue::from_str("Alpha must be between 0.0 and 1.0"));
+        }
+
+        Self::validate_finite_slice("color data", color_data)?;
+
+        Ok(())
     }
 
     /// Draw a specific FBO texture to the current framebuffer
@@ -978,11 +1286,24 @@ impl Renderer {
         offset_y: f32,
         alpha: f32,
     ) -> Result<(), JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+
         // Update camera state
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
 
         // Get canvas dimensions
         let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
+        }
 
         // Get transform matrix
         let transform = self.camera.get_transform_matrix(width, height);
@@ -1108,5 +1429,18 @@ impl Renderer {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        self.clear_all();
+        self.gl.delete_buffer(Some(&self.quad_buffer));
+        self.gl
+            .delete_program(Some(&self.programs.triangle.program));
+        self.gl.delete_program(Some(&self.programs.circle.program));
+        self.gl.delete_program(Some(&self.programs.arc.program));
+        self.gl.delete_program(Some(&self.programs.thermal.program));
+        self.gl.delete_program(Some(&self.programs.texture.program));
     }
 }
