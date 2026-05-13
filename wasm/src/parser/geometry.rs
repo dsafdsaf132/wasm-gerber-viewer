@@ -1,9 +1,10 @@
-use crate::parser::{Aperture, FormatSpec, ParserState};
+use crate::parser::{Aperture, FormatSpec, ParserState, Polarity};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
 use i_triangle::float::triangulatable::Triangulatable;
 use std::collections::HashMap;
+use std::mem::take;
 
 /// Basic primitive shape - created directly by parser
 #[derive(Clone, Debug)]
@@ -719,15 +720,97 @@ fn flash_aperture_no_sr(
     }
 }
 
+fn transform_primitive_for_flash(
+    primitive: &Primitive,
+    x: f32,
+    y: f32,
+    layer_scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+) -> Primitive {
+    let mut transformed = primitive.clone();
+    scale_primitive(&mut transformed, layer_scale);
+    mirror_primitive(&mut transformed, mirror_x, mirror_y);
+    offset_primitive_by(&transformed, x, y)
+}
+
+fn flush_primitives_to_layer(
+    primitives: &mut Vec<Primitive>,
+    polarity: Polarity,
+    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+) {
+    if !primitives.is_empty() {
+        polarity_layers.push((polarity, take(primitives)));
+    }
+}
+
+fn toggled_block_polarity(block_polarity: Polarity, flash_polarity: Polarity) -> Polarity {
+    if flash_polarity == Polarity::Negative {
+        match block_polarity {
+            Polarity::Positive => Polarity::Negative,
+            Polarity::Negative => Polarity::Positive,
+        }
+    } else {
+        block_polarity
+    }
+}
+
+fn flash_block_aperture(
+    block_layers: &[(Polarity, Vec<Primitive>)],
+    state: &ParserState,
+    primitives: &mut Vec<Primitive>,
+    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    x: f32,
+    y: f32,
+) {
+    flush_primitives_to_layer(primitives, state.polarity, polarity_layers);
+
+    for sy in 0..state.sr_y {
+        for sx in 0..state.sr_x {
+            let flash_x = x + sx as f32 * state.sr_i;
+            let flash_y = y + sy as f32 * state.sr_j;
+
+            for (block_polarity, block_primitives) in block_layers {
+                let transformed: Vec<Primitive> = block_primitives
+                    .iter()
+                    .map(|primitive| {
+                        transform_primitive_for_flash(
+                            primitive,
+                            flash_x,
+                            flash_y,
+                            state.layer_scale,
+                            state.mirror_x,
+                            state.mirror_y,
+                        )
+                    })
+                    .collect();
+
+                if !transformed.is_empty() {
+                    polarity_layers.push((
+                        toggled_block_polarity(*block_polarity, state.polarity),
+                        transformed,
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Flash aperture at given position - add all primitives of the aperture to the position
 pub fn flash_aperture(
     state: &ParserState,
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
+    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
     x: f32,
     y: f32,
 ) {
     if let Some(aperture) = apertures.get(&state.current_aperture) {
+        if let Some(block_layers) = aperture.block_layers.as_ref() {
+            flash_block_aperture(block_layers, state, primitives, polarity_layers, x, y);
+            return;
+        }
+
         // Step and Repeat iteration
         for sy in 0..state.sr_y {
             for sx in 0..state.sr_x {
@@ -1026,6 +1109,7 @@ pub fn parse_graphic_command(
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
     region_contours: &mut Vec<Vec<[f32; 2]>>,
+    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
 ) {
     let clean_line = line.trim_end_matches('*');
 
@@ -1227,7 +1311,7 @@ pub fn parse_graphic_command(
                 }
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
-                    flash_aperture(state, apertures, primitives, x, y);
+                    flash_aperture(state, apertures, primitives, polarity_layers, x, y);
                 }
                 _ if d_code >= 10 => {
                     // D10+: Aperture selection

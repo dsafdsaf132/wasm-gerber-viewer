@@ -81,7 +81,6 @@ Modern browsers with WebGL2 support:
 
 The following Gerber commands are not implemented yet:
 
-- **%AB** - Aperture Block definitions
 - **%LR** - Layer Rotation transformations
 
 ## Source

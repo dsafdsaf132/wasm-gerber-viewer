@@ -1,5 +1,6 @@
 use super::aperture_macro::ApertureMacro;
 use super::geometry::{scale_primitive, Primitive};
+use super::state::Polarity;
 use std::collections::HashMap;
 
 /// Aperture definition (Circle, Rectangle, Obround, Polygon, or Macro reference)
@@ -8,6 +9,7 @@ pub struct Aperture {
     pub radius: f32,
     pub primitives: Vec<Primitive>, // Aperture contains multiple basic primitives
     pub has_negative: bool,         // true if primitives contain exposure=0
+    pub block_layers: Option<Vec<(Polarity, Vec<Primitive>)>>,
 }
 
 impl Aperture {
@@ -16,6 +18,20 @@ impl Aperture {
             radius,
             primitives: Vec::new(),
             has_negative: false,
+            block_layers: None,
+        }
+    }
+
+    pub fn new_block(block_layers: Vec<(Polarity, Vec<Primitive>)>) -> Self {
+        let has_negative = block_layers
+            .iter()
+            .any(|(polarity, _)| *polarity == Polarity::Negative);
+
+        Aperture {
+            radius: 0.0,
+            primitives: Vec::new(),
+            has_negative,
+            block_layers: Some(block_layers),
         }
     }
 }
