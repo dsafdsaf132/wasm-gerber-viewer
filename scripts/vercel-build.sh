@@ -1,13 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CARGO_HOME="/rust"
-export RUSTUP_HOME="/rust"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${CARGO_HOME:-}" && -f /rust/env ]]; then
+  export CARGO_HOME="/rust"
+fi
+if [[ -z "${RUSTUP_HOME:-}" && -f /rust/env ]]; then
+  export RUSTUP_HOME="/rust"
+fi
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 WASM_PACK_VERSION="0.14.0"
 
-# shellcheck disable=SC1091
-. /rust/env
+for rust_env in "$CARGO_HOME/env" "$RUSTUP_HOME/env" /rust/env; do
+  if [[ -f "$rust_env" ]]; then
+    # shellcheck disable=SC1090
+    . "$rust_env"
+    break
+  fi
+done
+
+wasm_package_hash() {
+  (
+    cd "$REPO_ROOT"
+    {
+      printf '%s\0' scripts/vercel-build.sh wasm/Cargo.lock wasm/Cargo.toml
+      find wasm/src -type f -print0 | sort -z
+    } | xargs -0 sha256sum
+  ) | sha256sum | cut -d ' ' -f1
+}
+
+wasm_hash="$(wasm_package_hash)"
+wasm_pkg_dir="$REPO_ROOT/wasm/pkg"
+
+if [[
+  -f "$wasm_pkg_dir/.source-hash" &&
+  -f "$wasm_pkg_dir/wasm_gerber_processor.js" &&
+  -f "$wasm_pkg_dir/wasm_gerber_processor_bg.wasm" &&
+  "$(cat "$wasm_pkg_dir/.source-hash")" == "$wasm_hash"
+]]; then
+  echo "Reusing cached wasm/pkg for source hash $wasm_hash"
+  exit 0
+fi
 
 rustup toolchain install stable --profile minimal
 rustup default stable
@@ -41,5 +76,6 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
   rm -rf "$wasm_pack_tmp"
 fi
 
-cd wasm
+cd "$REPO_ROOT/wasm"
 wasm-pack build --target web --out-dir pkg --release
+printf '%s\n' "$wasm_hash" > pkg/.source-hash

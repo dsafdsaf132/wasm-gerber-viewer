@@ -1,10 +1,18 @@
-name: Build and Test
+name: Build, Test, and Deploy
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,53 +22,115 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        profile: minimal
-        override: true
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('wasm/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-registry-
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('wasm/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-index-
 
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-index-
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: wasm/target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('wasm/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-target-
 
-    - name: Cache cargo build
-      uses: actions/cache@v4
-      with:
-        path: wasm/target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-build-target-
+      - name: Cache WASM package
+        uses: actions/cache@v4
+        with:
+          path: wasm/pkg
+          key: ${{ runner.os }}-wasm-pkg-release-${{ hashFiles('scripts/vercel-build.sh', 'wasm/Cargo.lock', 'wasm/Cargo.toml', 'wasm/src/**') }}
 
-    - name: Install wasm-pack
-      run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build or reuse WASM package
+        run: ./scripts/vercel-build.sh
 
-    - name: Build WASM module
-      working-directory: ./wasm
-      run: wasm-pack build --target web --out-dir pkg --dev
+      - name: Install Rust toolchain for tests
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
-    - name: Run tests
-      working-directory: ./wasm
-      run: cargo test --verbose
+      - name: Run tests
+        working-directory: ./wasm
+        run: cargo test --verbose
 
-    - name: Upload WASM artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: wasm-module
-        path: wasm/pkg/
-        retention-days: 7
+      - name: Upload WASM package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: wasm/pkg/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-pkg
+          path: wasm/pkg
+
+      - name: Check Vercel secrets
+        id: vercel-secrets
+        run: |
+          if [[ -n "$VERCEL_ORG_ID" && -n "$VERCEL_PROJECT_ID" && -n "$VERCEL_TOKEN" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping Vercel deploy because VERCEL_ORG_ID, VERCEL_PROJECT_ID, or VERCEL_TOKEN is missing."
+          fi
+
+      - name: Install Vercel CLI
+        if: steps.vercel-secrets.outputs.enabled == 'true'
+        run: npm install --global vercel@latest
+
+      - name: Resolve Vercel environment
+        if: steps.vercel-secrets.outputs.enabled == 'true'
+        id: vercel-env
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == "refs/heads/main" ]]; then
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "prod-flag=--prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=preview" >> "$GITHUB_OUTPUT"
+            echo "prod-flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pull Vercel environment
+        if: steps.vercel-secrets.outputs.enabled == 'true'
+        run: vercel pull --yes --environment="${{ steps.vercel-env.outputs.environment }}" --token="$VERCEL_TOKEN"
+
+      - name: Build Vercel output
+        if: steps.vercel-secrets.outputs.enabled == 'true'
+        run: vercel build ${{ steps.vercel-env.outputs.prod-flag }} --token="$VERCEL_TOKEN"
+
+      - name: Deploy Vercel prebuilt output
+        if: steps.vercel-secrets.outputs.enabled == 'true'
+        id: vercel-deploy
+        run: |
+          deployment_url="$(vercel deploy --prebuilt ${{ steps.vercel-env.outputs.prod-flag }} --token="$VERCEL_TOKEN")"
+          echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
+          echo "Deployed to $deployment_url" >> "$GITHUB_STEP_SUMMARY"
