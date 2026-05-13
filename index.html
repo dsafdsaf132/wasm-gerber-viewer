@@ -231,26 +231,53 @@
 
             <section class="panel-section" data-panel="filter">
               <div class="filter-form">
+                <div class="filter-actions">
+                  <button class="chip-button" id="filter-save-btn" type="button" title="Save">
+                    <i data-lucide="save"></i>
+                    <span>Save</span>
+                  </button>
+                  <button
+                    class="chip-button"
+                    id="filter-default-btn"
+                    type="button"
+                    title="Default"
+                  >
+                    <i data-lucide="rotate-ccw"></i>
+                    <span>Default</span>
+                  </button>
+                  <button
+                    class="chip-button"
+                    id="filter-restore-btn"
+                    type="button"
+                    title="Restore"
+                  >
+                    <i data-lucide="history"></i>
+                    <span>Restore</span>
+                  </button>
+                </div>
                 <label class="filter-field" for="top-filter-input">
                   <span>Top</span>
-                  <input
-                    type="text"
+                  <textarea
                     id="top-filter-input"
+                    rows="7"
                     autocomplete="off"
                     spellcheck="false"
-                  />
+                    wrap="soft"
+                  ></textarea>
                 </label>
                 <label class="filter-field" for="bottom-filter-input">
                   <span>Bottom</span>
-                  <input
-                    type="text"
+                  <textarea
                     id="bottom-filter-input"
+                    rows="7"
                     autocomplete="off"
                     spellcheck="false"
-                  />
+                    wrap="soft"
+                  ></textarea>
                 </label>
                 <p class="filter-note">
-                  <span>Use comma or space separated text. Prefix with # for case-sensitive matching.</span>
+                  <span>Use spaces, commas, or new lines.</span>
+                  <span>Prefix with # for case-sensitive matching.</span>
                   <span>Example: top #BOT</span>
                 </p>
               </div>

@@ -47,7 +47,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -844,6 +845,15 @@ button {
   gap: 12px;
 }
 
+.filter-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.filter-actions .chip-button {
+  flex: 1;
+}
+
 .filter-field {
   display: grid;
   gap: 6px;
@@ -856,18 +866,22 @@ button {
   line-height: 1.35;
 }
 
-.filter-field input {
+.filter-field textarea {
   width: 100%;
-  min-height: 36px;
-  padding: 0 10px;
+  min-height: 148px;
+  padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: #0f1724;
   color: var(--text);
   outline: none;
+  resize: vertical;
+  line-height: 1.45;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
 }
 
-.filter-field input:focus {
+.filter-field textarea:focus {
   border-color: rgba(94, 234, 212, 0.62);
 }
 

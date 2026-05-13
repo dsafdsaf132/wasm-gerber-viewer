@@ -96,6 +96,9 @@ export class GerberViewer {
     this.diagnosticsCount = document.getElementById("diagnostics-count");
     this.topFilterInput = document.getElementById("top-filter-input");
     this.bottomFilterInput = document.getElementById("bottom-filter-input");
+    this.filterSaveBtn = document.getElementById("filter-save-btn");
+    this.filterDefaultBtn = document.getElementById("filter-default-btn");
+    this.filterRestoreBtn = document.getElementById("filter-restore-btn");
     this.panelTabs = Array.from(document.querySelectorAll("[data-panel-tab]"));
     this.panelSections = Array.from(document.querySelectorAll("[data-panel]"));
 
@@ -368,6 +371,18 @@ export class GerberViewer {
       this.updateLayerFilter("bottom", this.bottomFilterInput.value);
     });
 
+    this.filterSaveBtn.addEventListener("click", () => {
+      this.saveLayerFiltersFromInputs();
+    });
+
+    this.filterDefaultBtn.addEventListener("click", () => {
+      this.setLayerFilters(this.getDefaultLayerFilters());
+    });
+
+    this.filterRestoreBtn.addEventListener("click", () => {
+      this.setLayerFilters(this.loadLayerFilters());
+    });
+
     this.notificationCloseBtn.addEventListener("click", () => {
       this.hideNotification();
     });
@@ -504,25 +519,47 @@ export class GerberViewer {
     }
   }
 
-  loadLayerFilters() {
-    const defaults = {
-      top:
-        "top front -f .gtl .gto .gts .gtp .gpt .cmp .plc .stc .crc .top .smt .sst .spt .tsm .tsk .plt .pastetop f.cu f_cu f.mask f_mask f.silks f_silks f.paste f_paste mt.pho st.pho pt.pho #TOP",
-      bottom:
-        "bottom back -b .gbl .gbo .gbs .gbp .gpb .sol .pls .sts .crs .bot .smb .ssb .spb .bsm .bsk .plb .pastebot b.cu b_cu b.mask b_mask b.silks b_silks b.paste b_paste mb.pho sb.pho pb.pho #BOT",
-    };
-    const previousDefaults = {
+  getDefaultLayerFilters() {
+    return {
       top: [
+        "top front -f #TOP",
+        ".gtl .gto .gts .gtp .gpt",
+        ".cmp .plc .stc .crc",
+        ".top .smt .sst .spt .tsm .tsk .plt .pastetop",
+        "f.cu f_cu f.mask f_mask f.silks f_silks f.paste f_paste",
+        "mt.pho st.pho pt.pho",
+      ].join("\n"),
+      bottom: [
+        "bottom back -b #BOT",
+        ".gbl .gbo .gbs .gbp .gpb",
+        ".sol .pls .sts .crs",
+        ".bot .smb .ssb .spb .bsm .bsk .plb .pastebot",
+        "b.cu b_cu b.mask b_mask b.silks b_silks b.paste b_paste",
+        "mb.pho sb.pho pb.pho",
+      ].join("\n"),
+    };
+  }
+
+  getPreviousLayerFilterDefaults() {
+    return {
+      top: [
+        "top front -f .gtl .gto .gts .gtp .gpt .cmp .plc .stc .crc .top .smt .sst .spt .tsm .tsk .plt .pastetop f.cu f_cu f.mask f_mask f.silks f_silks f.paste f_paste mt.pho st.pho pt.pho #TOP",
         "top -f .gtl .gto .gts .gtp #TOP",
         "top .gtl .gto .gts .gtp #TOP",
       ],
       bottom: [
+        "bottom back -b .gbl .gbo .gbs .gbp .gpb .sol .pls .sts .crs .bot .smb .ssb .spb .bsm .bsk .plb .pastebot b.cu b_cu b.mask b_mask b.silks b_silks b.paste b_paste mb.pho sb.pho pb.pho #BOT",
         "bottom -b .gbl .gbo .gbs .gbp #BOT",
         "bottom .gbl .gbo .gbs .gbp #BOT",
       ],
       front: ["front .gtl .gto .gts .gtp #TOP"],
       back: ["back .gbl .gbo .gbs .gbp #BOT"],
     };
+  }
+
+  loadLayerFilters() {
+    const defaults = this.getDefaultLayerFilters();
+    const previousDefaults = this.getPreviousLayerFilterDefaults();
 
     try {
       const stored = JSON.parse(
@@ -558,6 +595,14 @@ export class GerberViewer {
     }
   }
 
+  setLayerFilters(filters) {
+    this.layerFilters = {
+      top: filters.top,
+      bottom: filters.bottom,
+    };
+    this.syncFilterInputs();
+  }
+
   saveLayerFilters() {
     window.localStorage.setItem(
       this.layerFilterStorageKey,
@@ -572,7 +617,20 @@ export class GerberViewer {
 
   updateLayerFilter(kind, value) {
     this.layerFilters[kind] = value;
+  }
+
+  saveLayerFiltersFromInputs() {
+    this.updateLayerFilter("top", this.topFilterInput.value);
+    this.updateLayerFilter("bottom", this.bottomFilterInput.value);
     this.saveLayerFilters();
+    this.showNotification(
+      "Filters saved",
+      "info",
+      NOTIFICATION_DURATION_MS,
+      (messageElement) => {
+        messageElement.textContent = "Layer filter settings were saved.";
+      },
+    );
   }
 
   getFilterTokens(kind) {
