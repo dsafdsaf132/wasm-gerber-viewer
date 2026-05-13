@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  deployments: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -125,6 +126,39 @@ jobs:
             echo "prod-flag=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Create GitHub deployment
+        if: steps.vercel-secrets.outputs.enabled == 'true'
+        id: github-deployment
+        uses: actions/github-script@v7
+        env:
+          DEPLOYMENT_ENVIRONMENT: ${{ steps.vercel-env.outputs.environment }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const environment = process.env.DEPLOYMENT_ENVIRONMENT;
+            const logUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const deployment = await github.rest.repos.createDeployment({
+              owner,
+              repo,
+              ref: context.sha,
+              environment,
+              description: `Vercel ${environment} deployment`,
+              auto_merge: false,
+              required_contexts: [],
+              production_environment: environment === "production",
+            });
+
+            core.setOutput("deployment-id", deployment.data.id);
+
+            await github.rest.repos.createDeploymentStatus({
+              owner,
+              repo,
+              deployment_id: deployment.data.id,
+              state: "in_progress",
+              log_url: logUrl,
+              description: "Vercel deployment started",
+            });
+
       - name: Pull Vercel environment
         if: steps.vercel-secrets.outputs.enabled == 'true'
         run: vercel pull --yes --environment="${{ steps.vercel-env.outputs.environment }}" --token="$VERCEL_TOKEN"
@@ -140,3 +174,44 @@ jobs:
           deployment_url="$(vercel deploy --prebuilt ${{ steps.vercel-env.outputs.prod-flag }} --token="$VERCEL_TOKEN")"
           echo "url=$deployment_url" >> "$GITHUB_OUTPUT"
           echo "Deployed to $deployment_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark GitHub deployment successful
+        if: steps.vercel-secrets.outputs.enabled == 'true' && steps.github-deployment.outputs.deployment-id != ''
+        uses: actions/github-script@v7
+        env:
+          DEPLOYMENT_ID: ${{ steps.github-deployment.outputs.deployment-id }}
+          DEPLOYMENT_URL: ${{ steps.vercel-deploy.outputs.url }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const logUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            await github.rest.repos.createDeploymentStatus({
+              owner,
+              repo,
+              deployment_id: Number(process.env.DEPLOYMENT_ID),
+              state: "success",
+              environment_url: process.env.DEPLOYMENT_URL,
+              log_url: logUrl,
+              description: "Vercel deployment completed",
+              auto_inactive: true,
+            });
+
+      - name: Mark GitHub deployment failed
+        if: failure() && steps.github-deployment.outputs.deployment-id != ''
+        uses: actions/github-script@v7
+        env:
+          DEPLOYMENT_ID: ${{ steps.github-deployment.outputs.deployment-id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const logUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            await github.rest.repos.createDeploymentStatus({
+              owner,
+              repo,
+              deployment_id: Number(process.env.DEPLOYMENT_ID),
+              state: "failure",
+              log_url: logUrl,
+              description: "Vercel deployment failed",
+            });
