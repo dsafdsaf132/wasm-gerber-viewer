@@ -95,8 +95,11 @@ export class GerberViewer {
     // Drawer resize state
     this.isResizingDrawer = false;
     this.drawerCurrentWidth = 381;
+    this.drawerCurrentHeight = 420;
     this.drawerMinWidth = 200;
     this.drawerMaxWidth = 600;
+    this.drawerMinHeight = 180;
+    this.drawerMaxHeight = 560;
 
     // Colors
     this.colorPalette = [
@@ -142,7 +145,10 @@ export class GerberViewer {
 
     // Resize Canvas
     this.resizeCanvas();
-    window.addEventListener("resize", () => this.resizeCanvas());
+    window.addEventListener("resize", () => {
+      this.resizeCanvas();
+      this.updateDrawerToggleState();
+    });
 
     this.setupEventListeners();
 
@@ -158,7 +164,11 @@ export class GerberViewer {
 
   resizeCanvas() {
     if (this.drawer && !this.drawer.classList.contains("collapsed")) {
-      this.setDrawerWidth(this.drawerCurrentWidth);
+      if (this.isMobileDrawerLayout()) {
+        this.setDrawerHeight(this.drawerCurrentHeight);
+      } else {
+        this.setDrawerWidth(this.drawerCurrentWidth);
+      }
     }
 
     const rect = this.canvas.getBoundingClientRect();
@@ -313,7 +323,7 @@ export class GerberViewer {
     });
 
     // Drawer toggle event
-    if (window.matchMedia("(max-width: 760px)").matches) {
+    if (this.isMobileDrawerLayout()) {
       this.drawer.classList.add("collapsed");
     }
     this.updateDrawerToggleState();
@@ -1799,6 +1809,10 @@ export class GerberViewer {
   }
 
   // Drawer management methods
+  isMobileDrawerLayout() {
+    return window.matchMedia("(max-width: 760px)").matches;
+  }
+
   getDrawerMaxWidth() {
     const viewportLimit = Math.max(this.drawerMinWidth, window.innerWidth - 48);
     return Math.min(this.drawerMaxWidth, viewportLimit);
@@ -1818,8 +1832,36 @@ export class GerberViewer {
   setDrawerWidth(width) {
     const clampedWidth = this.clampDrawerWidth(width);
     this.drawerCurrentWidth = clampedWidth;
+    this.drawer.style.height = "";
     this.drawer.style.width = `${clampedWidth}px`;
     this.dropZone.style.setProperty("--panel-width", `${clampedWidth}px`);
+  }
+
+  getDrawerMaxHeight() {
+    const viewportLimit = Math.max(
+      this.drawerMinHeight,
+      Math.floor(window.innerHeight * 0.72),
+    );
+    return Math.min(this.drawerMaxHeight, viewportLimit);
+  }
+
+  clampDrawerHeight(height) {
+    if (!Number.isFinite(height)) {
+      return this.drawerCurrentHeight;
+    }
+
+    return Math.min(
+      this.getDrawerMaxHeight(),
+      Math.max(this.drawerMinHeight, height),
+    );
+  }
+
+  setDrawerHeight(height) {
+    const clampedHeight = this.clampDrawerHeight(height);
+    this.drawerCurrentHeight = clampedHeight;
+    this.drawer.style.width = "";
+    this.drawer.style.height = `${clampedHeight}px`;
+    this.dropZone.style.setProperty("--panel-height", `${clampedHeight}px`);
   }
 
   startDrawerResize(e) {
@@ -1831,19 +1873,24 @@ export class GerberViewer {
     this.isResizingDrawer = true;
     this.drawer.classList.add("resizing");
     document.body.style.userSelect = "none";
-    document.body.style.cursor = "ew-resize";
+    document.body.style.cursor = this.isMobileDrawerLayout()
+      ? "ns-resize"
+      : "ew-resize";
   }
 
   resizeDrawer(e) {
     if (!this.isResizingDrawer) return;
 
-    // Get X position from mouse or touch event
+    e.preventDefault();
+
+    if (this.isMobileDrawerLayout()) {
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      this.setDrawerHeight(window.innerHeight - clientY);
+      return;
+    }
+
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-
-    // Calculate new width based on position
-    // X position from right edge of viewport
     const newWidth = window.innerWidth - clientX;
-
     this.setDrawerWidth(newWidth);
   }
 
@@ -1871,36 +1918,53 @@ export class GerberViewer {
     if (shouldOpen) {
       // Expand drawer
       this.drawer.classList.remove("collapsed");
-      this.setDrawerWidth(this.drawerCurrentWidth);
+      if (this.isMobileDrawerLayout()) {
+        this.setDrawerHeight(this.drawerCurrentHeight);
+      } else {
+        this.setDrawerWidth(this.drawerCurrentWidth);
+      }
     } else {
       // Collapse drawer
-      this.drawerCurrentWidth = this.clampDrawerWidth(
-        this.drawer.getBoundingClientRect().width || this.drawerCurrentWidth,
-      );
+      const drawerRect = this.drawer.getBoundingClientRect();
+      if (this.isMobileDrawerLayout()) {
+        this.drawerCurrentHeight = this.clampDrawerHeight(
+          drawerRect.height || this.drawerCurrentHeight,
+        );
+      } else {
+        this.drawerCurrentWidth = this.clampDrawerWidth(
+          drawerRect.width || this.drawerCurrentWidth,
+        );
+      }
       this.drawer.classList.add("collapsed");
     }
 
     this.updateDrawerToggleState();
 
     // Trigger canvas resize immediately after toggle
-    // Use requestAnimationFrame to ensure layout has updated
     requestAnimationFrame(() => {
       this.triggerCanvasResize();
     });
+    window.setTimeout(() => {
+      this.triggerCanvasResize();
+    }, 220);
   }
 
   updateDrawerToggleState() {
     const isCollapsed = this.drawer.classList.contains("collapsed");
     const label = isCollapsed ? "Show panel" : "Hide panel";
+    const iconName = this.isMobileDrawerLayout()
+      ? isCollapsed
+        ? "chevron-up"
+        : "chevron-down"
+      : isCollapsed
+        ? "panel-right-open"
+        : "panel-right-close";
     this.drawerToggleBtn.setAttribute("aria-label", label);
     this.drawerToggleBtn.setAttribute("aria-expanded", String(!isCollapsed));
     this.drawerToggleBtn.title = label;
     this.drawerToggleBtn.replaceChildren();
     const icon = document.createElement("i");
-    icon.setAttribute(
-      "data-lucide",
-      isCollapsed ? "panel-right-open" : "panel-right-close",
-    );
+    icon.setAttribute("data-lucide", iconName);
     this.drawerToggleBtn.appendChild(icon);
     this.refreshIcons();
   }

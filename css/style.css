@@ -14,6 +14,7 @@
   --danger: #f87171;
   --warning: #facc15;
   --panel-width: 381px;
+  --panel-height: 420px;
   --toolbar-height: 58px;
   --status-height: 34px;
   --radius: 8px;
@@ -58,10 +59,11 @@ button {
 
 .top-toolbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(150px, max-content) minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   min-width: 0;
+  overflow: hidden;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: rgba(17, 24, 34, 0.96);
@@ -73,10 +75,18 @@ button {
   min-width: 0;
   display: flex;
   align-items: center;
+  overflow: hidden;
+}
+
+.brand-lockup > div {
+  min-width: 0;
 }
 
 .brand-lockup h1 {
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   line-height: 1.1;
   font-size: 15px;
   font-weight: 700;
@@ -95,13 +105,21 @@ button {
 
 .toolbar-group,
 .section-toolbar {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
 .view-actions {
+  flex: 0 0 auto;
   justify-content: flex-end;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 28px;
+  background: var(--line);
 }
 
 .section-toolbar {
@@ -114,6 +132,7 @@ button {
 }
 
 .primary-actions {
+  justify-self: stretch;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -229,6 +248,8 @@ button {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--panel-width);
+  overflow: hidden;
+  transition: grid-template-columns 180ms ease;
 }
 
 .viewer-surface {
@@ -416,17 +437,25 @@ button {
   container-type: inline-size;
   border-left: 1px solid var(--line);
   background: var(--surface);
+  transform: translateX(0);
+  transition: transform 180ms ease;
 }
 
 .side-panel.collapsed {
-  width: 0;
   min-width: 0;
   overflow: hidden;
+  pointer-events: none;
+  transform: translateX(100%);
   border-left: 0;
 }
 
 .workspace:has(.side-panel.collapsed) {
   grid-template-columns: minmax(0, 1fr) 0;
+}
+
+.app-shell:has(.side-panel.resizing) .workspace,
+.side-panel.resizing {
+  transition: none;
 }
 
 .side-panel.resizing {
@@ -440,6 +469,7 @@ button {
   bottom: 0;
   width: 8px;
   cursor: ew-resize;
+  touch-action: none;
   z-index: 7;
 }
 
@@ -815,13 +845,17 @@ button {
   }
 
   .top-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(118px, max-content) minmax(0, 1fr) auto auto;
     padding: 8px;
-    gap: 8px;
+    gap: 6px;
   }
 
   .brand-lockup h1 {
     font-size: 14px;
+  }
+
+  .toolbar-divider {
+    height: 24px;
   }
 
   #workspace-status {
@@ -841,6 +875,7 @@ button {
   .workspace {
     position: relative;
     display: block;
+    overflow: hidden;
   }
 
   .viewer-surface {
@@ -854,24 +889,43 @@ button {
     right: 0;
     bottom: 0;
     width: auto !important;
+    height: var(--panel-height);
     max-height: min(72vh, 560px);
     z-index: 30;
     border-left: 0;
     border-top: 1px solid var(--line);
     box-shadow: 0 -18px 42px rgba(0, 0, 0, 0.34);
     transform: translateY(0);
-    transition: transform 180ms ease;
   }
 
   .side-panel.collapsed {
     width: auto;
     transform: translateY(calc(100% - 65px));
     overflow: hidden;
+    pointer-events: auto;
     border-top: 1px solid var(--line);
   }
 
   .resize-handle {
-    display: none;
+    left: 0;
+    right: 0;
+    top: -5px;
+    bottom: auto;
+    width: auto;
+    height: 10px;
+    cursor: ns-resize;
+  }
+
+  .resize-handle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 4px;
+    width: 44px;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--line);
+    transform: translateX(-50%);
   }
 
   .panel-tabs {
