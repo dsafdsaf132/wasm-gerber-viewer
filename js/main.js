@@ -127,6 +127,7 @@ export class GerberViewer {
     this.drawerMaxWidth = 600;
     this.drawerMinHeight = 300;
     this.drawerMaxHeight = 560;
+    this.drawerMobileMaxHeightRatio = 0.72;
     this.drawerCollapsedWidth = 156;
     this.drawerCollapsedHeight = 95;
     this.drawerSnapThreshold = 50;
@@ -2173,8 +2174,8 @@ export class GerberViewer {
 
   getDrawerMaxHeight() {
     const viewportLimit = Math.max(
-      this.drawerMinHeight,
-      Math.floor(window.innerHeight * 0.72),
+      1,
+      Math.floor(window.innerHeight * this.drawerMobileMaxHeightRatio),
     );
     return Math.min(this.drawerMaxHeight, viewportLimit);
   }
@@ -2184,10 +2185,10 @@ export class GerberViewer {
       return this.drawerCurrentHeight;
     }
 
-    return Math.min(
-      this.getDrawerMaxHeight(),
-      Math.max(this.drawerMinHeight, height),
-    );
+    const maxHeight = this.getDrawerMaxHeight();
+    const minHeight = Math.min(this.drawerMinHeight, maxHeight);
+
+    return Math.min(maxHeight, Math.max(minHeight, height));
   }
 
   setDrawerHeight(height, { commitLayout = true } = {}) {
