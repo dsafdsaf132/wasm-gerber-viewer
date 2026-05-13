@@ -77,12 +77,6 @@ Modern browsers with WebGL2 support:
 
 - Chrome 80+, Firefox 75+, Safari 15+, Edge 80+
 
-## Work in Progress
-
-The following Gerber commands are not implemented yet:
-
-- **%LR** - Layer Rotation transformations
-
 ## Source
 
 Sample archives are loaded from their upstream sources and are not bundled in

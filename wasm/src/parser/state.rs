@@ -62,6 +62,8 @@ pub struct ParserState {
     // Layer Mirroring
     pub mirror_x: bool,
     pub mirror_y: bool,
+    // Layer Rotation
+    pub layer_rotation: f32,
 }
 
 impl Default for ParserState {
@@ -88,6 +90,7 @@ impl Default for ParserState {
             layer_scale: 1.0,
             mirror_x: false,
             mirror_y: false,
+            layer_rotation: 0.0,
         }
     }
 }
@@ -344,6 +347,28 @@ pub fn parse_ls(line: &str, state: &mut ParserState) {
     if let Ok(new_scale) = scale_str.parse::<f32>() {
         if new_scale > 0.0 {
             state.layer_scale = new_scale;
+        }
+    }
+}
+
+/// Parse Layer Rotation - %LR90.0*%
+/// Format: %LR[rotation_degrees]*%
+/// Rotation is counterclockwise in degrees and replaces the previous value.
+pub fn parse_lr(line: &str, state: &mut ParserState) {
+    let spec_str = line
+        .trim_start_matches('%')
+        .trim_end_matches('%')
+        .trim_end_matches('*');
+
+    if !spec_str.starts_with("LR") {
+        return;
+    }
+
+    let rotation_str = &spec_str[2..];
+
+    if let Ok(new_rotation) = rotation_str.parse::<f32>() {
+        if new_rotation.is_finite() {
+            state.layer_rotation = new_rotation.to_radians();
         }
     }
 }

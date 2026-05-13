@@ -10,7 +10,9 @@ pub use state::{FormatSpec, ParserState, Polarity};
 // Internal use only
 use aperture::parse_aperture;
 use aperture_macro::{parse_macro, ApertureMacro};
-use state::{parse_format_spec, parse_if, parse_lm, parse_lp, parse_ls, parse_mo, parse_sr};
+use state::{
+    parse_format_spec, parse_if, parse_lm, parse_lp, parse_lr, parse_ls, parse_mo, parse_sr,
+};
 
 use self::geometry::{parse_graphic_command, Primitive};
 use crate::shape::{Arcs, Boundary, Circles, GerberData, Thermals, Triangles};
@@ -410,7 +412,7 @@ fn parse_command(
         parse_lm(&line, state);
     } else if line.starts_with("%LR") {
         // Layer rotation: %LR45.0*
-        // TODO: Implement rotation transformation
+        parse_lr(&line, state);
     } else if line.starts_with("%LS") {
         // Layer scaling: %LS0.8*
         parse_ls(&line, state);
@@ -969,5 +971,90 @@ M02*";
         assert_eq!(circles.x.len(), 1);
         assert_approx_eq(circles.x[0], 12.0);
         assert_approx_eq(circles.radius[0], 1.0);
+    }
+
+    #[test]
+    fn layer_rotation_transforms_aperture_about_origin() {
+        let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10R,2.0X1.0*%
+%LR90*%
+D10*
+X000000Y000000D03*
+M02*";
+
+        let layers = parse_gerber(data).expect("rotated aperture should parse");
+        let (min_x, max_x, min_y, max_y) = triangle_bounds(&layers[0].triangles.vertices);
+
+        assert_approx_eq(min_x, -0.5);
+        assert_approx_eq(max_x, 0.5);
+        assert_approx_eq(min_y, -1.0);
+        assert_approx_eq(max_y, 1.0);
+    }
+
+    #[test]
+    fn layer_rotation_is_applied_after_mirroring() {
+        let data = "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMOFF*1,1,0.5,0.25,0*%
+%ADD10OFF*%
+%LMX*%
+%LR90*%
+D10*
+X1000000Y1000000D03*
+M02*";
+
+        let layers = parse_gerber(data).expect("mirrored rotated aperture should parse");
+        let circles = &layers[0].circles;
+
+        assert_eq!(circles.x.len(), 1);
+        assert_approx_eq(circles.x[0], 1.0);
+        assert_approx_eq(circles.y[0], 0.75);
+    }
+
+    #[test]
+    fn layer_rotation_replaces_previous_value() {
+        let data = "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMOFF*1,1,0.5,1,0*%
+%ADD10OFF*%
+%LR90*%
+%LR180*%
+D10*
+X000000Y000000D03*
+M02*";
+
+        let layers = parse_gerber(data).expect("rotated aperture should parse");
+        let circles = &layers[0].circles;
+
+        assert_eq!(circles.x.len(), 1);
+        assert_approx_eq(circles.x[0], -1.0);
+        assert_approx_eq(circles.y[0], 0.0);
+    }
+
+    #[test]
+    fn layer_rotation_transforms_aperture_block_about_origin() {
+        let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+%ABD20*%
+%ADD10C,1.0*%
+D10*
+X010000Y000000D03*
+%AB*%
+%LR90*%
+D20*
+X100000Y000000D03*
+M02*";
+
+        let layers = parse_gerber(data).expect("rotated aperture block should parse");
+        let circles = &layers[0].circles;
+
+        assert_eq!(circles.x.len(), 1);
+        assert_approx_eq(circles.x[0], 10.0);
+        assert_approx_eq(circles.y[0], 1.0);
     }
 }
