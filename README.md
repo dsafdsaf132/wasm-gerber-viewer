@@ -79,6 +79,18 @@ The following Gerber commands are not implemented yet:
 - **%AB** - Aperture Block definitions
 - **%LR** - Layer Rotation transformations
 
+## Source
+
+The Demo button loads Gerber files from the
+[KLP-5e ESP32 Sensor Board](https://github.com/futureshocked/KLP-5e-ESP32-sensor-board)
+project.
+
+- Copyright: Copyright (c) 2025, Peter Dalmaris
+- License: CERN-OHL-S v2.0
+- Source archive:
+  <https://raw.githubusercontent.com/futureshocked/KLP-5e-ESP32-sensor-board/main/KiCad%20project/dfm/gerber.zip>
+- The demo archive is loaded from the upstream repository and is not bundled in this repository.
+
 ## License
 
 [MIT License](LICENSE)

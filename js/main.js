@@ -50,8 +50,8 @@ export class GerberViewer {
     this.measurementUnitToggle = document.getElementById("measurement-unit-toggle");
     this.fullscreenBtn = document.getElementById("fullscreen-btn");
     this.selectAllBtn = document.getElementById("select-all-btn");
-    this.selectFrontBtn = document.getElementById("select-front-btn");
-    this.selectBackBtn = document.getElementById("select-back-btn");
+    this.selectTopBtn = document.getElementById("select-top-btn");
+    this.selectBottomBtn = document.getElementById("select-bottom-btn");
     this.unselectAllBtn = document.getElementById("unselect-all-btn");
     this.clearAllBtn = document.getElementById("clear-all-btn");
     this.clearDiagnosticsBtn = document.getElementById("clear-diagnostics-btn");
@@ -76,8 +76,8 @@ export class GerberViewer {
     this.cursorReadout = document.getElementById("cursor-readout");
     this.boundsReadout = document.getElementById("bounds-readout");
     this.diagnosticsCount = document.getElementById("diagnostics-count");
-    this.frontFilterInput = document.getElementById("front-filter-input");
-    this.backFilterInput = document.getElementById("back-filter-input");
+    this.topFilterInput = document.getElementById("top-filter-input");
+    this.bottomFilterInput = document.getElementById("bottom-filter-input");
     this.panelTabs = Array.from(document.querySelectorAll("[data-panel-tab]"));
     this.panelSections = Array.from(document.querySelectorAll("[data-panel]"));
 
@@ -282,12 +282,12 @@ export class GerberViewer {
       this.selectAllLayerCheckboxes();
     });
 
-    this.selectFrontBtn.addEventListener("click", () => {
-      this.selectLayersByFilter("front");
+    this.selectTopBtn.addEventListener("click", () => {
+      this.selectLayersByFilter("top");
     });
 
-    this.selectBackBtn.addEventListener("click", () => {
-      this.selectLayersByFilter("back");
+    this.selectBottomBtn.addEventListener("click", () => {
+      this.selectLayersByFilter("bottom");
     });
 
     this.unselectAllBtn.addEventListener("click", () => {
@@ -309,12 +309,12 @@ export class GerberViewer {
       this.updateGlobalAlpha(alpha);
     });
 
-    this.frontFilterInput.addEventListener("input", () => {
-      this.updateLayerFilter("front", this.frontFilterInput.value);
+    this.topFilterInput.addEventListener("input", () => {
+      this.updateLayerFilter("top", this.topFilterInput.value);
     });
 
-    this.backFilterInput.addEventListener("input", () => {
-      this.updateLayerFilter("back", this.backFilterInput.value);
+    this.bottomFilterInput.addEventListener("input", () => {
+      this.updateLayerFilter("bottom", this.bottomFilterInput.value);
     });
 
     this.notificationCloseBtn.addEventListener("click", () => {
@@ -403,8 +403,8 @@ export class GerberViewer {
 
   loadLayerFilters() {
     const defaults = {
-      front: "front top .gtl .gto .gts .gtp #TOP",
-      back: "back bottom .gbl .gbo .gbs .gbp #BOT",
+      top: "top .gtl .gto .gts .gtp #TOP",
+      bottom: "bottom .gbl .gbo .gbs .gbp #BOT",
     };
 
     try {
@@ -412,8 +412,18 @@ export class GerberViewer {
         window.localStorage.getItem(this.layerFilterStorageKey) || "{}",
       );
       return {
-        front: typeof stored.front === "string" ? stored.front : defaults.front,
-        back: typeof stored.back === "string" ? stored.back : defaults.back,
+        top:
+          typeof stored.top === "string"
+            ? stored.top
+            : typeof stored.front === "string"
+              ? stored.front
+              : defaults.top,
+        bottom:
+          typeof stored.bottom === "string"
+            ? stored.bottom
+            : typeof stored.back === "string"
+              ? stored.back
+              : defaults.bottom,
       };
     } catch {
       return defaults;
@@ -428,8 +438,8 @@ export class GerberViewer {
   }
 
   syncFilterInputs() {
-    this.frontFilterInput.value = this.layerFilters.front;
-    this.backFilterInput.value = this.layerFilters.back;
+    this.topFilterInput.value = this.layerFilters.top;
+    this.bottomFilterInput.value = this.layerFilters.bottom;
   }
 
   updateLayerFilter(kind, value) {
@@ -964,7 +974,7 @@ export class GerberViewer {
       );
 
       return entries.map((entry) => ({
-        name: `${file.name}/${entry.name}`,
+        name: this.getBaseFileName(entry.name),
         readText: () => entry.async("string"),
       }));
     } catch (error) {
@@ -1012,13 +1022,17 @@ export class GerberViewer {
   }
 
   getFileExtension(path) {
-    const fileName = path.split(/[\\/]/).pop() ?? path;
+    const fileName = this.getBaseFileName(path);
     const dotIndex = fileName.lastIndexOf(".");
     if (dotIndex <= 0) {
       return "";
     }
 
     return fileName.slice(dotIndex).toLowerCase();
+  }
+
+  getBaseFileName(path) {
+    return path.split(/[\\/]/).pop() ?? path;
   }
 
   formatFileSize(bytes) {
@@ -1143,6 +1157,11 @@ export class GerberViewer {
       this.layers.push(layer);
       this.updateUiState();
     } catch (error) {
+      if (this.isNoGeometryError(this.getErrorMessage(error))) {
+        console.warn(`[Layer] Skipped layer ${name}:`, error);
+        throw error;
+      }
+
       console.error(`[Layer] Failed to add layer ${name}:`, error);
       throw error;
     }
