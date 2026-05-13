@@ -15,6 +15,8 @@
   --warning: #facc15;
   --panel-width: 381px;
   --panel-height: 420px;
+  --panel-overlay-width: var(--panel-width);
+  --panel-overlay-height: var(--panel-height);
   --panel-collapsed-height: 95px;
   --toolbar-height: 58px;
   --status-height: 34px;
@@ -341,6 +343,14 @@ button {
   pointer-events: auto;
 }
 
+.empty-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
 .empty-state strong {
   color: var(--text);
   font-size: 18px;
@@ -440,7 +450,7 @@ button {
 
 .workspace:has(.side-panel:not(.collapsed)) .empty-state,
 .workspace:has(.side-panel:not(.collapsed)) .canvas-status {
-  right: var(--panel-width);
+  right: var(--panel-overlay-width);
 }
 
 .side-panel {
@@ -560,6 +570,14 @@ button {
 .layer-panel-controls {
   display: grid;
   gap: 12px;
+  flex: 0 0 auto;
+}
+
+.diagnostic-toolbar {
+  justify-content: flex-end;
+}
+
+.diagnostic-toolbar .chip-button {
   flex: 0 0 auto;
 }
 
@@ -868,12 +886,12 @@ button {
 
   .workspace:has(.side-panel:not(.collapsed)) .empty-state {
     right: 0;
-    bottom: var(--panel-height);
+    bottom: var(--panel-overlay-height);
   }
 
   .workspace:has(.side-panel:not(.collapsed)) .canvas-status {
     right: 0;
-    bottom: var(--panel-height);
+    bottom: var(--panel-overlay-height);
   }
 
   .side-panel {

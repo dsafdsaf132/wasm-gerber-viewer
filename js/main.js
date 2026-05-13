@@ -1,5 +1,33 @@
 const NOTIFICATION_DURATION_MS = 2000;
 const MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024;
+const DEMO_ARCHIVE_NAME = "ucamco-librepcb-sample-2.zip";
+const DEMO_ARCHIVE_PATH =
+  "https://raw.githubusercontent.com/futureshocked/KLP-5e-ESP32-sensor-board/main/KiCad%20project/dfm/gerber.zip";
+const ZIP_MIME_TYPES = new Set([
+  "application/zip",
+  "application/x-zip-compressed",
+]);
+const GERBER_FILE_EXTENSIONS = new Set([
+  ".art",
+  ".cmp",
+  ".drd",
+  ".gbl",
+  ".gbo",
+  ".gbr",
+  ".gbs",
+  ".gbp",
+  ".gdo",
+  ".ger",
+  ".gko",
+  ".gtl",
+  ".gto",
+  ".gtp",
+  ".gts",
+  ".plc",
+  ".sol",
+  ".stc",
+  ".sts",
+]);
 
 export class GerberViewer {
   constructor() {
@@ -26,6 +54,7 @@ export class GerberViewer {
     this.selectBackBtn = document.getElementById("select-back-btn");
     this.unselectAllBtn = document.getElementById("unselect-all-btn");
     this.clearAllBtn = document.getElementById("clear-all-btn");
+    this.clearDiagnosticsBtn = document.getElementById("clear-diagnostics-btn");
     this.alphaSlider = document.getElementById("alpha-slider");
     this.alphaValue = document.getElementById("alpha-value");
     this.layerList = document.getElementById("layer-list");
@@ -39,6 +68,7 @@ export class GerberViewer {
     this.workspaceStatus = document.getElementById("workspace-status");
     this.emptyState = document.getElementById("empty-state");
     this.emptyFileSizeLimit = document.getElementById("empty-file-size-limit");
+    this.emptyDemoBtn = document.getElementById("empty-demo-btn");
     this.dropOverlay = document.getElementById("drop-overlay");
     this.measurementOverlay = document.getElementById("measurement-overlay");
     this.visibleLayerCount = document.getElementById("visible-layer-count");
@@ -195,6 +225,10 @@ export class GerberViewer {
       this.fileInput.click();
     });
 
+    this.emptyDemoBtn.addEventListener("click", () => {
+      this.loadDemoArchive();
+    });
+
     this.fileInput.addEventListener("change", (e) => {
       if (e.target.files.length > 0) {
         this.handleFileUpload(e.target.files);
@@ -262,6 +296,10 @@ export class GerberViewer {
 
     this.clearAllBtn.addEventListener("click", () => {
       this.clearAllLayers();
+    });
+
+    this.clearDiagnosticsBtn.addEventListener("click", () => {
+      this.clearDiagnostics();
     });
 
     // Alpha slider
@@ -483,6 +521,10 @@ export class GerberViewer {
   }
 
   addDiagnostic(level, title, detail = "") {
+    if (level === "info") {
+      return;
+    }
+
     this.diagnostics.unshift({
       level,
       title,
@@ -516,6 +558,11 @@ export class GerberViewer {
       item.append(title, detail);
       this.diagnosticList.appendChild(item);
     }
+  }
+
+  clearDiagnostics() {
+    this.diagnostics = [];
+    this.updateUiState();
   }
 
   setActivePanel(panelName) {
@@ -772,6 +819,45 @@ export class GerberViewer {
       `Max ${this.formatFileSize(MAX_FILE_SIZE_BYTES)} per file`;
   }
 
+  async loadDemoArchive() {
+    if (this.layers.length > 0 || this.emptyDemoBtn.disabled) {
+      return;
+    }
+
+    this.emptyDemoBtn.disabled = true;
+    this.setWorkspaceStatus("Loading demo");
+
+    try {
+      const response = await fetch(DEMO_ARCHIVE_PATH);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} while loading ${DEMO_ARCHIVE_PATH}`);
+      }
+
+      const demoArchive = new File([await response.blob()], DEMO_ARCHIVE_NAME, {
+        type: "application/zip",
+      });
+      const layerSources = await this.collectZipLayerSources(demoArchive);
+      const results = await Promise.all(
+        layerSources.map((source) =>
+          this.loadLayerSource(source.name, source.readText),
+        ),
+      );
+      const loadedCount = results.filter(Boolean).length;
+
+      if (loadedCount > 0) {
+        this.renderLayerList();
+        this.render();
+        this.fitView();
+        this.addDiagnostic("info", "Demo loaded", `${loadedCount} processed`);
+      }
+    } catch (error) {
+      this.handleLayerLoadError(DEMO_ARCHIVE_NAME, error);
+    } finally {
+      this.emptyDemoBtn.disabled = false;
+      this.updateUiState();
+    }
+  }
+
   async handleFileUpload(files) {
     const oversizedFiles = [];
     const validFiles = [];
@@ -796,39 +882,143 @@ export class GerberViewer {
       this.showFileSizeWarning(oversizedFiles);
     }
 
-    // Process valid files in parallel
     if (validFiles.length > 0) {
-      const promises = validFiles.map(async (file) => {
-        try {
-          const content = await file.text();
-          await this.addLayer(file.name, content);
-        } catch (error) {
-          const message = this.getErrorMessage(error);
-          if (this.isNoGeometryError(message)) {
-            console.warn(`Skipped file ${file.name}:`, error);
-            this.addDiagnostic("warning", file.name, message);
-            return;
-          }
+      const layerSources = await this.collectLayerSources(validFiles);
 
-          console.error(`Failed to load file ${file.name}:`, error);
-          this.addDiagnostic("error", file.name, message);
-          this.showError(`Failed to load file ${file.name}: ${message}`);
+      if (layerSources.length > 0) {
+        const results = await Promise.all(
+          layerSources.map((source) =>
+            this.loadLayerSource(source.name, source.readText),
+          ),
+        );
+        const loadedCount = results.filter(Boolean).length;
+
+        if (loadedCount > 0) {
+          this.renderLayerList();
+          this.render();
+          this.fitView();
+          this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
         }
-      });
-
-      await Promise.all(promises);
-
-      // Render once after all layers are added
-      this.renderLayerList();
-      this.render();
-      this.fitView();
-      this.addDiagnostic("info", "Files loaded", `${validFiles.length} processed`);
+      }
     }
 
     this.updateUiState();
 
     // Clear file input
     this.fileInput.value = "";
+  }
+
+  async collectLayerSources(files) {
+    const layerSources = [];
+
+    for (const file of files) {
+      if (this.isZipFile(file)) {
+        layerSources.push(...(await this.collectZipLayerSources(file)));
+        continue;
+      }
+
+      layerSources.push({
+        name: file.name,
+        readText: () => file.text(),
+      });
+    }
+
+    return layerSources;
+  }
+
+  async collectZipLayerSources(file) {
+    if (!window.JSZip) {
+      this.handleLayerLoadError(file.name, new Error("ZIP support failed to load"));
+      return [];
+    }
+
+    try {
+      const zip = await window.JSZip.loadAsync(file);
+      const entries = Object.values(zip.files)
+        .filter(
+          (entry) =>
+            !entry.dir &&
+            !this.isArchiveMetadataPath(entry.name) &&
+            this.isSupportedGerberPath(entry.name),
+        )
+        .sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, {
+            numeric: true,
+            sensitivity: "base",
+          }),
+        );
+
+      if (entries.length === 0) {
+        this.addDiagnostic(
+          "warning",
+          file.name,
+          "No supported Gerber files found in archive",
+        );
+        return [];
+      }
+
+      this.addDiagnostic(
+        "info",
+        file.name,
+        `${entries.length} Gerber files found in archive`,
+      );
+
+      return entries.map((entry) => ({
+        name: `${file.name}/${entry.name}`,
+        readText: () => entry.async("string"),
+      }));
+    } catch (error) {
+      this.handleLayerLoadError(file.name, error);
+      return [];
+    }
+  }
+
+  async loadLayerSource(name, readText) {
+    try {
+      const content = await readText();
+      await this.addLayer(name, content);
+      return true;
+    } catch (error) {
+      this.handleLayerLoadError(name, error);
+      return false;
+    }
+  }
+
+  handleLayerLoadError(name, error) {
+    const message = this.getErrorMessage(error);
+    if (this.isNoGeometryError(message)) {
+      console.warn(`Skipped file ${name}:`, error);
+      this.addDiagnostic("warning", name, message);
+      return;
+    }
+
+    console.error(`Failed to load file ${name}:`, error);
+    this.addDiagnostic("error", name, message);
+    this.showError(`Failed to load file ${name}: ${message}`);
+  }
+
+  isZipFile(file) {
+    return this.getFileExtension(file.name) === ".zip" || ZIP_MIME_TYPES.has(file.type);
+  }
+
+  isSupportedGerberPath(path) {
+    return GERBER_FILE_EXTENSIONS.has(this.getFileExtension(path));
+  }
+
+  isArchiveMetadataPath(path) {
+    const normalizedPath = path.replaceAll("\\", "/");
+    const fileName = normalizedPath.split("/").pop() ?? normalizedPath;
+    return normalizedPath.startsWith("__MACOSX/") || fileName.startsWith("._");
+  }
+
+  getFileExtension(path) {
+    const fileName = path.split(/[\\/]/).pop() ?? path;
+    const dotIndex = fileName.lastIndexOf(".");
+    if (dotIndex <= 0) {
+      return "";
+    }
+
+    return fileName.slice(dotIndex).toLowerCase();
   }
 
   formatFileSize(bytes) {
@@ -1904,6 +2094,7 @@ export class GerberViewer {
 
   setDrawerWidth(width, { commitLayout = true } = {}) {
     const clampedWidth = this.clampDrawerWidth(width);
+    this.dropZone.style.setProperty("--panel-overlay-width", `${clampedWidth}px`);
     if (commitLayout) {
       this.drawerCurrentWidth = clampedWidth;
       this.drawerPendingWidth = null;
@@ -1936,6 +2127,7 @@ export class GerberViewer {
 
   setDrawerHeight(height, { commitLayout = true } = {}) {
     const clampedHeight = this.clampDrawerHeight(height);
+    this.dropZone.style.setProperty("--panel-overlay-height", `${clampedHeight}px`);
     if (commitLayout) {
       this.drawerCurrentHeight = clampedHeight;
       this.drawerPendingHeight = null;
