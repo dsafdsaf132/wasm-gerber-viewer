@@ -472,7 +472,6 @@ fn parse_aperture_block(
     let Some(block_code) = parse_aperture_block_code(line) else {
         return;
     };
-    let outer_state = state.clone();
 
     flush_primitives(current_primitives, polarity_layers, state.polarity);
 
@@ -493,6 +492,7 @@ fn parse_aperture_block(
                 break;
             }
 
+            let nested_block_state = parse_aperture_block_code(block_line).map(|_| state.clone());
             parse_command(
                 block_line,
                 i,
@@ -504,6 +504,9 @@ fn parse_aperture_block(
                 &mut block_primitives,
                 &mut block_layers,
             );
+            if let Some(enclosing_state) = nested_block_state {
+                *state = enclosing_state;
+            }
         } else if block_line.starts_with('G')
             || block_line.starts_with('D')
             || block_line.starts_with('X')
@@ -524,8 +527,11 @@ fn parse_aperture_block(
 
     flush_primitives(&mut block_primitives, &mut block_layers, state.polarity);
 
+    state.x = 0.0;
+    state.y = 0.0;
+    state.pen_state = "up".to_string();
+
     apertures.insert(block_code, Aperture::new_block(block_layers));
-    *state = outer_state;
 }
 
 pub fn parse_gerber(data: &str) -> Result<Vec<GerberData>, JsValue> {

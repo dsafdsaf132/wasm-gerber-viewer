@@ -882,6 +882,28 @@ M02*",
 }
 
 #[test]
+fn aperture_block_definition_preserves_ending_graphic_state() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+%ADD11C,2.0*%
+%ABD20*%
+D10*
+X0000000Y0000000D03*
+D11*
+%AB*%
+X1000000Y0000000D03*
+M02*",
+    )
+    .expect("aperture block should parse");
+    let circles = &layers[0].circles;
+
+    assert!(has_circle_at(circles, 1.0, 0.0, 1.0));
+}
+
+#[test]
 fn arc_caps_use_rendered_arc_endpoints() {
     let layers = parse_gerber(
         "\
