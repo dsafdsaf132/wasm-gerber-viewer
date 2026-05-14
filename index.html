@@ -297,6 +297,68 @@
         </aside>
       </main>
 
+      <dialog id="screenshot-dialog" class="screenshot-dialog">
+        <form id="screenshot-form" class="screenshot-form">
+          <div class="screenshot-dialog-header">
+            <strong>Export PNG</strong>
+            <button
+              type="button"
+              class="icon-button"
+              id="screenshot-cancel-btn"
+              aria-label="Close screenshot options"
+            >
+              <i data-lucide="x"></i>
+            </button>
+          </div>
+
+          <label class="screenshot-option-row" for="screenshot-background-toggle">
+            <span class="screenshot-option-copy">
+              <strong>Background</strong>
+              <small>Include current canvas color</small>
+            </span>
+            <input type="checkbox" id="screenshot-background-toggle" />
+          </label>
+
+          <label class="screenshot-option-row" for="screenshot-scale-select">
+            <span class="screenshot-option-copy">
+              <strong>Resolution</strong>
+              <small id="screenshot-resolution">0 x 0 px</small>
+            </span>
+            <select id="screenshot-scale-select">
+              <option value="1">1x</option>
+              <option value="2">2x</option>
+              <option value="4">4x</option>
+              <option value="8">8x</option>
+              <option value="16">16x</option>
+              <option value="32">32x</option>
+              <option value="64">64x</option>
+            </select>
+          </label>
+
+          <div class="screenshot-progress" id="screenshot-progress" aria-live="polite">
+            <div class="screenshot-progress-header">
+              <span id="screenshot-progress-label">Exporting</span>
+              <strong id="screenshot-progress-value">0%</strong>
+            </div>
+            <progress
+              class="screenshot-progress-bar"
+              id="screenshot-progress-bar"
+              value="0"
+              max="100"
+            ></progress>
+          </div>
+
+          <div class="screenshot-actions">
+            <button type="button" class="chip-button" id="screenshot-dismiss-btn">
+              Cancel
+            </button>
+            <button type="submit" class="tool-button primary" id="screenshot-export-btn">
+              Export
+            </button>
+          </div>
+        </form>
+      </dialog>
+
       <div
         id="file-size-warning"
         class="notification"

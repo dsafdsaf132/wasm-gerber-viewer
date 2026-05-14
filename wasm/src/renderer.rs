@@ -21,6 +21,8 @@ pub struct LayerMetadata {
     fbo: Fbo,                        // FBO for rendering this layer
     buffer_caches: Vec<BufferCache>, // Buffer cache per polarity sublayer
     boundary: Boundary,              // Combined boundary
+    fbo_dirty: bool,
+    fbo_transform: Option<[f32; 9]>,
 }
 
 /// WebGL renderer for Gerber graphics with multi-layer support
@@ -89,6 +91,8 @@ impl Renderer {
             fbo,
             buffer_caches,
             boundary,
+            fbo_dirty: true,
+            fbo_transform: None,
         };
 
         // Find next free slot or extend vec
@@ -1293,31 +1297,163 @@ impl Renderer {
         // Get transform matrix
         let transform = self.camera.get_transform_matrix(width, height);
 
-        // STEP 1: Render each active layer's geometry to its FBO (white)
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<(), JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+        Self::validate_tile_inputs(
+            export_width,
+            export_height,
+            tile_x,
+            tile_y,
+            tile_width,
+            tile_height,
+        )?;
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let transform = Self::tile_transform_matrix(
+            self.camera
+                .get_transform_matrix(export_width, export_height),
+            export_width,
+            export_height,
+            tile_x,
+            tile_y,
+            tile_width,
+            tile_height,
+        );
+
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform)
+    }
+
+    fn render_with_transform(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        alpha: f32,
+        transform: [f32; 9],
+    ) -> Result<(), JsValue> {
+        let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
+        }
+
+        // STEP 1: Render active layer geometry to FBOs only when geometry/camera state changed.
         for &layer_id in active_layer_ids {
             let layer_idx = layer_id as usize;
+            let should_redraw = {
+                let layer = self.get_layer(layer_idx)?;
+                layer.fbo_dirty || layer.fbo_transform.as_ref() != Some(&transform)
+            };
 
-            // Validate layer exists and get FBO
-            let layer = self.get_layer(layer_idx)?;
-            let fbo = &layer.fbo;
+            if should_redraw {
+                // Validate layer exists and get FBO
+                let layer = self.get_layer(layer_idx)?;
+                let fbo = &layer.fbo;
 
-            // Bind layer FBO
-            self.gl
-                .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&fbo.framebuffer));
-            self.gl.viewport(0, 0, width as i32, height as i32);
+                // Bind layer FBO
+                self.gl
+                    .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&fbo.framebuffer));
+                self.gl.viewport(0, 0, width as i32, height as i32);
 
-            // Clear layer FBO
-            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            self.gl.clear(COLOR_BUFFER_BIT);
+                // Clear layer FBO
+                self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                self.gl.clear(COLOR_BUFFER_BIT);
 
-            // Render layer geometry (with polarity blending handled internally)
-            self.render_layer_geometry(layer_idx, &transform)?;
+                // Render layer geometry (with polarity blending handled internally)
+                self.render_layer_geometry(layer_idx, &transform)?;
+
+                if let Some(layer) = &mut self.layers[layer_idx] {
+                    layer.fbo_dirty = false;
+                    layer.fbo_transform = Some(transform);
+                }
+            }
         }
 
         // STEP 2: Composite FBOs to canvas
         self.composite_layers(active_layer_ids, color_data, alpha)?;
 
         Ok(())
+    }
+
+    fn validate_tile_inputs(
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+    ) -> Result<(), JsValue> {
+        if export_width == 0 || export_height == 0 || tile_width == 0 || tile_height == 0 {
+            return Err(JsValue::from_str("Tile dimensions must be non-zero"));
+        }
+
+        let tile_right = tile_x
+            .checked_add(tile_width)
+            .ok_or_else(|| JsValue::from_str("Tile width overflows export bounds"))?;
+        let tile_bottom = tile_y
+            .checked_add(tile_height)
+            .ok_or_else(|| JsValue::from_str("Tile height overflows export bounds"))?;
+
+        if tile_right > export_width || tile_bottom > export_height {
+            return Err(JsValue::from_str("Tile is outside export bounds"));
+        }
+
+        Ok(())
+    }
+
+    fn tile_transform_matrix(
+        mut transform: [f32; 9],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+    ) -> [f32; 9] {
+        let export_width = export_width as f32;
+        let export_height = export_height as f32;
+        let tile_x = tile_x as f32;
+        let tile_y = tile_y as f32;
+        let tile_width = tile_width as f32;
+        let tile_height = tile_height as f32;
+
+        let scale_x = export_width / tile_width;
+        let offset_x = (export_width - 2.0 * tile_x) / tile_width - 1.0;
+        let scale_y = export_height / tile_height;
+        let offset_y = 1.0 - export_height / tile_height + 2.0 * tile_y / tile_height;
+
+        transform[0] *= scale_x;
+        transform[3] *= scale_x;
+        transform[6] = transform[6] * scale_x + offset_x;
+        transform[1] *= scale_y;
+        transform[4] *= scale_y;
+        transform[7] = transform[7] * scale_y + offset_y;
+        transform
     }
 
     fn composite_layers(
@@ -1410,6 +1546,8 @@ impl Renderer {
             let old_fbo =
                 std::mem::replace(&mut layer.fbo, Self::create_fbo(&self.gl, width, height)?);
             Self::delete_fbo(&self.gl, old_fbo);
+            layer.fbo_dirty = true;
+            layer.fbo_transform = None;
         }
 
         Ok(())
@@ -1455,6 +1593,8 @@ impl Renderer {
                     Self::delete_buffer_cache(&old_gl, cache);
                 }
                 layer.buffer_caches = Self::create_buffer_caches(layer.gerber_data.len());
+                layer.fbo_dirty = true;
+                layer.fbo_transform = None;
             }
         }
 

@@ -64,6 +64,24 @@ export class GerberViewer {
     this.flipVerticalBtn = document.getElementById("flip-vertical-btn");
     this.canvasThemeToggle = document.getElementById("canvas-theme-toggle");
     this.screenshotBtn = document.getElementById("screenshot-btn");
+    this.screenshotDialog = document.getElementById("screenshot-dialog");
+    this.screenshotForm = document.getElementById("screenshot-form");
+    this.screenshotBackgroundToggle = document.getElementById(
+      "screenshot-background-toggle",
+    );
+    this.screenshotScaleSelect = document.getElementById("screenshot-scale-select");
+    this.screenshotResolution = document.getElementById("screenshot-resolution");
+    this.screenshotProgress = document.getElementById("screenshot-progress");
+    this.screenshotProgressLabel = document.getElementById(
+      "screenshot-progress-label",
+    );
+    this.screenshotProgressValue = document.getElementById(
+      "screenshot-progress-value",
+    );
+    this.screenshotProgressBar = document.getElementById("screenshot-progress-bar");
+    this.screenshotCancelBtn = document.getElementById("screenshot-cancel-btn");
+    this.screenshotDismissBtn = document.getElementById("screenshot-dismiss-btn");
+    this.screenshotExportBtn = document.getElementById("screenshot-export-btn");
     this.rulerToggleBtn = document.getElementById("ruler-toggle-btn");
     this.rulerClearBtn = document.getElementById("ruler-clear-btn");
     this.measurementUnitToggle = document.getElementById("measurement-unit-toggle");
@@ -154,6 +172,7 @@ export class GerberViewer {
     this.drawerCurrentHeight = 420;
     this.drawerPendingWidth = null;
     this.drawerPendingHeight = null;
+    this.drawerResizeViewState = null;
     this.drawerMinWidth = 200;
     this.drawerMaxWidth = 600;
     this.drawerMinHeight = 300;
@@ -185,6 +204,9 @@ export class GerberViewer {
     this.rulerStartPoint = null;
     this.rulerHoverPoint = null;
     this.measurements = [];
+    this.measurementOverlayNodes = [];
+    this.measurementOverlayCursor = 0;
+    this.isExportingScreenshot = false;
     this.measurementUnit = "mm";
     this.layerFilterStorageKey = "wasm-gerber-viewer.layerFilters";
     this.layerFilters = this.loadLayerFilters();
@@ -203,6 +225,9 @@ export class GerberViewer {
     window.addEventListener("resize", () => {
       this.resizeCanvas();
       this.updateDrawerToggleState();
+      if (this.screenshotDialog.open) {
+        this.updateScreenshotResolutionPreview();
+      }
     });
 
     this.setupEventListeners();
@@ -233,9 +258,11 @@ export class GerberViewer {
     this.wasmProcessor.init(this.gl);
   }
 
-  resizeCanvas({ allowProcessorResize = false } = {}) {
-    if (this.drawer && !this.drawer.classList.contains("collapsed")) {
-      if (this.isMobileDrawerLayout()) {
+  resizeCanvas({ allowProcessorResize = false, preserveViewState = null } = {}) {
+    if (this.drawer) {
+      if (this.drawer.classList.contains("collapsed")) {
+        this.updateCanvasReservationForDrawerState();
+      } else if (this.isMobileDrawerLayout()) {
         this.setDrawerHeight(this.drawerCurrentHeight);
       } else {
         this.setDrawerWidth(this.drawerCurrentWidth);
@@ -246,6 +273,7 @@ export class GerberViewer {
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
     this.canvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
     this.canvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
+    this.restoreCanvasViewState(preserveViewState);
 
     const canResizeProcessor =
       this.wasmProcessor &&
@@ -307,7 +335,39 @@ export class GerberViewer {
     });
 
     this.screenshotBtn.addEventListener("click", () => {
-      this.exportScreenshot();
+      this.openScreenshotDialog();
+    });
+    this.screenshotForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const options = {
+        includeBackground: this.screenshotBackgroundToggle.checked,
+        scale: this.getSelectedScreenshotScale(),
+      };
+      const isTiled = this.shouldTileScreenshot(options.scale);
+      if (!isTiled) {
+        this.closeScreenshotDialog();
+      }
+      void this.exportScreenshot(options).finally(() => {
+        if (isTiled) {
+          this.closeScreenshotDialog();
+        }
+      });
+    });
+    this.screenshotScaleSelect.addEventListener("change", () => {
+      this.updateScreenshotResolutionPreview();
+    });
+    this.screenshotCancelBtn.addEventListener("click", () => {
+      if (this.isExportingScreenshot) return;
+      this.closeScreenshotDialog();
+    });
+    this.screenshotDismissBtn.addEventListener("click", () => {
+      if (this.isExportingScreenshot) return;
+      this.closeScreenshotDialog();
+    });
+    this.screenshotDialog.addEventListener("click", (e) => {
+      if (e.target === this.screenshotDialog && !this.isExportingScreenshot) {
+        this.closeScreenshotDialog();
+      }
     });
 
     this.rulerToggleBtn.addEventListener("click", () => {
@@ -432,7 +492,9 @@ export class GerberViewer {
     if (this.isMobileDrawerLayout()) {
       this.drawer.classList.add("collapsed");
     }
+    this.updateCanvasReservationForDrawerState();
     this.updateDrawerToggleState();
+    this.resizeCanvas();
     this.drawerToggleBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       e.preventDefault();
@@ -484,6 +546,7 @@ export class GerberViewer {
       bounds: layer.bounds ? { ...layer.bounds } : null,
       visible: layer.visible,
       color: [...layer.color],
+      sourceContent: layer.sourceContent,
     }));
 
     this.isRestoringWebGlContext = true;
@@ -688,13 +751,28 @@ export class GerberViewer {
       return "100%";
     }
 
-    const fitZoom = this.getFitViewZoom() ?? this.fitViewZoom;
+    const fitZoom = this.getZoomReadoutBaseZoom();
     if (!Number.isFinite(fitZoom) || fitZoom <= 0) {
       return "100%";
     }
 
     const zoomPercent = (this.camera.zoom / fitZoom) * 100;
     return `${Math.trunc(zoomPercent)}%`;
+  }
+
+  getZoomReadoutBaseZoom() {
+    return Number.isFinite(this.fitViewZoom) && this.fitViewZoom > 0
+      ? this.fitViewZoom
+      : this.getFitViewZoom();
+  }
+
+  getZoomReadoutRatio() {
+    const fitZoom = this.getZoomReadoutBaseZoom();
+    if (!Number.isFinite(fitZoom) || fitZoom <= 0) {
+      return null;
+    }
+
+    return this.camera.zoom / fitZoom;
   }
 
   formatCombinedBounds() {
@@ -821,6 +899,47 @@ export class GerberViewer {
     };
   }
 
+  captureCanvasViewState() {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0 || this.camera.zoom === 0) {
+      return null;
+    }
+
+    const anchorWorld = this.canvasPointToWorld(rect.left, rect.top);
+    if (!anchorWorld) return null;
+
+    return {
+      anchorWorld,
+      pixelsPerWorld: (Math.min(rect.width, rect.height) * this.camera.zoom) / 2,
+      zoomReadoutRatio: this.getZoomReadoutRatio(),
+    };
+  }
+
+  restoreCanvasViewState(viewState) {
+    if (!viewState || !Number.isFinite(viewState.pixelsPerWorld)) return;
+
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    const nextZoom = this.clampZoom(
+      (viewState.pixelsPerWorld * 2) / Math.min(rect.width, rect.height),
+    );
+    this.camera.zoom = nextZoom;
+
+    const anchorCorrected = this.canvasLocalPointToCorrected(0, 0, rect);
+    this.camera.offsetX =
+      anchorCorrected.x - viewState.anchorWorld.x * this.getViewScaleX();
+    this.camera.offsetY =
+      anchorCorrected.y - viewState.anchorWorld.y * this.getViewScaleY();
+
+    if (
+      Number.isFinite(viewState.zoomReadoutRatio) &&
+      viewState.zoomReadoutRatio > 0
+    ) {
+      this.fitViewZoom = this.camera.zoom / viewState.zoomReadoutRatio;
+    }
+  }
+
   updateViewFlipControls() {
     this.flipHorizontalBtn.setAttribute(
       "aria-pressed",
@@ -854,41 +973,555 @@ export class GerberViewer {
     this.refreshIcons();
   }
 
-  async exportScreenshot() {
-    this.render();
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-
+  openScreenshotDialog() {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) {
       this.showError("Cannot export screenshot because the canvas has no size.");
       return;
     }
 
-    const scale = Math.min(window.devicePixelRatio || 1, 2);
-    const output = document.createElement("canvas");
-    output.width = Math.max(1, Math.round(rect.width * scale));
-    output.height = Math.max(1, Math.round(rect.height * scale));
+    this.updateScreenshotResolutionPreview();
+    if (!this.screenshotDialog.open) {
+      this.screenshotDialog.showModal();
+    }
+  }
 
-    const context = output.getContext("2d");
-    context.scale(scale, scale);
-    context.fillStyle = this.isCanvasLight ? "#f8fafc" : "#020617";
-    context.fillRect(0, 0, rect.width, rect.height);
-    context.drawImage(this.canvas, 0, 0, rect.width, rect.height);
-    this.drawMeasurementsOnContext(context);
+  closeScreenshotDialog() {
+    if (this.screenshotDialog.open) {
+      this.screenshotDialog.close();
+    }
+  }
 
-    output.toBlob((blob) => {
-      if (!blob) {
-        this.showError("Failed to export screenshot.");
-        return;
+  setScreenshotExportBusy(isBusy) {
+    this.screenshotForm.classList.toggle("is-exporting", isBusy);
+    this.screenshotBackgroundToggle.disabled = isBusy;
+    this.screenshotScaleSelect.disabled = isBusy;
+    this.screenshotCancelBtn.disabled = isBusy;
+    this.screenshotDismissBtn.disabled = isBusy;
+    this.screenshotExportBtn.disabled = isBusy;
+    this.screenshotExportBtn.textContent = isBusy ? "Exporting" : "Export";
+
+    if (isBusy) {
+      this.setScreenshotProgress(0, "Rendering");
+    } else {
+      this.setScreenshotProgress(0, "Exporting");
+    }
+  }
+
+  setScreenshotProgress(progress, label = null) {
+    const clampedProgress = Math.min(1, Math.max(0, progress));
+    const percent = Math.trunc(clampedProgress * 100);
+
+    if (label !== null) {
+      this.screenshotProgressLabel.textContent = label;
+    }
+    this.screenshotProgressValue.textContent = `${percent}%`;
+    this.screenshotProgressBar.value = percent;
+  }
+
+  getSelectedScreenshotScale() {
+    const scale = Number.parseFloat(this.screenshotScaleSelect.value);
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+  }
+
+  getScreenshotDimensions(scale = this.getSelectedScreenshotScale()) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      width: Math.max(1, Math.round(rect.width * scale)),
+      height: Math.max(1, Math.round(rect.height * scale)),
+    };
+  }
+
+  getMaxScreenshotDimension() {
+    if (!this.gl) return Number.POSITIVE_INFINITY;
+
+    const maxTextureSize = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE);
+    const maxRenderbufferSize = this.gl.getParameter(
+      this.gl.MAX_RENDERBUFFER_SIZE,
+    );
+    return Math.min(maxTextureSize, maxRenderbufferSize);
+  }
+
+  updateScreenshotResolutionPreview() {
+    const scale = this.getSelectedScreenshotScale();
+    const { width, height } = this.getScreenshotDimensions(scale);
+    const maxDimension = this.getMaxScreenshotDimension();
+    const isTiled = this.shouldTileScreenshot(scale);
+    const exceedsLimit = !isTiled && (width > maxDimension || height > maxDimension);
+
+    this.screenshotResolution.textContent = exceedsLimit
+      ? `Estimated ${width} x ${height} px · exceeds ${maxDimension}px GPU limit`
+      : `Estimated ${width} x ${height} px`;
+    this.screenshotExportBtn.disabled = exceedsLimit;
+  }
+
+  shouldTileScreenshot(scale) {
+    return scale >= 8;
+  }
+
+  shouldStreamScreenshot(scale) {
+    return scale >= 8;
+  }
+
+  async exportScreenshot({ includeBackground = false, scale = 1 } = {}) {
+    if (this.isExportingScreenshot) return false;
+
+    if (
+      !this.wasmProcessor ||
+      this.isWebGlContextLost ||
+      this.isRestoringWebGlContext
+    ) {
+      this.showError("Cannot export screenshot while WebGL is unavailable.");
+      return false;
+    }
+
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      this.showError("Cannot export screenshot because the canvas has no size.");
+      return false;
+    }
+
+    const exportScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    const exportWidth = Math.max(1, Math.round(rect.width * exportScale));
+    const exportHeight = Math.max(1, Math.round(rect.height * exportScale));
+    const maxDimension = this.getMaxScreenshotDimension();
+    const isTiled = this.shouldTileScreenshot(exportScale);
+    const shouldStream = this.shouldStreamScreenshot(exportScale);
+    if (!isTiled && (exportWidth > maxDimension || exportHeight > maxDimension)) {
+      this.showError(
+        `Screenshot is too large for this GPU (${exportWidth} x ${exportHeight}px).`,
+      );
+      return false;
+    }
+
+    this.isExportingScreenshot = true;
+    this.screenshotBtn.disabled = true;
+    this.setScreenshotExportBusy(isTiled);
+    let screenshotRenderer = null;
+
+    try {
+      screenshotRenderer = this.createScreenshotRenderer();
+      let blob = null;
+
+      if (shouldStream) {
+        blob = await this.renderStreamingScreenshot(
+          screenshotRenderer,
+          exportWidth,
+          exportHeight,
+          exportScale,
+          includeBackground,
+        );
+      } else {
+        const output = document.createElement("canvas");
+        output.width = exportWidth;
+        output.height = exportHeight;
+
+        const context = output.getContext("2d");
+        if (!context) {
+          throw new Error(
+            `Cannot create ${exportWidth} x ${exportHeight}px screenshot canvas. Try a lower resolution.`,
+          );
+        }
+
+        if (includeBackground) {
+          context.fillStyle = this.isCanvasLight ? "#f8fafc" : "#020617";
+          context.fillRect(0, 0, exportWidth, exportHeight);
+        } else {
+          context.clearRect(0, 0, exportWidth, exportHeight);
+        }
+
+        this.renderSingleScreenshotTile(
+          screenshotRenderer,
+          exportWidth,
+          exportHeight,
+          0,
+          0,
+          exportWidth,
+          exportHeight,
+        );
+        context.drawImage(
+          screenshotRenderer.canvas,
+          0,
+          0,
+          exportWidth,
+          exportHeight,
+        );
+
+        context.save();
+        context.scale(exportScale, exportScale);
+        this.drawMeasurementsOnContext(context);
+        context.restore();
+
+        blob = await new Promise((resolve) => {
+          output.toBlob(resolve, "image/png");
+        });
       }
 
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `gerber-viewer-${this.getTimestampForFileName()}.png`;
-      link.click();
-      URL.revokeObjectURL(url);
-    }, "image/png");
+      if (!blob) {
+        throw new Error(
+          `Failed to encode ${exportWidth} x ${exportHeight}px PNG. The requested image may exceed this browser's canvas limit.`,
+        );
+      }
+
+      this.downloadScreenshotBlob(blob);
+      return true;
+    } catch (error) {
+      const message = this.getErrorMessage(error);
+      console.error("[Export] Failed to export screenshot:", error);
+      this.showError(`Failed to export screenshot: ${message}`);
+      return false;
+    } finally {
+      this.disposeScreenshotRenderer(screenshotRenderer);
+      this.isExportingScreenshot = false;
+      this.screenshotBtn.disabled = false;
+      this.setScreenshotExportBusy(false);
+      this.updateScreenshotResolutionPreview();
+    }
+  }
+
+  createScreenshotRenderer() {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+    if (!gl) {
+      throw new Error("WebGL2 is unavailable for screenshot export.");
+    }
+
+    const processor = new this.wasmModule.GerberProcessor();
+    processor.init(gl);
+
+    const activeLayerIds = [];
+    const colorData = [];
+    for (const layer of this.layers) {
+      if (typeof layer.sourceContent !== "string") {
+        throw new Error("Reload files before using high-resolution screenshot export.");
+      }
+
+      const layerId = processor.add_layer(layer.sourceContent);
+      if (layer.visible) {
+        activeLayerIds.push(layerId);
+        colorData.push(layer.color[0], layer.color[1], layer.color[2]);
+      }
+    }
+
+    return {
+      canvas,
+      gl,
+      processor,
+      activeLayerIds: new Uint32Array(activeLayerIds),
+      colorData: new Float32Array(colorData),
+    };
+  }
+
+  disposeScreenshotRenderer(screenshotRenderer) {
+    if (!screenshotRenderer) return;
+
+    try {
+      screenshotRenderer.processor.clear();
+    } catch (error) {
+      console.warn("[Export] Failed to dispose screenshot renderer:", error);
+    }
+
+    screenshotRenderer.canvas.width = 0;
+    screenshotRenderer.canvas.height = 0;
+    if (screenshotRenderer.tileCanvas) {
+      screenshotRenderer.tileCanvas.width = 0;
+      screenshotRenderer.tileCanvas.height = 0;
+    }
+  }
+
+  async renderStreamingScreenshot(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    exportScale,
+    includeBackground,
+  ) {
+    if (typeof CompressionStream !== "function") {
+      throw new Error(
+        "This browser does not support streamed PNG export. Try a lower resolution.",
+      );
+    }
+
+    const tileSize = this.getScreenshotStreamTileDimensions();
+    const totalTiles =
+      Math.ceil(exportWidth / tileSize.width) *
+      Math.ceil(exportHeight / tileSize.height);
+    const rowStride = 1 + exportWidth * 4;
+    const pngParts = [
+      this.createPngSignature(),
+      this.createPngHeaderChunk(exportWidth, exportHeight),
+    ];
+    const compressionStream = new CompressionStream("deflate");
+    const reader = compressionStream.readable.getReader();
+    const writer = compressionStream.writable.getWriter();
+    const readCompressed = (async () => {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pngParts.push(this.createPngChunk("IDAT", value));
+      }
+    })();
+    let tileCount = 0;
+    let writeError = null;
+
+    try {
+      for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
+        const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
+        const bandBuffer = new Uint8Array(rowStride * tileHeight);
+
+        for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
+          const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
+          this.setScreenshotProgress(tileCount / totalTiles);
+          const tileData = this.renderScreenshotTileToImageData(
+            screenshotRenderer,
+            exportWidth,
+            exportHeight,
+            exportScale,
+            tileX,
+            tileY,
+            tileWidth,
+            tileHeight,
+            includeBackground,
+          );
+
+          for (let row = 0; row < tileHeight; row += 1) {
+            const sourceStart = row * tileWidth * 4;
+            const sourceEnd = sourceStart + tileWidth * 4;
+            const destStart = row * rowStride + 1 + tileX * 4;
+            bandBuffer.set(tileData.subarray(sourceStart, sourceEnd), destStart);
+          }
+
+          tileCount += 1;
+          this.setScreenshotProgress(tileCount / totalTiles);
+        }
+
+        for (let row = 0; row < tileHeight; row += 1) {
+          const rowStart = row * rowStride;
+          await writer.write(bandBuffer.subarray(rowStart, rowStart + rowStride));
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+
+      this.setScreenshotProgress(1);
+      await writer.close();
+    } catch (error) {
+      writeError = error;
+      try {
+        await writer.abort(error);
+      } catch {
+        // The stream may already be closed or errored.
+      }
+    }
+
+    try {
+      await readCompressed;
+    } catch (error) {
+      if (!writeError) {
+        writeError = error;
+      }
+    }
+
+    if (writeError) {
+      throw writeError;
+    }
+
+    pngParts.push(this.createPngChunk("IEND", new Uint8Array()));
+    return new Blob(pngParts, { type: "image/png" });
+  }
+
+  getScreenshotStreamTileDimensions() {
+    const rect = this.canvas.getBoundingClientRect();
+    const maxDimension = this.getMaxScreenshotDimension();
+
+    return {
+      width: Math.max(
+        1,
+        Math.min(maxDimension, Math.round(rect.width * 8)),
+      ),
+      height: Math.max(
+        1,
+        Math.min(maxDimension, Math.round(rect.height)),
+      ),
+    };
+  }
+
+  renderScreenshotTileToImageData(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    exportScale,
+    tileX,
+    tileY,
+    tileWidth,
+    tileHeight,
+    includeBackground,
+  ) {
+    this.renderSingleScreenshotTile(
+      screenshotRenderer,
+      exportWidth,
+      exportHeight,
+      tileX,
+      tileY,
+      tileWidth,
+      tileHeight,
+    );
+
+    const context = this.getScreenshotTileContext(
+      screenshotRenderer,
+      tileWidth,
+      tileHeight,
+    );
+
+    if (includeBackground) {
+      context.fillStyle = this.isCanvasLight ? "#f8fafc" : "#020617";
+      context.fillRect(0, 0, tileWidth, tileHeight);
+    } else {
+      context.clearRect(0, 0, tileWidth, tileHeight);
+    }
+
+    context.drawImage(
+      screenshotRenderer.canvas,
+      0,
+      0,
+      tileWidth,
+      tileHeight,
+    );
+    context.save();
+    context.scale(exportScale, exportScale);
+    context.translate(-tileX / exportScale, -tileY / exportScale);
+    this.drawMeasurementsOnContext(context);
+    context.restore();
+
+    return context.getImageData(0, 0, tileWidth, tileHeight).data;
+  }
+
+  getScreenshotTileContext(screenshotRenderer, tileWidth, tileHeight) {
+    if (!screenshotRenderer.tileCanvas) {
+      screenshotRenderer.tileCanvas = document.createElement("canvas");
+    }
+
+    const tileCanvas = screenshotRenderer.tileCanvas;
+    if (tileCanvas.width !== tileWidth) {
+      tileCanvas.width = tileWidth;
+    }
+    if (tileCanvas.height !== tileHeight) {
+      tileCanvas.height = tileHeight;
+    }
+
+    if (!screenshotRenderer.tileContext) {
+      screenshotRenderer.tileContext = tileCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+    }
+    if (!screenshotRenderer.tileContext) {
+      throw new Error("Cannot create screenshot tile canvas.");
+    }
+
+    return screenshotRenderer.tileContext;
+  }
+
+  downloadScreenshotBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `gerber-viewer-${this.getTimestampForFileName()}.png`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  createPngSignature() {
+    return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  }
+
+  createPngHeaderChunk(width, height) {
+    const data = new Uint8Array(13);
+    const view = new DataView(data.buffer);
+    view.setUint32(0, width, false);
+    view.setUint32(4, height, false);
+    data[8] = 8;
+    data[9] = 6;
+    data[10] = 0;
+    data[11] = 0;
+    data[12] = 0;
+    return this.createPngChunk("IHDR", data);
+  }
+
+  createPngChunk(type, data) {
+    const payload = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const chunk = new Uint8Array(12 + payload.length);
+    const view = new DataView(chunk.buffer);
+    view.setUint32(0, payload.length, false);
+
+    for (let index = 0; index < 4; index += 1) {
+      chunk[4 + index] = type.charCodeAt(index);
+    }
+
+    chunk.set(payload, 8);
+    view.setUint32(
+      8 + payload.length,
+      this.pngCrc32(chunk.subarray(4, 8 + payload.length)),
+      false,
+    );
+    return chunk;
+  }
+
+  pngCrc32(bytes) {
+    const table = this.getPngCrcTable();
+    let crc = 0xffffffff;
+
+    for (const byte of bytes) {
+      crc = table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    }
+
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  getPngCrcTable() {
+    if (this.pngCrcTable) {
+      return this.pngCrcTable;
+    }
+
+    const table = new Uint32Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      let value = index;
+      for (let bit = 0; bit < 8; bit += 1) {
+        value = (value & 1) ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+      }
+      table[index] = value >>> 0;
+    }
+
+    this.pngCrcTable = table;
+    return table;
+  }
+
+  renderSingleScreenshotTile(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    tileX,
+    tileY,
+    tileWidth,
+    tileHeight,
+  ) {
+    screenshotRenderer.canvas.width = tileWidth;
+    screenshotRenderer.canvas.height = tileHeight;
+    screenshotRenderer.processor.resize();
+    screenshotRenderer.processor.render_tile(
+      screenshotRenderer.activeLayerIds,
+      screenshotRenderer.colorData,
+      exportWidth,
+      exportHeight,
+      tileX,
+      tileY,
+      tileWidth,
+      tileHeight,
+      this.getViewScaleX(),
+      this.getViewScaleY(),
+      this.camera.offsetX,
+      this.camera.offsetY,
+      this.globalAlpha,
+    );
+    screenshotRenderer.gl.finish();
   }
 
   drawMeasurementsOnContext(context) {
@@ -1380,6 +2013,7 @@ export class GerberViewer {
         name: name,
         visible: options.visible ?? true,
         color: color,
+        sourceContent: options.sourceContent ?? content,
         bounds: {
           minX: bounds.min_x,
           maxX: bounds.max_x,
@@ -1412,27 +2046,12 @@ export class GerberViewer {
     }
 
     try {
-      // Get selected layers
-      const selectedLayerIds = this.getSelectedLayerIds();
-
-      const activeLayerIds = [];
-      const colorData = [];
-
-      this.layers.forEach((layer) => {
-        if (selectedLayerIds.has(layer.id)) {
-          activeLayerIds.push(layer.layerId);
-
-          // Add RGB color (no alpha)
-          colorData.push(layer.color[0]);
-          colorData.push(layer.color[1]);
-          colorData.push(layer.color[2]);
-        }
-      });
+      const { activeLayerIds, colorData } = this.getRenderLayerPayload();
 
       // Render with active layers
       this.wasmProcessor.render(
-        new Uint32Array(activeLayerIds),
-        new Float32Array(colorData),
+        activeLayerIds,
+        colorData,
         this.getViewScaleX(),
         this.getViewScaleY(),
         this.camera.offsetX,
@@ -1449,11 +2068,30 @@ export class GerberViewer {
     this.renderMeasurements();
   }
 
+  getRenderLayerPayload() {
+    const selectedLayerIds = this.getSelectedLayerIds();
+    const activeLayerIds = [];
+    const colorData = [];
+
+    this.layers.forEach((layer) => {
+      if (selectedLayerIds.has(layer.id)) {
+        activeLayerIds.push(layer.layerId);
+        colorData.push(layer.color[0], layer.color[1], layer.color[2]);
+      }
+    });
+
+    return {
+      activeLayerIds: new Uint32Array(activeLayerIds),
+      colorData: new Float32Array(colorData),
+    };
+  }
+
   renderMeasurements() {
     const rect = this.canvas.getBoundingClientRect();
-    this.measurementOverlay.replaceChildren();
+    this.measurementOverlayCursor = 0;
 
     if (rect.width === 0 || rect.height === 0) {
+      this.pruneMeasurementOverlayNodes();
       return;
     }
 
@@ -1469,6 +2107,8 @@ export class GerberViewer {
         this.drawMeasurement(this.rulerStartPoint, this.rulerHoverPoint, true);
       }
     }
+
+    this.pruneMeasurementOverlayNodes();
   }
 
   drawMeasurement(start, end, isPreview) {
@@ -1482,28 +2122,26 @@ export class GerberViewer {
       outline.setAttribute("opacity", "0.7");
       line.setAttribute("opacity", "0.7");
     }
-    this.measurementOverlay.appendChild(outline);
-    this.measurementOverlay.appendChild(line);
 
     this.drawMeasurementPoint(start);
     this.drawMeasurementPoint(end);
 
     const distance = Math.hypot(end.x - start.x, end.y - start.y);
-    const label = this.createSvgElement("text");
+    const label = this.getMeasurementSvgElement("text");
     label.textContent = this.formatMeasurementLength(distance);
     label.setAttribute("x", (startPoint.x + endPoint.x) / 2);
     label.setAttribute("y", (startPoint.y + endPoint.y) / 2 - 8);
     label.setAttribute("text-anchor", "middle");
-    this.measurementOverlay.appendChild(label);
   }
 
   createMeasurementLine(startPoint, endPoint, className) {
-    const line = this.createSvgElement("line");
+    const line = this.getMeasurementSvgElement("line");
     line.setAttribute("class", className);
     line.setAttribute("x1", startPoint.x);
     line.setAttribute("y1", startPoint.y);
     line.setAttribute("x2", endPoint.x);
     line.setAttribute("y2", endPoint.y);
+    line.removeAttribute("opacity");
     return line;
   }
 
@@ -1511,11 +2149,41 @@ export class GerberViewer {
     const canvasPoint = this.worldToCanvasPoint(point);
     if (!canvasPoint) return;
 
-    const circle = this.createSvgElement("circle");
+    const circle = this.getMeasurementSvgElement("circle");
     circle.setAttribute("cx", canvasPoint.x);
     circle.setAttribute("cy", canvasPoint.y);
     circle.setAttribute("r", "4");
-    this.measurementOverlay.appendChild(circle);
+  }
+
+  getMeasurementSvgElement(tagName) {
+    const index = this.measurementOverlayCursor++;
+    let node = this.measurementOverlayNodes[index];
+
+    if (!node || node.localName !== tagName) {
+      if (node) {
+        node.remove();
+      }
+      node = this.createSvgElement(tagName);
+      this.measurementOverlayNodes[index] = node;
+    }
+
+    const currentNode = this.measurementOverlay.childNodes[index];
+    if (currentNode !== node) {
+      this.measurementOverlay.insertBefore(node, currentNode || null);
+    }
+
+    return node;
+  }
+
+  pruneMeasurementOverlayNodes() {
+    for (
+      let i = this.measurementOverlayCursor;
+      i < this.measurementOverlayNodes.length;
+      i++
+    ) {
+      this.measurementOverlayNodes[i].remove();
+    }
+    this.measurementOverlayNodes.length = this.measurementOverlayCursor;
   }
 
   createSvgElement(tagName) {
@@ -1645,41 +2313,14 @@ export class GerberViewer {
       return null;
     }
 
-    const visibleRect = {
-      left: 0,
-      top: 0,
-      right: rect.width,
-      bottom: rect.height,
-    };
-    const drawerRect = this.drawer.getBoundingClientRect();
-    const intersectsCanvas =
-      drawerRect.right > rect.left &&
-      drawerRect.left < rect.right &&
-      drawerRect.bottom > rect.top &&
-      drawerRect.top < rect.bottom;
-
-    if (intersectsCanvas) {
-      if (this.isMobileDrawerLayout()) {
-        visibleRect.bottom = Math.max(
-          visibleRect.top + 1,
-          Math.min(visibleRect.bottom, drawerRect.top - rect.top),
-        );
-      } else {
-        visibleRect.right = Math.max(
-          visibleRect.left + 1,
-          Math.min(visibleRect.right, drawerRect.left - rect.left),
-        );
-      }
-    }
-
     const topLeft = this.canvasLocalPointToCorrected(
-      visibleRect.left,
-      visibleRect.top,
+      0,
+      0,
       rect,
     );
     const bottomRight = this.canvasLocalPointToCorrected(
-      visibleRect.right,
-      visibleRect.bottom,
+      rect.width,
+      rect.height,
       rect,
     );
 
@@ -2494,6 +3135,29 @@ export class GerberViewer {
     );
   }
 
+  updateCanvasReservationForDrawerState() {
+    const isCollapsed = this.drawer.classList.contains("collapsed");
+
+    if (this.isMobileDrawerLayout()) {
+      const reservedHeight = isCollapsed
+        ? this.getDrawerCollapsedHeight()
+        : this.drawerCurrentHeight;
+      this.dropZone.style.setProperty(
+        "--canvas-reserved-height",
+        `${reservedHeight}px`,
+      );
+      return;
+    }
+
+    const reservedWidth = isCollapsed
+      ? this.getDrawerCollapsedWidth()
+      : this.drawerCurrentWidth;
+    this.dropZone.style.setProperty(
+      "--canvas-reserved-width",
+      `${reservedWidth}px`,
+    );
+  }
+
   getDrawerMaxWidth() {
     const viewportLimit = Math.max(this.drawerMinWidth, window.innerWidth - 48);
     return Math.min(this.drawerMaxWidth, viewportLimit);
@@ -2517,6 +3181,10 @@ export class GerberViewer {
       this.drawerCurrentWidth = clampedWidth;
       this.drawerPendingWidth = null;
       this.dropZone.style.setProperty("--panel-width", `${clampedWidth}px`);
+      this.dropZone.style.setProperty(
+        "--canvas-reserved-width",
+        `${clampedWidth}px`,
+      );
     } else {
       this.drawerPendingWidth = clampedWidth;
     }
@@ -2550,6 +3218,10 @@ export class GerberViewer {
       this.drawerCurrentHeight = clampedHeight;
       this.drawerPendingHeight = null;
       this.dropZone.style.setProperty("--panel-height", `${clampedHeight}px`);
+      this.dropZone.style.setProperty(
+        "--canvas-reserved-height",
+        `${clampedHeight}px`,
+      );
     } else {
       this.drawerPendingHeight = clampedHeight;
     }
@@ -2560,6 +3232,7 @@ export class GerberViewer {
   startDrawerResize(e) {
     e.preventDefault();
     this.isResizingDrawer = true;
+    this.drawerResizeViewState = this.captureCanvasViewState();
     this.drawer.classList.add("resizing");
     document.body.style.userSelect = "none";
     document.body.style.cursor = this.isMobileDrawerLayout()
@@ -2630,6 +3303,9 @@ export class GerberViewer {
   stopDrawerResize(e) {
     if (!this.isResizingDrawer) return;
 
+    const viewState =
+      this.drawerResizeViewState ?? this.captureCanvasViewState();
+
     if (this.drawer.classList.contains("collapsed")) {
       this.drawerPendingHeight = null;
       this.drawerPendingWidth = null;
@@ -2642,12 +3318,14 @@ export class GerberViewer {
     }
 
     this.isResizingDrawer = false;
+    this.drawerResizeViewState = null;
     document.body.style.userSelect = "";
     document.body.style.cursor = "";
     requestAnimationFrame(() => {
       this.drawer.classList.remove("resizing");
     });
-    this.render();
+    this.updateCanvasReservationForDrawerState();
+    this.resizeCanvas({ preserveViewState: viewState });
   }
 
   triggerCanvasResize() {
@@ -2656,6 +3334,7 @@ export class GerberViewer {
   }
 
   toggleDrawer(forceOpen = null) {
+    const viewState = this.captureCanvasViewState();
     const isCollapsed = this.drawer.classList.contains("collapsed");
     const shouldOpen = forceOpen === null ? isCollapsed : forceOpen;
 
@@ -2682,7 +3361,11 @@ export class GerberViewer {
       this.drawer.classList.add("collapsed");
     }
 
+    this.updateCanvasReservationForDrawerState();
     this.updateDrawerToggleState();
+    requestAnimationFrame(() => {
+      this.resizeCanvas({ preserveViewState: viewState });
+    });
   }
 
   updateDrawerToggleState() {

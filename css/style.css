@@ -17,6 +17,8 @@
   --panel-height: 420px;
   --panel-overlay-width: var(--panel-width);
   --panel-overlay-height: var(--panel-height);
+  --canvas-reserved-width: var(--panel-width);
+  --canvas-reserved-height: var(--panel-height);
   --panel-collapsed-width: 76px;
   --panel-collapsed-height: 102px;
   --panel-snap-threshold: 50px;
@@ -48,6 +50,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -280,7 +283,7 @@ button {
 
 .viewer-surface canvas {
   display: block;
-  width: 100%;
+  width: calc(100% - var(--canvas-reserved-width));
   height: 100%;
   cursor: grab;
   touch-action: none;
@@ -297,8 +300,9 @@ button {
 
 .app-shell .measurement-overlay {
   position: absolute;
-  inset: 0;
-  width: 100%;
+  left: 0;
+  top: 0;
+  width: calc(100% - var(--canvas-reserved-width));
   height: 100%;
   pointer-events: none;
   z-index: 4;
@@ -824,6 +828,158 @@ button {
   background: var(--surface-2);
 }
 
+.screenshot-dialog {
+  width: min(380px, calc(100vw - 24px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+
+.screenshot-dialog::backdrop {
+  background: rgba(3, 7, 18, 0.62);
+  backdrop-filter: blur(4px);
+}
+
+.screenshot-form {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.screenshot-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.screenshot-dialog-header strong {
+  font-size: 14px;
+}
+
+.screenshot-option-row {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.screenshot-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.screenshot-option-row strong {
+  font-size: 13px;
+}
+
+.screenshot-option-row small,
+.screenshot-progress {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.screenshot-option-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.screenshot-option-row select {
+  width: 86px;
+  flex: 0 0 86px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0f1724;
+  color: var(--text);
+  outline: none;
+}
+
+.screenshot-option-row select:focus {
+  border-color: rgba(94, 234, 212, 0.62);
+}
+
+.screenshot-progress {
+  display: none;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(94, 234, 212, 0.34);
+  border-radius: 7px;
+  background: rgba(20, 49, 58, 0.46);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.screenshot-form.is-exporting .screenshot-progress {
+  display: grid;
+}
+
+.screenshot-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.screenshot-progress-header span {
+  min-width: 0;
+  color: var(--text);
+}
+
+.screenshot-progress-header strong {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.screenshot-progress-bar {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  appearance: none;
+  border: 1px solid rgba(94, 234, 212, 0.28);
+  border-radius: 999px;
+  background: rgba(15, 23, 36, 0.82);
+}
+
+.screenshot-progress-bar::-webkit-progress-bar {
+  border-radius: 999px;
+  background: rgba(15, 23, 36, 0.82);
+}
+
+.screenshot-progress-bar::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.screenshot-progress-bar::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.screenshot-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.screenshot-actions .chip-button,
+.screenshot-actions .tool-button {
+  flex: 0 0 auto;
+  min-width: 82px;
+}
+
 .filter-form {
   padding: 12px;
 }
@@ -983,6 +1139,12 @@ button {
 
   .workspace {
     overflow: hidden;
+  }
+
+  .viewer-surface canvas,
+  .app-shell .measurement-overlay {
+    width: 100%;
+    height: calc(100% - var(--canvas-reserved-height));
   }
 
   .workspace:has(.side-panel:not(.collapsed)) .empty-state {

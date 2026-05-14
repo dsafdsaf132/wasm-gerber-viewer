@@ -187,6 +187,52 @@ impl GerberProcessor {
         }
     }
 
+    /// Render one tile of a larger virtual canvas to the current WebGL canvas.
+    ///
+    /// The caller is expected to resize the WebGL canvas to `tile_width` x
+    /// `tile_height` before calling this method, then copy the result into the
+    /// final image at `tile_x`, `tile_y`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<String, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.render_tile(
+                active_layer_ids,
+                color_data,
+                export_width,
+                export_height,
+                tile_x,
+                tile_y,
+                tile_width,
+                tile_height,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+                alpha,
+            )?;
+            Ok("render_tile_done".to_string())
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
     /// Get the boundary of the parsed Gerber data for fitToView
     ///
     /// # Returns
