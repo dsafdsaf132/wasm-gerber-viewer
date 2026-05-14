@@ -5,6 +5,7 @@ import {
 } from "./config.js";
 import { DiagnosticsLog } from "./diagnostics.js";
 import { getViewerElements } from "./dom-elements.js";
+import { DrawerController } from "./drawer-controller.js";
 import {
   formatFileSize,
   getErrorMessage,
@@ -12,12 +13,28 @@ import {
 } from "./file-utils.js";
 import { LayerFilterStore } from "./layer-filters.js";
 import { renderLayerList as renderLayerListView } from "./layer-list.js";
+import {
+  drawMeasurementsOnContext,
+  formatDimensionPair,
+  renderMeasurements as renderMeasurementOverlay,
+} from "./measurements.js";
 import { NotificationCenter } from "./notifications.js";
 import {
   collectLayerSources,
   fetchRemoteFile,
   getInitialSourceUrl,
 } from "./source-loader.js";
+import {
+  calculateFitView as calculateViewportFit,
+  canvasPointToWorld as canvasPointToWorldCoordinate,
+  clampZoom as clampViewportZoom,
+  getViewScaleX,
+  getViewScaleY,
+  getVisibleCanvasViewport,
+  panCameraByScreenDelta,
+  worldToCanvasPoint as worldToCanvasCoordinate,
+  zoomCameraAtCanvasPoint,
+} from "./viewport.js";
 
 export class GerberViewer {
   constructor() {
@@ -62,23 +79,6 @@ export class GerberViewer {
     this.rulerTouchStartPoint = null;
     this.rulerTouchPoint = null;
 
-    // Drawer resize state
-    this.isResizingDrawer = false;
-    this.drawerCurrentWidth = 381;
-    this.drawerCurrentHeight = 420;
-    this.drawerPendingWidth = null;
-    this.drawerPendingHeight = null;
-    this.drawerResizeViewState = null;
-    this.drawerMinWidth = 200;
-    this.drawerMaxWidth = 600;
-    this.drawerMinHeight = 300;
-    this.drawerMaxHeight = 560;
-    this.drawerMobileMaxHeightRatio = 0.72;
-    this.drawerCollapsedWidth = 156;
-    this.drawerCollapsedHeight = 95;
-    this.drawerSnapThreshold = 50;
-    this.drawerBottomCollapseThreshold = 200;
-
     // Colors
     this.colorPalette = [
       [1.0, 0.0, 0.0], // Red
@@ -99,11 +99,20 @@ export class GerberViewer {
     this.rulerStartPoint = null;
     this.rulerHoverPoint = null;
     this.measurements = [];
-    this.measurementOverlayNodes = [];
-    this.measurementOverlayCursor = 0;
     this.isExportingScreenshot = false;
     this.measurementUnit = "mm";
     this.layerFilterStore = new LayerFilterStore();
+    this.drawerController = new DrawerController({
+      drawer: this.drawer,
+      resizeHandle: this.resizeHandle,
+      toggleButton: this.drawerToggleBtn,
+      dropZone: this.dropZone,
+      refreshIcons: () => this.refreshIcons(),
+      captureViewState: () => this.captureCanvasViewState(),
+      onResizeEnd: (viewState) => {
+        this.resizeCanvas({ preserveViewState: viewState });
+      },
+    });
     this.notifications = new NotificationCenter({
       notification: this.notification,
       titleElement: this.notificationTitle,
@@ -125,7 +134,7 @@ export class GerberViewer {
     this.resizeCanvas();
     window.addEventListener("resize", () => {
       this.resizeCanvas();
-      this.updateDrawerToggleState();
+      this.drawerController.updateToggleState();
       if (this.screenshotDialog.open) {
         this.updateScreenshotResolutionPreview();
       }
@@ -160,15 +169,7 @@ export class GerberViewer {
   }
 
   resizeCanvas({ allowProcessorResize = false, preserveViewState = null } = {}) {
-    if (this.drawer) {
-      if (this.drawer.classList.contains("collapsed")) {
-        this.updateCanvasReservationForDrawerState();
-      } else if (this.isMobileDrawerLayout()) {
-        this.setDrawerHeight(this.drawerCurrentHeight);
-      } else {
-        this.setDrawerWidth(this.drawerCurrentWidth);
-      }
-    }
+    this.drawerController.syncLayout();
 
     const rect = this.canvas.getBoundingClientRect();
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
@@ -371,38 +372,9 @@ export class GerberViewer {
       passive: false,
     });
 
-    // Drawer resize events (mouse)
-    this.resizeHandle.addEventListener("mousedown", (e) =>
-      this.startDrawerResize(e),
-    );
-    document.addEventListener("mousemove", (e) => this.resizeDrawer(e));
-    document.addEventListener("mouseup", (e) => this.stopDrawerResize(e));
-
-    // Drawer resize events (touch)
-    this.resizeHandle.addEventListener(
-      "touchstart",
-      (e) => this.startDrawerResize(e),
-      { passive: false },
-    );
-    document.addEventListener("touchmove", (e) => this.resizeDrawer(e), {
-      passive: false,
-    });
-    document.addEventListener("touchend", (e) => this.stopDrawerResize(e), {
-      passive: false,
-    });
-
-    // Drawer toggle event
-    if (this.isMobileDrawerLayout()) {
-      this.drawer.classList.add("collapsed");
-    }
-    this.updateCanvasReservationForDrawerState();
-    this.updateDrawerToggleState();
+    this.drawerController.bindEvents();
+    this.drawerController.initialize();
     this.resizeCanvas();
-    this.drawerToggleBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      this.toggleDrawer();
-    });
     this.panelTabs.forEach((button) => {
       button.addEventListener("click", () => {
         this.setActivePanel(button.dataset.panelTab);
@@ -595,7 +567,7 @@ export class GerberViewer {
 
     const width = maxX - minX;
     const height = maxY - minY;
-    return this.formatDimensionPair(width, height);
+    return formatDimensionPair(width, height, this.measurementUnit);
   }
 
   setWorkspaceStatus(status) {
@@ -630,11 +602,11 @@ export class GerberViewer {
   }
 
   getViewScaleX() {
-    return this.camera.zoom * (this.camera.flipX ? -1 : 1);
+    return getViewScaleX(this.camera);
   }
 
   getViewScaleY() {
-    return this.camera.zoom * (this.camera.flipY ? -1 : 1);
+    return getViewScaleY(this.camera);
   }
 
   toggleViewFlip(axis) {
@@ -1397,83 +1369,13 @@ export class GerberViewer {
   }
 
   drawMeasurementsOnContext(context, renderState = null) {
-    for (const measurement of this.measurements) {
-      this.drawMeasurementOnContext(
-        context,
-        measurement.start,
-        measurement.end,
-        false,
-        renderState,
-      );
-    }
-
-    if (this.rulerStartPoint && this.rulerHoverPoint) {
-      this.drawMeasurementOnContext(
-        context,
-        this.rulerStartPoint,
-        this.rulerHoverPoint,
-        true,
-        renderState,
-      );
-    } else if (this.rulerStartPoint) {
-      this.drawMeasurementPointOnContext(context, this.rulerStartPoint, renderState);
-    }
-  }
-
-  drawMeasurementOnContext(context, start, end, isPreview, renderState = null) {
-    const startPoint = this.worldToCanvasPoint(start, renderState);
-    const endPoint = this.worldToCanvasPoint(end, renderState);
-    if (!startPoint || !endPoint) return;
-
-    context.save();
-    context.globalAlpha = isPreview ? 0.7 : 1;
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.strokeStyle = "#000";
-    context.lineWidth = 4;
-    context.beginPath();
-    context.moveTo(startPoint.x, startPoint.y);
-    context.lineTo(endPoint.x, endPoint.y);
-    context.stroke();
-    context.strokeStyle = "#fff";
-    context.lineWidth = 2;
-    context.beginPath();
-    context.moveTo(startPoint.x, startPoint.y);
-    context.lineTo(endPoint.x, endPoint.y);
-    context.stroke();
-    context.restore();
-
-    this.drawMeasurementPointOnContext(context, start, renderState);
-    this.drawMeasurementPointOnContext(context, end, renderState);
-
-    const distance = Math.hypot(end.x - start.x, end.y - start.y);
-    const x = (startPoint.x + endPoint.x) / 2;
-    const y = (startPoint.y + endPoint.y) / 2 - 8;
-    context.save();
-    context.font = "700 12px Inter, ui-sans-serif, system-ui, sans-serif";
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.lineWidth = 4;
-    context.strokeStyle = "#000";
-    context.fillStyle = "#fff";
-    context.strokeText(this.formatMeasurementLength(distance), x, y);
-    context.fillText(this.formatMeasurementLength(distance), x, y);
-    context.restore();
-  }
-
-  drawMeasurementPointOnContext(context, point, renderState = null) {
-    const canvasPoint = this.worldToCanvasPoint(point, renderState);
-    if (!canvasPoint) return;
-
-    context.save();
-    context.fillStyle = "#fff";
-    context.strokeStyle = "#000";
-    context.lineWidth = 1;
-    context.beginPath();
-    context.arc(canvasPoint.x, canvasPoint.y, 4, 0, Math.PI * 2);
-    context.fill();
-    context.stroke();
-    context.restore();
+    drawMeasurementsOnContext(context, {
+      measurements: this.measurements,
+      rulerStartPoint: this.rulerStartPoint,
+      rulerHoverPoint: this.rulerHoverPoint,
+      worldToCanvasPoint: (point) => this.worldToCanvasPoint(point, renderState),
+      unit: this.measurementUnit,
+    });
   }
 
   getTimestampForFileName() {
@@ -1794,126 +1696,15 @@ export class GerberViewer {
   }
 
   renderMeasurements() {
-    const rect = this.canvas.getBoundingClientRect();
-    this.measurementOverlayCursor = 0;
-
-    if (rect.width === 0 || rect.height === 0) {
-      this.pruneMeasurementOverlayNodes();
-      return;
-    }
-
-    this.measurementOverlay.setAttribute("viewBox", `0 0 ${rect.width} ${rect.height}`);
-
-    for (const measurement of this.measurements) {
-      this.drawMeasurement(measurement.start, measurement.end, false);
-    }
-
-    if (this.rulerStartPoint) {
-      this.drawMeasurementPoint(this.rulerStartPoint);
-      if (this.rulerHoverPoint) {
-        this.drawMeasurement(this.rulerStartPoint, this.rulerHoverPoint, true);
-      }
-    }
-
-    this.pruneMeasurementOverlayNodes();
-  }
-
-  drawMeasurement(start, end, isPreview) {
-    const startPoint = this.worldToCanvasPoint(start);
-    const endPoint = this.worldToCanvasPoint(end);
-    if (!startPoint || !endPoint) return;
-
-    const outline = this.createMeasurementLine(startPoint, endPoint, "measurement-line-outline");
-    const line = this.createMeasurementLine(startPoint, endPoint, "measurement-line");
-    if (isPreview) {
-      outline.setAttribute("opacity", "0.7");
-      line.setAttribute("opacity", "0.7");
-    }
-
-    this.drawMeasurementPoint(start);
-    this.drawMeasurementPoint(end);
-
-    const distance = Math.hypot(end.x - start.x, end.y - start.y);
-    const label = this.getMeasurementSvgElement("text");
-    label.textContent = this.formatMeasurementLength(distance);
-    label.setAttribute("x", (startPoint.x + endPoint.x) / 2);
-    label.setAttribute("y", (startPoint.y + endPoint.y) / 2 - 8);
-    label.setAttribute("text-anchor", "middle");
-  }
-
-  createMeasurementLine(startPoint, endPoint, className) {
-    const line = this.getMeasurementSvgElement("line");
-    line.setAttribute("class", className);
-    line.setAttribute("x1", startPoint.x);
-    line.setAttribute("y1", startPoint.y);
-    line.setAttribute("x2", endPoint.x);
-    line.setAttribute("y2", endPoint.y);
-    line.removeAttribute("opacity");
-    return line;
-  }
-
-  drawMeasurementPoint(point) {
-    const canvasPoint = this.worldToCanvasPoint(point);
-    if (!canvasPoint) return;
-
-    const circle = this.getMeasurementSvgElement("circle");
-    circle.setAttribute("cx", canvasPoint.x);
-    circle.setAttribute("cy", canvasPoint.y);
-    circle.setAttribute("r", "4");
-  }
-
-  getMeasurementSvgElement(tagName) {
-    const index = this.measurementOverlayCursor++;
-    let node = this.measurementOverlayNodes[index];
-
-    if (!node || node.localName !== tagName) {
-      if (node) {
-        node.remove();
-      }
-      node = this.createSvgElement(tagName);
-      this.measurementOverlayNodes[index] = node;
-    }
-
-    const currentNode = this.measurementOverlay.childNodes[index];
-    if (currentNode !== node) {
-      this.measurementOverlay.insertBefore(node, currentNode || null);
-    }
-
-    return node;
-  }
-
-  pruneMeasurementOverlayNodes() {
-    for (
-      let i = this.measurementOverlayCursor;
-      i < this.measurementOverlayNodes.length;
-      i++
-    ) {
-      this.measurementOverlayNodes[i].remove();
-    }
-    this.measurementOverlayNodes.length = this.measurementOverlayCursor;
-  }
-
-  createSvgElement(tagName) {
-    return document.createElementNS("http://www.w3.org/2000/svg", tagName);
-  }
-
-  formatMeasurementLength(length) {
-    if (this.measurementUnit === "inch") {
-      const inches = length / 25.4;
-      const decimals = inches >= 1 ? 4 : 5;
-      return `${inches.toFixed(decimals)} in`;
-    }
-
-    const decimals = length >= 10 ? 2 : 3;
-    return `${length.toFixed(decimals)} mm`;
-  }
-
-  formatDimensionPair(widthMm, heightMm) {
-    if (this.measurementUnit === "inch") {
-      return `${(widthMm / 25.4).toFixed(4)} x ${(heightMm / 25.4).toFixed(4)} in`;
-    }
-
-    return `${widthMm.toFixed(3)} x ${heightMm.toFixed(3)} mm`;
+    renderMeasurementOverlay({
+      overlay: this.measurementOverlay,
+      rect: this.canvas.getBoundingClientRect(),
+      measurements: this.measurements,
+      rulerStartPoint: this.rulerStartPoint,
+      rulerHoverPoint: this.rulerHoverPoint,
+      worldToCanvasPoint: (point) => this.worldToCanvasPoint(point),
+      unit: this.measurementUnit,
+    });
   }
 
   getSelectedLayerIds() {
@@ -1948,97 +1739,21 @@ export class GerberViewer {
   }
 
   calculateFitView() {
-    const selectedLayerIds = this.getSelectedLayerIds();
-    if (selectedLayerIds.size === 0) return null;
-
-    const selectedLayers = this.layers.filter((layer) =>
-      selectedLayerIds.has(layer.id),
-    );
-    if (selectedLayers.length === 0) return null;
-
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-
-    for (const layer of selectedLayers) {
-      if (layer.bounds) {
-        minX = Math.min(minX, layer.bounds.minX);
-        maxX = Math.max(maxX, layer.bounds.maxX);
-        minY = Math.min(minY, layer.bounds.minY);
-        maxY = Math.max(maxY, layer.bounds.maxY);
-      }
-    }
-
-    if (
-      !isFinite(minX) ||
-      !isFinite(maxX) ||
-      !isFinite(minY) ||
-      !isFinite(maxY) ||
-      this.canvas.width === 0 ||
-      this.canvas.height === 0
-    ) {
-      return null;
-    }
-
-    const viewport = this.getVisibleCanvasViewport();
-    if (!viewport) return null;
-
-    const boundsWidth = maxX - minX;
-    const boundsHeight = maxY - minY;
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    const targetX = (viewport.left + viewport.right) / 2;
-    const targetY = (viewport.top + viewport.bottom) / 2;
-
-    if (boundsWidth === 0 && boundsHeight === 0) {
-      return { centerX, centerY, targetX, targetY, zoom: 2.0 };
-    }
-
-    let zoom;
-    if (boundsWidth === 0) {
-      zoom = (viewport.height / boundsHeight) * 0.9;
-    } else if (boundsHeight === 0) {
-      zoom = (viewport.width / boundsWidth) * 0.9;
-    } else {
-      zoom =
-        Math.min(viewport.width / boundsWidth, viewport.height / boundsHeight) *
-        0.9;
-    }
-
-    return { centerX, centerY, targetX, targetY, zoom };
+    return calculateViewportFit({
+      layers: this.layers,
+      selectedLayerIds: this.getSelectedLayerIds(),
+      canvas: this.canvas,
+      drawer: this.drawer,
+      isMobileLayout: () => this.drawerController.isMobileLayout(),
+    });
   }
 
   getVisibleCanvasViewport() {
-    const rect = this.canvas.getBoundingClientRect();
-    if (
-      rect.width === 0 ||
-      rect.height === 0 ||
-      this.canvas.width === 0 ||
-      this.canvas.height === 0
-    ) {
-      return null;
-    }
-
-    const topLeft = this.canvasLocalPointToCorrected(
-      0,
-      0,
-      rect,
-    );
-    const bottomRight = this.canvasLocalPointToCorrected(
-      rect.width,
-      rect.height,
-      rect,
-    );
-
-    return {
-      left: topLeft.x,
-      right: bottomRight.x,
-      top: topLeft.y,
-      bottom: bottomRight.y,
-      width: Math.abs(bottomRight.x - topLeft.x),
-      height: Math.abs(topLeft.y - bottomRight.y),
-    };
+    return getVisibleCanvasViewport({
+      canvas: this.canvas,
+      drawer: this.drawer,
+      isMobileLayout: () => this.drawerController.isMobileLayout(),
+    });
   }
 
   canvasLocalPointToCorrected(x, y, rect) {
@@ -2076,46 +1791,22 @@ export class GerberViewer {
   }
 
   clampZoom(zoom) {
-    if (!Number.isFinite(zoom)) {
-      return this.camera.zoom;
-    }
-
-    return Math.min(this.maxZoom, Math.max(this.minZoom, zoom));
+    return clampViewportZoom(zoom, this.camera.zoom, this.minZoom, this.maxZoom);
   }
 
   zoomAtCanvasPoint(clientX, clientY, zoomChange) {
-    if (!Number.isFinite(zoomChange) || zoomChange <= 0) {
-      return;
+    const didZoom = zoomCameraAtCanvasPoint({
+      clientX,
+      clientY,
+      zoomChange,
+      canvas: this.canvas,
+      camera: this.camera,
+      minZoom: this.minZoom,
+      maxZoom: this.maxZoom,
+    });
+    if (didZoom) {
+      this.render();
     }
-
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      return;
-    }
-
-    const mxScreen = clientX - rect.left;
-    const myScreen = clientY - rect.top;
-
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-    const mouseXNDC = ((mxScreen - centerX) / rect.width) * 2;
-    const mouseYNDC = -((myScreen - centerY) / rect.height) * 2;
-
-    const aspect = this.canvas.width / this.canvas.height;
-    const mouseXCorrected = aspect > 1.0 ? mouseXNDC * aspect : mouseXNDC;
-    const mouseYCorrected = aspect > 1.0 ? mouseYNDC : mouseYNDC / aspect;
-
-    const prevZoom = this.camera.zoom;
-    const newZoom = this.clampZoom(prevZoom * zoomChange);
-    const zoomRatio = newZoom / prevZoom;
-
-    this.camera.offsetX =
-      (this.camera.offsetX - mouseXCorrected) * zoomRatio + mouseXCorrected;
-    this.camera.offsetY =
-      (this.camera.offsetY - mouseYCorrected) * zoomRatio + mouseYCorrected;
-    this.camera.zoom = newZoom;
-
-    this.render();
   }
 
   handleMouseDown(e) {
@@ -2185,48 +1876,21 @@ export class GerberViewer {
   }
 
   canvasPointToWorld(clientX, clientY) {
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      return null;
-    }
-
-    const mxScreen = clientX - rect.left;
-    const myScreen = clientY - rect.top;
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-    const mouseXNDC = ((mxScreen - centerX) / rect.width) * 2;
-    const mouseYNDC = -((myScreen - centerY) / rect.height) * 2;
-    const aspect = this.canvas.width / this.canvas.height;
-    const correctedX = aspect > 1.0 ? mouseXNDC * aspect : mouseXNDC;
-    const correctedY = aspect > 1.0 ? mouseYNDC : mouseYNDC / aspect;
-    const worldX = (correctedX - this.camera.offsetX) / this.getViewScaleX();
-    const worldY = (correctedY - this.camera.offsetY) / this.getViewScaleY();
-    return { x: worldX, y: worldY };
+    return canvasPointToWorldCoordinate({
+      clientX,
+      clientY,
+      canvas: this.canvas,
+      camera: this.camera,
+    });
   }
 
   worldToCanvasPoint(point, renderState = null) {
-    const rect = renderState
-      ? { width: renderState.rectWidth, height: renderState.rectHeight }
-      : this.canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      return null;
-    }
-
-    const canvasWidth = renderState?.canvasWidth ?? this.canvas.width;
-    const canvasHeight = renderState?.canvasHeight ?? this.canvas.height;
-    const viewScaleX = renderState?.viewScaleX ?? this.getViewScaleX();
-    const viewScaleY = renderState?.viewScaleY ?? this.getViewScaleY();
-    const offsetX = renderState?.offsetX ?? this.camera.offsetX;
-    const offsetY = renderState?.offsetY ?? this.camera.offsetY;
-    const aspect = canvasWidth / canvasHeight;
-    const correctedX = point.x * viewScaleX + offsetX;
-    const correctedY = point.y * viewScaleY + offsetY;
-    const ndcX = aspect > 1.0 ? correctedX / aspect : correctedX;
-    const ndcY = aspect > 1.0 ? correctedY : correctedY * aspect;
-    return {
-      x: ((ndcX + 1) / 2) * rect.width,
-      y: ((1 - ndcY) / 2) * rect.height,
-    };
+    return worldToCanvasCoordinate({
+      point,
+      canvas: this.canvas,
+      camera: this.camera,
+      renderState,
+    });
   }
 
   handleMouseUp(e) {
@@ -2245,18 +1909,12 @@ export class GerberViewer {
 
     const deltaX = e.clientX - this.lastMousePos.x;
     const deltaY = e.clientY - this.lastMousePos.y;
-
-    const deltaXNDC = (deltaX / canvasRect.width) * 2;
-    const deltaYNDC = (-deltaY / canvasRect.height) * 2;
-    const aspect = this.canvas.width / this.canvas.height;
-
-    if (aspect > 1.0) {
-      this.camera.offsetX += deltaXNDC * aspect;
-      this.camera.offsetY += deltaYNDC;
-    } else {
-      this.camera.offsetX += deltaXNDC;
-      this.camera.offsetY += deltaYNDC / aspect;
-    }
+    panCameraByScreenDelta({
+      deltaX,
+      deltaY,
+      canvas: this.canvas,
+      camera: this.camera,
+    });
 
     this.render();
   }
@@ -2340,21 +1998,12 @@ export class GerberViewer {
       // Handle pan
       const deltaX = currentCenter.x - this.lastTouchCenter.x;
       const deltaY = currentCenter.y - this.lastTouchCenter.y;
-
-      const canvasRect = this.canvas.getBoundingClientRect();
-      if (canvasRect.width > 0 && canvasRect.height > 0) {
-        const deltaXNDC = (deltaX / canvasRect.width) * 2;
-        const deltaYNDC = (-deltaY / canvasRect.height) * 2;
-        const aspect = this.canvas.width / this.canvas.height;
-
-        if (aspect > 1.0) {
-          this.camera.offsetX += deltaXNDC * aspect;
-          this.camera.offsetY += deltaYNDC;
-        } else {
-          this.camera.offsetX += deltaXNDC;
-          this.camera.offsetY += deltaYNDC / aspect;
-        }
-      }
+      panCameraByScreenDelta({
+        deltaX,
+        deltaY,
+        canvas: this.canvas,
+        camera: this.camera,
+      });
 
       this.lastTouchCenter = currentCenter;
       this.render();
@@ -2371,21 +2020,12 @@ export class GerberViewer {
 
       const deltaX = currentPos.x - this.lastTouchCenter.x;
       const deltaY = currentPos.y - this.lastTouchCenter.y;
-
-      const canvasRect = this.canvas.getBoundingClientRect();
-      if (canvasRect.width > 0 && canvasRect.height > 0) {
-        const deltaXNDC = (deltaX / canvasRect.width) * 2;
-        const deltaYNDC = (-deltaY / canvasRect.height) * 2;
-        const aspect = this.canvas.width / this.canvas.height;
-
-        if (aspect > 1.0) {
-          this.camera.offsetX += deltaXNDC * aspect;
-          this.camera.offsetY += deltaYNDC;
-        } else {
-          this.camera.offsetX += deltaXNDC;
-          this.camera.offsetY += deltaYNDC / aspect;
-        }
-      }
+      panCameraByScreenDelta({
+        deltaX,
+        deltaY,
+        canvas: this.canvas,
+        camera: this.camera,
+      });
 
       this.lastTouchCenter = currentPos;
       this.render();
@@ -2730,301 +2370,12 @@ export class GerberViewer {
 
     const width = layer.bounds.maxX - layer.bounds.minX;
     const height = layer.bounds.maxY - layer.bounds.minY;
-    return this.formatDimensionPair(width, height);
-  }
-
-  // Drawer management methods
-  isMobileDrawerLayout() {
-    return window.matchMedia("(max-width: 760px)").matches;
-  }
-
-  getCssPixelValue(propertyName, fallback) {
-    const rawValue = getComputedStyle(this.dropZone)
-      .getPropertyValue(propertyName)
-      .trim();
-    const parsedValue = parseFloat(rawValue);
-    return Number.isFinite(parsedValue) ? parsedValue : fallback;
-  }
-
-  getDrawerCollapsedWidth() {
-    return this.getCssPixelValue(
-      "--panel-collapsed-width",
-      this.drawerCollapsedWidth,
-    );
-  }
-
-  getDrawerCollapsedHeight() {
-    return this.getCssPixelValue(
-      "--panel-collapsed-height",
-      this.drawerCollapsedHeight,
-    );
-  }
-
-  getDrawerSnapThreshold() {
-    return this.getCssPixelValue(
-      "--panel-snap-threshold",
-      this.drawerSnapThreshold,
-    );
-  }
-
-  getDrawerBottomCollapseThreshold() {
-    return this.getCssPixelValue(
-      "--panel-bottom-collapse-threshold",
-      this.drawerBottomCollapseThreshold,
-    );
-  }
-
-  updateCanvasReservationForDrawerState() {
-    const isCollapsed = this.drawer.classList.contains("collapsed");
-
-    if (this.isMobileDrawerLayout()) {
-      const reservedHeight = isCollapsed
-        ? this.getDrawerCollapsedHeight()
-        : this.drawerCurrentHeight;
-      this.dropZone.style.setProperty(
-        "--canvas-reserved-height",
-        `${reservedHeight}px`,
-      );
-      return;
-    }
-
-    const reservedWidth = isCollapsed
-      ? this.getDrawerCollapsedWidth()
-      : this.drawerCurrentWidth;
-    this.dropZone.style.setProperty(
-      "--canvas-reserved-width",
-      `${reservedWidth}px`,
-    );
-  }
-
-  getDrawerMaxWidth() {
-    const viewportLimit = Math.max(this.drawerMinWidth, window.innerWidth - 48);
-    return Math.min(this.drawerMaxWidth, viewportLimit);
-  }
-
-  clampDrawerWidth(width) {
-    if (!Number.isFinite(width)) {
-      return this.drawerCurrentWidth;
-    }
-
-    return Math.min(
-      this.getDrawerMaxWidth(),
-      Math.max(this.drawerMinWidth, width),
-    );
-  }
-
-  setDrawerWidth(width, { commitLayout = true } = {}) {
-    const clampedWidth = this.clampDrawerWidth(width);
-    this.dropZone.style.setProperty("--panel-overlay-width", `${clampedWidth}px`);
-    if (commitLayout) {
-      this.drawerCurrentWidth = clampedWidth;
-      this.drawerPendingWidth = null;
-      this.dropZone.style.setProperty("--panel-width", `${clampedWidth}px`);
-      this.dropZone.style.setProperty(
-        "--canvas-reserved-width",
-        `${clampedWidth}px`,
-      );
-    } else {
-      this.drawerPendingWidth = clampedWidth;
-    }
-    this.drawer.style.height = "";
-    this.drawer.style.width = `${clampedWidth}px`;
-  }
-
-  getDrawerMaxHeight() {
-    const viewportLimit = Math.max(
-      1,
-      Math.floor(window.innerHeight * this.drawerMobileMaxHeightRatio),
-    );
-    return Math.min(this.drawerMaxHeight, viewportLimit);
-  }
-
-  clampDrawerHeight(height) {
-    if (!Number.isFinite(height)) {
-      return this.drawerCurrentHeight;
-    }
-
-    const maxHeight = this.getDrawerMaxHeight();
-    const minHeight = Math.min(this.drawerMinHeight, maxHeight);
-
-    return Math.min(maxHeight, Math.max(minHeight, height));
-  }
-
-  setDrawerHeight(height, { commitLayout = true } = {}) {
-    const clampedHeight = this.clampDrawerHeight(height);
-    this.dropZone.style.setProperty("--panel-overlay-height", `${clampedHeight}px`);
-    if (commitLayout) {
-      this.drawerCurrentHeight = clampedHeight;
-      this.drawerPendingHeight = null;
-      this.dropZone.style.setProperty("--panel-height", `${clampedHeight}px`);
-      this.dropZone.style.setProperty(
-        "--canvas-reserved-height",
-        `${clampedHeight}px`,
-      );
-    } else {
-      this.drawerPendingHeight = clampedHeight;
-    }
-    this.drawer.style.width = "";
-    this.drawer.style.height = `${clampedHeight}px`;
-  }
-
-  startDrawerResize(e) {
-    e.preventDefault();
-    this.isResizingDrawer = true;
-    this.drawerResizeViewState = this.captureCanvasViewState();
-    this.drawer.classList.add("resizing");
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = this.isMobileDrawerLayout()
-      ? "ns-resize"
-      : "ew-resize";
-  }
-
-  resizeDrawer(e) {
-    if (!this.isResizingDrawer) return;
-
-    e.preventDefault();
-
-    if (this.isMobileDrawerLayout()) {
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      this.previewDrawerResize(window.innerHeight - clientY, "height");
-      return;
-    }
-
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    this.previewDrawerResize(window.innerWidth - clientX, "width");
-  }
-
-  previewDrawerResize(rawSize, axis) {
-    const wasCollapsed = this.drawer.classList.contains("collapsed");
-    const collapsedSize =
-      axis === "height"
-        ? this.getDrawerCollapsedHeight()
-        : this.getDrawerCollapsedWidth();
-    const collapseThreshold =
-      axis === "height"
-        ? this.getDrawerBottomCollapseThreshold()
-        : collapsedSize + this.getDrawerSnapThreshold();
-
-    if (rawSize <= collapseThreshold) {
-      this.drawer.classList.add("collapsed");
-      if (axis === "height") {
-        this.drawerPendingHeight = null;
-        this.dropZone.style.setProperty(
-          "--panel-overlay-height",
-          `${collapsedSize}px`,
-        );
-        this.drawer.style.height = `${this.drawerCurrentHeight}px`;
-      } else {
-        this.drawerPendingWidth = null;
-        this.dropZone.style.setProperty(
-          "--panel-overlay-width",
-          `${collapsedSize}px`,
-        );
-        this.drawer.style.width = `${this.drawerCurrentWidth}px`;
-      }
-      if (!wasCollapsed) {
-        this.updateDrawerToggleState();
-      }
-      return;
-    }
-
-    this.drawer.classList.remove("collapsed");
-    if (axis === "height") {
-      this.setDrawerHeight(rawSize, { commitLayout: false });
-    } else {
-      this.setDrawerWidth(rawSize, { commitLayout: false });
-    }
-    if (wasCollapsed) {
-      this.updateDrawerToggleState();
-    }
-  }
-
-  stopDrawerResize(e) {
-    if (!this.isResizingDrawer) return;
-
-    const viewState =
-      this.drawerResizeViewState ?? this.captureCanvasViewState();
-
-    if (this.drawer.classList.contains("collapsed")) {
-      this.drawerPendingHeight = null;
-      this.drawerPendingWidth = null;
-    } else if (this.isMobileDrawerLayout()) {
-      if (this.drawerPendingHeight !== null) {
-        this.setDrawerHeight(this.drawerPendingHeight);
-      }
-    } else if (this.drawerPendingWidth !== null) {
-      this.setDrawerWidth(this.drawerPendingWidth);
-    }
-
-    this.isResizingDrawer = false;
-    this.drawerResizeViewState = null;
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-    requestAnimationFrame(() => {
-      this.drawer.classList.remove("resizing");
-    });
-    this.updateCanvasReservationForDrawerState();
-    this.resizeCanvas({ preserveViewState: viewState });
+    return formatDimensionPair(width, height, this.measurementUnit);
   }
 
   triggerCanvasResize() {
     // Dispatch resize event to notify canvas needs update
     window.dispatchEvent(new Event("resize"));
-  }
-
-  toggleDrawer(forceOpen = null) {
-    const viewState = this.captureCanvasViewState();
-    const isCollapsed = this.drawer.classList.contains("collapsed");
-    const shouldOpen = forceOpen === null ? isCollapsed : forceOpen;
-
-    if (shouldOpen) {
-      // Expand drawer
-      this.drawer.classList.remove("collapsed");
-      if (this.isMobileDrawerLayout()) {
-        this.setDrawerHeight(this.drawerCurrentHeight);
-      } else {
-        this.setDrawerWidth(this.drawerCurrentWidth);
-      }
-    } else {
-      // Collapse drawer
-      const drawerRect = this.drawer.getBoundingClientRect();
-      if (this.isMobileDrawerLayout()) {
-        this.drawerCurrentHeight = this.clampDrawerHeight(
-          drawerRect.height || this.drawerCurrentHeight,
-        );
-      } else {
-        this.drawerCurrentWidth = this.clampDrawerWidth(
-          drawerRect.width || this.drawerCurrentWidth,
-        );
-      }
-      this.drawer.classList.add("collapsed");
-    }
-
-    this.updateCanvasReservationForDrawerState();
-    this.updateDrawerToggleState();
-    requestAnimationFrame(() => {
-      this.resizeCanvas({ preserveViewState: viewState });
-    });
-  }
-
-  updateDrawerToggleState() {
-    const isCollapsed = this.drawer.classList.contains("collapsed");
-    const label = isCollapsed ? "Show panel" : "Hide panel";
-    const iconName = this.isMobileDrawerLayout()
-      ? isCollapsed
-        ? "chevron-up"
-        : "chevron-down"
-      : isCollapsed
-        ? "panel-right-open"
-        : "panel-right-close";
-    this.drawerToggleBtn.setAttribute("aria-label", label);
-    this.drawerToggleBtn.setAttribute("aria-expanded", String(!isCollapsed));
-    this.drawerToggleBtn.title = label;
-    this.drawerToggleBtn.replaceChildren();
-    const icon = document.createElement("i");
-    icon.setAttribute("data-lucide", iconName);
-    this.drawerToggleBtn.appendChild(icon);
-    this.refreshIcons();
   }
 
   // File drop handlers
