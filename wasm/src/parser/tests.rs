@@ -26,6 +26,24 @@ fn triangle_bounds(vertices: &[f32]) -> (f32, f32, f32, f32) {
     (min_x, max_x, min_y, max_y)
 }
 
+fn has_circle_at(
+    circles: &crate::shape::Circles,
+    expected_x: f32,
+    expected_y: f32,
+    expected_radius: f32,
+) -> bool {
+    circles
+        .x
+        .iter()
+        .zip(&circles.y)
+        .zip(&circles.radius)
+        .any(|((&x, &y), &radius)| {
+            (x - expected_x).abs() < 0.0001
+                && (y - expected_y).abs() < 0.0001
+                && (radius - expected_radius).abs() < 0.0001
+        })
+}
+
 fn test_circle() -> Primitive {
     Primitive::Circle {
         x: 0.0,
@@ -206,6 +224,63 @@ X010000Y000000D03*",
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].circles.x.len(), 1);
     assert_approx_eq(layers[0].circles.x[0], 0.0);
+}
+
+#[test]
+fn aperture_macro_omitted_variables_default_to_zero() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMSTAR5*
+$3=$1x0.5*
+$4=$3x0.4*
+4,1,10,
+$3x0.0000,$3x1.0000,
+$4x-0.5878,$4x0.8090,
+$3x-0.9511,$3x0.3090,
+$4x-0.9511,$4x-0.3090,
+$3x-0.5878,$3x-0.8090,
+$4x0.0000,$4x-1.0000,
+$3x0.5878,$3x-0.8090,
+$4x0.9511,$4x-0.3090,
+$3x0.9511,$3x0.3090,
+$4x0.5878,$4x0.8090,
+$3x0.0000,$3x1.0000,
+$2*%
+%ADD23STAR5,5.000000*%
+%ADD24STAR5,5.000000X45*%
+%ADD25STAR5,5.000000X90*%
+%ADD26STAR5,5.000000X135*%
+D23*
+X025000000Y025000000D03*
+D24*
+X-025000000Y025000000D03*
+D25*
+X-025000000Y-025000000D03*
+D26*
+X025000000Y-025000000D03*
+M02*",
+    )
+    .expect("macro should parse omitted parameters");
+    let mut occupied_quadrants = [false; 4];
+
+    for triangle in layers[0].triangles.vertices.chunks_exact(6) {
+        let centroid_x = (triangle[0] + triangle[2] + triangle[4]) / 3.0;
+        let centroid_y = (triangle[1] + triangle[3] + triangle[5]) / 3.0;
+
+        if centroid_x > 10.0 && centroid_y > 10.0 {
+            occupied_quadrants[0] = true;
+        } else if centroid_x < -10.0 && centroid_y > 10.0 {
+            occupied_quadrants[1] = true;
+        } else if centroid_x < -10.0 && centroid_y < -10.0 {
+            occupied_quadrants[2] = true;
+        } else if centroid_x > 10.0 && centroid_y < -10.0 {
+            occupied_quadrants[3] = true;
+        }
+    }
+
+    assert_eq!(occupied_quadrants, [true, true, true, true]);
 }
 
 #[test]
@@ -767,6 +842,65 @@ M02*";
     assert_eq!(circles.x.len(), 1);
     assert_approx_eq(circles.x[0], 13.0);
     assert_approx_eq(circles.y[0], 0.0);
+}
+
+#[test]
+fn nested_aperture_block_restores_enclosing_graphic_state() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+%ADD11C,0.5*%
+%ABD20*%
+D11*
+G02*
+G75*
+X0000000Y2500000D02*
+%ABD21*%
+D10*
+G01*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+%AB*%
+X2500000Y0I0J-2500000D01*
+%AB*%
+D20*
+X0Y0D03*
+M02*",
+    )
+    .expect("nested aperture block should parse");
+    let arcs = &layers[0].arcs;
+    let circles = &layers[0].circles;
+
+    assert_eq!(arcs.x.len(), 1);
+    assert_approx_eq(arcs.x[0], 0.0);
+    assert_approx_eq(arcs.y[0], 0.0);
+    assert_approx_eq(arcs.radius[0], 2.5);
+    assert!(has_circle_at(circles, 0.0, 2.5, 0.25));
+    assert!(has_circle_at(circles, 2.5, 0.0, 0.25));
+}
+
+#[test]
+fn arc_caps_use_rendered_arc_endpoints() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+G03*
+G75*
+X0000000Y-2500000D02*
+X-5000000Y0I0J2500000D01*
+M02*",
+    )
+    .expect("arc should parse");
+    let circles = &layers[0].circles;
+
+    assert!(has_circle_at(circles, 0.0, -2.5, 0.5));
+    assert!(has_circle_at(circles, -2.5, 0.0, 0.5));
+    assert!(!has_circle_at(circles, -5.0, 0.0, 0.5));
 }
 
 #[test]

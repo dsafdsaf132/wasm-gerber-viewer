@@ -37,6 +37,7 @@ impl Default for FormatSpec {
     }
 }
 
+#[derive(Clone)]
 pub struct ParserState {
     pub x: f32,
     pub y: f32,

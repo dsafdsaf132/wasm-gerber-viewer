@@ -472,6 +472,7 @@ fn parse_aperture_block(
     let Some(block_code) = parse_aperture_block_code(line) else {
         return;
     };
+    let outer_state = state.clone();
 
     flush_primitives(current_primitives, polarity_layers, state.polarity);
 
@@ -523,11 +524,8 @@ fn parse_aperture_block(
 
     flush_primitives(&mut block_primitives, &mut block_layers, state.polarity);
 
-    state.x = 0.0;
-    state.y = 0.0;
-    state.pen_state = "up".to_string();
-
     apertures.insert(block_code, Aperture::new_block(block_layers));
+    *state = outer_state;
 }
 
 pub fn parse_gerber(data: &str) -> Result<Vec<GerberData>, JsValue> {

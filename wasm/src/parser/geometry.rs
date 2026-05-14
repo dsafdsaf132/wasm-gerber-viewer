@@ -980,24 +980,30 @@ pub fn execute_interpolation(
                             let sr_end_x = end_x + offset_x;
                             let sr_end_y = end_y + offset_y;
 
-                            // Flash aperture at start point (no SR since we're already in SR loop)
-                            flash_aperture_no_sr(
-                                aperture,
-                                primitives,
-                                sr_start_x,
-                                sr_start_y,
-                                state.layer_scale,
-                                state.mirror_x,
-                                state.mirror_y,
-                                state.layer_rotation,
-                            );
-
                             if let Some((center_x, center_y, radius, start_angle, sweep_angle)) =
                                 calculate_arc_parameters(
                                     state, sr_start_x, sr_start_y, sr_end_x, sr_end_y, i, j,
                                 )
                             {
                                 let thickness = aperture.radius * 2.0 * state.layer_scale;
+                                let end_angle = start_angle + sweep_angle;
+
+                                let cap_start_x = center_x + radius * start_angle.cos();
+                                let cap_start_y = center_y + radius * start_angle.sin();
+                                let cap_end_x = center_x + radius * end_angle.cos();
+                                let cap_end_y = center_y + radius * end_angle.sin();
+
+                                // Flash aperture at rendered arc start point.
+                                flash_aperture_no_sr(
+                                    aperture,
+                                    primitives,
+                                    cap_start_x,
+                                    cap_start_y,
+                                    state.layer_scale,
+                                    state.mirror_x,
+                                    state.mirror_y,
+                                    state.layer_rotation,
+                                );
 
                                 // Add Arc primitive
                                 primitives.push(Primitive::Arc {
@@ -1009,19 +1015,40 @@ pub fn execute_interpolation(
                                     thickness,
                                     exposure: 1.0,
                                 });
-                            }
 
-                            // Flash aperture at end point (no SR since we're already in SR loop)
-                            flash_aperture_no_sr(
-                                aperture,
-                                primitives,
-                                sr_end_x,
-                                sr_end_y,
-                                state.layer_scale,
-                                state.mirror_x,
-                                state.mirror_y,
-                                state.layer_rotation,
-                            );
+                                // Flash aperture at rendered arc end point.
+                                flash_aperture_no_sr(
+                                    aperture,
+                                    primitives,
+                                    cap_end_x,
+                                    cap_end_y,
+                                    state.layer_scale,
+                                    state.mirror_x,
+                                    state.mirror_y,
+                                    state.layer_rotation,
+                                );
+                            } else {
+                                flash_aperture_no_sr(
+                                    aperture,
+                                    primitives,
+                                    sr_start_x,
+                                    sr_start_y,
+                                    state.layer_scale,
+                                    state.mirror_x,
+                                    state.mirror_y,
+                                    state.layer_rotation,
+                                );
+                                flash_aperture_no_sr(
+                                    aperture,
+                                    primitives,
+                                    sr_end_x,
+                                    sr_end_y,
+                                    state.layer_scale,
+                                    state.mirror_x,
+                                    state.mirror_y,
+                                    state.layer_rotation,
+                                );
+                            }
                         }
                     }
                 }
