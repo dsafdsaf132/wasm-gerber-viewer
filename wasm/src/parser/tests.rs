@@ -190,6 +190,25 @@ fn assert_gerber_snapshot(data: &str, expected: &str) {
 }
 
 #[test]
+fn m02_stops_parsing_following_commands() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X000000Y000000D03*
+M02*
+X010000Y000000D03*",
+    )
+    .expect("flash should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].circles.x.len(), 1);
+    assert_approx_eq(layers[0].circles.x[0], 0.0);
+}
+
+#[test]
 fn golden_region_d02_output_matches_current_parser() {
     assert_gerber_snapshot(
         "\

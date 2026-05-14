@@ -61,7 +61,9 @@ impl GerberParser {
                 continue;
             }
 
-            if line_ref.starts_with('%') {
+            if line_ref.starts_with("M02") {
+                break;
+            } else if line_ref.starts_with('%') {
                 parse_command(
                     line_ref,
                     &mut i,
