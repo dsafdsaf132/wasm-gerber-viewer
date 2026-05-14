@@ -1056,11 +1056,11 @@ export class GerberViewer {
   }
 
   shouldTileScreenshot(scale) {
-    return scale >= 8;
+    return scale >= 2;
   }
 
   shouldStreamScreenshot(scale) {
-    return scale >= 8;
+    return scale >= 2;
   }
 
   async exportScreenshot({ includeBackground = false, scale = 1 } = {}) {
@@ -1336,7 +1336,7 @@ export class GerberViewer {
     return {
       width: Math.max(
         1,
-        Math.min(maxDimension, Math.round(rect.width * 8)),
+        Math.min(maxDimension, Math.round(rect.width * 2)),
       ),
       height: Math.max(
         1,
