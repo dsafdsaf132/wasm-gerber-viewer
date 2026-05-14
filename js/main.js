@@ -1046,8 +1046,9 @@ export class GerberViewer {
     const scale = this.getSelectedScreenshotScale();
     const { width, height } = this.getScreenshotDimensions(scale);
     const maxDimension = this.getMaxScreenshotDimension();
-    const isTiled = this.shouldTileScreenshot(scale);
-    const exceedsLimit = !isTiled && (width > maxDimension || height > maxDimension);
+    const shouldStream = this.shouldStreamScreenshot(scale);
+    const exceedsLimit =
+      !shouldStream && (width > maxDimension || height > maxDimension);
 
     this.screenshotResolution.textContent = exceedsLimit
       ? `Estimated ${width} x ${height} px · exceeds ${maxDimension}px GPU limit`
@@ -1060,7 +1061,11 @@ export class GerberViewer {
   }
 
   shouldStreamScreenshot(scale) {
-    return scale >= 2;
+    return scale >= 2 && this.supportsStreamingScreenshot();
+  }
+
+  supportsStreamingScreenshot() {
+    return typeof CompressionStream === "function";
   }
 
   async exportScreenshot({ includeBackground = false, scale = 1 } = {}) {
@@ -1087,7 +1092,10 @@ export class GerberViewer {
     const maxDimension = this.getMaxScreenshotDimension();
     const isTiled = this.shouldTileScreenshot(exportScale);
     const shouldStream = this.shouldStreamScreenshot(exportScale);
-    if (!isTiled && (exportWidth > maxDimension || exportHeight > maxDimension)) {
+    if (
+      !shouldStream &&
+      (exportWidth > maxDimension || exportHeight > maxDimension)
+    ) {
       this.showError(
         `Screenshot is too large for this GPU (${exportWidth} x ${exportHeight}px).`,
       );
