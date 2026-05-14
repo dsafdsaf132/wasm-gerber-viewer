@@ -271,11 +271,8 @@ fn is_operator_or_bracket(token: Option<&String>) -> bool {
 /// Convert token to value (number or $variable)
 fn token_to_value(token: &str, variables: &HashMap<String, f32>) -> Result<f32, String> {
     if token.starts_with('$') {
-        // Variable reference
-        variables
-            .get(token)
-            .copied()
-            .ok_or_else(|| format!("Undefined variable: {}", token))
+        // Undefined aperture macro variables evaluate to 0.
+        Ok(variables.get(token).copied().unwrap_or(0.0))
     } else {
         // Number
         token
