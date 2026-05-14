@@ -1,133 +1,28 @@
-const NOTIFICATION_DURATION_MS = 2000;
-const MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024;
-const MAX_SCREENSHOT_STREAM_BAND_BYTES = 1024 * 1024 * 1024;
-const ZIP_MIME_TYPES = new Set([
-  "application/zip",
-  "application/x-zip-compressed",
-]);
-const GERBER_FILE_EXTENSIONS = new Set([
-  ".art",
-  ".bot",
-  ".bsk",
-  ".bsm",
-  ".cmp",
-  ".crc",
-  ".crs",
-  ".drd",
-  ".gbl",
-  ".gbo",
-  ".gbr",
-  ".gbs",
-  ".gbp",
-  ".gdo",
-  ".ger",
-  ".gko",
-  ".gpb",
-  ".gpt",
-  ".gtl",
-  ".gto",
-  ".gtp",
-  ".gts",
-  ".pastebot",
-  ".pastetop",
-  ".pho",
-  ".plb",
-  ".plc",
-  ".pls",
-  ".plt",
-  ".smb",
-  ".smt",
-  ".sol",
-  ".spb",
-  ".spt",
-  ".ssb",
-  ".sst",
-  ".stc",
-  ".sts",
-  ".top",
-  ".tsk",
-  ".tsm",
-]);
+import {
+  MAX_FILE_SIZE_BYTES,
+  MAX_SCREENSHOT_STREAM_BAND_BYTES,
+  NOTIFICATION_DURATION_MS,
+} from "./config.js";
+import { DiagnosticsLog } from "./diagnostics.js";
+import { getViewerElements } from "./dom-elements.js";
+import {
+  formatFileSize,
+  getErrorMessage,
+  isNoGeometryError,
+} from "./file-utils.js";
+import { LayerFilterStore } from "./layer-filters.js";
+import { renderLayerList as renderLayerListView } from "./layer-list.js";
+import { NotificationCenter } from "./notifications.js";
+import {
+  collectLayerSources,
+  fetchRemoteFile,
+  getInitialSourceUrl,
+} from "./source-loader.js";
 
 export class GerberViewer {
   constructor() {
-    // Main canvas (WebGL2)
-    this.canvas = document.getElementById("gerber-canvas");
-    this.viewerSurface = this.canvas.closest(".viewer-surface");
+    Object.assign(this, getViewerElements());
     this.gl = null; // WebGL2 context
-
-    // DOM elements
-    this.fileInput = document.getElementById("file-input");
-    this.selectFilesBtn = document.getElementById("select-files-btn");
-    this.emptyUploadBtn = document.getElementById("empty-upload-btn");
-    this.fitViewBtn = document.getElementById("fit-view-btn");
-    this.flipHorizontalBtn = document.getElementById("flip-horizontal-btn");
-    this.flipVerticalBtn = document.getElementById("flip-vertical-btn");
-    this.canvasThemeToggle = document.getElementById("canvas-theme-toggle");
-    this.screenshotBtn = document.getElementById("screenshot-btn");
-    this.screenshotDialog = document.getElementById("screenshot-dialog");
-    this.screenshotForm = document.getElementById("screenshot-form");
-    this.screenshotBackgroundToggle = document.getElementById(
-      "screenshot-background-toggle",
-    );
-    this.screenshotScaleSelect = document.getElementById("screenshot-scale-select");
-    this.screenshotResolution = document.getElementById("screenshot-resolution");
-    this.screenshotProgress = document.getElementById("screenshot-progress");
-    this.screenshotProgressLabel = document.getElementById(
-      "screenshot-progress-label",
-    );
-    this.screenshotProgressValue = document.getElementById(
-      "screenshot-progress-value",
-    );
-    this.screenshotProgressBar = document.getElementById("screenshot-progress-bar");
-    this.screenshotCancelBtn = document.getElementById("screenshot-cancel-btn");
-    this.screenshotDismissBtn = document.getElementById("screenshot-dismiss-btn");
-    this.screenshotExportBtn = document.getElementById("screenshot-export-btn");
-    this.rulerToggleBtn = document.getElementById("ruler-toggle-btn");
-    this.rulerClearBtn = document.getElementById("ruler-clear-btn");
-    this.measurementUnitToggle = document.getElementById("measurement-unit-toggle");
-    this.fullscreenBtn = document.getElementById("fullscreen-btn");
-    this.selectAllBtn = document.getElementById("select-all-btn");
-    this.selectTopBtn = document.getElementById("select-top-btn");
-    this.selectBottomBtn = document.getElementById("select-bottom-btn");
-    this.unselectAllBtn = document.getElementById("unselect-all-btn");
-    this.clearAllBtn = document.getElementById("clear-all-btn");
-    this.clearDiagnosticsBtn = document.getElementById("clear-diagnostics-btn");
-    this.alphaSlider = document.getElementById("alpha-slider");
-    this.alphaValue = document.getElementById("alpha-value");
-    this.layerList = document.getElementById("layer-list");
-    this.diagnosticList = document.getElementById("diagnostic-list");
-    this.notification = document.getElementById("file-size-warning");
-    this.notificationTitle = document.getElementById("warning-title");
-    this.notificationMessage = document.getElementById("warning-message");
-    this.notificationCloseBtn = this.notification.querySelector(
-      "[data-notification-close]",
-    );
-    this.workspaceStatus = document.getElementById("workspace-status");
-    this.emptyState = document.getElementById("empty-state");
-    this.emptyFileSizeLimit = document.getElementById("empty-file-size-limit");
-    this.dropOverlay = document.getElementById("drop-overlay");
-    this.measurementOverlay = document.getElementById("measurement-overlay");
-    this.visibleLayerCount = document.getElementById("visible-layer-count");
-    this.zoomReadout = document.getElementById("zoom-readout");
-    this.cursorReadout = document.getElementById("cursor-readout");
-    this.boundsReadout = document.getElementById("bounds-readout");
-    this.diagnosticsCount = document.getElementById("diagnostics-count");
-    this.topFilterInput = document.getElementById("top-filter-input");
-    this.bottomFilterInput = document.getElementById("bottom-filter-input");
-    this.filterSaveBtn = document.getElementById("filter-save-btn");
-    this.filterDefaultBtn = document.getElementById("filter-default-btn");
-    this.filterRestoreBtn = document.getElementById("filter-restore-btn");
-    this.panelTabs = Array.from(document.querySelectorAll("[data-panel-tab]"));
-    this.panelSections = Array.from(document.querySelectorAll("[data-panel]"));
-
-    // Drawer elements
-    this.drawer = document.getElementById("drawer");
-    this.resizeHandle = document.getElementById("resize-handle");
-    this.drawerToggleBtn = document.getElementById("drawer-toggle");
-
-    // Drop zone
-    this.dropZone = document.getElementById("drop-zone");
 
     // WASM module and single processor
     this.wasmModule = null;
@@ -197,8 +92,7 @@ export class GerberViewer {
 
     // Global alpha
     this.globalAlpha = 0.7;
-    this.notificationTimeout = null;
-    this.diagnostics = [];
+    this.diagnostics = new DiagnosticsLog({ container: this.diagnosticList });
     this.activePanel = "layers";
     this.isCanvasLight = false;
     this.isRulerActive = false;
@@ -209,8 +103,14 @@ export class GerberViewer {
     this.measurementOverlayCursor = 0;
     this.isExportingScreenshot = false;
     this.measurementUnit = "mm";
-    this.layerFilterStorageKey = "wasm-gerber-viewer.layerFilters";
-    this.layerFilters = this.loadLayerFilters();
+    this.layerFilterStore = new LayerFilterStore();
+    this.notifications = new NotificationCenter({
+      notification: this.notification,
+      titleElement: this.notificationTitle,
+      messageElement: this.notificationMessage,
+      durationMs: NOTIFICATION_DURATION_MS,
+      onNotify: (level, title, detail) => this.addDiagnostic(level, title, detail),
+    });
   }
 
   async init() {
@@ -284,7 +184,7 @@ export class GerberViewer {
       try {
         this.wasmProcessor.resize();
       } catch (error) {
-        const message = this.getErrorMessage(error);
+        const message = getErrorMessage(error);
         console.error("[Render] Failed to resize renderer:", error);
         this.addDiagnostic("error", "Resize failed", message);
       }
@@ -439,11 +339,11 @@ export class GerberViewer {
     });
 
     this.filterDefaultBtn.addEventListener("click", () => {
-      this.setLayerFilters(this.getDefaultLayerFilters());
+      this.setLayerFilters(this.layerFilterStore.getDefaults());
     });
 
     this.filterRestoreBtn.addEventListener("click", () => {
-      this.setLayerFilters(this.loadLayerFilters());
+      this.setLayerFilters(this.layerFilterStore.reload());
     });
 
     this.notificationCloseBtn.addEventListener("click", () => {
@@ -568,7 +468,7 @@ export class GerberViewer {
       this.renderLayerList();
     } catch (error) {
       this.isWebGlContextLost = true;
-      const message = this.getErrorMessage(error);
+      const message = getErrorMessage(error);
       console.error("[Render] Failed to restore WebGL context:", error);
       this.addDiagnostic("error", "WebGL restore failed", message);
       this.showError(`Failed to restore WebGL context: ${message}`);
@@ -585,110 +485,24 @@ export class GerberViewer {
     }
   }
 
-  getDefaultLayerFilters() {
-    return {
-      top: [
-        "top front -f #TOP",
-        ".gtl .gto .gts .gtp .gpt",
-        ".cmp .plc .stc .crc",
-        ".top .smt .sst .spt .tsm .tsk .plt .pastetop",
-        "f.cu f_cu f.mask f_mask f.silks f_silks f.paste f_paste",
-        "mt.pho st.pho pt.pho",
-      ].join("\n"),
-      bottom: [
-        "bottom back -b #BOT",
-        ".gbl .gbo .gbs .gbp .gpb",
-        ".sol .pls .sts .crs",
-        ".bot .smb .ssb .spb .bsm .bsk .plb .pastebot",
-        "b.cu b_cu b.mask b_mask b.silks b_silks b.paste b_paste",
-        "mb.pho sb.pho pb.pho",
-      ].join("\n"),
-    };
-  }
-
-  getPreviousLayerFilterDefaults() {
-    return {
-      top: [
-        "top front -f .gtl .gto .gts .gtp .gpt .cmp .plc .stc .crc .top .smt .sst .spt .tsm .tsk .plt .pastetop f.cu f_cu f.mask f_mask f.silks f_silks f.paste f_paste mt.pho st.pho pt.pho #TOP",
-        "top -f .gtl .gto .gts .gtp #TOP",
-        "top .gtl .gto .gts .gtp #TOP",
-      ],
-      bottom: [
-        "bottom back -b .gbl .gbo .gbs .gbp .gpb .sol .pls .sts .crs .bot .smb .ssb .spb .bsm .bsk .plb .pastebot b.cu b_cu b.mask b_mask b.silks b_silks b.paste b_paste mb.pho sb.pho pb.pho #BOT",
-        "bottom -b .gbl .gbo .gbs .gbp #BOT",
-        "bottom .gbl .gbo .gbs .gbp #BOT",
-      ],
-      front: ["front .gtl .gto .gts .gtp #TOP"],
-      back: ["back .gbl .gbo .gbs .gbp #BOT"],
-    };
-  }
-
-  loadLayerFilters() {
-    const defaults = this.getDefaultLayerFilters();
-    const previousDefaults = this.getPreviousLayerFilterDefaults();
-
-    try {
-      const stored = JSON.parse(
-        window.localStorage.getItem(this.layerFilterStorageKey) || "{}",
-      );
-      const normalizeFilter = (value, previousDefaultValues, currentDefault) =>
-        previousDefaultValues.includes(value) ? currentDefault : value;
-
-      return {
-        top:
-          typeof stored.top === "string"
-            ? normalizeFilter(stored.top, previousDefaults.top, defaults.top)
-            : typeof stored.front === "string"
-              ? normalizeFilter(stored.front, previousDefaults.front, defaults.top)
-              : defaults.top,
-        bottom:
-          typeof stored.bottom === "string"
-            ? normalizeFilter(
-                stored.bottom,
-                previousDefaults.bottom,
-                defaults.bottom,
-              )
-            : typeof stored.back === "string"
-              ? normalizeFilter(
-                  stored.back,
-                  previousDefaults.back,
-                  defaults.bottom,
-                )
-              : defaults.bottom,
-      };
-    } catch {
-      return defaults;
-    }
-  }
-
   setLayerFilters(filters) {
-    this.layerFilters = {
-      top: filters.top,
-      bottom: filters.bottom,
-    };
+    this.layerFilterStore.set(filters);
     this.syncFilterInputs();
   }
 
-  saveLayerFilters() {
-    window.localStorage.setItem(
-      this.layerFilterStorageKey,
-      JSON.stringify(this.layerFilters),
-    );
-  }
-
   syncFilterInputs() {
-    this.topFilterInput.value = this.layerFilters.top;
-    this.bottomFilterInput.value = this.layerFilters.bottom;
+    this.topFilterInput.value = this.layerFilterStore.get("top");
+    this.bottomFilterInput.value = this.layerFilterStore.get("bottom");
   }
 
   updateLayerFilter(kind, value) {
-    this.layerFilters[kind] = value;
+    this.layerFilterStore.update(kind, value);
   }
 
   saveLayerFiltersFromInputs() {
     this.updateLayerFilter("top", this.topFilterInput.value);
     this.updateLayerFilter("bottom", this.bottomFilterInput.value);
-    this.saveLayerFilters();
+    this.layerFilterStore.save();
     this.showNotification(
       "Filters saved",
       "info",
@@ -697,27 +511,6 @@ export class GerberViewer {
         messageElement.textContent = "Layer filter settings were saved.";
       },
     );
-  }
-
-  getFilterTokens(kind) {
-    return this.layerFilters[kind]
-      .split(/[\s,;|]+/)
-      .map((token) => token.trim())
-      .filter(Boolean);
-  }
-
-  layerMatchesFilter(layer, kind) {
-    const tokens = this.getFilterTokens(kind);
-    if (tokens.length === 0) return false;
-    const layerName = layer.name;
-    const lowerLayerName = layerName.toLowerCase();
-    return tokens.some((token) => {
-      if (token.startsWith("#") && token.length > 1) {
-        return layerName.includes(token.slice(1));
-      }
-
-      return lowerLayerName.includes(token.toLowerCase());
-    });
   }
 
   updateUiState() {
@@ -741,7 +534,7 @@ export class GerberViewer {
     this.emptyUploadBtn.disabled = rendererBusy;
 
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;
-    this.diagnosticsCount.textContent = String(this.diagnostics.length);
+    this.diagnosticsCount.textContent = String(this.diagnostics.count);
     this.emptyState.classList.toggle("is-hidden", totalLayers > 0);
     this.zoomReadout.textContent = this.formatZoom();
     this.boundsReadout.textContent = this.formatCombinedBounds();
@@ -810,47 +603,16 @@ export class GerberViewer {
   }
 
   addDiagnostic(level, title, detail = "") {
-    if (level === "info") {
-      return;
-    }
-
-    this.diagnostics.unshift({
-      level,
-      title,
-      detail,
-      time: new Date().toLocaleTimeString(),
-    });
-    this.diagnostics = this.diagnostics.slice(0, 30);
+    this.diagnostics.add(level, title, detail);
     this.updateUiState();
   }
 
   renderDiagnostics() {
-    this.diagnosticList.replaceChildren();
-
-    if (this.diagnostics.length === 0) {
-      const item = document.createElement("li");
-      const title = document.createElement("strong");
-      const detail = document.createElement("span");
-      title.textContent = "No diagnostics";
-      detail.textContent = "Ready";
-      item.append(title, detail);
-      this.diagnosticList.appendChild(item);
-      return;
-    }
-
-    for (const diagnostic of this.diagnostics) {
-      const item = document.createElement("li");
-      const title = document.createElement("strong");
-      const detail = document.createElement("span");
-      title.textContent = diagnostic.title;
-      detail.textContent = `${diagnostic.time} · ${diagnostic.level}${diagnostic.detail ? ` · ${diagnostic.detail}` : ""}`;
-      item.append(title, detail);
-      this.diagnosticList.appendChild(item);
-    }
+    this.diagnostics.render();
   }
 
   clearDiagnostics() {
-    this.diagnostics = [];
+    this.diagnostics.clear();
     this.updateUiState();
   }
 
@@ -1790,11 +1552,11 @@ export class GerberViewer {
 
   updateEmptyStateHint() {
     this.emptyFileSizeLimit.textContent =
-      `Max ${this.formatFileSize(MAX_FILE_SIZE_BYTES)} per file`;
+      `Max ${formatFileSize(MAX_FILE_SIZE_BYTES)} per file`;
   }
 
   async loadInitialUrlSource() {
-    const sourceUrl = this.getInitialSourceUrl();
+    const sourceUrl = getInitialSourceUrl();
     if (!sourceUrl) return;
 
     try {
@@ -1805,23 +1567,9 @@ export class GerberViewer {
     }
   }
 
-  getInitialSourceUrl() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("url") || params.get("source") || params.get("file");
-  }
-
   async loadRemoteSource(url) {
     this.setWorkspaceStatus("Loading remote file");
-    const response = await fetch(url.href);
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} while loading ${url.href}`);
-    }
-
-    const fileName = this.getBaseFileName(decodeURIComponent(url.pathname));
-    const file = new File([await response.blob()], fileName, {
-      type: response.headers.get("content-type") || "",
-    });
-
+    const file = await fetchRemoteFile(url);
     const layerSources = await this.collectLayerSources([file]);
     if (layerSources.length === 0) {
       this.updateUiState();
@@ -1856,8 +1604,8 @@ export class GerberViewer {
       if (file.size > MAX_FILE_SIZE_BYTES) {
         oversizedFiles.push({
           name: file.name,
-          size: this.formatFileSize(file.size),
-          limit: this.formatFileSize(MAX_FILE_SIZE_BYTES),
+          size: formatFileSize(file.size),
+          limit: formatFileSize(MAX_FILE_SIZE_BYTES),
         });
       } else {
         validFiles.push(file);
@@ -1896,68 +1644,12 @@ export class GerberViewer {
   }
 
   async collectLayerSources(files) {
-    const layerSources = [];
-
-    for (const file of files) {
-      if (this.isZipFile(file)) {
-        layerSources.push(...(await this.collectZipLayerSources(file)));
-        continue;
-      }
-
-      layerSources.push({
-        name: file.name,
-        readText: () => file.text(),
-      });
-    }
-
-    return layerSources;
-  }
-
-  async collectZipLayerSources(file) {
-    if (!window.JSZip) {
-      this.handleLayerLoadError(file.name, new Error("ZIP support failed to load"));
-      return [];
-    }
-
-    try {
-      const zip = await window.JSZip.loadAsync(file);
-      const entries = Object.values(zip.files)
-        .filter(
-          (entry) =>
-            !entry.dir &&
-            !this.isArchiveMetadataPath(entry.name) &&
-            this.isSupportedGerberPath(entry.name),
-        )
-        .sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, {
-            numeric: true,
-            sensitivity: "base",
-          }),
-        );
-
-      if (entries.length === 0) {
-        this.addDiagnostic(
-          "warning",
-          file.name,
-          "No supported Gerber files found in archive",
-        );
-        return [];
-      }
-
-      this.addDiagnostic(
-        "info",
-        file.name,
-        `${entries.length} Gerber files found in archive`,
-      );
-
-      return entries.map((entry) => ({
-        name: this.getBaseFileName(entry.name),
-        readText: () => entry.async("string"),
-      }));
-    } catch (error) {
-      this.handleLayerLoadError(file.name, error);
-      return [];
-    }
+    return collectLayerSources(files, {
+      onArchiveWarning: (name, message) =>
+        this.addDiagnostic("warning", name, message),
+      onArchiveInfo: (name, message) => this.addDiagnostic("info", name, message),
+      onArchiveError: (name, error) => this.handleLayerLoadError(name, error),
+    });
   }
 
   async loadLayerSource(name, readText) {
@@ -1972,8 +1664,8 @@ export class GerberViewer {
   }
 
   handleLayerLoadError(name, error) {
-    const message = this.getErrorMessage(error);
-    if (this.isNoGeometryError(message)) {
+    const message = getErrorMessage(error);
+    if (isNoGeometryError(message)) {
       console.warn(`Skipped file ${name}:`, error);
       this.addDiagnostic("warning", name, message);
       return;
@@ -1984,122 +1676,20 @@ export class GerberViewer {
     this.showError(`Failed to load file ${name}: ${message}`);
   }
 
-  isZipFile(file) {
-    return this.getFileExtension(file.name) === ".zip" || ZIP_MIME_TYPES.has(file.type);
-  }
-
-  isSupportedGerberPath(path) {
-    return GERBER_FILE_EXTENSIONS.has(this.getFileExtension(path));
-  }
-
-  isArchiveMetadataPath(path) {
-    const normalizedPath = path.replaceAll("\\", "/");
-    const fileName = normalizedPath.split("/").pop() ?? normalizedPath;
-    return normalizedPath.startsWith("__MACOSX/") || fileName.startsWith("._");
-  }
-
-  getFileExtension(path) {
-    const fileName = this.getBaseFileName(path);
-    const dotIndex = fileName.lastIndexOf(".");
-    if (dotIndex <= 0) {
-      return "";
-    }
-
-    return fileName.slice(dotIndex).toLowerCase();
-  }
-
-  getBaseFileName(path) {
-    return path.split(/[\\/]/).pop() ?? path;
-  }
-
-  formatFileSize(bytes) {
-    if (bytes === 0) return "0 Bytes";
-    const k = 1024;
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
-  }
-
   showFileSizeWarning(oversizedFiles) {
-    this.showNotification(
-      "Warning",
-      "warning",
-      NOTIFICATION_DURATION_MS,
-      (messageElement) => {
-        const list = document.createElement("ul");
-        list.className = "mb-0 mt-2 ps-3";
-
-        oversizedFiles.forEach((file) => {
-          const item = document.createElement("li");
-          const fileName = document.createElement("strong");
-          fileName.textContent = file.name;
-
-          item.appendChild(fileName);
-          item.append(
-            document.createTextNode(`: ${file.size} (limit: ${file.limit})`),
-          );
-          list.appendChild(item);
-        });
-
-        messageElement.appendChild(list);
-      },
-    );
+    this.notifications.showFileSizeWarning(oversizedFiles);
   }
 
   showError(message) {
-    this.showNotification(
-      "Error",
-      "danger",
-      NOTIFICATION_DURATION_MS,
-      (messageElement) => {
-        messageElement.textContent = message;
-      },
-    );
-  }
-
-  getErrorMessage(error) {
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return String(error);
-  }
-
-  isNoGeometryError(message) {
-    return message.toLowerCase().includes("no geometry found");
+    this.notifications.showError(message);
   }
 
   showNotification(title, variant, duration, renderMessage) {
-    if (this.notificationTimeout !== null) {
-      clearTimeout(this.notificationTimeout);
-    }
-
-    this.notification.classList.remove("danger", "show");
-    if (variant === "danger") {
-      this.notification.classList.add("danger");
-    }
-    this.notificationTitle.textContent = title;
-    this.notificationMessage.replaceChildren();
-    renderMessage(this.notificationMessage);
-    this.addDiagnostic(variant, title, this.notificationMessage.textContent.trim());
-
-    requestAnimationFrame(() => {
-      this.notification.classList.add("show");
-    });
-
-    this.notificationTimeout = setTimeout(() => {
-      this.hideNotification();
-    }, duration);
+    this.notifications.show(title, variant, renderMessage, duration);
   }
 
   hideNotification() {
-    if (this.notificationTimeout !== null) {
-      clearTimeout(this.notificationTimeout);
-      this.notificationTimeout = null;
-    }
-
-    this.notification.classList.remove("show");
-    this.notificationTitle.textContent = "Notice";
+    this.notifications.hide();
   }
 
   async addLayer(name, content, options = {}) {
@@ -2142,7 +1732,7 @@ export class GerberViewer {
       this.layers.push(layer);
       this.updateUiState();
     } catch (error) {
-      if (this.isNoGeometryError(this.getErrorMessage(error))) {
+      if (isNoGeometryError(getErrorMessage(error))) {
         console.warn(`[Layer] Skipped layer ${name}:`, error);
         throw error;
       }
@@ -2177,7 +1767,7 @@ export class GerberViewer {
       );
       this.zoomReadout.textContent = this.formatZoom();
     } catch (error) {
-      const message = this.getErrorMessage(error);
+      const message = getErrorMessage(error);
       console.error("[Render] Failed to render:", error);
       this.addDiagnostic("error", "Render failed", message);
     }
@@ -2989,7 +2579,7 @@ export class GerberViewer {
 
   selectLayersByFilter(kind) {
     this.layers.forEach((layer) => {
-      layer.visible = this.layerMatchesFilter(layer, kind);
+      layer.visible = this.layerFilterStore.matches(layer, kind);
     });
     this.renderLayerList();
     this.render();
@@ -3110,89 +2700,26 @@ export class GerberViewer {
   }
 
   renderLayerList() {
-    this.layerList.replaceChildren();
-
-    this.layers.forEach((layer, index) => {
-      const li = document.createElement("li");
-      li.className = "layer-item";
-      li.dataset.layerId = layer.id;
-      li.dataset.layerIndex = String(index);
-      li.draggable = true;
-      li.addEventListener("dragstart", (event) =>
-        this.handleLayerDragStart(event, layer.id),
-      );
-      li.addEventListener("dragend", (event) => this.handleLayerDragEnd(event));
-
-      // Color picker
-      const colorPicker = document.createElement("input");
-      colorPicker.type = "color";
-      colorPicker.className = "layer-color-picker";
-      colorPicker.value = this.rgbToHex(layer.color);
-      colorPicker.addEventListener("change", (e) => {
-        this.updateLayerColor(layer.id, e.target.value);
-      });
-
-      // Checkbox
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.className = "layer-checkbox";
-      checkbox.checked = layer.visible;
-      checkbox.addEventListener("change", () => {
-        layer.visible = checkbox.checked;
+    renderLayerListView({
+      container: this.layerList,
+      layers: this.layers,
+      formatBounds: (layer) => this.formatLayerBounds(layer),
+      onDragStart: (event, layerId) =>
+        this.handleLayerDragStart(event, layerId),
+      onDragEnd: (event) => this.handleLayerDragEnd(event),
+      onColorChange: (layerId, color) => this.updateLayerColor(layerId, color),
+      onVisibilityChange: (layer, visible) => {
+        layer.visible = visible;
         this.render();
         this.updateUiState();
-      });
-
-      // Label
-      const label = document.createElement("label");
-      label.className = "layer-label";
-      const layerName = document.createElement("strong");
-      const layerMeta = document.createElement("span");
-      layerName.textContent = layer.name;
-      layerMeta.textContent = this.formatLayerBounds(layer);
-      label.append(layerName, layerMeta);
-      label.addEventListener("click", () => {
+      },
+      onToggleVisibility: (layer) => {
         layer.visible = !layer.visible;
-        checkbox.checked = layer.visible;
         this.render();
         this.updateUiState();
-      });
-
-      // Delete button
-      const deleteBtn = document.createElement("button");
-      deleteBtn.type = "button";
-      deleteBtn.className = "icon-button layer-delete-btn";
-      deleteBtn.setAttribute("aria-label", "Delete layer");
-      deleteBtn.title = "Delete layer";
-      const deleteIcon = document.createElement("i");
-      deleteIcon.setAttribute("data-lucide", "trash-2");
-      deleteBtn.appendChild(deleteIcon);
-      deleteBtn.addEventListener("click", () => {
-        this.deleteLayer(layer.id);
-      });
-
-      li.appendChild(colorPicker);
-      li.appendChild(checkbox);
-      li.appendChild(label);
-      li.appendChild(deleteBtn);
-      this.layerList.appendChild(li);
+      },
+      onDelete: (layerId) => this.deleteLayer(layerId),
     });
-
-    if (this.layers.length === 0) {
-      const li = document.createElement("li");
-      li.className = "layer-item";
-      li.style.gridTemplateColumns = "1fr";
-      const label = document.createElement("label");
-      label.className = "layer-label";
-      const title = document.createElement("strong");
-      const detail = document.createElement("span");
-      title.textContent = "No layers";
-      detail.textContent = "Ready";
-      label.append(title, detail);
-      li.appendChild(label);
-      this.layerList.appendChild(li);
-    }
-
     this.refreshIcons();
   }
 
@@ -3204,19 +2731,6 @@ export class GerberViewer {
     const width = layer.bounds.maxX - layer.bounds.minX;
     const height = layer.bounds.maxY - layer.bounds.minY;
     return this.formatDimensionPair(width, height);
-  }
-
-  rgbToHex(rgb) {
-    const r = Math.round(rgb[0] * 255)
-      .toString(16)
-      .padStart(2, "0");
-    const g = Math.round(rgb[1] * 255)
-      .toString(16)
-      .padStart(2, "0");
-    const b = Math.round(rgb[2] * 255)
-      .toString(16)
-      .padStart(2, "0");
-    return `#${r}${g}${b}`;
   }
 
   // Drawer management methods
