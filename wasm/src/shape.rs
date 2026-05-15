@@ -31,6 +31,33 @@ impl Triangles {
     }
 }
 
+/// Triangle mesh template rendered at many flash positions.
+pub struct TriangleTemplateInstances {
+    pub(crate) vertices: Vec<f32>,
+    pub(crate) instance_x: Vec<f32>,
+    pub(crate) instance_y: Vec<f32>,
+}
+
+impl TriangleTemplateInstances {
+    pub fn new(
+        vertices: Vec<f32>,
+        instance_x: Vec<f32>,
+        instance_y: Vec<f32>,
+    ) -> TriangleTemplateInstances {
+        TriangleTemplateInstances {
+            vertices,
+            instance_x,
+            instance_y,
+        }
+    }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.vertices = Vec::new();
+        self.instance_x = Vec::new();
+        self.instance_y = Vec::new();
+    }
+}
+
 /// Circle primitive data structure
 pub struct Circles {
     pub(crate) x: Vec<f32>,
@@ -193,6 +220,7 @@ impl Boundary {
 /// Container for all parsed Gerber data
 pub struct GerberData {
     pub(crate) triangles: Triangles,
+    pub(crate) triangle_templates: Vec<TriangleTemplateInstances>,
     pub(crate) circles: Circles,
     pub(crate) arcs: Arcs,
     pub(crate) thermals: Thermals,
@@ -203,6 +231,7 @@ pub struct GerberData {
 impl GerberData {
     pub fn new(
         triangles: Triangles,
+        triangle_templates: Vec<TriangleTemplateInstances>,
         circles: Circles,
         arcs: Arcs,
         thermals: Thermals,
@@ -211,6 +240,7 @@ impl GerberData {
     ) -> GerberData {
         GerberData {
             triangles,
+            triangle_templates,
             circles,
             arcs,
             thermals,
@@ -222,6 +252,10 @@ impl GerberData {
     /// Check if this GerberData contains any geometry
     pub fn has_geometry(&self) -> bool {
         !self.triangles.vertices.is_empty()
+            || self
+                .triangle_templates
+                .iter()
+                .any(|template| !template.vertices.is_empty() && !template.instance_x.is_empty())
             || !self.circles.x.is_empty()
             || !self.arcs.x.is_empty()
             || !self.thermals.x.is_empty()

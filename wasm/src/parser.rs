@@ -15,7 +15,9 @@ use state::{
 };
 
 use self::geometry::{parse_graphic_command, Primitive};
-use crate::shape::{Arcs, Boundary, Circles, GerberData, Thermals, Triangles};
+use crate::shape::{
+    Arcs, Boundary, Circles, GerberData, Thermals, TriangleTemplateInstances, Triangles,
+};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
@@ -33,6 +35,7 @@ fn collect_lines(data: &str) -> Result<Vec<&str>, JsValue> {
 struct PrimitiveBufferCounts {
     triangles: usize,
     has_triangle_holes: bool,
+    triangle_template_instance_counts: HashMap<usize, usize>,
     circles: usize,
     has_circle_holes: bool,
     arcs: usize,
@@ -52,11 +55,14 @@ impl PrimitiveBufferCounts {
             }
             Primitive::Arc { .. } => self.arcs += 1,
             Primitive::Thermal { .. } => self.thermals += 1,
+            Primitive::TriangleTemplateFlash { template, .. } => {
+                let key = std::rc::Rc::as_ptr(template) as usize;
+                *self
+                    .triangle_template_instance_counts
+                    .entry(key)
+                    .or_default() += 1;
+            }
         }
-    }
-
-    fn has_geometry(&self) -> bool {
-        self.triangles > 0 || self.circles > 0 || self.arcs > 0 || self.thermals > 0
     }
 }
 
@@ -87,8 +93,16 @@ fn primitive_has_hole(primitive: &Primitive) -> bool {
         Primitive::Triangle { hole_radius, .. } | Primitive::Circle { hole_radius, .. } => {
             *hole_radius != 0.0
         }
-        Primitive::Arc { .. } | Primitive::Thermal { .. } => false,
+        Primitive::Arc { .. }
+        | Primitive::Thermal { .. }
+        | Primitive::TriangleTemplateFlash { .. } => false,
     }
+}
+
+struct TriangleTemplateOutputBuffers {
+    vertices: Vec<f32>,
+    instance_x: Vec<f32>,
+    instance_y: Vec<f32>,
 }
 
 struct PrimitiveOutputBuffers {
@@ -97,6 +111,9 @@ struct PrimitiveOutputBuffers {
     triangle_hole_x: Vec<f32>,
     triangle_hole_y: Vec<f32>,
     triangle_hole_radius: Vec<f32>,
+    triangle_templates: Vec<TriangleTemplateOutputBuffers>,
+    triangle_template_indices: HashMap<usize, usize>,
+    triangle_template_instance_counts: HashMap<usize, usize>,
     has_circle_holes: bool,
     circles_x: Vec<f32>,
     circles_y: Vec<f32>,
@@ -129,6 +146,9 @@ impl PrimitiveOutputBuffers {
             triangle_hole_x: Vec::new(),
             triangle_hole_y: Vec::new(),
             triangle_hole_radius: Vec::new(),
+            triangle_templates: Vec::new(),
+            triangle_template_indices: HashMap::new(),
+            triangle_template_instance_counts: counts.triangle_template_instance_counts.clone(),
             has_circle_holes: counts.has_circle_holes,
             circles_x: Vec::new(),
             circles_y: Vec::new(),
@@ -174,6 +194,19 @@ impl PrimitiveOutputBuffers {
                 "triangle hole radius buffer",
             )?;
         }
+        try_reserve_exact(
+            &mut buffers.triangle_templates,
+            counts.triangle_template_instance_counts.len(),
+            "triangle template list",
+        )?;
+        buffers
+            .triangle_template_indices
+            .try_reserve(counts.triangle_template_instance_counts.len())
+            .map_err(|_| {
+                JsValue::from_str(
+                    "Gerber layer is too large to render: not enough memory for triangle template index map",
+                )
+            })?;
 
         try_reserve_exact(&mut buffers.circles_x, counts.circles, "circle X buffer")?;
         try_reserve_exact(&mut buffers.circles_y, counts.circles, "circle Y buffer")?;
@@ -245,7 +278,7 @@ impl PrimitiveOutputBuffers {
         Ok(buffers)
     }
 
-    fn push_primitive(&mut self, primitive: Primitive) {
+    fn push_primitive(&mut self, primitive: Primitive) -> Result<(), JsValue> {
         // Unit conversion: aperture.rs already converts to mm using unit_multiplier.
         const TO_MM: f32 = 1.0;
 
@@ -320,11 +353,70 @@ impl PrimitiveOutputBuffers {
                 self.thermals_gap_thickness.push(gap_thickness * TO_MM);
                 self.thermals_rotation.push(rotation);
             }
+            Primitive::TriangleTemplateFlash { template, x, y } => {
+                let key = std::rc::Rc::as_ptr(&template) as usize;
+                let template_idx =
+                    if let Some(index) = self.triangle_template_indices.get(&key).copied() {
+                        index
+                    } else {
+                        let expected_instances = self
+                            .triangle_template_instance_counts
+                            .get(&key)
+                            .copied()
+                            .unwrap_or(1);
+                        let mut vertices = Vec::new();
+                        try_reserve_exact(
+                            &mut vertices,
+                            template.len(),
+                            "triangle template vertex buffer",
+                        )?;
+                        vertices.extend(template.iter().copied());
+
+                        let mut instance_x = Vec::new();
+                        let mut instance_y = Vec::new();
+                        try_reserve_exact(
+                            &mut instance_x,
+                            expected_instances,
+                            "triangle template instance X buffer",
+                        )?;
+                        try_reserve_exact(
+                            &mut instance_y,
+                            expected_instances,
+                            "triangle template instance Y buffer",
+                        )?;
+
+                        let index = self.triangle_templates.len();
+                        self.triangle_templates.push(TriangleTemplateOutputBuffers {
+                            vertices,
+                            instance_x,
+                            instance_y,
+                        });
+                        self.triangle_template_indices.insert(key, index);
+                        index
+                    };
+
+                let template = &mut self.triangle_templates[template_idx];
+                template.instance_x.push(x * TO_MM);
+                template.instance_y.push(y * TO_MM);
+            }
         }
+
+        Ok(())
     }
 
     fn into_gerber_data(self, is_negative: bool) -> GerberData {
         let boundary = self.boundary();
+        let triangle_templates = self
+            .triangle_templates
+            .into_iter()
+            .map(|template| {
+                TriangleTemplateInstances::new(
+                    template.vertices,
+                    template.instance_x,
+                    template.instance_y,
+                )
+            })
+            .collect();
 
         GerberData::new(
             Triangles::new(
@@ -333,6 +425,7 @@ impl PrimitiveOutputBuffers {
                 self.triangle_hole_y,
                 self.triangle_hole_radius,
             ),
+            triangle_templates,
             Circles::new(
                 self.circles_x,
                 self.circles_y,
@@ -362,6 +455,17 @@ impl PrimitiveOutputBuffers {
         )
     }
 
+    fn has_geometry(&self) -> bool {
+        !self.triangle_vertices.is_empty()
+            || self
+                .triangle_templates
+                .iter()
+                .any(|template| !template.vertices.is_empty() && !template.instance_x.is_empty())
+            || !self.circles_x.is_empty()
+            || !self.arcs_x.is_empty()
+            || !self.thermals_x.is_empty()
+    }
+
     fn boundary(&self) -> Boundary {
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
@@ -375,6 +479,32 @@ impl PrimitiveOutputBuffers {
             max_x = max_x.max(x);
             min_y = min_y.min(y);
             max_y = max_y.max(y);
+        }
+
+        for template in &self.triangle_templates {
+            if template.vertices.is_empty() {
+                continue;
+            }
+
+            let mut template_min_x = f32::INFINITY;
+            let mut template_max_x = f32::NEG_INFINITY;
+            let mut template_min_y = f32::INFINITY;
+            let mut template_max_y = f32::NEG_INFINITY;
+            for point in template.vertices.chunks_exact(2) {
+                template_min_x = template_min_x.min(point[0]);
+                template_max_x = template_max_x.max(point[0]);
+                template_min_y = template_min_y.min(point[1]);
+                template_max_y = template_max_y.max(point[1]);
+            }
+
+            for i in 0..template.instance_x.len() {
+                let x = template.instance_x[i];
+                let y = template.instance_y[i];
+                min_x = min_x.min(template_min_x + x);
+                max_x = max_x.max(template_max_x + x);
+                min_y = min_y.min(template_min_y + y);
+                max_y = max_y.max(template_max_y + y);
+            }
         }
 
         for i in 0..self.circles_x.len() {
@@ -614,25 +744,25 @@ impl GerberParser {
 
         for primitive in primitives {
             if primitive_has_hole(&primitive) {
-                holed_buffers.push_primitive(primitive);
+                holed_buffers.push_primitive(primitive)?;
             } else {
-                plain_buffers.push_primitive(primitive);
+                plain_buffers.push_primitive(primitive)?;
             }
         }
 
         let mut gerber_data_layers = Vec::new();
         let layer_count =
-            usize::from(counts.plain.has_geometry()) + usize::from(counts.holed.has_geometry());
+            usize::from(plain_buffers.has_geometry()) + usize::from(holed_buffers.has_geometry());
         try_reserve_exact(
             &mut gerber_data_layers,
             layer_count,
             "Gerber data layer list",
         )?;
 
-        if counts.plain.has_geometry() {
+        if plain_buffers.has_geometry() {
             gerber_data_layers.push(plain_buffers.into_gerber_data(is_negative));
         }
-        if counts.holed.has_geometry() {
+        if holed_buffers.has_geometry() {
             gerber_data_layers.push(holed_buffers.into_gerber_data(is_negative));
         }
 

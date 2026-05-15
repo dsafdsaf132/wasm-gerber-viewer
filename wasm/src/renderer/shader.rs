@@ -52,6 +52,28 @@ void main() {
 }
 "#;
 
+pub const TRIANGLE_TEMPLATE_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
+in vec2 position;
+in float instance_x;
+in float instance_y;
+uniform mat3 transform;
+void main() {
+    vec2 worldPosition = position + vec2(instance_x, instance_y);
+    vec3 transformed = transform * vec3(worldPosition, 1.0);
+    gl_Position = vec4(transformed.xy, 0.0, 1.0);
+}
+"#;
+
+pub const TRIANGLE_TEMPLATE_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
+void main() {
+    fragColor = color;
+}
+"#;
+
 pub const CIRCLE_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 in vec2 position;
@@ -285,6 +307,7 @@ pub struct ShaderProgram {
 /// All shader programs
 pub struct ShaderPrograms {
     pub triangle: ShaderProgram,
+    pub triangle_template: ShaderProgram,
     pub circle: ShaderProgram,
     pub arc: ShaderProgram,
     pub thermal: ShaderProgram,
@@ -304,6 +327,14 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
+            &["transform", "color"],
+        )?;
+
+        let triangle_template = compile_program(
+            gl,
+            TRIANGLE_TEMPLATE_VERTEX_SHADER,
+            TRIANGLE_TEMPLATE_FRAGMENT_SHADER,
+            &["position", "instance_x", "instance_y"],
             &["transform", "color"],
         )?;
 
@@ -365,6 +396,7 @@ impl ShaderPrograms {
 
         Ok(ShaderPrograms {
             triangle,
+            triangle_template,
             circle,
             arc,
             thermal,

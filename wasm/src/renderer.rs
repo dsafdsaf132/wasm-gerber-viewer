@@ -3,14 +3,16 @@ mod camera;
 mod shader;
 
 // Internal use only
-use buffer::{BufferCache, Fbo};
+use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
 use camera::Camera;
 use shader::{
     ShaderProgram, ShaderPrograms, ARRAY_BUFFER, BLEND, COLOR_BUFFER_BIT, FLOAT, FUNC_ADD, ONE,
     ONE_MINUS_SRC_ALPHA, STATIC_DRAW, TRIANGLES, ZERO,
 };
 
-use crate::shape::{Arcs, Boundary, Circles, GerberData, Thermals, Triangles};
+use crate::shape::{
+    Arcs, Boundary, Circles, GerberData, Thermals, TriangleTemplateInstances, Triangles,
+};
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
 use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlTexture};
@@ -123,6 +125,7 @@ impl Renderer {
 
     fn validate_gerber_data(data: &GerberData, sublayer_idx: usize) -> Result<(), JsValue> {
         Self::validate_triangle_data(&data.triangles, sublayer_idx)?;
+        Self::validate_triangle_template_data(&data.triangle_templates, sublayer_idx)?;
         Self::validate_circle_data(&data.circles, sublayer_idx)?;
         Self::validate_arc_data(&data.arcs, sublayer_idx)?;
         Self::validate_thermal_data(&data.thermals, sublayer_idx)?;
@@ -181,6 +184,47 @@ impl Renderer {
                 "Sublayer {} triangle vertex count exceeds WebGL draw limits",
                 sublayer_idx
             )));
+        }
+
+        Ok(())
+    }
+
+    fn validate_triangle_template_data(
+        templates: &[TriangleTemplateInstances],
+        sublayer_idx: usize,
+    ) -> Result<(), JsValue> {
+        for (template_idx, template) in templates.iter().enumerate() {
+            if !template.vertices.len().is_multiple_of(2) {
+                return Err(JsValue::from_str(&format!(
+                    "Sublayer {} triangle template {} vertex buffer has an odd number of coordinates",
+                    sublayer_idx, template_idx
+                )));
+            }
+            let vertex_count = template.vertices.len() / 2;
+            if !vertex_count.is_multiple_of(3) {
+                return Err(JsValue::from_str(&format!(
+                    "Sublayer {} triangle template {} vertex count is not divisible by 3",
+                    sublayer_idx, template_idx
+                )));
+            }
+            let instance_count = template.instance_x.len();
+            Self::validate_instance_count("triangle template", sublayer_idx, instance_count)?;
+            Self::validate_len(
+                "triangle template instance_y",
+                sublayer_idx,
+                template.instance_y.len(),
+                instance_count,
+            )?;
+            Self::validate_finite_slice("triangle template vertices", &template.vertices)?;
+            Self::validate_finite_slice("triangle template instance_x", &template.instance_x)?;
+            Self::validate_finite_slice("triangle template instance_y", &template.instance_y)?;
+
+            if vertex_count > i32::MAX as usize {
+                return Err(JsValue::from_str(&format!(
+                    "Sublayer {} triangle template {} vertex count exceeds WebGL draw limits",
+                    sublayer_idx, template_idx
+                )));
+            }
         }
 
         Ok(())
@@ -381,6 +425,7 @@ impl Renderer {
 
     fn delete_shader_programs(gl: &WebGl2RenderingContext, programs: &ShaderPrograms) {
         gl.delete_program(Some(&programs.triangle.program));
+        gl.delete_program(Some(&programs.triangle_template.program));
         gl.delete_program(Some(&programs.circle.program));
         gl.delete_program(Some(&programs.arc.program));
         gl.delete_program(Some(&programs.thermal.program));
@@ -402,6 +447,20 @@ impl Renderer {
         }
         if let Some(buf) = cache.triangle_hole_radius_buffer {
             gl.delete_buffer(Some(&buf));
+        }
+        for template_cache in cache.triangle_template_caches {
+            if let Some(vao) = template_cache.vao {
+                gl.delete_vertex_array(Some(&vao));
+            }
+            if let Some(buf) = template_cache.vertex_buffer {
+                gl.delete_buffer(Some(&buf));
+            }
+            if let Some(buf) = template_cache.instance_x_buffer {
+                gl.delete_buffer(Some(&buf));
+            }
+            if let Some(buf) = template_cache.instance_y_buffer {
+                gl.delete_buffer(Some(&buf));
+            }
         }
 
         if let Some(vao) = cache.circle_vao {
@@ -864,6 +923,139 @@ impl Renderer {
         Ok(())
     }
 
+    /// Draw repeated triangle mesh templates.
+    fn draw_instanced_triangle_templates(
+        &mut self,
+        transform: &[f32; 9],
+        color: &[f32; 4],
+        layer_id: usize,
+        sublayer_idx: usize,
+    ) -> Result<(), JsValue> {
+        if layer_id >= self.layers.len() {
+            return Err(JsValue::from_str("Invalid layer index"));
+        }
+
+        let program = &self.programs.triangle_template;
+        self.gl.use_program(Some(&program.program));
+
+        let template_count = self.get_layer(layer_id)?.gerber_data[sublayer_idx]
+            .triangle_templates
+            .len();
+
+        for template_idx in 0..template_count {
+            let (vertex_count, instance_count) = {
+                let layer = if let Some(l) = &mut self.layers[layer_id] {
+                    l
+                } else {
+                    return Err(JsValue::from_str("Layer deallocated"));
+                };
+
+                let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
+                if buffer_cache.triangle_template_caches.len() < template_count {
+                    buffer_cache
+                        .triangle_template_caches
+                        .resize_with(template_count, TriangleTemplateBufferCache::default);
+                }
+
+                if buffer_cache.triangle_template_caches[template_idx]
+                    .vao
+                    .is_none()
+                {
+                    let template =
+                        &layer.gerber_data[sublayer_idx].triangle_templates[template_idx];
+                    if template.vertices.is_empty() || template.instance_x.is_empty() {
+                        continue;
+                    }
+
+                    let vertex_count = (template.vertices.len() / 2) as i32;
+                    let instance_count = template.instance_x.len() as i32;
+
+                    let vao = self
+                        .gl
+                        .create_vertex_array()
+                        .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+                    self.gl.bind_vertex_array(Some(&vao));
+
+                    let vertex_buffer = self
+                        .gl
+                        .create_buffer()
+                        .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
+                    self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
+                    unsafe {
+                        let array = Float32Array::view(&template.vertices);
+                        self.gl.buffer_data_with_array_buffer_view(
+                            ARRAY_BUFFER,
+                            &array,
+                            STATIC_DRAW,
+                        );
+                    }
+
+                    let position_loc = Self::shader_attribute(program, "position")?;
+                    self.gl.enable_vertex_attrib_array(position_loc);
+                    self.gl
+                        .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+
+                    let instance_x_buffer = Self::create_instance_buffer(
+                        &self.gl,
+                        &template.instance_x,
+                        program,
+                        "instance_x",
+                        1,
+                    )?;
+                    let instance_y_buffer = Self::create_instance_buffer(
+                        &self.gl,
+                        &template.instance_y,
+                        program,
+                        "instance_y",
+                        1,
+                    )?;
+
+                    self.gl.bind_vertex_array(None);
+
+                    let template_cache = &mut layer.buffer_caches[sublayer_idx]
+                        .triangle_template_caches[template_idx];
+                    template_cache.vao = Some(vao);
+                    template_cache.vertex_count = vertex_count;
+                    template_cache.instance_count = instance_count;
+                    template_cache.vertex_buffer = Some(vertex_buffer);
+                    template_cache.instance_x_buffer = Some(instance_x_buffer);
+                    template_cache.instance_y_buffer = Some(instance_y_buffer);
+
+                    layer.gerber_data[sublayer_idx].triangle_templates[template_idx]
+                        .release_cpu_geometry();
+                    layer.cpu_geometry_released = true;
+                }
+
+                let template_cache =
+                    &layer.buffer_caches[sublayer_idx].triangle_template_caches[template_idx];
+                (template_cache.vertex_count, template_cache.instance_count)
+            };
+
+            if vertex_count == 0 || instance_count == 0 {
+                continue;
+            }
+
+            let layer = self.get_layer(layer_id)?;
+            let template_cache =
+                &layer.buffer_caches[sublayer_idx].triangle_template_caches[template_idx];
+
+            self.gl.bind_vertex_array(template_cache.vao.as_ref());
+            if let Some(loc) = program.uniforms.get("transform") {
+                self.gl
+                    .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
+            }
+            if let Some(loc) = program.uniforms.get("color") {
+                self.gl.uniform4fv_with_f32_array(Some(loc), color);
+            }
+
+            self.gl
+                .draw_arrays_instanced(TRIANGLES, 0, vertex_count, instance_count);
+            self.gl.bind_vertex_array(None);
+        }
+
+        Ok(())
+    }
+
     /// Draw instanced circles
     fn draw_instanced_circles(
         &mut self,
@@ -1306,6 +1498,12 @@ impl Renderer {
 
             // Render all shapes (empty checks done inside draw methods)
             self.draw_instanced_triangles(transform, &white_color, layer_id, sublayer_idx)?;
+            self.draw_instanced_triangle_templates(
+                transform,
+                &white_color,
+                layer_id,
+                sublayer_idx,
+            )?;
             self.draw_instanced_circles(transform, &white_color, layer_id, sublayer_idx)?;
             self.draw_instanced_arcs(transform, &white_color, layer_id, sublayer_idx)?;
             self.draw_instanced_thermals(transform, &white_color, layer_id, sublayer_idx)?;

@@ -6,6 +6,7 @@ use i_triangle::float::triangulatable::Triangulatable;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
+use std::rc::Rc;
 
 fn format_count(value: usize) -> String {
     let digits = value.to_string();
@@ -125,6 +126,11 @@ pub enum Primitive {
         rotation: f32,
         exposure: f32, // 1.0 = positive, 0.0 = negative
     },
+    TriangleTemplateFlash {
+        template: Rc<Vec<f32>>,
+        x: f32,
+        y: f32,
+    },
 }
 
 /// Rotate point around given center
@@ -201,6 +207,13 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *outer_diameter *= scale;
             *inner_diameter *= scale;
             *gap_thickness *= scale;
+        }
+        Primitive::TriangleTemplateFlash { template, x, y } => {
+            for value in Rc::make_mut(template).iter_mut() {
+                *value *= scale;
+            }
+            *x *= scale;
+            *y *= scale;
         }
     }
 }
@@ -286,6 +299,23 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
             }
             mirror_angle(rotation);
         }
+        Primitive::TriangleTemplateFlash { template, x, y } => {
+            let vertices = Rc::make_mut(template);
+            for point in vertices.chunks_exact_mut(2) {
+                if mirror_x {
+                    point[0] = -point[0];
+                }
+                if mirror_y {
+                    point[1] = -point[1];
+                }
+            }
+            if mirror_x {
+                *x = -*x;
+            }
+            if mirror_y {
+                *y = -*y;
+            }
+        }
     }
 }
 
@@ -352,6 +382,19 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             *x = center[0];
             *y = center[1];
             rotate_angle(rotation);
+        }
+        Primitive::TriangleTemplateFlash { template, x, y } => {
+            let vertices = Rc::make_mut(template);
+            for point in vertices.chunks_exact_mut(2) {
+                let mut vertex = [point[0], point[1]];
+                rotate_point(&mut vertex, angle, 0.0, 0.0);
+                point[0] = vertex[0];
+                point[1] = vertex[1];
+            }
+            let mut center = [*x, *y];
+            rotate_point(&mut center, angle, 0.0, 0.0);
+            *x = center[0];
+            *y = center[1];
         }
     }
 }
@@ -515,6 +558,10 @@ pub fn primitive_to_polygon(primitive: &Primitive) -> Vec<[f32; 2]> {
             }
             vertices
         }
+        Primitive::TriangleTemplateFlash { template, x, y } => template
+            .chunks_exact(2)
+            .map(|point| [point[0] + *x, point[1] + *y])
+            .collect(),
     }
 }
 
@@ -537,12 +584,9 @@ pub fn apply_boolean_operations(shapes: &[(Vec<Vec<[f32; 2]>>, f32)]) -> Vec<Pri
     // Start with first positive shape
     let mut result_shapes: Vec<Vec<Vec<[f32; 2]>>> = vec![shapes[first_idx].0.clone()];
 
-    // Apply boolean operations sequentially
-    for (i, (shape, exposure)) in shapes.iter().enumerate() {
-        if i == first_idx {
-            continue; // Skip the first shape we already added
-        }
-
+    // Apply boolean operations sequentially. Exposure-off primitives before
+    // the first positive primitive have no earlier macro solid to erase.
+    for (shape, exposure) in shapes.iter().skip(first_idx + 1) {
         if *exposure > 0.5 {
             // Positive: UNION
             result_shapes =
@@ -719,6 +763,11 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             rotation: *rotation,
             exposure: *exposure,
         },
+        Primitive::TriangleTemplateFlash { template, x, y } => Primitive::TriangleTemplateFlash {
+            template: Rc::clone(template),
+            x: x + dx,
+            y: y + dy,
+        },
     }
 }
 
@@ -816,6 +865,7 @@ fn flash_aperture_no_sr(
                     Primitive::Triangle { exposure, .. } => *exposure,
                     Primitive::Arc { exposure, .. } => *exposure,
                     Primitive::Thermal { exposure, .. } => *exposure,
+                    Primitive::TriangleTemplateFlash { .. } => 1.0,
                 };
                 // Wrap polygon in shape format (single contour)
                 (vec![poly], exposure)
@@ -827,6 +877,18 @@ fn flash_aperture_no_sr(
         try_reserve_primitives(primitives, result_primitives.len(), "aperture flash")?;
         primitives.extend(result_primitives);
     } else {
+        if let Some(template) = &aperture.triangle_template {
+            if layer_scale == 1.0 && !mirror_x && !mirror_y && layer_rotation == 0.0 {
+                try_reserve_primitives(primitives, 1, "aperture triangle template flash")?;
+                primitives.push(Primitive::TriangleTemplateFlash {
+                    template: Rc::clone(template),
+                    x,
+                    y,
+                });
+                return Ok(());
+            }
+        }
+
         // Direct primitive cloning
         try_reserve_primitives(primitives, aperture.primitives.len(), "aperture flash")?;
         for primitive in &aperture.primitives {
@@ -865,6 +927,10 @@ fn flash_aperture_no_sr(
                     *ay += y;
                 }
                 Primitive::Thermal { x: tx, y: ty, .. } => {
+                    *tx += x;
+                    *ty += y;
+                }
+                Primitive::TriangleTemplateFlash { x: tx, y: ty, .. } => {
                     *tx += x;
                     *ty += y;
                 }

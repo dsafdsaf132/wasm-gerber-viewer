@@ -6,6 +6,17 @@ pub struct Fbo {
     pub texture: WebGlTexture,
 }
 
+/// Buffer cache for one repeated triangle mesh template.
+#[derive(Default)]
+pub struct TriangleTemplateBufferCache {
+    pub vao: Option<WebGlVertexArrayObject>,
+    pub vertex_count: i32,
+    pub instance_count: i32,
+    pub vertex_buffer: Option<WebGlBuffer>,
+    pub instance_x_buffer: Option<WebGlBuffer>,
+    pub instance_y_buffer: Option<WebGlBuffer>,
+}
+
 /// Buffer cache for geometry rendering (per polarity sublayer)
 #[derive(Default)]
 pub struct BufferCache {
@@ -16,6 +27,7 @@ pub struct BufferCache {
     pub triangle_hole_x_buffer: Option<WebGlBuffer>,
     pub triangle_hole_y_buffer: Option<WebGlBuffer>,
     pub triangle_hole_radius_buffer: Option<WebGlBuffer>,
+    pub triangle_template_caches: Vec<TriangleTemplateBufferCache>,
 
     // Circles cache
     pub circle_vao: Option<WebGlVertexArrayObject>,

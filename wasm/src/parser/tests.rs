@@ -1,5 +1,6 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
 use super::{format_count, parse_gerber};
+use crate::shape::GerberData;
 use std::collections::HashMap;
 
 fn assert_approx_eq(actual: f32, expected: f32) {
@@ -23,6 +24,27 @@ fn triangle_bounds(vertices: &[f32]) -> (f32, f32, f32, f32) {
     }
 
     (min_x, max_x, min_y, max_y)
+}
+
+fn collect_triangle_vertices(layer: &GerberData) -> Vec<f32> {
+    let mut vertices = layer.triangles.vertices.clone();
+
+    for template in &layer.triangle_templates {
+        for i in 0..template.instance_x.len() {
+            let offset_x = template.instance_x[i];
+            let offset_y = template.instance_y[i];
+            for point in template.vertices.chunks_exact(2) {
+                vertices.push(point[0] + offset_x);
+                vertices.push(point[1] + offset_y);
+            }
+        }
+    }
+
+    vertices
+}
+
+fn layer_triangle_bounds(layer: &GerberData) -> (f32, f32, f32, f32) {
+    triangle_bounds(&collect_triangle_vertices(layer))
 }
 
 fn has_circle_at(
@@ -103,6 +125,23 @@ fn gerber_snapshot(data: &str) -> String {
             &format!("layer[{idx}].triangles.hole_radius"),
             &layer.triangles.hole_radius,
         );
+        for (template_idx, template) in layer.triangle_templates.iter().enumerate() {
+            push_scaled_vec(
+                &mut output,
+                &format!("layer[{idx}].triangle_templates[{template_idx}].vertices"),
+                &template.vertices,
+            );
+            push_scaled_vec(
+                &mut output,
+                &format!("layer[{idx}].triangle_templates[{template_idx}].instance_x"),
+                &template.instance_x,
+            );
+            push_scaled_vec(
+                &mut output,
+                &format!("layer[{idx}].triangle_templates[{template_idx}].instance_y"),
+                &template.instance_y,
+            );
+        }
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.x"),
@@ -252,7 +291,8 @@ M02*",
     .expect("macro should parse omitted parameters");
     let mut occupied_quadrants = [false; 4];
 
-    for triangle in layers[0].triangles.vertices.chunks_exact(6) {
+    let vertices = collect_triangle_vertices(&layers[0]);
+    for triangle in vertices.chunks_exact(6) {
         let centroid_x = (triangle[0] + triangle[2] + triangle[4]) / 3.0;
         let centroid_y = (triangle[1] + triangle[3] + triangle[5]) / 3.0;
 
@@ -332,7 +372,13 @@ M02*",
     .expect("apertures should parse");
 
     let triangles = &layers[0].triangles;
-    assert!(!triangles.vertices.is_empty());
+    assert!(
+        !triangles.vertices.is_empty()
+            || layers[0]
+                .triangle_templates
+                .iter()
+                .any(|template| !template.vertices.is_empty())
+    );
     assert!(triangles.hole_x.is_empty());
     assert!(triangles.hole_y.is_empty());
     assert!(triangles.hole_radius.is_empty());
@@ -373,6 +419,32 @@ M02*",
     assert_eq!(circles.hole_y.len(), circles.x.len());
     assert_eq!(circles.hole_radius.len(), circles.x.len());
     assert!(circles.hole_radius.iter().all(|radius| *radius > 0.0));
+}
+
+#[test]
+fn macro_exposure_off_only_erases_earlier_macro_primitives() {
+    let data = "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMCLEARFIRST*
+1,0,0.6,0,0,0*
+21,1,1.0,1.0,0,0,0*%
+%ADD10CLEARFIRST*%
+D10*
+X000000Y000000D03*
+M02*";
+
+    let layers = parse_gerber(data).expect("macro exposure order should parse");
+    let vertices = collect_triangle_vertices(&layers[0]);
+
+    // The leading exposure-off circle has no earlier macro solid to erase, so
+    // the result is the plain square rather than a square with a circular hole.
+    assert_eq!(vertices.len(), 12);
+    let (min_x, max_x, min_y, max_y) = triangle_bounds(&vertices);
+    assert_approx_eq(min_x, -0.5);
+    assert_approx_eq(max_x, 0.5);
+    assert_approx_eq(min_y, -0.5);
+    assert_approx_eq(max_y, 0.5);
 }
 
 #[test]
@@ -422,7 +494,9 @@ M02*",
 layers=1
 layer[0].negative=false
 layer[0].boundary=[-5000,5000,0,20000]
-layer[0].triangles.vertices=[5000, 0, 5000, 20000, -5000, 20000, 5000, 0, -5000, 20000, -5000, 0]",
+layer[0].triangle_templates[0].vertices=[5000, 0, 5000, 20000, -5000, 20000, 5000, 0, -5000, 20000, -5000, 0]
+layer[0].triangle_templates[0].instance_x=[0]
+layer[0].triangle_templates[0].instance_y=[0]",
     );
 }
 
@@ -508,7 +582,9 @@ M02*",
 layers=1
 layer[0].negative=false
 layer[0].boundary=[-2000,0,-9000,11000]
-layer[0].triangles.vertices=[-2000, 8000, -2000, -6000, 0, -9000, 0, 11000, -2000, 8000, 0, -9000]",
+layer[0].triangle_templates[0].vertices=[-2000, 8000, -2000, -6000, 0, -9000, 0, 11000, -2000, 8000, 0, -9000]
+layer[0].triangle_templates[0].instance_x=[0]
+layer[0].triangle_templates[0].instance_y=[0]",
     );
 }
 
@@ -663,7 +739,7 @@ X000000Y000000D03*
 M02*";
 
     let layers = parse_gerber(data).expect("macro rectangle should parse");
-    let (min_x, max_x, min_y, max_y) = triangle_bounds(&layers[0].triangles.vertices);
+    let (min_x, max_x, min_y, max_y) = layer_triangle_bounds(&layers[0]);
 
     assert_approx_eq(min_x, -0.5);
     assert_approx_eq(max_x, 0.5);
@@ -683,7 +759,7 @@ X000000Y000000D03*
 M02*";
 
     let layers = parse_gerber(data).expect("macro outline should parse");
-    let (min_x, max_x, min_y, max_y) = triangle_bounds(&layers[0].triangles.vertices);
+    let (min_x, max_x, min_y, max_y) = layer_triangle_bounds(&layers[0]);
 
     assert_approx_eq(min_x, -1.0);
     assert_approx_eq(max_x, 0.0);
@@ -751,7 +827,7 @@ M02*";
     let layers = parse_gerber(data).expect("macro expression should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(!layers[0].triangles.vertices.is_empty());
+    assert!(!collect_triangle_vertices(&layers[0]).is_empty());
 }
 
 #[test]
@@ -772,6 +848,29 @@ M02*";
     assert_eq!(circles.x.len(), 2);
     assert_approx_eq(circles.x[0], 0.0);
     assert_approx_eq(circles.x[1], 25.4);
+}
+
+#[test]
+fn repeated_triangle_aperture_flashes_use_template_instances() {
+    let data = "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X0.5*%
+D10*
+X000000Y000000D03*
+X2000000Y000000D03*
+M02*";
+
+    let layers = parse_gerber(data).expect("rectangle flashes should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert!(layers[0].triangles.vertices.is_empty());
+    assert_eq!(layers[0].triangle_templates.len(), 1);
+    assert_eq!(layers[0].triangle_templates[0].vertices.len(), 12);
+    assert_eq!(layers[0].triangle_templates[0].instance_x.len(), 2);
+    assert_eq!(layers[0].triangle_templates[0].instance_y.len(), 2);
+    assert_approx_eq(layers[0].triangle_templates[0].instance_x[0], 0.0);
+    assert_approx_eq(layers[0].triangle_templates[0].instance_x[1], 2.0);
 }
 
 #[test]
@@ -1003,7 +1102,7 @@ X000000Y000000D03*
 M02*";
 
     let layers = parse_gerber(data).expect("rotated aperture should parse");
-    let (min_x, max_x, min_y, max_y) = triangle_bounds(&layers[0].triangles.vertices);
+    let (min_x, max_x, min_y, max_y) = layer_triangle_bounds(&layers[0]);
 
     assert_approx_eq(min_x, -0.5);
     assert_approx_eq(max_x, 0.5);

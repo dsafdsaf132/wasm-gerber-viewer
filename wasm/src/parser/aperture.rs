@@ -2,6 +2,7 @@ use super::aperture_macro::ApertureMacro;
 use super::geometry::{scale_primitive, Primitive};
 use super::state::Polarity;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// Aperture definition (Circle, Rectangle, Obround, Polygon, or Macro reference)
 #[derive(Clone, Debug)]
@@ -10,6 +11,7 @@ pub struct Aperture {
     pub primitives: Vec<Primitive>, // Aperture contains multiple basic primitives
     pub has_negative: bool,         // true if primitives contain exposure=0
     pub block_layers: Option<Vec<(Polarity, Vec<Primitive>)>>,
+    pub triangle_template: Option<Rc<Vec<f32>>>,
 }
 
 impl Aperture {
@@ -19,6 +21,7 @@ impl Aperture {
             primitives: Vec::new(),
             has_negative: false,
             block_layers: None,
+            triangle_template: None,
         }
     }
 
@@ -32,8 +35,35 @@ impl Aperture {
             primitives: Vec::new(),
             has_negative,
             block_layers: Some(block_layers),
+            triangle_template: None,
         }
     }
+}
+
+fn build_triangle_template(primitives: &[Primitive]) -> Option<Rc<Vec<f32>>> {
+    if primitives.is_empty() {
+        return None;
+    }
+
+    let mut vertices = Vec::with_capacity(primitives.len() * 6);
+    for primitive in primitives {
+        match primitive {
+            Primitive::Triangle {
+                vertices: triangle,
+                exposure,
+                hole_radius,
+                ..
+            } if *exposure >= 0.5 && *hole_radius == 0.0 => {
+                for vertex in triangle {
+                    vertices.push(vertex[0]);
+                    vertices.push(vertex[1]);
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    Some(Rc::new(vertices))
 }
 
 /// Parse Aperture definition - %ADD{code}{shape}{params}*%
@@ -372,7 +402,9 @@ pub fn parse_aperture(
         Primitive::Triangle { exposure, .. } => *exposure < 0.5,
         Primitive::Arc { exposure, .. } => *exposure < 0.5,
         Primitive::Thermal { exposure, .. } => *exposure < 0.5,
+        Primitive::TriangleTemplateFlash { .. } => false,
     });
+    aperture.triangle_template = build_triangle_template(&aperture.primitives);
 
     apertures.insert(code, aperture);
 }
