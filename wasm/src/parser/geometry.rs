@@ -4,17 +4,47 @@ use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
 use i_triangle::float::triangulatable::Triangulatable;
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::mem::take;
 
-fn primitive_allocation_error(
-    context: &str,
-    additional: usize,
-    error: impl std::fmt::Debug,
-) -> String {
-    format!(
-        "Gerber layer is too large to parse: unable to allocate {} ({} primitives): {:?}",
-        context, additional, error
-    )
+fn format_count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    let first_group_len = digits.len() % 3;
+
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (index - first_group_len) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(ch);
+    }
+
+    formatted
+}
+
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as usize)
+    }
+}
+
+fn format_primitive_allocation(additional: usize) -> String {
+    let primitives = format_count(additional);
+    match additional.checked_mul(size_of::<Primitive>()) {
+        Some(bytes) => format!("{} primitives, {}", primitives, format_bytes(bytes)),
+        None => format!("{} primitives", primitives),
+    }
 }
 
 fn checked_primitive_count(
@@ -35,9 +65,13 @@ fn try_reserve_primitives(
     additional: usize,
     context: &str,
 ) -> Result<(), String> {
-    primitives
-        .try_reserve(additional)
-        .map_err(|error| primitive_allocation_error(context, additional, error))
+    primitives.try_reserve(additional).map_err(|_| {
+        format!(
+            "Gerber layer is too large to parse: not enough memory for {} ({})",
+            context,
+            format_primitive_allocation(additional)
+        )
+    })
 }
 
 fn try_reserve_layers(
@@ -45,10 +79,11 @@ fn try_reserve_layers(
     additional: usize,
     context: &str,
 ) -> Result<(), String> {
-    polarity_layers.try_reserve(additional).map_err(|error| {
+    polarity_layers.try_reserve(additional).map_err(|_| {
         format!(
-            "Gerber layer is too large to parse: unable to allocate {} ({} polarity layers): {:?}",
-            context, additional, error
+            "Gerber layer is too large to parse: not enough memory for {} ({} polarity layers)",
+            context,
+            format_count(additional)
         )
     })
 }

@@ -275,11 +275,9 @@ pub fn parse_lp(
 
     // Check if polarity has changed
     if state.polarity != new_polarity && !current_primitives.is_empty() {
-        polarity_layers.try_reserve(1).map_err(|error| {
-            format!(
-                "Gerber layer is too large to parse: unable to allocate polarity layer list: {:?}",
-                error
-            )
+        polarity_layers.try_reserve(1).map_err(|_| {
+            "Gerber layer is too large to parse: not enough memory for polarity layer list"
+                .to_string()
         })?;
         polarity_layers.push((state.polarity, take(current_primitives)));
     }

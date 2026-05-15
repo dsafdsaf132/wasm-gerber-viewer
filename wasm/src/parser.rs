@@ -17,6 +17,7 @@ use state::{
 use self::geometry::{parse_graphic_command, Primitive};
 use crate::shape::{Arcs, Boundary, Circles, GerberData, Thermals, Triangles};
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::mem::take;
 use wasm_bindgen::prelude::*;
 
@@ -229,15 +230,56 @@ fn checked_capacity(
     })
 }
 
+fn format_count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    let first_group_len = digits.len() % 3;
+
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (index - first_group_len) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(ch);
+    }
+
+    formatted
+}
+
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as usize)
+    }
+}
+
+fn format_value_allocation<T>(additional: usize) -> String {
+    let values = format_count(additional);
+    match additional.checked_mul(size_of::<T>()) {
+        Some(bytes) => format!("{} values, {}", values, format_bytes(bytes)),
+        None => format!("{} values", values),
+    }
+}
+
 fn try_reserve_exact<T>(
     values: &mut Vec<T>,
     additional: usize,
     buffer_name: &str,
 ) -> Result<(), JsValue> {
-    values.try_reserve_exact(additional).map_err(|error| {
+    values.try_reserve_exact(additional).map_err(|_| {
         JsValue::from_str(&format!(
-            "Gerber layer is too large to render: unable to allocate {} ({} values): {:?}",
-            buffer_name, additional, error
+            "Gerber layer is too large to render: not enough memory for {} ({})",
+            buffer_name,
+            format_value_allocation::<T>(additional)
         ))
     })
 }

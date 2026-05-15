@@ -1034,9 +1034,7 @@ export class GerberViewer {
     try {
       this.wasmModule.reserve_input_capacity(reserveBytes);
     } catch (error) {
-      throw new Error(
-        `Not enough WebAssembly memory to load ${formatFileSize(byteLength)} input: ${getErrorMessage(error)}`,
-      );
+      throw new Error(getErrorMessage(error));
     }
   }
 

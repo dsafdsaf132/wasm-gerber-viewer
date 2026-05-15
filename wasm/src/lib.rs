@@ -15,14 +15,31 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as usize)
+    }
+}
+
 /// Preflight a large JS-to-WASM input copy with catchable allocation failure.
 #[wasm_bindgen]
 pub fn reserve_input_capacity(byte_count: usize) -> Result<(), JsValue> {
     let mut buffer = Vec::<u8>::new();
-    buffer.try_reserve_exact(byte_count).map_err(|error| {
+    buffer.try_reserve_exact(byte_count).map_err(|_| {
         JsValue::from_str(&format!(
-            "Not enough WebAssembly memory to load file input ({} bytes): {:?}",
-            byte_count, error
+            "Not enough WebAssembly memory to load file input ({})",
+            format_bytes(byte_count)
         ))
     })?;
     Ok(())
