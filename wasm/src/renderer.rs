@@ -145,8 +145,18 @@ impl Renderer {
             max_y = max_y.max(boundary.max_y);
 
             let mut buffer_cache = BufferCache::default();
-            let template_count =
-                self.populate_buffer_cache_from_render_payload(&mut buffer_cache, &sublayer)?;
+            let template_count = match self
+                .populate_buffer_cache_from_render_payload(&mut buffer_cache, &sublayer)
+            {
+                Ok(template_count) => template_count,
+                Err(error) => {
+                    Self::delete_buffer_cache(&self.gl, buffer_cache);
+                    for cache in buffer_caches.drain(..) {
+                        Self::delete_buffer_cache(&self.gl, cache);
+                    }
+                    return Err(error);
+                }
+            };
             buffer_caches.push(buffer_cache);
             gerber_data.push(Self::placeholder_gerber_data(
                 boundary,
@@ -159,9 +169,19 @@ impl Renderer {
             return Err(JsValue::from_str("Layer boundary is not finite"));
         }
 
+        let fbo = match Self::create_fbo(&self.gl, width, height) {
+            Ok(fbo) => fbo,
+            Err(error) => {
+                for cache in buffer_caches.drain(..) {
+                    Self::delete_buffer_cache(&self.gl, cache);
+                }
+                return Err(error);
+            }
+        };
+
         let layer_metadata = LayerMetadata {
             gerber_data,
-            fbo: Self::create_fbo(&self.gl, width, height)?,
+            fbo,
             buffer_caches,
             boundary: Boundary::new(min_x, max_x, min_y, max_y),
             fbo_dirty: true,

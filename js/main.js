@@ -268,8 +268,23 @@ class GerberParseWorkerPool {
   recycleWorker(worker) {
     worker.terminate();
     this.workers = this.workers.filter((item) => item !== worker);
-    if (!this.isDisposed) {
+
+    if (this.isDisposed) {
+      return;
+    }
+
+    try {
       this.addIdleWorker();
+    } catch (error) {
+      if (this.workers.length === 0) {
+        const message = getErrorMessage(error);
+        for (const queuedTask of this.queue) {
+          queuedTask.reject(
+            new Error(`Failed to recreate parse worker: ${message}`),
+          );
+        }
+        this.queue = [];
+      }
     }
   }
 
@@ -343,6 +358,7 @@ export class GerberViewer {
     this.nextLayerDomId = 0;
     this.draggedLayerId = null;
     this.layerDropIndex = null;
+    this.pendingLayerRecordsForRecovery = null;
 
     // Camera
     this.camera = {
@@ -1489,6 +1505,8 @@ export class GerberViewer {
   ) {
     const results = Array(total).fill(false);
     const layerRecords = Array(total).fill(null);
+    const previousPendingLayerRecords = this.pendingLayerRecordsForRecovery;
+    this.pendingLayerRecordsForRecovery = layerRecords;
     let activeTasks = 0;
     let scheduledTasks = 0;
     let completedTasks = 0;
@@ -1503,11 +1521,16 @@ export class GerberViewer {
 
         isResolved = true;
         let didCommitLayer = false;
-        for (const layerRecord of layerRecords) {
+        for (let index = 0; index < layerRecords.length; index++) {
+          const layerRecord = layerRecords[index];
           if (layerRecord) {
             this.commitLayerMetadata(layerRecord, { updateUiState: false });
+            layerRecords[index] = null;
             didCommitLayer = true;
           }
+        }
+        if (this.pendingLayerRecordsForRecovery === layerRecords) {
+          this.pendingLayerRecordsForRecovery = previousPendingLayerRecords;
         }
         if (didCommitLayer) {
           this.updateUiState();
@@ -1543,6 +1566,7 @@ export class GerberViewer {
                 progress,
               });
               if (layerRecord) {
+                this.prepareLayerMetadata(layerRecord);
                 layerRecords[index] = layerRecord;
                 results[index] = true;
               }
@@ -1894,15 +1918,57 @@ export class GerberViewer {
     }
   }
 
-  snapshotLayersForRecovery() {
-    return this.layers.map((layer) => ({
+  createLayerRecoverySnapshot(layer) {
+    return {
       id: layer.id,
       name: layer.name,
       visible: layer.visible,
-      color: [...layer.color],
+      color: layer.color ? [...layer.color] : null,
       sourceContent: layer.sourceContent,
       offset: { ...normalizeLayerOffset(layer.offset) },
-    }));
+    };
+  }
+
+  snapshotLayersForRecovery() {
+    const committedSnapshots = this.layers.map((layer) =>
+      this.createLayerRecoverySnapshot(layer),
+    );
+    const committedIds = new Set(this.layers.map((layer) => layer.id));
+    const pendingSnapshots = (this.pendingLayerRecordsForRecovery ?? [])
+      .filter(
+        (layer) =>
+          layer &&
+          !committedIds.has(layer.id) &&
+          typeof layer.sourceContent === "string",
+      )
+      .map((layer) => this.createLayerRecoverySnapshot(layer));
+
+    return [...committedSnapshots, ...pendingSnapshots];
+  }
+
+  collectPendingLayerRecoveryIds() {
+    return new Set(
+      (this.pendingLayerRecordsForRecovery ?? [])
+        .filter((layer) => layer && typeof layer.sourceContent === "string")
+        .map((layer) => layer.id),
+    );
+  }
+
+  clearRecoveredPendingLayerRecords(recoveredLayerIds) {
+    if (!this.pendingLayerRecordsForRecovery || recoveredLayerIds.size === 0) {
+      return;
+    }
+
+    for (
+      let index = 0;
+      index < this.pendingLayerRecordsForRecovery.length;
+      index++
+    ) {
+      const layer = this.pendingLayerRecordsForRecovery[index];
+      if (layer && recoveredLayerIds.has(layer.id)) {
+        this.pendingLayerRecordsForRecovery[index] = null;
+      }
+    }
   }
 
   disposeWasmProcessor() {
@@ -1925,10 +1991,12 @@ export class GerberViewer {
       return;
     }
 
+    const recoveredPendingLayerIds = this.collectPendingLayerRecoveryIds();
     const layerSnapshot = this.snapshotLayersForRecovery();
     if (layerSnapshot.length === 0) {
       this.disposeWasmProcessor();
       this.createWebGlProcessor();
+      this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       return;
     }
 
@@ -1975,6 +2043,7 @@ export class GerberViewer {
       this.renderLayerList();
       this.render();
     } finally {
+      this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       this.isRecoveringWasmProcessor = false;
       this.updateUiState();
     }
@@ -2020,6 +2089,15 @@ export class GerberViewer {
   }
 
   commitLayerMetadata(layer, { updateUiState = true } = {}) {
+    this.prepareLayerMetadata(layer);
+    this.layers.push(layer);
+    if (updateUiState) {
+      this.updateUiState();
+    }
+    return layer;
+  }
+
+  prepareLayerMetadata(layer) {
     if (!layer.id) {
       layer.id = `layer-${this.nextLayerDomId++}`;
     }
@@ -2030,10 +2108,6 @@ export class GerberViewer {
         ...this.colorPalette[this.nextColorIndex % this.colorPalette.length],
       ];
       this.nextColorIndex++;
-    }
-    this.layers.push(layer);
-    if (updateUiState) {
-      this.updateUiState();
     }
     return layer;
   }
