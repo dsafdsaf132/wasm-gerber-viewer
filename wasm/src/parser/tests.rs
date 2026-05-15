@@ -1,6 +1,6 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
 use super::geometry::Primitive;
-use super::{parse_gerber, GerberParser, Polarity};
+use super::{format_count, parse_gerber, GerberParser, Polarity};
 use std::collections::HashMap;
 
 fn assert_approx_eq(actual: f32, expected: f32) {
@@ -54,6 +54,17 @@ fn test_circle() -> Primitive {
         hole_y: 0.0,
         hole_radius: 0.0,
     }
+}
+
+#[test]
+fn allocation_count_formatting_groups_digits_without_underflow() {
+    assert_eq!(format_count(0), "0");
+    assert_eq!(format_count(12), "12");
+    assert_eq!(format_count(123), "123");
+    assert_eq!(format_count(1_234), "1,234");
+    assert_eq!(format_count(12_345), "12,345");
+    assert_eq!(format_count(123_456), "123,456");
+    assert_eq!(format_count(24_000_000), "24,000,000");
 }
 
 fn scaled(value: f32) -> i32 {

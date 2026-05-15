@@ -13,7 +13,7 @@ fn format_count(value: usize) -> String {
     let first_group_len = digits.len() % 3;
 
     for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && (index - first_group_len) % 3 == 0 {
+        if index > 0 && index >= first_group_len && (index - first_group_len) % 3 == 0 {
             formatted.push(',');
         }
         formatted.push(ch);
