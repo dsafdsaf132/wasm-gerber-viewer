@@ -62,12 +62,6 @@ function getUtf8ByteLength(value) {
   return bytes;
 }
 
-function waitForNextFrame() {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => resolve());
-  });
-}
-
 function clampProgress(value) {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
@@ -1230,7 +1224,6 @@ export class GerberViewer {
         total,
         progress: this.getLayerLoadProgress(index, total, 0.55),
       });
-      await waitForNextFrame();
 
       await this.addLayer(name, content);
       this.updateLoadingModal({
@@ -1240,7 +1233,6 @@ export class GerberViewer {
         total,
         progress: this.getLayerLoadProgress(index, total, 1),
       });
-      await waitForNextFrame();
       return true;
     } catch (error) {
       this.handleLayerLoadError(name, error);
@@ -1251,7 +1243,6 @@ export class GerberViewer {
         total,
         progress: this.getLayerLoadProgress(index, total, 1),
       });
-      await waitForNextFrame();
       return false;
     }
   }

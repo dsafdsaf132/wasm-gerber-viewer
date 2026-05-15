@@ -60,7 +60,10 @@ export async function fetchRemoteFile(url, { onProgress = () => {} } = {}) {
 export async function collectLayerSources(files, callbacks = {}) {
   const layerSources = [];
 
-  for (const [index, file] of files.entries()) {
+  for (let index = 0; index < files.length; index++) {
+    const file = typeof files.item === "function" ? files.item(index) : files[index];
+    if (!file) continue;
+
     callbacks.onFileStart?.(file.name, index + 1, files.length);
 
     if (isZipFile(file)) {
