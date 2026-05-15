@@ -1,5 +1,6 @@
 const NOTIFICATION_DURATION_MS = 2000;
 const MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024;
+const MAX_SCREENSHOT_STREAM_BAND_BYTES = 1024 * 1024 * 1024;
 const ZIP_MIME_TYPES = new Set([
   "application/zip",
   "application/x-zip-compressed",
@@ -1270,10 +1271,11 @@ export class GerberViewer {
     }
 
     const tileSize = this.getScreenshotStreamTileDimensions();
+    this.validateScreenshotStreamMemory(exportWidth, exportHeight, tileSize);
     const totalTiles =
       Math.ceil(exportWidth / tileSize.width) *
       Math.ceil(exportHeight / tileSize.height);
-    const rowStride = 1 + exportWidth * 4;
+    const rowStride = this.getScreenshotPngRowStride(exportWidth);
     const pngParts = [
       this.createPngSignature(),
       this.createPngHeaderChunk(exportWidth, exportHeight),
@@ -1294,7 +1296,11 @@ export class GerberViewer {
     try {
       for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
         const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
-        const bandBuffer = new Uint8Array(rowStride * tileHeight);
+        const bandBuffer = this.createScreenshotBandBuffer(
+          exportWidth,
+          exportHeight,
+          tileHeight,
+        );
 
         for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
           const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
@@ -1355,6 +1361,53 @@ export class GerberViewer {
 
     pngParts.push(this.createPngChunk("IEND", new Uint8Array()));
     return new Blob(pngParts, { type: "image/png" });
+  }
+
+  validateScreenshotStreamMemory(exportWidth, exportHeight, tileSize) {
+    const bandHeight = Math.min(tileSize.height, exportHeight);
+    const bandBytes = this.getScreenshotBandByteLength(exportWidth, bandHeight);
+
+    if (
+      !Number.isSafeInteger(bandBytes) ||
+      bandBytes > MAX_SCREENSHOT_STREAM_BAND_BYTES
+    ) {
+      throw new Error(
+        this.getScreenshotMemoryLimitMessage(exportWidth, exportHeight, bandBytes),
+      );
+    }
+  }
+
+  createScreenshotBandBuffer(exportWidth, exportHeight, bandHeight) {
+    const bandBytes = this.getScreenshotBandByteLength(exportWidth, bandHeight);
+
+    try {
+      return new Uint8Array(bandBytes);
+    } catch (error) {
+      throw new Error(
+        this.getScreenshotMemoryLimitMessage(exportWidth, exportHeight, bandBytes),
+        { cause: error },
+      );
+    }
+  }
+
+  getScreenshotBandByteLength(exportWidth, bandHeight) {
+    return this.getScreenshotPngRowStride(exportWidth) * bandHeight;
+  }
+
+  getScreenshotPngRowStride(width) {
+    return 1 + width * 4;
+  }
+
+  getScreenshotMemoryLimitMessage(exportWidth, exportHeight, bandBytes) {
+    const memoryText = Number.isFinite(bandBytes)
+      ? this.formatFileSize(bandBytes)
+      : "more than this browser can address";
+
+    return [
+      `Screenshot is too large to export at ${exportWidth} x ${exportHeight}px.`,
+      `It needs about ${memoryText} of temporary browser memory.`,
+      "Try a lower resolution.",
+    ].join(" ");
   }
 
   getScreenshotStreamTileDimensions() {
