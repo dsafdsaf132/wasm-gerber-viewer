@@ -13,7 +13,7 @@ use shader::{
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Thermals, TriangleTemplateInstances, Triangles,
 };
-use js_sys::Float32Array;
+use js_sys::{Array, Float32Array, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlTexture};
 
@@ -109,6 +109,695 @@ impl Renderer {
             self.layer_count += 1;
             Ok(self.layers.len() - 1)
         }
+    }
+
+    /// Add a layer from a worker-produced render payload without rebuilding
+    /// CPU-side GerberData geometry in the main WASM instance.
+    pub fn add_layer_from_render_payload(&mut self, payload: &JsValue) -> Result<usize, JsValue> {
+        let (width, height) = self.get_canvas_size()?;
+        let sublayers = Array::from(&Self::js_property(payload, "sublayers")?);
+        if sublayers.length() == 0 {
+            return Err(JsValue::from_str("Layer does not contain any sublayers"));
+        }
+
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        let mut gerber_data = Vec::with_capacity(sublayers.length() as usize);
+        let mut buffer_caches = Vec::with_capacity(sublayers.length() as usize);
+
+        for sublayer in sublayers.iter() {
+            let boundary = Boundary::new(
+                Self::js_f32_property(&Self::js_property(&sublayer, "boundary")?, "minX")?,
+                Self::js_f32_property(&Self::js_property(&sublayer, "boundary")?, "maxX")?,
+                Self::js_f32_property(&Self::js_property(&sublayer, "boundary")?, "minY")?,
+                Self::js_f32_property(&Self::js_property(&sublayer, "boundary")?, "maxY")?,
+            );
+            Self::validate_finite_value("boundary.min_x", boundary.min_x)?;
+            Self::validate_finite_value("boundary.max_x", boundary.max_x)?;
+            Self::validate_finite_value("boundary.min_y", boundary.min_y)?;
+            Self::validate_finite_value("boundary.max_y", boundary.max_y)?;
+
+            min_x = min_x.min(boundary.min_x);
+            max_x = max_x.max(boundary.max_x);
+            min_y = min_y.min(boundary.min_y);
+            max_y = max_y.max(boundary.max_y);
+
+            let mut buffer_cache = BufferCache::default();
+            let template_count =
+                self.populate_buffer_cache_from_render_payload(&mut buffer_cache, &sublayer)?;
+            buffer_caches.push(buffer_cache);
+            gerber_data.push(Self::placeholder_gerber_data(
+                boundary,
+                Self::js_bool_property(&sublayer, "isNegative"),
+                template_count,
+            ));
+        }
+
+        if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+            return Err(JsValue::from_str("Layer boundary is not finite"));
+        }
+
+        let layer_metadata = LayerMetadata {
+            gerber_data,
+            fbo: Self::create_fbo(&self.gl, width, height)?,
+            buffer_caches,
+            boundary: Boundary::new(min_x, max_x, min_y, max_y),
+            fbo_dirty: true,
+            fbo_transform: None,
+            cpu_geometry_released: true,
+        };
+
+        if let Some(free_slot) = self.layers.iter().position(|layer| layer.is_none()) {
+            self.layers[free_slot] = Some(layer_metadata);
+            self.layer_count += 1;
+            Ok(free_slot)
+        } else {
+            self.layers.push(Some(layer_metadata));
+            self.layer_count += 1;
+            Ok(self.layers.len() - 1)
+        }
+    }
+
+    fn placeholder_gerber_data(
+        boundary: Boundary,
+        is_negative: bool,
+        template_count: usize,
+    ) -> GerberData {
+        GerberData::new(
+            Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            (0..template_count)
+                .map(|_| TriangleTemplateInstances::new(Vec::new(), Vec::new(), Vec::new()))
+                .collect(),
+            Circles::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Arcs::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Thermals::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            boundary,
+            is_negative,
+        )
+    }
+
+    fn populate_buffer_cache_from_render_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<usize, JsValue> {
+        self.populate_triangle_cache_from_payload(buffer_cache, sublayer)?;
+        let template_count =
+            self.populate_triangle_template_cache_from_payload(buffer_cache, sublayer)?;
+        self.populate_circle_cache_from_payload(buffer_cache, sublayer)?;
+        self.populate_arc_cache_from_payload(buffer_cache, sublayer)?;
+        self.populate_thermal_cache_from_payload(buffer_cache, sublayer)?;
+        Ok(template_count)
+    }
+
+    fn populate_triangle_cache_from_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<(), JsValue> {
+        let triangles = Self::js_property(sublayer, "triangles")?;
+        let vertices = Self::js_f32_array(&triangles, "vertices")?;
+        if vertices.length() == 0 {
+            return Ok(());
+        }
+
+        let vertex_count = Self::validate_triangle_vertex_array("triangle vertices", &vertices)?;
+        let vao = self
+            .gl
+            .create_vertex_array()
+            .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+        self.gl.bind_vertex_array(Some(&vao));
+        let vertex_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &vertices,
+            &self.programs.triangle,
+            "position",
+            2,
+            0,
+        )?;
+
+        let hole_radius = Self::js_f32_array(&triangles, "holeRadius")?;
+        if hole_radius.length() == 0 {
+            Self::use_constant_vertex_attrib_1f(
+                &self.gl,
+                &self.programs.triangle,
+                "hole_x_instance",
+                0.0,
+            )?;
+            Self::use_constant_vertex_attrib_1f(
+                &self.gl,
+                &self.programs.triangle,
+                "hole_y_instance",
+                0.0,
+            )?;
+            Self::use_constant_vertex_attrib_1f(
+                &self.gl,
+                &self.programs.triangle,
+                "hole_radius_instance",
+                0.0,
+            )?;
+        } else {
+            let hole_x = Self::js_f32_array(&triangles, "holeX")?;
+            let hole_y = Self::js_f32_array(&triangles, "holeY")?;
+            Self::validate_js_array_len("triangle hole_x", &hole_x, vertex_count as u32)?;
+            Self::validate_js_array_len("triangle hole_y", &hole_y, vertex_count as u32)?;
+            Self::validate_js_array_len("triangle hole_radius", &hole_radius, vertex_count as u32)?;
+            buffer_cache.triangle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &hole_x,
+                &self.programs.triangle,
+                "hole_x_instance",
+                1,
+                0,
+            )?);
+            buffer_cache.triangle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &hole_y,
+                &self.programs.triangle,
+                "hole_y_instance",
+                1,
+                0,
+            )?);
+            buffer_cache.triangle_hole_radius_buffer =
+                Some(Self::create_attrib_buffer_from_js_array(
+                    &self.gl,
+                    &hole_radius,
+                    &self.programs.triangle,
+                    "hole_radius_instance",
+                    1,
+                    0,
+                )?);
+        }
+
+        self.gl.bind_vertex_array(None);
+        buffer_cache.triangle_vao = Some(vao);
+        buffer_cache.triangle_vertex_count = vertex_count;
+        buffer_cache.triangle_vertex_buffer = Some(vertex_buffer);
+        Ok(())
+    }
+
+    fn populate_triangle_template_cache_from_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<usize, JsValue> {
+        let templates = Array::from(&Self::js_property(sublayer, "triangleTemplates")?);
+        let template_count = templates.length() as usize;
+        buffer_cache
+            .triangle_template_caches
+            .resize_with(template_count, TriangleTemplateBufferCache::default);
+
+        for (template_idx, template) in templates.iter().enumerate() {
+            let vertices = Self::js_f32_array(&template, "vertices")?;
+            let instance_x = Self::js_f32_array(&template, "instanceX")?;
+            let instance_y = Self::js_f32_array(&template, "instanceY")?;
+            if vertices.length() == 0 || instance_x.length() == 0 {
+                continue;
+            }
+
+            let vertex_count =
+                Self::validate_triangle_vertex_array("triangle template vertices", &vertices)?;
+            let instance_count =
+                Self::validate_instance_array("triangle template instances", &instance_x)?;
+            Self::validate_js_array_len(
+                "triangle template instance_y",
+                &instance_y,
+                instance_count as u32,
+            )?;
+
+            let vao = self
+                .gl
+                .create_vertex_array()
+                .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+            self.gl.bind_vertex_array(Some(&vao));
+            let vertex_buffer = Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &vertices,
+                &self.programs.triangle_template,
+                "position",
+                2,
+                0,
+            )?;
+            let instance_x_buffer = Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &instance_x,
+                &self.programs.triangle_template,
+                "instance_x",
+                1,
+                1,
+            )?;
+            let instance_y_buffer = Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &instance_y,
+                &self.programs.triangle_template,
+                "instance_y",
+                1,
+                1,
+            )?;
+            self.gl.bind_vertex_array(None);
+
+            let template_cache = &mut buffer_cache.triangle_template_caches[template_idx];
+            template_cache.vao = Some(vao);
+            template_cache.vertex_count = vertex_count;
+            template_cache.instance_count = instance_count;
+            template_cache.vertex_buffer = Some(vertex_buffer);
+            template_cache.instance_x_buffer = Some(instance_x_buffer);
+            template_cache.instance_y_buffer = Some(instance_y_buffer);
+        }
+
+        Ok(template_count)
+    }
+
+    fn populate_circle_cache_from_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<(), JsValue> {
+        let circles = Self::js_property(sublayer, "circles")?;
+        let x = Self::js_f32_array(&circles, "x")?;
+        if x.length() == 0 {
+            return Ok(());
+        }
+
+        let y = Self::js_f32_array(&circles, "y")?;
+        let radius = Self::js_f32_array(&circles, "radius")?;
+        let instance_count = Self::validate_instance_array("circle", &x)?;
+        Self::validate_js_array_len("circle y", &y, instance_count as u32)?;
+        Self::validate_js_array_len("circle radius", &radius, instance_count as u32)?;
+
+        let vao = self
+            .gl
+            .create_vertex_array()
+            .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+        self.gl.bind_vertex_array(Some(&vao));
+        self.bind_quad_position(&self.programs.circle)?;
+        let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &x,
+            &self.programs.circle,
+            "center_x_instance",
+            1,
+            1,
+        )?;
+        let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &y,
+            &self.programs.circle,
+            "center_y_instance",
+            1,
+            1,
+        )?;
+        let radius_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &radius,
+            &self.programs.circle,
+            "radius_instance",
+            1,
+            1,
+        )?;
+
+        let hole_radius = Self::js_f32_array(&circles, "holeRadius")?;
+        if hole_radius.length() == 0 {
+            Self::use_constant_vertex_attrib_1f(
+                &self.gl,
+                &self.programs.circle,
+                "hole_x_instance",
+                0.0,
+            )?;
+            Self::use_constant_vertex_attrib_1f(
+                &self.gl,
+                &self.programs.circle,
+                "hole_y_instance",
+                0.0,
+            )?;
+            Self::use_constant_vertex_attrib_1f(
+                &self.gl,
+                &self.programs.circle,
+                "hole_radius_instance",
+                0.0,
+            )?;
+        } else {
+            let hole_x = Self::js_f32_array(&circles, "holeX")?;
+            let hole_y = Self::js_f32_array(&circles, "holeY")?;
+            Self::validate_js_array_len("circle hole_x", &hole_x, instance_count as u32)?;
+            Self::validate_js_array_len("circle hole_y", &hole_y, instance_count as u32)?;
+            Self::validate_js_array_len("circle hole_radius", &hole_radius, instance_count as u32)?;
+            buffer_cache.circle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &hole_x,
+                &self.programs.circle,
+                "hole_x_instance",
+                1,
+                1,
+            )?);
+            buffer_cache.circle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                &self.gl,
+                &hole_y,
+                &self.programs.circle,
+                "hole_y_instance",
+                1,
+                1,
+            )?);
+            buffer_cache.circle_hole_radius_buffer =
+                Some(Self::create_attrib_buffer_from_js_array(
+                    &self.gl,
+                    &hole_radius,
+                    &self.programs.circle,
+                    "hole_radius_instance",
+                    1,
+                    1,
+                )?);
+        }
+
+        self.gl.bind_vertex_array(None);
+        buffer_cache.circle_vao = Some(vao);
+        buffer_cache.circle_instance_count = instance_count;
+        buffer_cache.circle_center_x_buffer = Some(center_x_buffer);
+        buffer_cache.circle_center_y_buffer = Some(center_y_buffer);
+        buffer_cache.circle_radius_buffer = Some(radius_buffer);
+        Ok(())
+    }
+
+    fn populate_arc_cache_from_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<(), JsValue> {
+        let arcs = Self::js_property(sublayer, "arcs")?;
+        let x = Self::js_f32_array(&arcs, "x")?;
+        if x.length() == 0 {
+            return Ok(());
+        }
+
+        let y = Self::js_f32_array(&arcs, "y")?;
+        let radius = Self::js_f32_array(&arcs, "radius")?;
+        let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
+        let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
+        let thickness = Self::js_f32_array(&arcs, "thickness")?;
+        let instance_count = Self::validate_instance_array("arc", &x)?;
+        Self::validate_js_array_len("arc y", &y, instance_count as u32)?;
+        Self::validate_js_array_len("arc radius", &radius, instance_count as u32)?;
+        Self::validate_js_array_len("arc start_angle", &start_angle, instance_count as u32)?;
+        Self::validate_js_array_len("arc sweep_angle", &sweep_angle, instance_count as u32)?;
+        Self::validate_js_array_len("arc thickness", &thickness, instance_count as u32)?;
+
+        let vao = self
+            .gl
+            .create_vertex_array()
+            .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+        self.gl.bind_vertex_array(Some(&vao));
+        self.bind_quad_position(&self.programs.arc)?;
+        let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &x,
+            &self.programs.arc,
+            "center_x_instance",
+            1,
+            1,
+        )?;
+        let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &y,
+            &self.programs.arc,
+            "center_y_instance",
+            1,
+            1,
+        )?;
+        let radius_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &radius,
+            &self.programs.arc,
+            "radius_instance",
+            1,
+            1,
+        )?;
+        let start_angle_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &start_angle,
+            &self.programs.arc,
+            "startAngle_instance",
+            1,
+            1,
+        )?;
+        let sweep_angle_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &sweep_angle,
+            &self.programs.arc,
+            "sweepAngle_instance",
+            1,
+            1,
+        )?;
+        let thickness_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &thickness,
+            &self.programs.arc,
+            "thickness_instance",
+            1,
+            1,
+        )?;
+
+        self.gl.bind_vertex_array(None);
+        buffer_cache.arc_vao = Some(vao);
+        buffer_cache.arc_instance_count = instance_count;
+        buffer_cache.arc_center_x_buffer = Some(center_x_buffer);
+        buffer_cache.arc_center_y_buffer = Some(center_y_buffer);
+        buffer_cache.arc_radius_buffer = Some(radius_buffer);
+        buffer_cache.arc_start_angle_buffer = Some(start_angle_buffer);
+        buffer_cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
+        buffer_cache.arc_thickness_buffer = Some(thickness_buffer);
+        Ok(())
+    }
+
+    fn populate_thermal_cache_from_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<(), JsValue> {
+        let thermals = Self::js_property(sublayer, "thermals")?;
+        let x = Self::js_f32_array(&thermals, "x")?;
+        if x.length() == 0 {
+            return Ok(());
+        }
+
+        let y = Self::js_f32_array(&thermals, "y")?;
+        let outer_diameter = Self::js_f32_array(&thermals, "outerDiameter")?;
+        let inner_diameter = Self::js_f32_array(&thermals, "innerDiameter")?;
+        let gap_thickness = Self::js_f32_array(&thermals, "gapThickness")?;
+        let rotation = Self::js_f32_array(&thermals, "rotation")?;
+        let instance_count = Self::validate_instance_array("thermal", &x)?;
+        Self::validate_js_array_len("thermal y", &y, instance_count as u32)?;
+        Self::validate_js_array_len(
+            "thermal outer_diameter",
+            &outer_diameter,
+            instance_count as u32,
+        )?;
+        Self::validate_js_array_len(
+            "thermal inner_diameter",
+            &inner_diameter,
+            instance_count as u32,
+        )?;
+        Self::validate_js_array_len(
+            "thermal gap_thickness",
+            &gap_thickness,
+            instance_count as u32,
+        )?;
+        Self::validate_js_array_len("thermal rotation", &rotation, instance_count as u32)?;
+
+        let vao = self
+            .gl
+            .create_vertex_array()
+            .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+        self.gl.bind_vertex_array(Some(&vao));
+        self.bind_quad_position(&self.programs.thermal)?;
+        let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &x,
+            &self.programs.thermal,
+            "center_x_instance",
+            1,
+            1,
+        )?;
+        let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &y,
+            &self.programs.thermal,
+            "center_y_instance",
+            1,
+            1,
+        )?;
+        let outer_diameter_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &outer_diameter,
+            &self.programs.thermal,
+            "outer_diameter_instance",
+            1,
+            1,
+        )?;
+        let inner_diameter_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &inner_diameter,
+            &self.programs.thermal,
+            "inner_diameter_instance",
+            1,
+            1,
+        )?;
+        let gap_thickness_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &gap_thickness,
+            &self.programs.thermal,
+            "gap_thickness_instance",
+            1,
+            1,
+        )?;
+        let rotation_buffer = Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &rotation,
+            &self.programs.thermal,
+            "rotation_instance",
+            1,
+            1,
+        )?;
+
+        self.gl.bind_vertex_array(None);
+        buffer_cache.thermal_vao = Some(vao);
+        buffer_cache.thermal_instance_count = instance_count;
+        buffer_cache.thermal_center_x_buffer = Some(center_x_buffer);
+        buffer_cache.thermal_center_y_buffer = Some(center_y_buffer);
+        buffer_cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
+        buffer_cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
+        buffer_cache.thermal_gap_thickness_buffer = Some(gap_thickness_buffer);
+        buffer_cache.thermal_rotation_buffer = Some(rotation_buffer);
+        Ok(())
+    }
+
+    fn create_attrib_buffer_from_js_array(
+        gl: &WebGl2RenderingContext,
+        data: &Float32Array,
+        program: &ShaderProgram,
+        attr_name: &str,
+        components: i32,
+        divisor: u32,
+    ) -> Result<WebGlBuffer, JsValue> {
+        let buffer = gl
+            .create_buffer()
+            .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
+        gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
+        gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, data, STATIC_DRAW);
+        let loc = Self::shader_attribute(program, attr_name)?;
+        gl.enable_vertex_attrib_array(loc);
+        gl.vertex_attrib_pointer_with_i32(loc, components, FLOAT, false, 0, 0);
+        gl.vertex_attrib_divisor(loc, divisor);
+        Ok(buffer)
+    }
+
+    fn bind_quad_position(&self, program: &ShaderProgram) -> Result<(), JsValue> {
+        self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
+        let position_loc = Self::shader_attribute(program, "position")?;
+        self.gl.enable_vertex_attrib_array(position_loc);
+        self.gl
+            .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+        Ok(())
+    }
+
+    fn validate_triangle_vertex_array(label: &str, values: &Float32Array) -> Result<i32, JsValue> {
+        if !values.length().is_multiple_of(2) {
+            return Err(JsValue::from_str(&format!(
+                "{} buffer has an odd number of coordinates",
+                label
+            )));
+        }
+        let vertex_count = values.length() / 2;
+        if !vertex_count.is_multiple_of(3) {
+            return Err(JsValue::from_str(&format!(
+                "{} count is not divisible by 3",
+                label
+            )));
+        }
+        if vertex_count > i32::MAX as u32 {
+            return Err(JsValue::from_str(&format!(
+                "{} count exceeds WebGL draw limits",
+                label
+            )));
+        }
+        Ok(vertex_count as i32)
+    }
+
+    fn validate_instance_array(label: &str, values: &Float32Array) -> Result<i32, JsValue> {
+        if values.length() > i32::MAX as u32 {
+            return Err(JsValue::from_str(&format!(
+                "{} count exceeds WebGL draw limits",
+                label
+            )));
+        }
+        Ok(values.length() as i32)
+    }
+
+    fn validate_js_array_len(
+        label: &str,
+        values: &Float32Array,
+        expected: u32,
+    ) -> Result<(), JsValue> {
+        if values.length() != expected {
+            return Err(JsValue::from_str(&format!(
+                "{} length mismatch: expected {}, got {}",
+                label,
+                expected,
+                values.length()
+            )));
+        }
+        Ok(())
+    }
+
+    fn js_property(value: &JsValue, key: &str) -> Result<JsValue, JsValue> {
+        let property = Reflect::get(value, &JsValue::from_str(key))
+            .map_err(|_| JsValue::from_str(&format!("Missing render payload field `{key}`")))?;
+        if property.is_undefined() || property.is_null() {
+            return Err(JsValue::from_str(&format!(
+                "Missing render payload field `{key}`"
+            )));
+        }
+        Ok(property)
+    }
+
+    fn js_f32_array(value: &JsValue, key: &str) -> Result<Float32Array, JsValue> {
+        Ok(Float32Array::new(&Self::js_property(value, key)?))
+    }
+
+    fn js_f32_property(value: &JsValue, key: &str) -> Result<f32, JsValue> {
+        let number = Self::js_property(value, key)?.as_f64().ok_or_else(|| {
+            JsValue::from_str(&format!("Render payload field `{key}` is not numeric"))
+        })?;
+        Ok(number as f32)
+    }
+
+    fn js_bool_property(value: &JsValue, key: &str) -> bool {
+        Self::js_property(value, key)
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
     }
 
     fn validate_gerber_data_layers(gerber_data: &[GerberData]) -> Result<(), JsValue> {

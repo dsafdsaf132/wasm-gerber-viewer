@@ -198,6 +198,17 @@ impl GerberProcessor {
         self.add_parsed_layers(gerber_data_layers)
     }
 
+    /// Add a worker-produced render payload directly to WebGL buffers.
+    pub fn add_render_payload(&mut self, render_payload: JsValue) -> Result<u32, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            Ok(renderer.add_layer_from_render_payload(&render_payload)? as u32)
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
     /// Remove a layer from the renderer
     ///
     /// # Arguments

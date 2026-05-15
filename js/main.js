@@ -44,8 +44,10 @@ const MIN_PARSE_TASK_MEMORY_BYTES = 32 * BYTES_PER_MIB;
 const DEFAULT_PARSE_MEMORY_BUDGET_BYTES = 512 * BYTES_PER_MIB;
 const MIN_PARSE_MEMORY_BUDGET_BYTES = 128 * BYTES_PER_MIB;
 const MAX_PARSE_MEMORY_BUDGET_BYTES = 1536 * BYTES_PER_MIB;
-const PARSE_MEMORY_ESTIMATE_MULTIPLIER = 8;
+const PARSE_MEMORY_ESTIMATE_MULTIPLIER = 16;
 const PARSE_MEMORY_HEADROOM_RATIO = 0.5;
+const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
+const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
 
 function getUtf8ByteLength(value) {
   let bytes = 0;
@@ -163,23 +165,33 @@ class GerberParseWorkerPool {
     this.activeTasks = new Map();
     this.nextTaskId = 0;
     this.isDisposed = false;
+    this.workerUrl = new URL("./gerber-parse-worker.js", import.meta.url);
 
-    const workerUrl = new URL("./gerber-parse-worker.js", import.meta.url);
     for (let index = 0; index < workerCount; index++) {
-      const worker = new Worker(workerUrl, { type: "module" });
-      worker.addEventListener("message", (event) =>
-        this.handleWorkerMessage(worker, event),
-      );
-      worker.addEventListener("error", (event) =>
-        this.handleWorkerError(worker, event),
-      );
-      this.workers.push(worker);
-      this.idleWorkers.push(worker);
+      this.addIdleWorker();
     }
   }
 
   get size() {
     return this.workers.length;
+  }
+
+  createWorker() {
+    const worker = new Worker(this.workerUrl, { type: "module" });
+    worker.addEventListener("message", (event) =>
+      this.handleWorkerMessage(worker, event),
+    );
+    worker.addEventListener("error", (event) =>
+      this.handleWorkerError(worker, event),
+    );
+    return worker;
+  }
+
+  addIdleWorker() {
+    const worker = this.createWorker();
+    this.workers.push(worker);
+    this.idleWorkers.push(worker);
+    return worker;
   }
 
   parse(content, offset) {
@@ -217,17 +229,48 @@ class GerberParseWorkerPool {
     }
 
     this.activeTasks.delete(worker);
-    if (!this.isDisposed) {
-      this.idleWorkers.push(worker);
-    }
+    const shouldRecycle = this.shouldRecycleWorker(event.data?.workerMemory);
 
     if (event.data.ok) {
       task.resolve(event.data.parsedLayer);
     } else {
-      task.reject(new Error(event.data.error || "Failed to parse Gerber layer"));
+      const error = new Error(event.data.error || "Failed to parse Gerber layer");
+      task.reject(error);
+    }
+
+    if (!this.isDisposed) {
+      if (shouldRecycle) {
+        this.recycleWorker(worker);
+      } else {
+        this.idleWorkers.push(worker);
+      }
     }
 
     this.pump();
+  }
+
+  shouldRecycleWorker(memory) {
+    const beforeBytes = Number(memory?.beforeBytes);
+    const afterBytes = Number(memory?.afterBytes);
+    if (!Number.isFinite(afterBytes)) {
+      return false;
+    }
+
+    const growthBytes = Number.isFinite(beforeBytes)
+      ? Math.max(0, afterBytes - beforeBytes)
+      : 0;
+    return (
+      afterBytes >= RECYCLE_PARSE_WORKER_MEMORY_BYTES ||
+      growthBytes >= RECYCLE_PARSE_WORKER_GROWTH_BYTES
+    );
+  }
+
+  recycleWorker(worker) {
+    worker.terminate();
+    this.workers = this.workers.filter((item) => item !== worker);
+    if (!this.isDisposed) {
+      this.addIdleWorker();
+    }
   }
 
   handleWorkerError(worker, event) {
@@ -1369,7 +1412,6 @@ export class GerberViewer {
     const concurrency = parseWorkerPool.size;
     const progress = this.createLayerLoadProgress(total);
     const parseTasks = this.createLayerParseTasks(layerSources);
-
     this.showLoadingModal({
       title,
       stage: "Reading",
@@ -1436,7 +1478,14 @@ export class GerberViewer {
 
   runLayerParsePipeline(
     layerSources,
-    { title, total, concurrency, progress, parseWorkerPool, parseTasks },
+    {
+      title,
+      total,
+      concurrency,
+      progress,
+      parseWorkerPool,
+      parseTasks,
+    },
   ) {
     const results = Array(total).fill(false);
     const layerRecords = Array(total).fill(null);
@@ -1626,7 +1675,13 @@ export class GerberViewer {
 
   async readAndParseLayerSource(
     source,
-    { index, total, title, progress, parseWorkerPool },
+    {
+      index,
+      total,
+      title,
+      progress,
+      parseWorkerPool,
+    },
   ) {
     const { name, readText } = source;
 
@@ -1647,7 +1702,6 @@ export class GerberViewer {
           total,
         });
       });
-
       this.updateLoadingModal({
         stage: "Reading",
         fileName: name,
@@ -1750,7 +1804,11 @@ export class GerberViewer {
 
   async addParsedLayerSource(
     parseResult,
-    { title = "Loading files", total = 1, progress = null } = {},
+    {
+      title = "Loading files",
+      total = 1,
+      progress = null,
+    } = {},
   ) {
     const index = parseResult.index ?? 0;
     const name = parseResult.name;
@@ -2034,11 +2092,14 @@ export class GerberViewer {
         throw new Error("WebGL renderer is not available");
       }
 
-      if (typeof this.wasmProcessor.add_parsed_layer !== "function") {
+      let layerId;
+      if (typeof this.wasmProcessor.add_render_payload === "function") {
+        layerId = this.wasmProcessor.add_render_payload(parsedLayer);
+      } else if (typeof this.wasmProcessor.add_parsed_layer === "function") {
+        layerId = this.wasmProcessor.add_parsed_layer(parsedLayer);
+      } else {
         throw new Error("Parsed layer rendering requires an updated WASM module");
       }
-
-      const layerId = this.wasmProcessor.add_parsed_layer(parsedLayer);
       return this.createLayerMetadata(name, layerId, options);
     } catch (error) {
       if (isNoGeometryError(getErrorMessage(error))) {

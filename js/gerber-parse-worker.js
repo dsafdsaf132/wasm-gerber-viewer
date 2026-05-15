@@ -1,6 +1,12 @@
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
 
 let wasmModulePromise = null;
+let wasmExports = null;
+
+function getWorkerWasmMemoryBytes() {
+  const wasmMemoryBytes = Number(wasmExports?.memory?.buffer?.byteLength);
+  return Number.isFinite(wasmMemoryBytes) ? wasmMemoryBytes : null;
+}
 
 function getUtf8ByteLength(value) {
   let bytes = 0;
@@ -43,7 +49,7 @@ async function getWasmModule() {
   if (!wasmModulePromise) {
     wasmModulePromise = import("../wasm/pkg/wasm_gerber_processor.js").then(
       async (wasmModule) => {
-        await wasmModule.default();
+        wasmExports = await wasmModule.default();
         wasmModule.init_panic_hook?.();
         return wasmModule;
       },
@@ -92,28 +98,39 @@ function collectTransferables(value, transferables = [], seen = new Set()) {
 self.addEventListener("message", async (event) => {
   const { id, offset = {} } = event.data ?? {};
   let content = event.data?.content;
+  let beforeBytes = null;
 
   try {
     const wasmModule = await getWasmModule();
+    beforeBytes = getWorkerWasmMemoryBytes();
     reserveWasmInputCapacity(wasmModule, content);
     const parsedLayer = wasmModule.parse_gerber_layer(
       content,
       Number(offset.x ?? 0),
       Number(offset.y ?? 0),
     );
+    const transferables = collectTransferables(parsedLayer);
     self.postMessage(
       {
         id,
         ok: true,
         parsedLayer,
+        workerMemory: {
+          beforeBytes,
+          afterBytes: getWorkerWasmMemoryBytes(),
+        },
       },
-      collectTransferables(parsedLayer),
+      transferables,
     );
   } catch (error) {
     self.postMessage({
       id,
       ok: false,
       error: getErrorMessage(error),
+      workerMemory: {
+        beforeBytes,
+        afterBytes: getWorkerWasmMemoryBytes(),
+      },
     });
   } finally {
     content = null;
