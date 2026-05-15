@@ -1252,7 +1252,7 @@ button {
   .side-panel.collapsed .section-toolbar .chip-button {
     flex: 1;
     width: auto;
-    height: auto;
+    height: 42px;
     padding: 0 6px;
   }
 
