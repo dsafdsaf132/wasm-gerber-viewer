@@ -12,6 +12,7 @@ pub struct Aperture {
     pub has_negative: bool,         // true if primitives contain exposure=0
     pub block_layers: Option<Vec<(Polarity, Vec<Primitive>)>>,
     pub triangle_template: Option<Rc<Vec<f32>>>,
+    pub is_solid_circle: bool,
 }
 
 impl Aperture {
@@ -22,6 +23,7 @@ impl Aperture {
             has_negative: false,
             block_layers: None,
             triangle_template: None,
+            is_solid_circle: false,
         }
     }
 
@@ -36,6 +38,7 @@ impl Aperture {
             has_negative,
             block_layers: Some(block_layers),
             triangle_template: None,
+            is_solid_circle: false,
         }
     }
 }
@@ -124,6 +127,7 @@ pub fn parse_aperture(
                     };
 
                     aperture.radius = diameter_mm / 2.0;
+                    aperture.is_solid_circle = hole_diameter_mm == 0.0;
                     aperture.primitives.push(Primitive::Circle {
                         x: 0.0,
                         y: 0.0,

@@ -1068,6 +1068,90 @@ M02*",
 }
 
 #[test]
+fn linear_draw_requires_solid_standard_circle_aperture() {
+    let rectangle_layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X1.0*%
+D10*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+M02*",
+    )
+    .expect("rectangle D01 should parse without image geometry");
+    assert!(rectangle_layers.is_empty());
+
+    let holed_circle_layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0X0.2*%
+D10*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+M02*",
+    )
+    .expect("holed circle D01 should parse without image geometry");
+    assert!(holed_circle_layers.is_empty());
+
+    let macro_circle_layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%AMCIRC*1,1,1.0,0,0,0*%
+%ADD10CIRC*%
+D10*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+M02*",
+    )
+    .expect("macro circle D01 should parse without image geometry");
+    assert!(macro_circle_layers.is_empty());
+}
+
+#[test]
+fn solid_circle_linear_draw_still_renders_round_caps_and_body() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+M02*",
+    )
+    .expect("solid circle D01 should parse");
+    let layer = &layers[0];
+
+    assert_eq!(layer.circles.x.len(), 2);
+    assert!(has_circle_at(&layer.circles, 0.0, 0.0, 0.5));
+    assert!(has_circle_at(&layer.circles, 1.0, 0.0, 0.5));
+    assert!(!layer.triangles.vertices.is_empty());
+}
+
+#[test]
+fn zero_length_solid_circle_draw_matches_single_flash_image() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X0000000Y0000000D02*
+X0000000Y0000000D01*
+M02*",
+    )
+    .expect("zero-length solid circle D01 should parse");
+    let layer = &layers[0];
+
+    assert_eq!(layer.circles.x.len(), 1);
+    assert!(has_circle_at(&layer.circles, 0.0, 0.0, 0.5));
+    assert!(layer.triangles.vertices.is_empty());
+}
+
+#[test]
 fn layer_scaling_transforms_aperture_block_about_origin() {
     let data = "\
 %FSLAX24Y24*%

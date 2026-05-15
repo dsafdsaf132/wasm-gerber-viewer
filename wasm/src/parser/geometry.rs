@@ -1081,22 +1081,25 @@ pub fn execute_interpolation(
     let start_x = state.x;
     let start_y = state.y;
 
-    // Get current aperture
-    if let Some(_aperture) = apertures.get(&state.current_aperture) {
+    // RS-274X draw and arc objects can only be created with a solid standard circle aperture.
+    if let Some(aperture) = apertures.get(&state.current_aperture) {
+        if !aperture.is_solid_circle {
+            return Ok(());
+        }
+
         match state.interpolation_mode.as_str() {
             "linear" | "linear_x10" | "linear_x01" | "linear_x001" => {
                 // Draw line with Step and Repeat
-                if let Some(aperture) = apertures.get(&state.current_aperture) {
-                    for sy in 0..state.sr_y {
-                        for sx in 0..state.sr_x {
-                            let offset_x = sx as f32 * state.sr_i;
-                            let offset_y = sy as f32 * state.sr_j;
-                            let sr_start_x = start_x + offset_x;
-                            let sr_start_y = start_y + offset_y;
-                            let sr_end_x = end_x + offset_x;
-                            let sr_end_y = end_y + offset_y;
+                for sy in 0..state.sr_y {
+                    for sx in 0..state.sr_x {
+                        let offset_x = sx as f32 * state.sr_i;
+                        let offset_y = sy as f32 * state.sr_j;
+                        let sr_start_x = start_x + offset_x;
+                        let sr_start_y = start_y + offset_y;
+                        let sr_end_x = end_x + offset_x;
+                        let sr_end_y = end_y + offset_y;
 
-                            // Flash aperture at start point (no SR since we're already in SR loop)
+                        if points_coincide(sr_start_x, sr_start_y, sr_end_x, sr_end_y) {
                             flash_aperture_no_sr(
                                 aperture,
                                 primitives,
@@ -1107,105 +1110,118 @@ pub fn execute_interpolation(
                                 state.mirror_y,
                                 state.layer_rotation,
                             )?;
-
-                            // Convert vector line with width of aperture diameter to triangle
-                            let diameter = aperture.radius * 2.0 * state.layer_scale;
-                            let line_triangles = line_to_triangles(
-                                sr_start_x, sr_start_y, sr_end_x, sr_end_y, diameter, 1.0,
-                            );
-                            try_reserve_primitives(
-                                primitives,
-                                line_triangles.len(),
-                                "linear interpolation",
-                            )?;
-                            primitives.extend(line_triangles);
-
-                            // Flash aperture at end point (no SR since we're already in SR loop)
-                            flash_aperture_no_sr(
-                                aperture,
-                                primitives,
-                                sr_end_x,
-                                sr_end_y,
-                                state.layer_scale,
-                                state.mirror_x,
-                                state.mirror_y,
-                                state.layer_rotation,
-                            )?;
+                            continue;
                         }
+
+                        // Flash aperture at start point (no SR since we're already in SR loop)
+                        flash_aperture_no_sr(
+                            aperture,
+                            primitives,
+                            sr_start_x,
+                            sr_start_y,
+                            state.layer_scale,
+                            state.mirror_x,
+                            state.mirror_y,
+                            state.layer_rotation,
+                        )?;
+
+                        // Convert vector line with width of aperture diameter to triangle
+                        let diameter = aperture.radius * 2.0 * state.layer_scale;
+                        let line_triangles = line_to_triangles(
+                            sr_start_x, sr_start_y, sr_end_x, sr_end_y, diameter, 1.0,
+                        );
+                        try_reserve_primitives(
+                            primitives,
+                            line_triangles.len(),
+                            "linear interpolation",
+                        )?;
+                        primitives.extend(line_triangles);
+
+                        // Flash aperture at end point (no SR since we're already in SR loop)
+                        flash_aperture_no_sr(
+                            aperture,
+                            primitives,
+                            sr_end_x,
+                            sr_end_y,
+                            state.layer_scale,
+                            state.mirror_x,
+                            state.mirror_y,
+                            state.layer_rotation,
+                        )?;
                     }
                 }
             }
             "clockwise" | "counterclockwise" => {
                 // Draw arc with Step and Repeat
-                if let Some(aperture) = apertures.get(&state.current_aperture) {
-                    for sy in 0..state.sr_y {
-                        for sx in 0..state.sr_x {
-                            let offset_x = sx as f32 * state.sr_i;
-                            let offset_y = sy as f32 * state.sr_j;
-                            let sr_start_x = start_x + offset_x;
-                            let sr_start_y = start_y + offset_y;
-                            let sr_end_x = end_x + offset_x;
-                            let sr_end_y = end_y + offset_y;
+                for sy in 0..state.sr_y {
+                    for sx in 0..state.sr_x {
+                        let offset_x = sx as f32 * state.sr_i;
+                        let offset_y = sy as f32 * state.sr_j;
+                        let sr_start_x = start_x + offset_x;
+                        let sr_start_y = start_y + offset_y;
+                        let sr_end_x = end_x + offset_x;
+                        let sr_end_y = end_y + offset_y;
 
-                            if let Some((center_x, center_y, radius, start_angle, sweep_angle)) =
-                                calculate_arc_parameters(
-                                    state, sr_start_x, sr_start_y, sr_end_x, sr_end_y, i, j,
-                                )
-                            {
-                                let thickness = aperture.radius * 2.0 * state.layer_scale;
-                                let end_angle = start_angle + sweep_angle;
+                        if let Some((center_x, center_y, radius, start_angle, sweep_angle)) =
+                            calculate_arc_parameters(
+                                state, sr_start_x, sr_start_y, sr_end_x, sr_end_y, i, j,
+                            )
+                        {
+                            let thickness = aperture.radius * 2.0 * state.layer_scale;
+                            let end_angle = start_angle + sweep_angle;
 
-                                let cap_start_x = center_x + radius * start_angle.cos();
-                                let cap_start_y = center_y + radius * start_angle.sin();
-                                let cap_end_x = center_x + radius * end_angle.cos();
-                                let cap_end_y = center_y + radius * end_angle.sin();
+                            let cap_start_x = center_x + radius * start_angle.cos();
+                            let cap_start_y = center_y + radius * start_angle.sin();
+                            let cap_end_x = center_x + radius * end_angle.cos();
+                            let cap_end_y = center_y + radius * end_angle.sin();
 
-                                // Flash aperture at rendered arc start point.
-                                flash_aperture_no_sr(
-                                    aperture,
-                                    primitives,
-                                    cap_start_x,
-                                    cap_start_y,
-                                    state.layer_scale,
-                                    state.mirror_x,
-                                    state.mirror_y,
-                                    state.layer_rotation,
-                                )?;
+                            // Flash aperture at rendered arc start point.
+                            flash_aperture_no_sr(
+                                aperture,
+                                primitives,
+                                cap_start_x,
+                                cap_start_y,
+                                state.layer_scale,
+                                state.mirror_x,
+                                state.mirror_y,
+                                state.layer_rotation,
+                            )?;
 
-                                // Add Arc primitive
-                                try_reserve_primitives(primitives, 1, "arc interpolation")?;
-                                primitives.push(Primitive::Arc {
-                                    x: center_x,
-                                    y: center_y,
-                                    radius,
-                                    start_angle,
-                                    end_angle: start_angle + sweep_angle,
-                                    thickness,
-                                    exposure: 1.0,
-                                });
+                            // Add Arc primitive
+                            try_reserve_primitives(primitives, 1, "arc interpolation")?;
+                            primitives.push(Primitive::Arc {
+                                x: center_x,
+                                y: center_y,
+                                radius,
+                                start_angle,
+                                end_angle: start_angle + sweep_angle,
+                                thickness,
+                                exposure: 1.0,
+                            });
 
-                                // Flash aperture at rendered arc end point.
-                                flash_aperture_no_sr(
-                                    aperture,
-                                    primitives,
-                                    cap_end_x,
-                                    cap_end_y,
-                                    state.layer_scale,
-                                    state.mirror_x,
-                                    state.mirror_y,
-                                    state.layer_rotation,
-                                )?;
-                            } else {
-                                flash_aperture_no_sr(
-                                    aperture,
-                                    primitives,
-                                    sr_start_x,
-                                    sr_start_y,
-                                    state.layer_scale,
-                                    state.mirror_x,
-                                    state.mirror_y,
-                                    state.layer_rotation,
-                                )?;
+                            // Flash aperture at rendered arc end point.
+                            flash_aperture_no_sr(
+                                aperture,
+                                primitives,
+                                cap_end_x,
+                                cap_end_y,
+                                state.layer_scale,
+                                state.mirror_x,
+                                state.mirror_y,
+                                state.layer_rotation,
+                            )?;
+                        } else {
+                            flash_aperture_no_sr(
+                                aperture,
+                                primitives,
+                                sr_start_x,
+                                sr_start_y,
+                                state.layer_scale,
+                                state.mirror_x,
+                                state.mirror_y,
+                                state.layer_rotation,
+                            )?;
+                            if !points_coincide(sr_start_x, sr_start_y, sr_end_x, sr_end_y) {
                                 flash_aperture_no_sr(
                                     aperture,
                                     primitives,
