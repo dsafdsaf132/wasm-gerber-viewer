@@ -37,6 +37,15 @@ import {
 } from "./viewport.js";
 
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
+const MAX_PARSE_WORKERS = 4;
+const BYTES_PER_MIB = 1024 * 1024;
+const UNKNOWN_LAYER_SOURCE_SIZE_BYTES = 16 * BYTES_PER_MIB;
+const MIN_PARSE_TASK_MEMORY_BYTES = 32 * BYTES_PER_MIB;
+const DEFAULT_PARSE_MEMORY_BUDGET_BYTES = 512 * BYTES_PER_MIB;
+const MIN_PARSE_MEMORY_BUDGET_BYTES = 128 * BYTES_PER_MIB;
+const MAX_PARSE_MEMORY_BUDGET_BYTES = 1536 * BYTES_PER_MIB;
+const PARSE_MEMORY_ESTIMATE_MULTIPLIER = 8;
+const PARSE_MEMORY_HEADROOM_RATIO = 0.5;
 
 function getUtf8ByteLength(value) {
   let bytes = 0;
@@ -80,6 +89,184 @@ function normalizeLayerOffset(offset = {}) {
 
 function hasLayerOffset(offset) {
   return offset.x !== 0 || offset.y !== 0;
+}
+
+function getParseWorkerCount(layerCount) {
+  if (layerCount <= 1 || typeof Worker === "undefined") {
+    return 0;
+  }
+
+  const hardwareConcurrency = Number(globalThis.navigator?.hardwareConcurrency);
+  const availableWorkers = Number.isFinite(hardwareConcurrency)
+    ? Math.max(1, hardwareConcurrency - 1)
+    : 2;
+
+  return Math.min(layerCount, availableWorkers, MAX_PARSE_WORKERS);
+}
+
+function getLayerSourceSizeBytes(source) {
+  const sizeBytes = Number(source?.sizeBytes);
+  return Number.isFinite(sizeBytes) && sizeBytes > 0
+    ? sizeBytes
+    : UNKNOWN_LAYER_SOURCE_SIZE_BYTES;
+}
+
+function estimateLayerParseMemoryBytes(source) {
+  return Math.max(
+    getLayerSourceSizeBytes(source) * PARSE_MEMORY_ESTIMATE_MULTIPLIER,
+    MIN_PARSE_TASK_MEMORY_BYTES,
+  );
+}
+
+function getBrowserAvailableHeapBytes() {
+  const memory = globalThis.performance?.memory;
+  const heapLimit = Number(memory?.jsHeapSizeLimit);
+  const usedHeap = Number(memory?.usedJSHeapSize);
+
+  if (!Number.isFinite(heapLimit) || !Number.isFinite(usedHeap)) {
+    return null;
+  }
+
+  return Math.max(0, heapLimit - usedHeap);
+}
+
+function getDeviceMemoryBudgetBytes() {
+  const deviceMemory = Number(globalThis.navigator?.deviceMemory);
+  if (!Number.isFinite(deviceMemory) || deviceMemory <= 0) {
+    return DEFAULT_PARSE_MEMORY_BUDGET_BYTES;
+  }
+
+  return deviceMemory * 1024 * BYTES_PER_MIB * 0.25;
+}
+
+function getParseMemoryBudgetBytes() {
+  const availableHeapBytes = getBrowserAvailableHeapBytes();
+  const rawBudget =
+    availableHeapBytes === null
+      ? getDeviceMemoryBudgetBytes()
+      : Math.min(
+          getDeviceMemoryBudgetBytes(),
+          availableHeapBytes * PARSE_MEMORY_HEADROOM_RATIO,
+        );
+
+  return Math.min(
+    Math.max(rawBudget, MIN_PARSE_MEMORY_BUDGET_BYTES),
+    MAX_PARSE_MEMORY_BUDGET_BYTES,
+  );
+}
+
+class GerberParseWorkerPool {
+  constructor(workerCount) {
+    this.workers = [];
+    this.idleWorkers = [];
+    this.queue = [];
+    this.activeTasks = new Map();
+    this.nextTaskId = 0;
+    this.isDisposed = false;
+
+    const workerUrl = new URL("./gerber-parse-worker.js", import.meta.url);
+    for (let index = 0; index < workerCount; index++) {
+      const worker = new Worker(workerUrl, { type: "module" });
+      worker.addEventListener("message", (event) =>
+        this.handleWorkerMessage(worker, event),
+      );
+      worker.addEventListener("error", (event) =>
+        this.handleWorkerError(worker, event),
+      );
+      this.workers.push(worker);
+      this.idleWorkers.push(worker);
+    }
+  }
+
+  get size() {
+    return this.workers.length;
+  }
+
+  parse(content, offset) {
+    if (this.isDisposed) {
+      return Promise.reject(new Error("Parse worker pool has been disposed"));
+    }
+    if (this.workers.length === 0) {
+      return Promise.reject(new Error("No parse workers are available"));
+    }
+
+    const id = this.nextTaskId++;
+    return new Promise((resolve, reject) => {
+      this.queue.push({ id, content, offset, resolve, reject });
+      this.pump();
+    });
+  }
+
+  pump() {
+    while (this.idleWorkers.length > 0 && this.queue.length > 0) {
+      const worker = this.idleWorkers.pop();
+      const task = this.queue.shift();
+      this.activeTasks.set(worker, task);
+      worker.postMessage({
+        id: task.id,
+        content: task.content,
+        offset: task.offset,
+      });
+    }
+  }
+
+  handleWorkerMessage(worker, event) {
+    const task = this.activeTasks.get(worker);
+    if (!task || event.data?.id !== task.id) {
+      return;
+    }
+
+    this.activeTasks.delete(worker);
+    if (!this.isDisposed) {
+      this.idleWorkers.push(worker);
+    }
+
+    if (event.data.ok) {
+      task.resolve(event.data.parsedLayer);
+    } else {
+      task.reject(new Error(event.data.error || "Failed to parse Gerber layer"));
+    }
+
+    this.pump();
+  }
+
+  handleWorkerError(worker, event) {
+    const task = this.activeTasks.get(worker);
+    this.activeTasks.delete(worker);
+    worker.terminate();
+    this.workers = this.workers.filter((item) => item !== worker);
+    this.idleWorkers = this.idleWorkers.filter((item) => item !== worker);
+
+    if (task) {
+      task.reject(new Error(event.message || "Gerber parse worker failed"));
+    }
+    if (this.workers.length === 0) {
+      for (const queuedTask of this.queue) {
+        queuedTask.reject(new Error("No parse workers are available"));
+      }
+      this.queue = [];
+    }
+
+    this.pump();
+  }
+
+  dispose() {
+    this.isDisposed = true;
+    for (const task of this.queue) {
+      task.reject(new Error("Parse worker pool has been disposed"));
+    }
+    for (const task of this.activeTasks.values()) {
+      task.reject(new Error("Parse worker pool has been disposed"));
+    }
+    this.queue = [];
+    this.activeTasks.clear();
+
+    for (const worker of this.workers) {
+      worker.terminate();
+    }
+    this.workers = [];
+    this.idleWorkers = [];
+  }
 }
 
 function isFatalWasmRuntimeError(error) {
@@ -748,7 +935,6 @@ export class GerberViewer {
     fileName = null,
     current = null,
     total = null,
-    progress = null,
     indeterminate = false,
   } = {}) {
     if (title !== null) {
@@ -761,21 +947,27 @@ export class GerberViewer {
     if (fileName !== null) {
       this.loadingFileName.textContent = fileName || "-";
     }
-    if (current !== null || total !== null) {
-      const currentValue = Number.isFinite(current) ? current : 0;
-      const totalValue = Number.isFinite(total) ? total : 0;
-      this.loadingProgressCount.textContent = `${currentValue} / ${totalValue}`;
+    const currentValue = Number.isFinite(current) ? current : null;
+    const totalValue = Number.isFinite(total) ? total : null;
+    if (currentValue !== null || totalValue !== null) {
+      this.loadingProgressCount.textContent =
+        `${currentValue ?? 0} / ${totalValue ?? 0}`;
     }
 
     if (indeterminate) {
       this.loadingProgressBar.removeAttribute("value");
-      this.loadingProgressValue.textContent = "-";
+      this.loadingProgressValue.textContent = "";
+      this.loadingProgressValue.hidden = true;
       return;
     }
 
-    const percent = Math.round(clampProgress(progress ?? 0) * 100);
-    this.loadingProgressBar.value = percent;
-    this.loadingProgressValue.textContent = `${percent}%`;
+    this.loadingProgressValue.textContent = "";
+    this.loadingProgressValue.hidden = true;
+    const progressRatio =
+      totalValue && totalValue > 0 ? (currentValue ?? 0) / totalValue : 0;
+    this.loadingProgressBar.value = Math.round(
+      clampProgress(progressRatio) * 100,
+    );
   }
 
   hideLoadingModal() {
@@ -783,14 +975,6 @@ export class GerberViewer {
     this.isLoadingLayers = false;
     this.loadingWorkspaceStatus = "Loading files";
     this.updateUiState();
-  }
-
-  getLayerLoadProgress(index, total, fileProgress) {
-    if (!Number.isFinite(total) || total <= 0) {
-      return 0;
-    }
-
-    return (index + clampProgress(fileProgress)) / total;
   }
 
   addDiagnostic(level, title, detail = "") {
@@ -1074,13 +1258,13 @@ export class GerberViewer {
 
     try {
       const file = await fetchRemoteFile(url, {
-        onProgress: (progress) => {
+        onProgress: () => {
           this.updateLoadingModal({
             stage: "Downloading",
             fileName: url.href,
             current: 0,
             total: 0,
-            progress,
+            indeterminate: true,
           });
         },
       });
@@ -1145,7 +1329,6 @@ export class GerberViewer {
         stage: "Preparing",
         current: 0,
         total: validFiles.length,
-        progress: 0,
       });
 
       try {
@@ -1177,31 +1360,50 @@ export class GerberViewer {
 
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     const total = layerSources.length;
-    const readProgresses = Array(total).fill(0);
+    const parseWorkerPool = this.createParseWorkerPool(total);
+
+    if (!parseWorkerPool) {
+      return this.loadLayerSourcesSerially(layerSources, { title, total });
+    }
+
+    const concurrency = parseWorkerPool.size;
+    const progress = this.createLayerLoadProgress(total);
+    const parseTasks = this.createLayerParseTasks(layerSources);
 
     this.showLoadingModal({
       title,
       stage: "Reading",
       current: 0,
       total,
-      progress: 0,
     });
 
-    const readResults = await Promise.all(
-      layerSources.map((source, index) =>
-        this.readLayerSource(source, {
+    try {
+      return await this.runLayerParsePipeline(layerSources, {
+        title,
+        total,
+        concurrency,
+        progress,
+        parseWorkerPool,
+        parseTasks,
+      });
+    } finally {
+      parseWorkerPool?.dispose();
+    }
+  }
+
+  async loadLayerSourcesSerially(
+    layerSources,
+    { title = "Loading files", total = layerSources.length } = {},
+  ) {
+    const results = [];
+
+    for (const [index, source] of layerSources.entries()) {
+      results.push(
+        await this.loadLayerSourceSerially(source, {
           index,
           total,
           title,
-          readProgresses,
         }),
-      ),
-    );
-
-    const results = [];
-    for (const readResult of readResults) {
-      results.push(
-        await this.addBufferedLayerSource(readResult, { title, total }),
       );
     }
 
@@ -1225,32 +1427,207 @@ export class GerberViewer {
         this.updateLoadingModal({
           stage: "Preparing",
           fileName: name,
-          current,
+          current: Math.max(0, current - 1),
           total,
-          progress: total > 0 ? (current - 1) / total : 0,
         });
       },
     });
   }
 
-  getAggregateReadProgress(readProgresses) {
-    if (readProgresses.length === 0) {
+  runLayerParsePipeline(
+    layerSources,
+    { title, total, concurrency, progress, parseWorkerPool, parseTasks },
+  ) {
+    const results = Array(total).fill(false);
+    const layerRecords = Array(total).fill(null);
+    let activeTasks = 0;
+    let scheduledTasks = 0;
+    let completedTasks = 0;
+    let activeMemoryBytes = 0;
+    let isResolved = false;
+
+    return new Promise((resolve) => {
+      const finishIfDone = () => {
+        if (isResolved || completedTasks < total) {
+          return;
+        }
+
+        isResolved = true;
+        let didCommitLayer = false;
+        for (const layerRecord of layerRecords) {
+          if (layerRecord) {
+            this.commitLayerMetadata(layerRecord, { updateUiState: false });
+            didCommitLayer = true;
+          }
+        }
+        if (didCommitLayer) {
+          this.updateUiState();
+        }
+        resolve(results);
+      };
+
+      const launchMore = () => {
+        while (activeTasks < concurrency && scheduledTasks < total) {
+          const task = this.pickNextLayerParseTask(parseTasks, {
+            activeTasks,
+            activeMemoryBytes,
+          });
+          if (!task) break;
+
+          task.scheduled = true;
+          scheduledTasks++;
+          const { index, source, estimatedMemoryBytes } = task;
+          activeTasks++;
+          activeMemoryBytes += estimatedMemoryBytes;
+
+          this.readAndParseLayerSource(source, {
+            index,
+            total,
+            title,
+            progress,
+            parseWorkerPool,
+          })
+            .then(async (parseResult) => {
+              const layerRecord = await this.addParsedLayerSource(parseResult, {
+                title,
+                total,
+                progress,
+              });
+              if (layerRecord) {
+                layerRecords[index] = layerRecord;
+                results[index] = true;
+              }
+            })
+            .catch((error) => {
+              const completed = this.markLayerLoadComplete(progress);
+              this.handleLayerLoadError(source.name, error);
+              this.updateLoadingModal({
+                title,
+                stage: "Skipped",
+                fileName: source.name,
+                current: completed,
+                total,
+              });
+            })
+            .finally(() => {
+              activeTasks--;
+              completedTasks++;
+              activeMemoryBytes = Math.max(
+                0,
+                activeMemoryBytes - estimatedMemoryBytes,
+              );
+              launchMore();
+              finishIfDone();
+            });
+        }
+
+        finishIfDone();
+      };
+
+      launchMore();
+    });
+  }
+
+  createLayerParseTasks(layerSources) {
+    return layerSources.map((source, index) => ({
+      source,
+      index,
+      estimatedMemoryBytes: estimateLayerParseMemoryBytes(source),
+      scheduled: false,
+    }));
+  }
+
+  pickNextLayerParseTask(
+    parseTasks,
+    { activeTasks, activeMemoryBytes },
+  ) {
+    const candidates = parseTasks.filter((task) => !task.scheduled);
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const budgetBytes = getParseMemoryBudgetBytes();
+    const availableBytes = budgetBytes - activeMemoryBytes;
+    const fittingCandidates = candidates.filter(
+      (task) => task.estimatedMemoryBytes <= availableBytes,
+    );
+
+    if (fittingCandidates.length > 0) {
+      return fittingCandidates.sort(
+        (a, b) => b.estimatedMemoryBytes - a.estimatedMemoryBytes,
+      )[0];
+    }
+
+    if (activeTasks > 0) {
+      return null;
+    }
+
+    return candidates.sort(
+      (a, b) => a.estimatedMemoryBytes - b.estimatedMemoryBytes,
+    )[0];
+  }
+
+  createLayerLoadProgress(total) {
+    return {
+      total,
+      completedLayers: 0,
+    };
+  }
+
+  markLayerLoadComplete(progress) {
+    if (!progress) {
       return 0;
     }
 
-    const totalProgress = readProgresses.reduce(
-      (sum, progress) => sum + clampProgress(progress),
-      0,
+    progress.completedLayers = Math.min(
+      progress.total,
+      (progress.completedLayers ?? 0) + 1,
     );
-
-    return totalProgress / readProgresses.length;
+    return progress.completedLayers;
   }
 
-  getCompletedReadCount(readProgresses) {
-    return readProgresses.filter((progress) => progress >= 1).length;
+  createParseWorkerPool(layerCount) {
+    const workerCount = getParseWorkerCount(layerCount);
+    if (workerCount === 0) {
+      return null;
+    }
+
+    try {
+      return new GerberParseWorkerPool(workerCount);
+    } catch (error) {
+      console.warn("[Parse] Failed to create parse workers:", error);
+      this.addDiagnostic(
+        "warning",
+        "Parallel parsing unavailable",
+        getErrorMessage(error),
+      );
+      return null;
+    }
   }
 
-  async readLayerSource(source, { index, total, title, readProgresses }) {
+  async parseLayerContent(content, offset, parseWorkerPool) {
+    const normalizedOffset = normalizeLayerOffset(offset);
+
+    if (parseWorkerPool) {
+      return parseWorkerPool.parse(content, normalizedOffset);
+    }
+
+    if (typeof this.wasmModule?.parse_gerber_layer !== "function") {
+      throw new Error("Parallel parsing requires an updated WASM module");
+    }
+
+    this.reserveWasmInputCapacity(content);
+    return this.wasmModule.parse_gerber_layer(
+      content,
+      normalizedOffset.x,
+      normalizedOffset.y,
+    );
+  }
+
+  async readAndParseLayerSource(
+    source,
+    { index, total, title, progress, parseWorkerPool },
+  ) {
     const { name, readText } = source;
 
     try {
@@ -1258,47 +1635,59 @@ export class GerberViewer {
         title,
         stage: "Reading",
         fileName: name,
-        current: this.getCompletedReadCount(readProgresses),
+        current: progress.completedLayers,
         total,
-        progress: this.getAggregateReadProgress(readProgresses) * 0.5,
       });
 
-      const content = await readText((readProgress) => {
-        readProgresses[index] = clampProgress(readProgress);
+      const content = await readText(() => {
         this.updateLoadingModal({
           stage: "Reading",
           fileName: name,
-          current: this.getCompletedReadCount(readProgresses),
+          current: progress.completedLayers,
           total,
-          progress: this.getAggregateReadProgress(readProgresses) * 0.5,
         });
       });
 
-      readProgresses[index] = 1;
       this.updateLoadingModal({
         stage: "Reading",
         fileName: name,
-        current: this.getCompletedReadCount(readProgresses),
+        current: progress.completedLayers,
         total,
-        progress: this.getAggregateReadProgress(readProgresses) * 0.5,
+      });
+
+      this.updateLoadingModal({
+        stage: "Parsing",
+        fileName: name,
+        current: progress.completedLayers,
+        total,
+      });
+      const parsedLayer = await this.parseLayerContent(
+        content,
+        source.offset,
+        parseWorkerPool,
+      );
+      this.updateLoadingModal({
+        stage: "Parsing",
+        fileName: name,
+        current: progress.completedLayers,
+        total,
       });
 
       return {
         ok: true,
         index,
         name,
-        content,
+        parsedLayer,
+        sourceContent: content,
         offset: source.offset,
       };
     } catch (error) {
-      readProgresses[index] = 1;
       this.handleLayerLoadError(name, error);
       this.updateLoadingModal({
         stage: "Skipped",
         fileName: name,
-        current: this.getCompletedReadCount(readProgresses),
+        current: progress.completedLayers,
         total,
-        progress: this.getAggregateReadProgress(readProgresses) * 0.5,
       });
       return {
         ok: false,
@@ -1308,44 +1697,43 @@ export class GerberViewer {
     }
   }
 
-  async addBufferedLayerSource(
-    readResult,
-    { title = "Loading files", total = 1 } = {},
+  async loadLayerSourceSerially(
+    source,
+    { index = 0, total = 1, title = "Loading files" } = {},
   ) {
-    const index = readResult.index ?? 0;
-    const name = readResult.name;
-
-    if (!readResult.ok) {
-      this.updateLoadingModal({
-        title,
-        stage: "Skipped",
-        fileName: name,
-        current: index + 1,
-        total,
-        progress: 0.5 + this.getLayerLoadProgress(index, total, 1) * 0.5,
-      });
-      return false;
-    }
+    const { name, readText } = source;
 
     try {
       this.updateLoadingModal({
         title,
-        stage: "Parsing",
+        stage: "Reading",
         fileName: name,
-        current: index + 1,
+        current: index,
         total,
-        progress: 0.5 + this.getLayerLoadProgress(index, total, 0) * 0.5,
       });
 
-      await this.addLayer(name, readResult.content, {
-        offset: readResult.offset,
+      const content = await readText(() => {
+        this.updateLoadingModal({
+          stage: "Reading",
+          fileName: name,
+          current: index,
+          total,
+        });
       });
+
+      this.updateLoadingModal({
+        stage: "Parsing",
+        fileName: name,
+        current: index,
+        total,
+      });
+
+      await this.addLayer(name, content, { offset: source.offset });
       this.updateLoadingModal({
         stage: "Loaded",
         fileName: name,
         current: index + 1,
         total,
-        progress: 0.5 + this.getLayerLoadProgress(index, total, 1) * 0.5,
       });
       return true;
     } catch (error) {
@@ -1355,9 +1743,68 @@ export class GerberViewer {
         fileName: name,
         current: index + 1,
         total,
-        progress: 0.5 + this.getLayerLoadProgress(index, total, 1) * 0.5,
       });
       return false;
+    }
+  }
+
+  async addParsedLayerSource(
+    parseResult,
+    { title = "Loading files", total = 1, progress = null } = {},
+  ) {
+    const index = parseResult.index ?? 0;
+    const name = parseResult.name;
+
+    if (!parseResult.ok) {
+      const completed = this.markLayerLoadComplete(progress);
+      this.updateLoadingModal({
+        title,
+        stage: "Skipped",
+        fileName: name,
+        current: completed,
+        total,
+      });
+      return null;
+    }
+
+    try {
+      this.updateLoadingModal({
+        title,
+        stage: "Rendering",
+        fileName: name,
+        current: progress?.completedLayers ?? index,
+        total,
+      });
+
+      const layerRecord = await this.createParsedLayerRecord(
+        name,
+        parseResult.parsedLayer,
+        {
+          offset: parseResult.offset,
+          sourceContent: parseResult.sourceContent,
+        },
+      );
+      const completed = this.markLayerLoadComplete(progress);
+      this.updateLoadingModal({
+        stage: "Loaded",
+        fileName: name,
+        current: completed,
+        total,
+      });
+      return layerRecord;
+    } catch (error) {
+      const completed = this.markLayerLoadComplete(progress);
+      this.handleLayerLoadError(name, error);
+      this.updateLoadingModal({
+        stage: "Skipped",
+        fileName: name,
+        current: completed,
+        total,
+      });
+      return null;
+    } finally {
+      parseResult.parsedLayer = null;
+      parseResult.sourceContent = null;
     }
   }
 
@@ -1491,6 +1938,53 @@ export class GerberViewer {
     this.notifications.hide();
   }
 
+  createLayerMetadata(name, layerId, options = {}) {
+    if (layerId === undefined || layerId === null) {
+      throw new Error("Failed to get layer ID from WASM processor");
+    }
+
+    const bounds = this.wasmProcessor.get_layer_boundary(layerId);
+    return {
+      id: options.id ?? null,
+      layerId: layerId,
+      name: name,
+      visible: options.visible ?? true,
+      color: options.color ? [...options.color] : null,
+      sourceContent: options.sourceContent,
+      offset: normalizeLayerOffset(options.offset),
+      bounds: {
+        minX: bounds.min_x,
+        maxX: bounds.max_x,
+        minY: bounds.min_y,
+        maxY: bounds.max_y,
+      },
+    };
+  }
+
+  commitLayerMetadata(layer, { updateUiState = true } = {}) {
+    if (!layer.id) {
+      layer.id = `layer-${this.nextLayerDomId++}`;
+    }
+    if (layer.color) {
+      layer.color = [...layer.color];
+    } else {
+      layer.color = [
+        ...this.colorPalette[this.nextColorIndex % this.colorPalette.length],
+      ];
+      this.nextColorIndex++;
+    }
+    this.layers.push(layer);
+    if (updateUiState) {
+      this.updateUiState();
+    }
+    return layer;
+  }
+
+  addLayerMetadata(name, layerId, options = {}) {
+    const layer = this.createLayerMetadata(name, layerId, options);
+    return this.commitLayerMetadata(layer);
+  }
+
   async addLayer(name, content, options = {}) {
     try {
       if (!this.wasmProcessor || this.isWebGlContextLost) {
@@ -1509,38 +2003,11 @@ export class GerberViewer {
       const layerId = hasLayerOffset(offset)
         ? this.wasmProcessor.add_layer_with_offset(content, offset.x, offset.y)
         : this.wasmProcessor.add_layer(content);
-      if (layerId === undefined || layerId === null) {
-        throw new Error("Failed to get layer ID from WASM processor");
-      }
-
-      // Get this layer's boundary from WASM
-      const bounds = this.wasmProcessor.get_layer_boundary(layerId);
-
-      const color = options.color
-        ? [...options.color]
-        : this.colorPalette[this.nextColorIndex % this.colorPalette.length];
-      if (!options.color) {
-        this.nextColorIndex++;
-      }
-
-      const layer = {
-        id: options.id ?? `layer-${this.nextLayerDomId++}`,
-        layerId: layerId, // WASM layer_id
-        name: name,
-        visible: options.visible ?? true,
-        color: color,
+      this.addLayerMetadata(name, layerId, {
+        ...options,
         sourceContent: options.sourceContent ?? content,
         offset,
-        bounds: {
-          minX: bounds.min_x,
-          maxX: bounds.max_x,
-          minY: bounds.min_y,
-          maxY: bounds.max_y,
-        },
-      };
-
-      this.layers.push(layer);
-      this.updateUiState();
+      });
     } catch (error) {
       if (isNoGeometryError(getErrorMessage(error))) {
         console.warn(`[Layer] Skipped layer ${name}:`, error);
@@ -1552,6 +2019,38 @@ export class GerberViewer {
       }
 
       console.error(`[Layer] Failed to add layer ${name}:`, error);
+      throw error;
+    }
+  }
+
+  async addParsedLayer(name, parsedLayer, options = {}) {
+    const layer = await this.createParsedLayerRecord(name, parsedLayer, options);
+    return this.commitLayerMetadata(layer);
+  }
+
+  async createParsedLayerRecord(name, parsedLayer, options = {}) {
+    try {
+      if (!this.wasmProcessor || this.isWebGlContextLost) {
+        throw new Error("WebGL renderer is not available");
+      }
+
+      if (typeof this.wasmProcessor.add_parsed_layer !== "function") {
+        throw new Error("Parsed layer rendering requires an updated WASM module");
+      }
+
+      const layerId = this.wasmProcessor.add_parsed_layer(parsedLayer);
+      return this.createLayerMetadata(name, layerId, options);
+    } catch (error) {
+      if (isNoGeometryError(getErrorMessage(error))) {
+        console.warn(`[Layer] Skipped layer ${name}:`, error);
+        throw error;
+      }
+
+      if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
+        await this.recoverWasmProcessorAfterFatalError(name, error);
+      }
+
+      console.error(`[Layer] Failed to add parsed layer ${name}:`, error);
       throw error;
     }
   }

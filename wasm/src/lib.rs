@@ -4,7 +4,7 @@ mod shape;
 
 use crate::parser::parse_gerber;
 use crate::renderer::Renderer;
-use crate::shape::{Boundary, GerberData};
+use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
 
@@ -45,6 +45,47 @@ pub fn reserve_input_capacity(byte_count: usize) -> Result<(), JsValue> {
     Ok(())
 }
 
+fn parse_layer_data(
+    content: &str,
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<Vec<GerberData>, JsValue> {
+    if !offset_x.is_finite() || !offset_y.is_finite() {
+        return Err(JsValue::from_str("Layer offset must be finite"));
+    }
+
+    let mut gerber_data_layers = parse_gerber(content)?;
+
+    if offset_x != 0.0 || offset_y != 0.0 {
+        for layer in &mut gerber_data_layers {
+            layer.translate(offset_x, offset_y);
+        }
+    }
+
+    let non_empty_layers: Vec<_> = gerber_data_layers
+        .into_iter()
+        .filter(|layer| layer.has_geometry())
+        .collect();
+
+    if non_empty_layers.is_empty() {
+        return Err(JsValue::from_str(
+            "File does not contain valid Gerber data (no geometry found)",
+        ));
+    }
+
+    Ok(non_empty_layers)
+}
+
+#[wasm_bindgen]
+pub fn parse_gerber_layer(
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<JsValue, JsValue> {
+    let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y)?;
+    gerber_data_layers_to_js(&gerber_data_layers)
+}
+
 /// Main Gerber processor with stateful WebGL renderer
 #[wasm_bindgen]
 #[derive(Default)]
@@ -55,7 +96,6 @@ pub struct GerberProcessor {
 
 impl GerberProcessor {
     fn add_parsed_layers(&mut self, gerber_data_layers: Vec<GerberData>) -> Result<u32, JsValue> {
-        // Filter out empty layers (layers with no geometry)
         let non_empty_layers: Vec<_> = gerber_data_layers
             .into_iter()
             .filter(|layer| layer.has_geometry())
@@ -129,8 +169,7 @@ impl GerberProcessor {
     /// # Returns
     /// * Layer ID (u32) for tracking this layer
     pub fn add_layer(&mut self, content: String) -> Result<u32, JsValue> {
-        // Parse Gerber content to get Vec<GerberData> (one per polarity layer)
-        let gerber_data_layers = parse_gerber(&content)?;
+        let gerber_data_layers = parse_layer_data(&content, 0.0, 0.0)?;
         self.add_parsed_layers(gerber_data_layers)
     }
 
@@ -149,19 +188,13 @@ impl GerberProcessor {
         offset_x: f32,
         offset_y: f32,
     ) -> Result<u32, JsValue> {
-        if !offset_x.is_finite() || !offset_y.is_finite() {
-            return Err(JsValue::from_str("Layer offset must be finite"));
-        }
+        let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y)?;
+        self.add_parsed_layers(gerber_data_layers)
+    }
 
-        if offset_x == 0.0 && offset_y == 0.0 {
-            return self.add_layer(content);
-        }
-
-        let mut gerber_data_layers = parse_gerber(&content)?;
-        for layer in &mut gerber_data_layers {
-            layer.translate(offset_x, offset_y);
-        }
-
+    /// Add a layer from geometry parsed in a worker or another WASM instance.
+    pub fn add_parsed_layer(&mut self, parsed_layer: JsValue) -> Result<u32, JsValue> {
+        let gerber_data_layers = gerber_data_layers_from_js(&parsed_layer)?;
         self.add_parsed_layers(gerber_data_layers)
     }
 

@@ -84,6 +84,7 @@ export async function collectLayerSources(files, callbacks = {}) {
 
     layerSources.push({
       name: file.name,
+      sizeBytes: file.size,
       readText: (onProgress) => readFileText(file, onProgress),
     });
   }
@@ -98,16 +99,35 @@ export function repeatLayerSources(layerSources, repeat, { offset = {} } = {}) {
 
   const repeatOffset = normalizeLayerOffset(offset);
 
-  return layerSources.flatMap((source) =>
-    Array.from({ length: repeat }, (_, index) => ({
+  return layerSources.flatMap((source) => {
+    const readText = createSharedTextReader(source.readText);
+    return Array.from({ length: repeat }, (_, index) => ({
       name: `${source.name} #${index + 1}`,
-      readText: source.readText,
+      sizeBytes: source.sizeBytes,
+      readText,
       offset: addLayerOffsets(source.offset, {
         x: repeatOffset.x * index,
         y: repeatOffset.y * index,
       }),
-    })),
-  );
+    }));
+  });
+}
+
+function createSharedTextReader(readText) {
+  let textPromise = null;
+
+  return (onProgress = () => {}) => {
+    if (!textPromise) {
+      textPromise = readText(onProgress);
+    } else {
+      textPromise.then(
+        () => onProgress(1),
+        () => onProgress(1),
+      );
+    }
+
+    return textPromise;
+  };
 }
 
 function readFileText(file, onProgress = () => {}) {
@@ -210,6 +230,7 @@ async function collectZipLayerSources(
 
     return entries.map((entry) => ({
       name: getBaseFileName(entry.name),
+      sizeBytes: getZipEntrySizeBytes(entry),
       readText: (onProgress = () => {}) =>
         entry.async("string", (metadata) => {
           onProgress(Math.min(metadata.percent / 100, 1));
@@ -219,4 +240,11 @@ async function collectZipLayerSources(
     onArchiveError(file.name, error);
     return [];
   }
+}
+
+function getZipEntrySizeBytes(entry) {
+  const size = Number(
+    entry._data?.uncompressedSize ?? entry._data?.compressedSize,
+  );
+  return Number.isFinite(size) && size > 0 ? size : null;
 }
