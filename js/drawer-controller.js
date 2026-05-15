@@ -32,7 +32,7 @@ export class DrawerController {
     this.maxHeight = 560;
     this.mobileMaxHeightRatio = 0.72;
     this.collapsedWidth = 156;
-    this.collapsedHeight = 95;
+    this.collapsedHeight = 122;
     this.snapThreshold = 50;
     this.bottomCollapseThreshold = 200;
   }

@@ -20,7 +20,7 @@
   --canvas-reserved-width: var(--panel-width);
   --canvas-reserved-height: var(--panel-height);
   --panel-collapsed-width: 76px;
-  --panel-collapsed-height: 102px;
+  --panel-collapsed-height: 122px;
   --panel-snap-threshold: 50px;
   --panel-bottom-collapse-threshold: 200px;
   --toolbar-height: 58px;
