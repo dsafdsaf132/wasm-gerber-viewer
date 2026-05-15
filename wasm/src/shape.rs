@@ -3,7 +3,6 @@ use wasm_bindgen::prelude::*;
 /// Triangle mesh data structure
 pub struct Triangles {
     pub(crate) vertices: Vec<f32>,
-    pub(crate) indices: Vec<u32>,
     pub(crate) hole_x: Vec<f32>,
     pub(crate) hole_y: Vec<f32>,
     pub(crate) hole_radius: Vec<f32>,
@@ -12,14 +11,12 @@ pub struct Triangles {
 impl Triangles {
     pub fn new(
         vertices: Vec<f32>,
-        indices: Vec<u32>,
         hole_x: Vec<f32>,
         hole_y: Vec<f32>,
         hole_radius: Vec<f32>,
     ) -> Triangles {
         Triangles {
             vertices,
-            indices,
             hole_x,
             hole_y,
             hole_radius,
@@ -190,7 +187,7 @@ impl GerberData {
 
     /// Check if this GerberData contains any geometry
     pub fn has_geometry(&self) -> bool {
-        !self.triangles.indices.is_empty()
+        !self.triangles.vertices.is_empty()
             || !self.circles.x.is_empty()
             || !self.arcs.x.is_empty()
             || !self.thermals.x.is_empty()

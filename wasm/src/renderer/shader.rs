@@ -6,9 +6,7 @@ use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlShader, WebGlUniformLoc
 pub const COLOR_BUFFER_BIT: u32 = WebGl2RenderingContext::COLOR_BUFFER_BIT;
 pub const TRIANGLES: u32 = WebGl2RenderingContext::TRIANGLES;
 pub const FLOAT: u32 = WebGl2RenderingContext::FLOAT;
-pub const UNSIGNED_INT: u32 = WebGl2RenderingContext::UNSIGNED_INT;
 pub const ARRAY_BUFFER: u32 = WebGl2RenderingContext::ARRAY_BUFFER;
-pub const ELEMENT_ARRAY_BUFFER: u32 = WebGl2RenderingContext::ELEMENT_ARRAY_BUFFER;
 pub const STATIC_DRAW: u32 = WebGl2RenderingContext::STATIC_DRAW;
 pub const VERTEX_SHADER: u32 = WebGl2RenderingContext::VERTEX_SHADER;
 pub const FRAGMENT_SHADER: u32 = WebGl2RenderingContext::FRAGMENT_SHADER;

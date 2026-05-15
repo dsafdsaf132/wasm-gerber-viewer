@@ -21,9 +21,6 @@ use std::mem::size_of;
 use std::mem::take;
 use wasm_bindgen::prelude::*;
 
-// Security limits for resource consumption
-const MAX_TOTAL_PRIMITIVES: usize = 70_000_000; // 70 million total primitives max
-
 fn collect_lines(data: &str) -> Result<Vec<&str>, JsValue> {
     let line_count = data.bytes().filter(|byte| *byte == b'\n').count() + 1;
     let mut lines = Vec::new();
@@ -35,7 +32,9 @@ fn collect_lines(data: &str) -> Result<Vec<&str>, JsValue> {
 #[derive(Default)]
 struct PrimitiveBufferCounts {
     triangles: usize,
+    has_triangle_holes: bool,
     circles: usize,
+    has_circle_holes: bool,
     arcs: usize,
     thermals: usize,
 }
@@ -46,8 +45,14 @@ impl PrimitiveBufferCounts {
 
         for primitive in primitives {
             match primitive {
-                Primitive::Triangle { .. } => counts.triangles += 1,
-                Primitive::Circle { .. } => counts.circles += 1,
+                Primitive::Triangle { hole_radius, .. } => {
+                    counts.triangles += 1;
+                    counts.has_triangle_holes |= *hole_radius != 0.0;
+                }
+                Primitive::Circle { hole_radius, .. } => {
+                    counts.circles += 1;
+                    counts.has_circle_holes |= *hole_radius != 0.0;
+                }
                 Primitive::Arc { .. } => counts.arcs += 1,
                 Primitive::Thermal { .. } => counts.thermals += 1,
             }
@@ -58,11 +63,12 @@ impl PrimitiveBufferCounts {
 }
 
 struct PrimitiveOutputBuffers {
+    has_triangle_holes: bool,
     triangle_vertices: Vec<f32>,
-    triangle_indices: Vec<u32>,
     triangle_hole_x: Vec<f32>,
     triangle_hole_y: Vec<f32>,
     triangle_hole_radius: Vec<f32>,
+    has_circle_holes: bool,
     circles_x: Vec<f32>,
     circles_y: Vec<f32>,
     circles_radius: Vec<f32>,
@@ -88,20 +94,14 @@ impl PrimitiveOutputBuffers {
         let counts = PrimitiveBufferCounts::from_primitives(primitives);
         let triangle_vertex_values =
             checked_capacity(counts.triangles, 6, "triangle vertex buffer")?;
-        let triangle_index_values = checked_capacity(counts.triangles, 3, "triangle index buffer")?;
-
-        if triangle_index_values > u32::MAX as usize {
-            return Err(JsValue::from_str(
-                "Gerber layer is too large to render: triangle index buffer exceeds WebGL index range",
-            ));
-        }
 
         let mut buffers = Self {
+            has_triangle_holes: counts.has_triangle_holes,
             triangle_vertices: Vec::new(),
-            triangle_indices: Vec::new(),
             triangle_hole_x: Vec::new(),
             triangle_hole_y: Vec::new(),
             triangle_hole_radius: Vec::new(),
+            has_circle_holes: counts.has_circle_holes,
             circles_x: Vec::new(),
             circles_y: Vec::new(),
             circles_radius: Vec::new(),
@@ -127,26 +127,25 @@ impl PrimitiveOutputBuffers {
             triangle_vertex_values,
             "triangle vertex buffer",
         )?;
-        try_reserve_exact(
-            &mut buffers.triangle_indices,
-            triangle_index_values,
-            "triangle index buffer",
-        )?;
-        try_reserve_exact(
-            &mut buffers.triangle_hole_x,
-            triangle_index_values,
-            "triangle hole X buffer",
-        )?;
-        try_reserve_exact(
-            &mut buffers.triangle_hole_y,
-            triangle_index_values,
-            "triangle hole Y buffer",
-        )?;
-        try_reserve_exact(
-            &mut buffers.triangle_hole_radius,
-            triangle_index_values,
-            "triangle hole radius buffer",
-        )?;
+        if counts.has_triangle_holes {
+            let triangle_vertex_count =
+                checked_capacity(counts.triangles, 3, "triangle hole buffer")?;
+            try_reserve_exact(
+                &mut buffers.triangle_hole_x,
+                triangle_vertex_count,
+                "triangle hole X buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.triangle_hole_y,
+                triangle_vertex_count,
+                "triangle hole Y buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.triangle_hole_radius,
+                triangle_vertex_count,
+                "triangle hole radius buffer",
+            )?;
+        }
 
         try_reserve_exact(&mut buffers.circles_x, counts.circles, "circle X buffer")?;
         try_reserve_exact(&mut buffers.circles_y, counts.circles, "circle Y buffer")?;
@@ -155,21 +154,23 @@ impl PrimitiveOutputBuffers {
             counts.circles,
             "circle radius buffer",
         )?;
-        try_reserve_exact(
-            &mut buffers.circles_hole_x,
-            counts.circles,
-            "circle hole X buffer",
-        )?;
-        try_reserve_exact(
-            &mut buffers.circles_hole_y,
-            counts.circles,
-            "circle hole Y buffer",
-        )?;
-        try_reserve_exact(
-            &mut buffers.circles_hole_radius,
-            counts.circles,
-            "circle hole radius buffer",
-        )?;
+        if counts.has_circle_holes {
+            try_reserve_exact(
+                &mut buffers.circles_hole_x,
+                counts.circles,
+                "circle hole X buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.circles_hole_y,
+                counts.circles,
+                "circle hole Y buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.circles_hole_radius,
+                counts.circles,
+                "circle hole radius buffer",
+            )?;
+        }
 
         try_reserve_exact(&mut buffers.arcs_x, counts.arcs, "arc X buffer")?;
         try_reserve_exact(&mut buffers.arcs_y, counts.arcs, "arc Y buffer")?;
@@ -284,6 +285,20 @@ fn try_reserve_exact<T>(
     })
 }
 
+fn try_reserve_string(
+    value: &mut String,
+    additional: usize,
+    buffer_name: &str,
+) -> Result<(), JsValue> {
+    value.try_reserve(additional).map_err(|_| {
+        JsValue::from_str(&format!(
+            "Gerber layer is too large to render: not enough memory for {} ({})",
+            buffer_name,
+            format_value_allocation::<u8>(additional)
+        ))
+    })
+}
+
 /// Gerber parser with stateful aperture and macro storage
 pub struct GerberParser {
     pub apertures: HashMap<String, Aperture>,
@@ -356,8 +371,6 @@ impl GerberParser {
                 .map_err(|message| JsValue::from_str(&message))?;
             }
 
-            self.enforce_primitive_limit(MAX_TOTAL_PRIMITIVES)
-                .map_err(|message| JsValue::from_str(&message))?;
             i += 1;
         }
 
@@ -368,8 +381,6 @@ impl GerberParser {
                 self.current_state.polarity,
                 take(&mut self.current_primitives),
             ));
-            self.enforce_primitive_limit(MAX_TOTAL_PRIMITIVES)
-                .map_err(|message| JsValue::from_str(&message))?;
         }
 
         // Convert each layer to individual GerberData
@@ -389,32 +400,12 @@ impl GerberParser {
         Ok(gerber_data_layers)
     }
 
-    fn enforce_primitive_limit(&self, max_total_primitives: usize) -> Result<(), String> {
-        let flushed_primitives = self
-            .polarity_layers
-            .iter()
-            .map(|(_, primitives)| primitives.len())
-            .sum::<usize>();
-        let total_primitives = flushed_primitives + self.current_primitives.len();
-
-        if total_primitives > max_total_primitives {
-            return Err(format!(
-                "Too many total primitives: {} (max: {})",
-                total_primitives, max_total_primitives
-            ));
-        }
-
-        Ok(())
-    }
-
     /// Convert a vector of primitives to GerberData
     fn primitives_to_gerber_data(
         primitives: &[Primitive],
         is_negative: bool,
     ) -> Result<GerberData, JsValue> {
         let mut buffers = PrimitiveOutputBuffers::reserved_for(primitives)?;
-
-        let mut vertex_offset: u32 = 0;
 
         // Unit conversion: aperture.rs already converts to mm using unit_multiplier
         // No additional conversion needed
@@ -434,17 +425,14 @@ impl GerberParser {
                         buffers.triangle_vertices.push(vertex[0] * TO_MM);
                         buffers.triangle_vertices.push(vertex[1] * TO_MM);
                     }
-                    // Add index for every 3 vertices (one triangle)
-                    buffers.triangle_indices.push(vertex_offset);
-                    buffers.triangle_indices.push(vertex_offset + 1);
-                    buffers.triangle_indices.push(vertex_offset + 2);
-                    vertex_offset += 3;
 
-                    // Add hole data for each vertex (3 times per triangle)
-                    for _ in 0..3 {
-                        buffers.triangle_hole_x.push(*hole_x * TO_MM);
-                        buffers.triangle_hole_y.push(*hole_y * TO_MM);
-                        buffers.triangle_hole_radius.push(*hole_radius * TO_MM);
+                    if buffers.has_triangle_holes {
+                        // Add hole data for each vertex (3 times per triangle)
+                        for _ in 0..3 {
+                            buffers.triangle_hole_x.push(*hole_x * TO_MM);
+                            buffers.triangle_hole_y.push(*hole_y * TO_MM);
+                            buffers.triangle_hole_radius.push(*hole_radius * TO_MM);
+                        }
                     }
                 }
                 Primitive::Circle {
@@ -459,9 +447,11 @@ impl GerberParser {
                     buffers.circles_x.push(*x * TO_MM);
                     buffers.circles_y.push(*y * TO_MM);
                     buffers.circles_radius.push(*radius * TO_MM);
-                    buffers.circles_hole_x.push(*hole_x * TO_MM);
-                    buffers.circles_hole_y.push(*hole_y * TO_MM);
-                    buffers.circles_hole_radius.push(*hole_radius * TO_MM);
+                    if buffers.has_circle_holes {
+                        buffers.circles_hole_x.push(*hole_x * TO_MM);
+                        buffers.circles_hole_y.push(*hole_y * TO_MM);
+                        buffers.circles_hole_radius.push(*hole_radius * TO_MM);
+                    }
                 }
                 Primitive::Arc {
                     x,
@@ -565,7 +555,6 @@ impl GerberParser {
         Ok(GerberData::new(
             Triangles::new(
                 buffers.triangle_vertices,
-                buffers.triangle_indices,
                 buffers.triangle_hole_x,
                 buffers.triangle_hole_y,
                 buffers.triangle_hole_radius,
@@ -612,14 +601,15 @@ fn parse_command(
     polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
 ) -> Result<(), JsValue> {
     let line = if !line_ref.ends_with('%') {
-        let mut buffer = Vec::new();
-        try_reserve_exact(&mut buffer, 1, "extended command line buffer")?;
-        buffer.push(line_ref.to_string());
+        let mut buffer = String::new();
+        try_reserve_string(&mut buffer, line_ref.len(), "extended command buffer")?;
+        buffer.push_str(line_ref);
         *i += 1;
 
         while *i < length {
             let next_line = lines[*i].trim();
-            buffer.push(next_line.to_string());
+            try_reserve_string(&mut buffer, next_line.len(), "extended command buffer")?;
+            buffer.push_str(next_line);
 
             if next_line.ends_with('%') {
                 break;
@@ -627,7 +617,7 @@ fn parse_command(
             *i += 1;
         }
 
-        buffer.join("")
+        buffer
     } else {
         line_ref.to_string()
     };

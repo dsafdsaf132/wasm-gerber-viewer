@@ -1,6 +1,5 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
-use super::geometry::Primitive;
-use super::{format_count, parse_gerber, GerberParser, Polarity};
+use super::{format_count, parse_gerber};
 use std::collections::HashMap;
 
 fn assert_approx_eq(actual: f32, expected: f32) {
@@ -44,18 +43,6 @@ fn has_circle_at(
         })
 }
 
-fn test_circle() -> Primitive {
-    Primitive::Circle {
-        x: 0.0,
-        y: 0.0,
-        radius: 0.5,
-        exposure: 1.0,
-        hole_x: 0.0,
-        hole_y: 0.0,
-        hole_radius: 0.0,
-    }
-}
-
 #[test]
 fn allocation_count_formatting_groups_digits_without_underflow() {
     assert_eq!(format_count(0), "0");
@@ -81,12 +68,6 @@ fn push_scaled_vec(output: &mut String, label: &str, values: &[f32]) {
     }
 }
 
-fn push_indices(output: &mut String, label: &str, values: &[u32]) {
-    if !values.is_empty() {
-        output.push_str(&format!("{label}={values:?}\n"));
-    }
-}
-
 fn gerber_snapshot(data: &str) -> String {
     let layers = parse_gerber(data).expect("snapshot input should parse");
     let mut output = String::new();
@@ -106,11 +87,6 @@ fn gerber_snapshot(data: &str) -> String {
             &mut output,
             &format!("layer[{idx}].triangles.vertices"),
             &layer.triangles.vertices,
-        );
-        push_indices(
-            &mut output,
-            &format!("layer[{idx}].triangles.indices"),
-            &layer.triangles.indices,
         );
         push_scaled_vec(
             &mut output,
@@ -313,11 +289,7 @@ M02*",
 layers=1
 layer[0].negative=false
 layer[0].boundary=[0,10000,0,10000]
-layer[0].triangles.vertices=[10000, 0, 0, 10000, 0, 0, 10000, 10000, 0, 10000, 10000, 0]
-layer[0].triangles.indices=[0, 1, 2, 3, 4, 5]
-layer[0].triangles.hole_x=[0, 0, 0, 0, 0, 0]
-layer[0].triangles.hole_y=[0, 0, 0, 0, 0, 0]
-layer[0].triangles.hole_radius=[0, 0, 0, 0, 0, 0]",
+layer[0].triangles.vertices=[10000, 0, 0, 10000, 0, 0, 10000, 10000, 0, 10000, 10000, 0]",
     );
 }
 
@@ -339,11 +311,68 @@ layer[0].negative=false
 layer[0].boundary=[-12700,266700,-12700,12700]
 layer[0].circles.x=[0, 254000]
 layer[0].circles.y=[0, 0]
-layer[0].circles.radius=[12700, 12700]
-layer[0].circles.hole_x=[0, 254000]
-layer[0].circles.hole_y=[0, 0]
-layer[0].circles.hole_radius=[0, 0]",
+layer[0].circles.radius=[12700, 12700]",
     );
+}
+
+#[test]
+fn no_hole_apertures_omit_hole_buffers() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X1.0*%
+%ADD11C,1.0*%
+D10*
+X000000Y000000D03*
+D11*
+X2000000Y000000D03*
+M02*",
+    )
+    .expect("apertures should parse");
+
+    let triangles = &layers[0].triangles;
+    assert!(!triangles.vertices.is_empty());
+    assert!(triangles.hole_x.is_empty());
+    assert!(triangles.hole_y.is_empty());
+    assert!(triangles.hole_radius.is_empty());
+
+    let circles = &layers[0].circles;
+    assert_eq!(circles.x.len(), 1);
+    assert!(circles.hole_x.is_empty());
+    assert!(circles.hole_y.is_empty());
+    assert!(circles.hole_radius.is_empty());
+}
+
+#[test]
+fn apertures_with_holes_keep_hole_buffers() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X1.0X0.2*%
+%ADD11C,1.0X0.2*%
+D10*
+X000000Y000000D03*
+D11*
+X2000000Y000000D03*
+M02*",
+    )
+    .expect("apertures should parse");
+
+    let triangles = &layers[0].triangles;
+    assert!(!triangles.vertices.is_empty());
+    assert_eq!(triangles.hole_x.len(), triangles.vertices.len() / 2);
+    assert_eq!(triangles.hole_y.len(), triangles.vertices.len() / 2);
+    assert_eq!(triangles.hole_radius.len(), triangles.vertices.len() / 2);
+    assert!(triangles.hole_radius.iter().all(|radius| *radius > 0.0));
+
+    let circles = &layers[0].circles;
+    assert_eq!(circles.x.len(), 1);
+    assert_eq!(circles.hole_x.len(), circles.x.len());
+    assert_eq!(circles.hole_y.len(), circles.x.len());
+    assert_eq!(circles.hole_radius.len(), circles.x.len());
+    assert!(circles.hole_radius.iter().all(|radius| *radius > 0.0));
 }
 
 #[test]
@@ -361,11 +390,7 @@ M02*",
 layers=1
 layer[0].negative=false
 layer[0].boundary=[-5000,5000,0,20000]
-layer[0].triangles.vertices=[5000, 0, 5000, 20000, -5000, 20000, 5000, 0, -5000, 20000, -5000, 0]
-layer[0].triangles.indices=[0, 1, 2, 3, 4, 5]
-layer[0].triangles.hole_x=[0, 0, 0, 0, 0, 0]
-layer[0].triangles.hole_y=[0, 0, 0, 0, 0, 0]
-layer[0].triangles.hole_radius=[0, 0, 0, 0, 0, 0]",
+layer[0].triangles.vertices=[5000, 0, 5000, 20000, -5000, 20000, 5000, 0, -5000, 20000, -5000, 0]",
     );
 }
 
@@ -396,17 +421,11 @@ layer[0].boundary=[80000,120000,-20000,20000]
 layer[0].circles.x=[100000]
 layer[0].circles.y=[0]
 layer[0].circles.radius=[20000]
-layer[0].circles.hole_x=[100000]
-layer[0].circles.hole_y=[0]
-layer[0].circles.hole_radius=[0]
 layer[1].negative=true
 layer[1].boundary=[90000,110000,-10000,10000]
 layer[1].circles.x=[100000]
 layer[1].circles.y=[0]
-layer[1].circles.radius=[10000]
-layer[1].circles.hole_x=[100000]
-layer[1].circles.hole_y=[0]
-layer[1].circles.hole_radius=[0]",
+layer[1].circles.radius=[10000]",
     );
 }
 
@@ -431,10 +450,7 @@ layer[0].negative=false
 layer[0].boundary=[95000,105000,5000,15000]
 layer[0].circles.x=[100000]
 layer[0].circles.y=[10000]
-layer[0].circles.radius=[5000]
-layer[0].circles.hole_x=[100000]
-layer[0].circles.hole_y=[10000]
-layer[0].circles.hole_radius=[0]",
+layer[0].circles.radius=[5000]",
     );
 }
 
@@ -460,23 +476,8 @@ M02*",
 layers=1
 layer[0].negative=false
 layer[0].boundary=[-2000,0,-9000,11000]
-layer[0].triangles.vertices=[-2000, 8000, -2000, -6000, 0, -9000, 0, 11000, -2000, 8000, 0, -9000]
-layer[0].triangles.indices=[0, 1, 2, 3, 4, 5]
-layer[0].triangles.hole_x=[0, 0, 0, 0, 0, 0]
-layer[0].triangles.hole_y=[0, 0, 0, 0, 0, 0]
-layer[0].triangles.hole_radius=[0, 0, 0, 0, 0, 0]",
+layer[0].triangles.vertices=[-2000, 8000, -2000, -6000, 0, -9000, 0, 11000, -2000, 8000, 0, -9000]",
     );
-}
-
-#[test]
-fn primitive_limit_counts_flushed_polarity_layers() {
-    let mut parser = GerberParser::new();
-    parser
-        .polarity_layers
-        .push((Polarity::Positive, vec![test_circle()]));
-    parser.current_primitives.push(test_circle());
-
-    assert!(parser.enforce_primitive_limit(1).is_err());
 }
 
 #[test]
@@ -498,7 +499,6 @@ M02*";
     let triangles = &layers[0].triangles;
 
     assert_eq!(triangles.vertices.len() / 2, 6);
-    assert_eq!(triangles.indices.len(), 6);
 }
 
 #[test]
@@ -719,7 +719,7 @@ M02*";
     let layers = parse_gerber(data).expect("macro expression should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(!layers[0].triangles.indices.is_empty());
+    assert!(!layers[0].triangles.vertices.is_empty());
 }
 
 #[test]

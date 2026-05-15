@@ -12,7 +12,6 @@ pub struct BufferCache {
     // Triangles cache
     pub triangle_vao: Option<WebGlVertexArrayObject>,
     pub triangle_vertex_buffer: Option<WebGlBuffer>,
-    pub triangle_index_buffer: Option<WebGlBuffer>,
     pub triangle_hole_center_buffer: Option<WebGlBuffer>,
     pub triangle_hole_radius_buffer: Option<WebGlBuffer>,
 
