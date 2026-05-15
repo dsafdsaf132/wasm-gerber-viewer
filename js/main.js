@@ -599,6 +599,14 @@ export class GerberViewer {
     );
   }
 
+  isRendererBusy() {
+    return (
+      this.isLoadingLayers ||
+      this.isWebGlContextLost ||
+      this.isRestoringWebGlContext
+    );
+  }
+
   updateUiState() {
     const totalLayers = this.layers.length;
     const visibleLayers = this.layers.filter((layer) => layer.visible).length;
@@ -616,10 +624,7 @@ export class GerberViewer {
           : `${visibleLayers} visible / ${totalLayers} loaded`;
     }
 
-    const rendererBusy =
-      this.isLoadingLayers ||
-      this.isWebGlContextLost ||
-      this.isRestoringWebGlContext;
+    const rendererBusy = this.isRendererBusy();
     this.fileInput.disabled = rendererBusy;
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
@@ -1087,6 +1092,11 @@ export class GerberViewer {
   }
 
   async handleFileUpload(files) {
+    if (this.isRendererBusy()) {
+      this.fileInput.value = "";
+      return;
+    }
+
     const oversizedFiles = [];
     const validFiles = [];
 
@@ -2170,6 +2180,14 @@ export class GerberViewer {
 
     e.preventDefault();
     e.stopPropagation();
+    if (this.isRendererBusy()) {
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = "none";
+      }
+      this.dropZone.classList.remove("drag-active");
+      return;
+    }
+
     if (e.dataTransfer) {
       e.dataTransfer.dropEffect = "copy";
     }
@@ -2197,6 +2215,7 @@ export class GerberViewer {
     e.preventDefault();
     e.stopPropagation();
     this.dropZone.classList.remove("drag-active");
+    if (this.isRendererBusy()) return;
 
     const files = e.dataTransfer?.files;
     if (files?.length > 0) {
