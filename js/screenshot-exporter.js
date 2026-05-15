@@ -351,6 +351,13 @@ export class ScreenshotExporter {
       screenshotRenderer.tileCanvas.width = 0;
       screenshotRenderer.tileCanvas.height = 0;
     }
+    screenshotRenderer.tileContext = null;
+
+    try {
+      screenshotRenderer.gl.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch (error) {
+      console.warn("[Export] Failed to release screenshot WebGL context:", error);
+    }
   }
 
   async renderStreaming(
@@ -430,7 +437,7 @@ export class ScreenshotExporter {
           const rowStart = row * rowStride;
           await writer.write(bandBuffer.subarray(rowStart, rowStart + rowStride));
         }
-        await new Promise((resolve) => requestAnimationFrame(resolve));
+        await this.yieldToBrowser();
       }
 
       this.setProgress(1);
@@ -672,9 +679,14 @@ export class ScreenshotExporter {
     tileHeight,
     renderState,
   ) {
-    screenshotRenderer.canvas.width = tileWidth;
-    screenshotRenderer.canvas.height = tileHeight;
-    screenshotRenderer.processor.resize();
+    const didResize =
+      screenshotRenderer.canvas.width !== tileWidth ||
+      screenshotRenderer.canvas.height !== tileHeight;
+    if (didResize) {
+      screenshotRenderer.canvas.width = tileWidth;
+      screenshotRenderer.canvas.height = tileHeight;
+      screenshotRenderer.processor.resize();
+    }
     screenshotRenderer.processor.render_tile(
       screenshotRenderer.activeLayerIds,
       screenshotRenderer.colorData,
@@ -691,5 +703,15 @@ export class ScreenshotExporter {
       renderState.globalAlpha,
     );
     screenshotRenderer.gl.finish();
+  }
+
+  yieldToBrowser() {
+    if (globalThis.scheduler?.yield) {
+      return globalThis.scheduler.yield();
+    }
+
+    return new Promise((resolve) => {
+      setTimeout(resolve, 0);
+    });
   }
 }
