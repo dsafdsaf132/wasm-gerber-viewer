@@ -1047,14 +1047,17 @@ export class GerberViewer {
     const scale = this.getSelectedScreenshotScale();
     const { width, height } = this.getScreenshotDimensions(scale);
     const maxDimension = this.getMaxScreenshotDimension();
-    const shouldStream = this.shouldStreamScreenshot(scale);
-    const exceedsLimit =
-      !shouldStream && (width > maxDimension || height > maxDimension);
+    const limitMessage = this.getScreenshotExportLimitMessage(
+      width,
+      height,
+      maxDimension,
+      scale,
+    );
 
-    this.screenshotResolution.textContent = exceedsLimit
-      ? `Estimated ${width} x ${height} px · exceeds ${maxDimension}px GPU limit`
+    this.screenshotResolution.textContent = limitMessage
+      ? `Estimated ${width} x ${height} px · ${limitMessage}`
       : `Estimated ${width} x ${height} px`;
-    this.screenshotExportBtn.disabled = exceedsLimit;
+    this.screenshotExportBtn.disabled = Boolean(limitMessage);
   }
 
   shouldTileScreenshot(scale) {
@@ -1067,6 +1070,19 @@ export class GerberViewer {
 
   supportsStreamingScreenshot() {
     return typeof CompressionStream === "function";
+  }
+
+  getScreenshotExportLimitMessage(width, height, maxDimension, scale) {
+    const exceedsGpuLimit = width > maxDimension || height > maxDimension;
+    if (!exceedsGpuLimit || this.shouldStreamScreenshot(scale)) {
+      return "";
+    }
+
+    if (this.shouldTileScreenshot(scale) && !this.supportsStreamingScreenshot()) {
+      return "streamed PNG export is unavailable in this browser; try a lower resolution";
+    }
+
+    return `exceeds ${maxDimension}px GPU limit`;
   }
 
   captureScreenshotRenderState(rect = this.canvas.getBoundingClientRect()) {
@@ -1109,12 +1125,19 @@ export class GerberViewer {
     const isTiled = this.shouldTileScreenshot(exportScale);
     const shouldStream = this.shouldStreamScreenshot(exportScale);
     const renderState = this.captureScreenshotRenderState(rect);
-    if (
-      !shouldStream &&
-      (exportWidth > maxDimension || exportHeight > maxDimension)
-    ) {
+    const limitMessage = this.getScreenshotExportLimitMessage(
+      exportWidth,
+      exportHeight,
+      maxDimension,
+      exportScale,
+    );
+    if (limitMessage) {
+      const detail =
+        this.shouldTileScreenshot(exportScale) && !this.supportsStreamingScreenshot()
+          ? "This browser does not support streamed PNG export. Try a lower resolution or a browser with CompressionStream support."
+          : `The requested image exceeds this GPU's ${maxDimension}px render limit.`;
       this.showError(
-        `Screenshot is too large for this GPU (${exportWidth} x ${exportHeight}px).`,
+        `Screenshot is too large to export at ${exportWidth} x ${exportHeight}px. ${detail}`,
       );
       return false;
     }
