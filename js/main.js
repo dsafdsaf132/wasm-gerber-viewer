@@ -1068,6 +1068,21 @@ export class GerberViewer {
     return typeof CompressionStream === "function";
   }
 
+  captureScreenshotRenderState(rect = this.canvas.getBoundingClientRect()) {
+    return {
+      viewScaleX: this.getViewScaleX(),
+      viewScaleY: this.getViewScaleY(),
+      offsetX: this.camera.offsetX,
+      offsetY: this.camera.offsetY,
+      canvasWidth: this.canvas.width,
+      canvasHeight: this.canvas.height,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      globalAlpha: this.globalAlpha,
+      backgroundColor: this.isCanvasLight ? "#f8fafc" : "#020617",
+    };
+  }
+
   async exportScreenshot({ includeBackground = false, scale = 1 } = {}) {
     if (this.isExportingScreenshot) return false;
 
@@ -1092,6 +1107,7 @@ export class GerberViewer {
     const maxDimension = this.getMaxScreenshotDimension();
     const isTiled = this.shouldTileScreenshot(exportScale);
     const shouldStream = this.shouldStreamScreenshot(exportScale);
+    const renderState = this.captureScreenshotRenderState(rect);
     if (
       !shouldStream &&
       (exportWidth > maxDimension || exportHeight > maxDimension)
@@ -1118,6 +1134,7 @@ export class GerberViewer {
           exportHeight,
           exportScale,
           includeBackground,
+          renderState,
         );
       } else {
         const output = document.createElement("canvas");
@@ -1132,7 +1149,7 @@ export class GerberViewer {
         }
 
         if (includeBackground) {
-          context.fillStyle = this.isCanvasLight ? "#f8fafc" : "#020617";
+          context.fillStyle = renderState.backgroundColor;
           context.fillRect(0, 0, exportWidth, exportHeight);
         } else {
           context.clearRect(0, 0, exportWidth, exportHeight);
@@ -1146,6 +1163,7 @@ export class GerberViewer {
           0,
           exportWidth,
           exportHeight,
+          renderState,
         );
         context.drawImage(
           screenshotRenderer.canvas,
@@ -1157,7 +1175,7 @@ export class GerberViewer {
 
         context.save();
         context.scale(exportScale, exportScale);
-        this.drawMeasurementsOnContext(context);
+        this.drawMeasurementsOnContext(context, renderState);
         context.restore();
 
         blob = await new Promise((resolve) => {
@@ -1243,6 +1261,7 @@ export class GerberViewer {
     exportHeight,
     exportScale,
     includeBackground,
+    renderState,
   ) {
     if (typeof CompressionStream !== "function") {
       throw new Error(
@@ -1290,6 +1309,7 @@ export class GerberViewer {
             tileWidth,
             tileHeight,
             includeBackground,
+            renderState,
           );
 
           for (let row = 0; row < tileHeight; row += 1) {
@@ -1363,6 +1383,7 @@ export class GerberViewer {
     tileWidth,
     tileHeight,
     includeBackground,
+    renderState,
   ) {
     this.renderSingleScreenshotTile(
       screenshotRenderer,
@@ -1372,6 +1393,7 @@ export class GerberViewer {
       tileY,
       tileWidth,
       tileHeight,
+      renderState,
     );
 
     const context = this.getScreenshotTileContext(
@@ -1381,7 +1403,7 @@ export class GerberViewer {
     );
 
     if (includeBackground) {
-      context.fillStyle = this.isCanvasLight ? "#f8fafc" : "#020617";
+      context.fillStyle = renderState.backgroundColor;
       context.fillRect(0, 0, tileWidth, tileHeight);
     } else {
       context.clearRect(0, 0, tileWidth, tileHeight);
@@ -1397,7 +1419,7 @@ export class GerberViewer {
     context.save();
     context.scale(exportScale, exportScale);
     context.translate(-tileX / exportScale, -tileY / exportScale);
-    this.drawMeasurementsOnContext(context);
+    this.drawMeasurementsOnContext(context, renderState);
     context.restore();
 
     return context.getImageData(0, 0, tileWidth, tileHeight).data;
@@ -1510,6 +1532,7 @@ export class GerberViewer {
     tileY,
     tileWidth,
     tileHeight,
+    renderState,
   ) {
     screenshotRenderer.canvas.width = tileWidth;
     screenshotRenderer.canvas.height = tileHeight;
@@ -1523,18 +1546,24 @@ export class GerberViewer {
       tileY,
       tileWidth,
       tileHeight,
-      this.getViewScaleX(),
-      this.getViewScaleY(),
-      this.camera.offsetX,
-      this.camera.offsetY,
-      this.globalAlpha,
+      renderState.viewScaleX,
+      renderState.viewScaleY,
+      renderState.offsetX,
+      renderState.offsetY,
+      renderState.globalAlpha,
     );
     screenshotRenderer.gl.finish();
   }
 
-  drawMeasurementsOnContext(context) {
+  drawMeasurementsOnContext(context, renderState = null) {
     for (const measurement of this.measurements) {
-      this.drawMeasurementOnContext(context, measurement.start, measurement.end, false);
+      this.drawMeasurementOnContext(
+        context,
+        measurement.start,
+        measurement.end,
+        false,
+        renderState,
+      );
     }
 
     if (this.rulerStartPoint && this.rulerHoverPoint) {
@@ -1543,15 +1572,16 @@ export class GerberViewer {
         this.rulerStartPoint,
         this.rulerHoverPoint,
         true,
+        renderState,
       );
     } else if (this.rulerStartPoint) {
-      this.drawMeasurementPointOnContext(context, this.rulerStartPoint);
+      this.drawMeasurementPointOnContext(context, this.rulerStartPoint, renderState);
     }
   }
 
-  drawMeasurementOnContext(context, start, end, isPreview) {
-    const startPoint = this.worldToCanvasPoint(start);
-    const endPoint = this.worldToCanvasPoint(end);
+  drawMeasurementOnContext(context, start, end, isPreview, renderState = null) {
+    const startPoint = this.worldToCanvasPoint(start, renderState);
+    const endPoint = this.worldToCanvasPoint(end, renderState);
     if (!startPoint || !endPoint) return;
 
     context.save();
@@ -1572,8 +1602,8 @@ export class GerberViewer {
     context.stroke();
     context.restore();
 
-    this.drawMeasurementPointOnContext(context, start);
-    this.drawMeasurementPointOnContext(context, end);
+    this.drawMeasurementPointOnContext(context, start, renderState);
+    this.drawMeasurementPointOnContext(context, end, renderState);
 
     const distance = Math.hypot(end.x - start.x, end.y - start.y);
     const x = (startPoint.x + endPoint.x) / 2;
@@ -1590,8 +1620,8 @@ export class GerberViewer {
     context.restore();
   }
 
-  drawMeasurementPointOnContext(context, point) {
-    const canvasPoint = this.worldToCanvasPoint(point);
+  drawMeasurementPointOnContext(context, point, renderState = null) {
+    const canvasPoint = this.worldToCanvasPoint(point, renderState);
     if (!canvasPoint) return;
 
     context.save();
@@ -2505,15 +2535,23 @@ export class GerberViewer {
     return { x: worldX, y: worldY };
   }
 
-  worldToCanvasPoint(point) {
-    const rect = this.canvas.getBoundingClientRect();
+  worldToCanvasPoint(point, renderState = null) {
+    const rect = renderState
+      ? { width: renderState.rectWidth, height: renderState.rectHeight }
+      : this.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) {
       return null;
     }
 
-    const aspect = this.canvas.width / this.canvas.height;
-    const correctedX = point.x * this.getViewScaleX() + this.camera.offsetX;
-    const correctedY = point.y * this.getViewScaleY() + this.camera.offsetY;
+    const canvasWidth = renderState?.canvasWidth ?? this.canvas.width;
+    const canvasHeight = renderState?.canvasHeight ?? this.canvas.height;
+    const viewScaleX = renderState?.viewScaleX ?? this.getViewScaleX();
+    const viewScaleY = renderState?.viewScaleY ?? this.getViewScaleY();
+    const offsetX = renderState?.offsetX ?? this.camera.offsetX;
+    const offsetY = renderState?.offsetY ?? this.camera.offsetY;
+    const aspect = canvasWidth / canvasHeight;
+    const correctedX = point.x * viewScaleX + offsetX;
+    const correctedY = point.y * viewScaleY + offsetY;
     const ndcX = aspect > 1.0 ? correctedX / aspect : correctedX;
     const ndcY = aspect > 1.0 ? correctedY : correctedY * aspect;
     return {
