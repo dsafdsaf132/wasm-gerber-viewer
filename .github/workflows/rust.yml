@@ -60,7 +60,10 @@ jobs:
         run: ./scripts/vercel-build.sh
 
       - name: Check JavaScript syntax
-        run: node --check js/main.js
+        run: |
+          for file in js/*.js; do
+            node --check "$file"
+          done
 
       - name: Install Rust toolchain for tests
         if: steps.wasm-pkg-cache.outputs.cache-hit != 'true'

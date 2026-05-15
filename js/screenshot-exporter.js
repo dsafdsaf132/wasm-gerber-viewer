@@ -1,0 +1,695 @@
+import { MAX_SCREENSHOT_STREAM_BAND_BYTES } from "./config.js";
+import { formatFileSize, getErrorMessage } from "./file-utils.js";
+
+export class ScreenshotExporter {
+  constructor({
+    canvas,
+    screenshotButton,
+    dialog,
+    form,
+    backgroundToggle,
+    scaleSelect,
+    resolution,
+    progressLabel,
+    progressValue,
+    progressBar,
+    cancelButton,
+    dismissButton,
+    exportButton,
+    getGl,
+    getWasmModule,
+    getWasmProcessor,
+    getLayers,
+    getRenderState,
+    isWebGlUnavailable,
+    drawMeasurements,
+    showError,
+  }) {
+    this.canvas = canvas;
+    this.screenshotButton = screenshotButton;
+    this.dialog = dialog;
+    this.form = form;
+    this.backgroundToggle = backgroundToggle;
+    this.scaleSelect = scaleSelect;
+    this.resolution = resolution;
+    this.progressLabel = progressLabel;
+    this.progressValue = progressValue;
+    this.progressBar = progressBar;
+    this.cancelButton = cancelButton;
+    this.dismissButton = dismissButton;
+    this.exportButton = exportButton;
+    this.getGl = getGl;
+    this.getWasmModule = getWasmModule;
+    this.getWasmProcessor = getWasmProcessor;
+    this.getLayers = getLayers;
+    this.getRenderState = getRenderState;
+    this.isWebGlUnavailable = isWebGlUnavailable;
+    this.drawMeasurements = drawMeasurements;
+    this.showError = showError;
+
+    this.isExporting = false;
+    this.pngCrcTable = null;
+  }
+
+  openDialog() {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      this.showError("Cannot export screenshot because the canvas has no size.");
+      return;
+    }
+
+    this.updateResolutionPreview();
+    if (!this.dialog.open) {
+      this.dialog.showModal();
+    }
+  }
+
+  closeDialog() {
+    if (this.dialog.open) {
+      this.dialog.close();
+    }
+  }
+
+  setExportBusy(isBusy) {
+    this.form.classList.toggle("is-exporting", isBusy);
+    this.backgroundToggle.disabled = isBusy;
+    this.scaleSelect.disabled = isBusy;
+    this.cancelButton.disabled = isBusy;
+    this.dismissButton.disabled = isBusy;
+    this.exportButton.disabled = isBusy;
+    this.exportButton.textContent = isBusy ? "Exporting" : "Export";
+
+    if (isBusy) {
+      this.setProgress(0, "Rendering");
+    } else {
+      this.setProgress(0, "Exporting");
+    }
+  }
+
+  setProgress(progress, label = null) {
+    const clampedProgress = Math.min(1, Math.max(0, progress));
+    const percent = Math.trunc(clampedProgress * 100);
+
+    if (label !== null) {
+      this.progressLabel.textContent = label;
+    }
+    this.progressValue.textContent = `${percent}%`;
+    this.progressBar.value = percent;
+  }
+
+  getSelectedScale() {
+    const scale = Number.parseFloat(this.scaleSelect.value);
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+  }
+
+  getDimensions(scale = this.getSelectedScale()) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      width: Math.max(1, Math.round(rect.width * scale)),
+      height: Math.max(1, Math.round(rect.height * scale)),
+    };
+  }
+
+  getMaxDimension() {
+    const gl = this.getGl();
+    if (!gl) return Number.POSITIVE_INFINITY;
+
+    const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const maxRenderbufferSize = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE);
+    return Math.min(maxTextureSize, maxRenderbufferSize);
+  }
+
+  updateResolutionPreview() {
+    const scale = this.getSelectedScale();
+    const { width, height } = this.getDimensions(scale);
+    const maxDimension = this.getMaxDimension();
+    const limitMessage = this.getExportLimitMessage(
+      width,
+      height,
+      maxDimension,
+      scale,
+    );
+
+    this.resolution.textContent = limitMessage
+      ? `Estimated ${width} x ${height} px · ${limitMessage}`
+      : `Estimated ${width} x ${height} px`;
+    this.exportButton.disabled = this.isExporting || Boolean(limitMessage);
+  }
+
+  shouldTile(scale) {
+    return scale >= 2;
+  }
+
+  shouldStream(scale) {
+    return scale >= 2 && this.supportsStreaming();
+  }
+
+  supportsStreaming() {
+    return typeof CompressionStream === "function";
+  }
+
+  getExportLimitMessage(width, height, maxDimension, scale) {
+    const exceedsGpuLimit = width > maxDimension || height > maxDimension;
+    if (!exceedsGpuLimit || this.shouldStream(scale)) {
+      return "";
+    }
+
+    if (this.shouldTile(scale) && !this.supportsStreaming()) {
+      return "streamed PNG export is unavailable in this browser; try a lower resolution";
+    }
+
+    return `exceeds ${maxDimension}px GPU limit`;
+  }
+
+  async export({ includeBackground = false, scale = 1 } = {}) {
+    if (this.isExporting) return false;
+
+    if (!this.getWasmProcessor() || this.isWebGlUnavailable()) {
+      this.showError("Cannot export screenshot while WebGL is unavailable.");
+      return false;
+    }
+
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) {
+      this.showError("Cannot export screenshot because the canvas has no size.");
+      return false;
+    }
+
+    const exportScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    const exportWidth = Math.max(1, Math.round(rect.width * exportScale));
+    const exportHeight = Math.max(1, Math.round(rect.height * exportScale));
+    const maxDimension = this.getMaxDimension();
+    const isTiled = this.shouldTile(exportScale);
+    const shouldStream = this.shouldStream(exportScale);
+    const renderState = this.getRenderState(rect);
+    const limitMessage = this.getExportLimitMessage(
+      exportWidth,
+      exportHeight,
+      maxDimension,
+      exportScale,
+    );
+    if (limitMessage) {
+      const detail =
+        this.shouldTile(exportScale) && !this.supportsStreaming()
+          ? "This browser does not support streamed PNG export. Try a lower resolution or a browser with CompressionStream support."
+          : `The requested image exceeds this GPU's ${maxDimension}px render limit.`;
+      this.showError(
+        `Screenshot is too large to export at ${exportWidth} x ${exportHeight}px. ${detail}`,
+      );
+      return false;
+    }
+
+    this.isExporting = true;
+    this.screenshotButton.disabled = true;
+    this.setExportBusy(isTiled);
+    let screenshotRenderer = null;
+
+    try {
+      screenshotRenderer = this.createRenderer();
+      let blob = null;
+
+      if (shouldStream) {
+        blob = await this.renderStreaming(
+          screenshotRenderer,
+          exportWidth,
+          exportHeight,
+          exportScale,
+          includeBackground,
+          renderState,
+        );
+      } else {
+        blob = await this.renderSingleImage(
+          screenshotRenderer,
+          exportWidth,
+          exportHeight,
+          exportScale,
+          includeBackground,
+          renderState,
+        );
+      }
+
+      if (!blob) {
+        throw new Error(
+          `Failed to encode ${exportWidth} x ${exportHeight}px PNG. The requested image may exceed this browser's canvas limit.`,
+        );
+      }
+
+      this.downloadBlob(blob);
+      return true;
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("[Export] Failed to export screenshot:", error);
+      this.showError(`Failed to export screenshot: ${message}`);
+      return false;
+    } finally {
+      this.disposeRenderer(screenshotRenderer);
+      this.isExporting = false;
+      this.screenshotButton.disabled = false;
+      this.setExportBusy(false);
+      this.updateResolutionPreview();
+    }
+  }
+
+  async renderSingleImage(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    exportScale,
+    includeBackground,
+    renderState,
+  ) {
+    const output = document.createElement("canvas");
+    output.width = exportWidth;
+    output.height = exportHeight;
+
+    const context = output.getContext("2d");
+    if (!context) {
+      throw new Error(
+        `Cannot create ${exportWidth} x ${exportHeight}px screenshot canvas. Try a lower resolution.`,
+      );
+    }
+
+    if (includeBackground) {
+      context.fillStyle = renderState.backgroundColor;
+      context.fillRect(0, 0, exportWidth, exportHeight);
+    } else {
+      context.clearRect(0, 0, exportWidth, exportHeight);
+    }
+
+    this.renderSingleTile(
+      screenshotRenderer,
+      exportWidth,
+      exportHeight,
+      0,
+      0,
+      exportWidth,
+      exportHeight,
+      renderState,
+    );
+    context.drawImage(screenshotRenderer.canvas, 0, 0, exportWidth, exportHeight);
+
+    context.save();
+    context.scale(exportScale, exportScale);
+    this.drawMeasurements(context, renderState);
+    context.restore();
+
+    return new Promise((resolve) => {
+      output.toBlob(resolve, "image/png");
+    });
+  }
+
+  createRenderer() {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+    if (!gl) {
+      throw new Error("WebGL2 is unavailable for screenshot export.");
+    }
+
+    const wasmModule = this.getWasmModule();
+    if (!wasmModule) {
+      throw new Error("WASM module is unavailable for screenshot export.");
+    }
+
+    const processor = new wasmModule.GerberProcessor();
+    processor.init(gl);
+
+    const activeLayerIds = [];
+    const colorData = [];
+    for (const layer of this.getLayers()) {
+      if (typeof layer.sourceContent !== "string") {
+        throw new Error("Reload files before using high-resolution screenshot export.");
+      }
+
+      const layerId = processor.add_layer(layer.sourceContent);
+      if (layer.visible) {
+        activeLayerIds.push(layerId);
+        colorData.push(layer.color[0], layer.color[1], layer.color[2]);
+      }
+    }
+
+    return {
+      canvas,
+      gl,
+      processor,
+      activeLayerIds: new Uint32Array(activeLayerIds),
+      colorData: new Float32Array(colorData),
+    };
+  }
+
+  disposeRenderer(screenshotRenderer) {
+    if (!screenshotRenderer) return;
+
+    try {
+      screenshotRenderer.processor.clear();
+    } catch (error) {
+      console.warn("[Export] Failed to dispose screenshot renderer:", error);
+    }
+
+    screenshotRenderer.canvas.width = 0;
+    screenshotRenderer.canvas.height = 0;
+    if (screenshotRenderer.tileCanvas) {
+      screenshotRenderer.tileCanvas.width = 0;
+      screenshotRenderer.tileCanvas.height = 0;
+    }
+  }
+
+  async renderStreaming(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    exportScale,
+    includeBackground,
+    renderState,
+  ) {
+    if (typeof CompressionStream !== "function") {
+      throw new Error(
+        "This browser does not support streamed PNG export. Try a lower resolution.",
+      );
+    }
+
+    const tileSize = this.getStreamTileDimensions();
+    this.validateStreamMemory(exportWidth, exportHeight, tileSize);
+    const totalTiles =
+      Math.ceil(exportWidth / tileSize.width) *
+      Math.ceil(exportHeight / tileSize.height);
+    const rowStride = this.getPngRowStride(exportWidth);
+    const pngParts = [
+      this.createPngSignature(),
+      this.createPngHeaderChunk(exportWidth, exportHeight),
+    ];
+    const compressionStream = new CompressionStream("deflate");
+    const reader = compressionStream.readable.getReader();
+    const writer = compressionStream.writable.getWriter();
+    const readCompressed = (async () => {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        pngParts.push(this.createPngChunk("IDAT", value));
+      }
+    })();
+    let tileCount = 0;
+    let writeError = null;
+
+    try {
+      for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
+        const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
+        const bandBuffer = this.createBandBuffer(
+          exportWidth,
+          exportHeight,
+          tileHeight,
+        );
+
+        for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
+          const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
+          this.setProgress(tileCount / totalTiles);
+          const tileData = this.renderTileToImageData(
+            screenshotRenderer,
+            exportWidth,
+            exportHeight,
+            exportScale,
+            tileX,
+            tileY,
+            tileWidth,
+            tileHeight,
+            includeBackground,
+            renderState,
+          );
+
+          for (let row = 0; row < tileHeight; row += 1) {
+            const sourceStart = row * tileWidth * 4;
+            const sourceEnd = sourceStart + tileWidth * 4;
+            const destStart = row * rowStride + 1 + tileX * 4;
+            bandBuffer.set(tileData.subarray(sourceStart, sourceEnd), destStart);
+          }
+
+          tileCount += 1;
+          this.setProgress(tileCount / totalTiles);
+        }
+
+        for (let row = 0; row < tileHeight; row += 1) {
+          const rowStart = row * rowStride;
+          await writer.write(bandBuffer.subarray(rowStart, rowStart + rowStride));
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+
+      this.setProgress(1);
+      await writer.close();
+    } catch (error) {
+      writeError = error;
+      try {
+        await writer.abort(error);
+      } catch {
+        // The stream may already be closed or errored.
+      }
+    }
+
+    try {
+      await readCompressed;
+    } catch (error) {
+      if (!writeError) {
+        writeError = error;
+      }
+    }
+
+    if (writeError) {
+      throw writeError;
+    }
+
+    pngParts.push(this.createPngChunk("IEND", new Uint8Array()));
+    return new Blob(pngParts, { type: "image/png" });
+  }
+
+  validateStreamMemory(exportWidth, exportHeight, tileSize) {
+    const bandHeight = Math.min(tileSize.height, exportHeight);
+    const bandBytes = this.getBandByteLength(exportWidth, bandHeight);
+
+    if (
+      !Number.isSafeInteger(bandBytes) ||
+      bandBytes > MAX_SCREENSHOT_STREAM_BAND_BYTES
+    ) {
+      throw new Error(
+        this.getMemoryLimitMessage(exportWidth, exportHeight, bandBytes),
+      );
+    }
+  }
+
+  createBandBuffer(exportWidth, exportHeight, bandHeight) {
+    const bandBytes = this.getBandByteLength(exportWidth, bandHeight);
+
+    try {
+      return new Uint8Array(bandBytes);
+    } catch (error) {
+      throw new Error(
+        this.getMemoryLimitMessage(exportWidth, exportHeight, bandBytes),
+        { cause: error },
+      );
+    }
+  }
+
+  getBandByteLength(exportWidth, bandHeight) {
+    return this.getPngRowStride(exportWidth) * bandHeight;
+  }
+
+  getPngRowStride(width) {
+    return 1 + width * 4;
+  }
+
+  getMemoryLimitMessage(exportWidth, exportHeight, bandBytes) {
+    const memoryText = Number.isFinite(bandBytes)
+      ? formatFileSize(bandBytes)
+      : "more than this browser can address";
+
+    return [
+      `Screenshot is too large to export at ${exportWidth} x ${exportHeight}px.`,
+      `It needs about ${memoryText} of temporary browser memory.`,
+      "Try a lower resolution.",
+    ].join(" ");
+  }
+
+  getStreamTileDimensions() {
+    const rect = this.canvas.getBoundingClientRect();
+    const maxDimension = this.getMaxDimension();
+
+    return {
+      width: Math.max(1, Math.min(maxDimension, Math.round(rect.width * 2))),
+      height: Math.max(1, Math.min(maxDimension, Math.round(rect.height))),
+    };
+  }
+
+  renderTileToImageData(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    exportScale,
+    tileX,
+    tileY,
+    tileWidth,
+    tileHeight,
+    includeBackground,
+    renderState,
+  ) {
+    this.renderSingleTile(
+      screenshotRenderer,
+      exportWidth,
+      exportHeight,
+      tileX,
+      tileY,
+      tileWidth,
+      tileHeight,
+      renderState,
+    );
+
+    const context = this.getTileContext(screenshotRenderer, tileWidth, tileHeight);
+
+    if (includeBackground) {
+      context.fillStyle = renderState.backgroundColor;
+      context.fillRect(0, 0, tileWidth, tileHeight);
+    } else {
+      context.clearRect(0, 0, tileWidth, tileHeight);
+    }
+
+    context.drawImage(screenshotRenderer.canvas, 0, 0, tileWidth, tileHeight);
+    context.save();
+    context.scale(exportScale, exportScale);
+    context.translate(-tileX / exportScale, -tileY / exportScale);
+    this.drawMeasurements(context, renderState);
+    context.restore();
+
+    return context.getImageData(0, 0, tileWidth, tileHeight).data;
+  }
+
+  getTileContext(screenshotRenderer, tileWidth, tileHeight) {
+    if (!screenshotRenderer.tileCanvas) {
+      screenshotRenderer.tileCanvas = document.createElement("canvas");
+    }
+
+    const tileCanvas = screenshotRenderer.tileCanvas;
+    if (tileCanvas.width !== tileWidth) {
+      tileCanvas.width = tileWidth;
+    }
+    if (tileCanvas.height !== tileHeight) {
+      tileCanvas.height = tileHeight;
+    }
+
+    if (!screenshotRenderer.tileContext) {
+      screenshotRenderer.tileContext = tileCanvas.getContext("2d", {
+        willReadFrequently: true,
+      });
+    }
+    if (!screenshotRenderer.tileContext) {
+      throw new Error("Cannot create screenshot tile canvas.");
+    }
+
+    return screenshotRenderer.tileContext;
+  }
+
+  downloadBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `gerber-viewer-${this.getTimestampForFileName()}.png`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  getTimestampForFileName() {
+    return new Date().toISOString().replace(/[:.]/g, "-");
+  }
+
+  createPngSignature() {
+    return new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  }
+
+  createPngHeaderChunk(width, height) {
+    const data = new Uint8Array(13);
+    const view = new DataView(data.buffer);
+    view.setUint32(0, width, false);
+    view.setUint32(4, height, false);
+    data[8] = 8;
+    data[9] = 6;
+    data[10] = 0;
+    data[11] = 0;
+    data[12] = 0;
+    return this.createPngChunk("IHDR", data);
+  }
+
+  createPngChunk(type, data) {
+    const payload = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const chunk = new Uint8Array(12 + payload.length);
+    const view = new DataView(chunk.buffer);
+    view.setUint32(0, payload.length, false);
+
+    for (let index = 0; index < 4; index += 1) {
+      chunk[4 + index] = type.charCodeAt(index);
+    }
+
+    chunk.set(payload, 8);
+    view.setUint32(
+      8 + payload.length,
+      this.pngCrc32(chunk.subarray(4, 8 + payload.length)),
+      false,
+    );
+    return chunk;
+  }
+
+  pngCrc32(bytes) {
+    const table = this.getPngCrcTable();
+    let crc = 0xffffffff;
+
+    for (const byte of bytes) {
+      crc = table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    }
+
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  getPngCrcTable() {
+    if (this.pngCrcTable) {
+      return this.pngCrcTable;
+    }
+
+    const table = new Uint32Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      let value = index;
+      for (let bit = 0; bit < 8; bit += 1) {
+        value = (value & 1) ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+      }
+      table[index] = value >>> 0;
+    }
+
+    this.pngCrcTable = table;
+    return table;
+  }
+
+  renderSingleTile(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    tileX,
+    tileY,
+    tileWidth,
+    tileHeight,
+    renderState,
+  ) {
+    screenshotRenderer.canvas.width = tileWidth;
+    screenshotRenderer.canvas.height = tileHeight;
+    screenshotRenderer.processor.resize();
+    screenshotRenderer.processor.render_tile(
+      screenshotRenderer.activeLayerIds,
+      screenshotRenderer.colorData,
+      exportWidth,
+      exportHeight,
+      tileX,
+      tileY,
+      tileWidth,
+      tileHeight,
+      renderState.viewScaleX,
+      renderState.viewScaleY,
+      renderState.offsetX,
+      renderState.offsetY,
+      renderState.globalAlpha,
+    );
+    screenshotRenderer.gl.finish();
+  }
+}
