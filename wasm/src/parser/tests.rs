@@ -1068,6 +1068,51 @@ M02*",
 }
 
 #[test]
+fn full_circle_arc_preserves_equal_start_end_with_center_offset() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+G03*
+G75*
+X1000000Y0000000D02*
+X1000000Y0000000I-1000000J0000000D01*
+M02*",
+    )
+    .expect("full-circle arc should parse");
+    let layer = &layers[0];
+
+    assert_eq!(layer.arcs.x.len(), 1);
+    assert_approx_eq(layer.arcs.x[0], 0.0);
+    assert_approx_eq(layer.arcs.y[0], 0.0);
+    assert_approx_eq(layer.arcs.radius[0], 1.0);
+    assert_approx_eq(layer.arcs.sweep_angle[0], 2.0 * std::f32::consts::PI);
+    assert_eq!(layer.circles.x.len(), 2);
+    assert!(has_circle_at(&layer.circles, 1.0, 0.0, 0.5));
+}
+
+#[test]
+fn full_circle_arc_requires_solid_standard_circle_aperture() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X1.0*%
+D10*
+G03*
+G75*
+X1000000Y0000000D02*
+X1000000Y0000000I-1000000J0000000D01*
+M02*",
+    )
+    .expect("non-solid full-circle arc should parse without image geometry");
+
+    assert!(layers.is_empty());
+}
+
+#[test]
 fn linear_draw_requires_solid_standard_circle_aperture() {
     let rectangle_layers = parse_gerber(
         "\

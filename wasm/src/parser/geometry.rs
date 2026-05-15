@@ -1163,7 +1163,9 @@ pub fn execute_interpolation(
                         let sr_end_x = end_x + offset_x;
                         let sr_end_y = end_y + offset_y;
 
-                        if points_coincide(sr_start_x, sr_start_y, sr_end_x, sr_end_y) {
+                        if points_coincide(sr_start_x, sr_start_y, sr_end_x, sr_end_y)
+                            && !arc_center_offset_present(i, j)
+                        {
                             flash_aperture_no_sr(
                                 aperture,
                                 primitives,
@@ -1373,6 +1375,10 @@ fn normalize_arc_sweep(
 
 fn points_coincide(start_x: f32, start_y: f32, end_x: f32, end_y: f32) -> bool {
     (start_x - end_x).abs() < 0.0001 && (start_y - end_y).abs() < 0.0001
+}
+
+fn arc_center_offset_present(i: f32, j: f32) -> bool {
+    i.abs() >= 0.0001 || j.abs() >= 0.0001
 }
 
 fn append_region_segment(
