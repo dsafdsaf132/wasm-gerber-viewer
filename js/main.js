@@ -62,6 +62,17 @@ function getUtf8ByteLength(value) {
   return bytes;
 }
 
+function waitForNextFrame() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => resolve());
+  });
+}
+
+function clampProgress(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
 function isFatalWasmRuntimeError(error) {
   const message = getErrorMessage(error);
   return (
@@ -85,6 +96,8 @@ export class GerberViewer {
     this.isRestoringWebGlContext = false;
     this.isRecoveringWasmProcessor = false;
     this.isInitialUrlLoading = Boolean(getInitialSourceUrl());
+    this.isLoadingLayers = false;
+    this.loadingWorkspaceStatus = "Loading files";
 
     // Layers
     this.layers = [];
@@ -596,7 +609,9 @@ export class GerberViewer {
     const totalLayers = this.layers.length;
     const visibleLayers = this.layers.filter((layer) => layer.visible).length;
 
-    if (this.isRestoringWebGlContext) {
+    if (this.isLoadingLayers) {
+      this.workspaceStatus.textContent = this.loadingWorkspaceStatus;
+    } else if (this.isRestoringWebGlContext) {
       this.workspaceStatus.textContent = "Restoring WebGL";
     } else if (this.isWebGlContextLost) {
       this.workspaceStatus.textContent = "WebGL context lost";
@@ -607,7 +622,10 @@ export class GerberViewer {
           : `${visibleLayers} visible / ${totalLayers} loaded`;
     }
 
-    const rendererBusy = this.isWebGlContextLost || this.isRestoringWebGlContext;
+    const rendererBusy =
+      this.isLoadingLayers ||
+      this.isWebGlContextLost ||
+      this.isRestoringWebGlContext;
     this.fileInput.disabled = rendererBusy;
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
@@ -616,7 +634,7 @@ export class GerberViewer {
     this.diagnosticsCount.textContent = String(this.diagnostics.count);
     this.emptyState.classList.toggle(
       "is-hidden",
-      totalLayers > 0 || this.isInitialUrlLoading,
+      totalLayers > 0 || this.isInitialUrlLoading || this.isLoadingLayers,
     );
     this.zoomReadout.textContent = this.formatZoom();
     this.boundsReadout.textContent = this.formatCombinedBounds();
@@ -682,6 +700,81 @@ export class GerberViewer {
 
   setWorkspaceStatus(status) {
     this.workspaceStatus.textContent = status;
+  }
+
+  showLoadingModal({
+    title = "Loading files",
+    stage = "Preparing",
+    fileName = "-",
+    current = 0,
+    total = 0,
+    progress = 0,
+    indeterminate = false,
+  } = {}) {
+    this.isLoadingLayers = true;
+    this.loadingWorkspaceStatus = title;
+    this.loadingModal.hidden = false;
+    this.updateLoadingModal({
+      title,
+      stage,
+      fileName,
+      current,
+      total,
+      progress,
+      indeterminate,
+    });
+    this.updateUiState();
+  }
+
+  updateLoadingModal({
+    title = null,
+    stage = null,
+    fileName = null,
+    current = null,
+    total = null,
+    progress = null,
+    indeterminate = false,
+  } = {}) {
+    if (title !== null) {
+      this.loadingTitle.textContent = title;
+      this.loadingWorkspaceStatus = title;
+    }
+    if (stage !== null) {
+      this.loadingStage.textContent = stage;
+    }
+    if (fileName !== null) {
+      this.loadingFileName.textContent = fileName || "-";
+    }
+    if (current !== null || total !== null) {
+      const currentValue = Number.isFinite(current) ? current : 0;
+      const totalValue = Number.isFinite(total) ? total : 0;
+      this.loadingProgressCount.textContent = `${currentValue} / ${totalValue}`;
+    }
+
+    if (indeterminate) {
+      this.loadingProgressBar.removeAttribute("value");
+      this.loadingProgressValue.textContent = "-";
+      return;
+    }
+
+    const percent = Math.round(clampProgress(progress ?? 0) * 100);
+    this.loadingProgressBar.value = percent;
+    this.loadingProgressValue.textContent = `${percent}%`;
+  }
+
+  hideLoadingModal() {
+    this.loadingModal.hidden = true;
+    this.isLoadingLayers = false;
+    this.loadingWorkspaceStatus = "Loading files";
+    this.updateUiState();
+  }
+
+  getLayerLoadProgress(index, total, fileProgress) {
+    if (!Number.isFinite(total) || total <= 0) {
+      return 0;
+    }
+
+    return (index + clampProgress(fileProgress)) / total;
   }
 
   addDiagnostic(level, title, detail = "") {
@@ -955,28 +1048,48 @@ export class GerberViewer {
   }
 
   async loadRemoteSource(url, { repeat = 1 } = {}) {
-    this.setWorkspaceStatus("Loading remote file");
-    const file = await fetchRemoteFile(url);
-    const layerSources = repeatLayerSources(
-      await this.collectLayerSources([file]),
-      repeat,
-    );
-    if (layerSources.length === 0) {
-      this.updateUiState();
-      return;
+    this.showLoadingModal({
+      title: "Loading remote file",
+      stage: "Downloading",
+      fileName: url.href,
+      indeterminate: true,
+    });
+
+    try {
+      const file = await fetchRemoteFile(url, {
+        onProgress: (progress) => {
+          this.updateLoadingModal({
+            stage: "Downloading",
+            fileName: url.href,
+            current: 0,
+            total: 0,
+            progress,
+          });
+        },
+      });
+      const layerSources = repeatLayerSources(
+        await this.collectLayerSources([file]),
+        repeat,
+      );
+      if (layerSources.length === 0) {
+        this.updateUiState();
+        return;
+      }
+
+      const results = await this.loadLayerSourcesSequentially(layerSources, {
+        title: "Loading remote file",
+      });
+      const loadedCount = results.filter(Boolean).length;
+
+      if (loadedCount > 0) {
+        this.renderLayerList();
+        this.render();
+        this.fitView();
+        this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
+      }
+    } finally {
+      this.hideLoadingModal();
     }
-
-    const results = await this.loadLayerSourcesSequentially(layerSources);
-    const loadedCount = results.filter(Boolean).length;
-
-    if (loadedCount > 0) {
-      this.renderLayerList();
-      this.render();
-      this.fitView();
-      this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
-    }
-
-    this.updateUiState();
   }
 
   async handleFileUpload(files) {
@@ -1004,18 +1117,32 @@ export class GerberViewer {
     }
 
     if (validFiles.length > 0) {
-      const layerSources = await this.collectLayerSources(validFiles);
+      this.showLoadingModal({
+        title: "Loading files",
+        stage: "Preparing",
+        current: 0,
+        total: validFiles.length,
+        progress: 0,
+      });
 
-      if (layerSources.length > 0) {
-        const results = await this.loadLayerSourcesSequentially(layerSources);
-        const loadedCount = results.filter(Boolean).length;
+      try {
+        const layerSources = await this.collectLayerSources(validFiles);
 
-        if (loadedCount > 0) {
-          this.renderLayerList();
-          this.render();
-          this.fitView();
-          this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
+        if (layerSources.length > 0) {
+          const results = await this.loadLayerSourcesSequentially(layerSources, {
+            title: "Loading files",
+          });
+          const loadedCount = results.filter(Boolean).length;
+
+          if (loadedCount > 0) {
+            this.renderLayerList();
+            this.render();
+            this.fitView();
+            this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
+          }
         }
+      } finally {
+        this.hideLoadingModal();
       }
     }
 
@@ -1025,11 +1152,26 @@ export class GerberViewer {
     this.fileInput.value = "";
   }
 
-  async loadLayerSourcesSequentially(layerSources) {
+  async loadLayerSourcesSequentially(layerSources, { title = "Loading files" } = {}) {
     const results = [];
+    const total = layerSources.length;
 
-    for (const source of layerSources) {
-      results.push(await this.loadLayerSource(source.name, source.readText));
+    this.showLoadingModal({
+      title,
+      stage: "Processing",
+      current: 0,
+      total,
+      progress: 0,
+    });
+
+    for (const [index, source] of layerSources.entries()) {
+      results.push(
+        await this.loadLayerSource(source.name, source.readText, {
+          index,
+          total,
+          title,
+        }),
+      );
     }
 
     return results;
@@ -1041,16 +1183,75 @@ export class GerberViewer {
         this.addDiagnostic("warning", name, message),
       onArchiveInfo: (name, message) => this.addDiagnostic("info", name, message),
       onArchiveError: (name, error) => this.handleLayerLoadError(name, error),
+      onArchiveStart: (name) => {
+        this.updateLoadingModal({
+          stage: "Reading archive",
+          fileName: name,
+          indeterminate: true,
+        });
+      },
+      onFileStart: (name, current, total) => {
+        this.updateLoadingModal({
+          stage: "Preparing",
+          fileName: name,
+          current,
+          total,
+          progress: total > 0 ? (current - 1) / total : 0,
+        });
+      },
     });
   }
 
-  async loadLayerSource(name, readText) {
+  async loadLayerSource(name, readText, { index = 0, total = 1, title = "Loading files" } = {}) {
     try {
-      const content = await readText();
+      this.updateLoadingModal({
+        title,
+        stage: "Reading",
+        fileName: name,
+        current: index + 1,
+        total,
+        progress: this.getLayerLoadProgress(index, total, 0),
+      });
+
+      const content = await readText((readProgress) => {
+        this.updateLoadingModal({
+          stage: "Reading",
+          fileName: name,
+          current: index + 1,
+          total,
+          progress: this.getLayerLoadProgress(index, total, readProgress * 0.45),
+        });
+      });
+
+      this.updateLoadingModal({
+        stage: "Parsing",
+        fileName: name,
+        current: index + 1,
+        total,
+        progress: this.getLayerLoadProgress(index, total, 0.55),
+      });
+      await waitForNextFrame();
+
       await this.addLayer(name, content);
+      this.updateLoadingModal({
+        stage: "Loaded",
+        fileName: name,
+        current: index + 1,
+        total,
+        progress: this.getLayerLoadProgress(index, total, 1),
+      });
+      await waitForNextFrame();
       return true;
     } catch (error) {
       this.handleLayerLoadError(name, error);
+      this.updateLoadingModal({
+        stage: "Skipped",
+        fileName: name,
+        current: index + 1,
+        total,
+        progress: this.getLayerLoadProgress(index, total, 1),
+      });
+      await waitForNextFrame();
       return false;
     }
   }

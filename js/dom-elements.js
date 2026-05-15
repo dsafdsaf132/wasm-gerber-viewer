@@ -52,6 +52,13 @@ export function getViewerElements(documentRef = document) {
     screenshotCancelBtn: requireElement(documentRef, "screenshot-cancel-btn"),
     screenshotDismissBtn: requireElement(documentRef, "screenshot-dismiss-btn"),
     screenshotExportBtn: requireElement(documentRef, "screenshot-export-btn"),
+    loadingModal: requireElement(documentRef, "loading-modal"),
+    loadingTitle: requireElement(documentRef, "loading-title"),
+    loadingStage: requireElement(documentRef, "loading-stage"),
+    loadingFileName: requireElement(documentRef, "loading-file-name"),
+    loadingProgressCount: requireElement(documentRef, "loading-progress-count"),
+    loadingProgressValue: requireElement(documentRef, "loading-progress-value"),
+    loadingProgressBar: requireElement(documentRef, "loading-progress-bar"),
     rulerToggleBtn: requireElement(documentRef, "ruler-toggle-btn"),
     rulerClearBtn: requireElement(documentRef, "ruler-clear-btn"),
     measurementUnitToggle: requireElement(

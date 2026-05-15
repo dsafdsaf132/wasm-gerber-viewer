@@ -360,6 +360,43 @@
       </dialog>
 
       <div
+        id="loading-modal"
+        class="loading-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="loading-title"
+        aria-describedby="loading-file-name"
+        aria-live="polite"
+        hidden
+      >
+        <div class="loading-panel">
+          <div class="loading-header">
+            <div>
+              <strong id="loading-title">Loading files</strong>
+              <span id="loading-stage">Preparing</span>
+            </div>
+            <i data-lucide="loader-circle"></i>
+          </div>
+
+          <div class="loading-file">
+            <span>Current file</span>
+            <strong id="loading-file-name">-</strong>
+          </div>
+
+          <div class="loading-progress-header">
+            <span id="loading-progress-count">0 / 0</span>
+            <strong id="loading-progress-value">0%</strong>
+          </div>
+          <progress
+            class="loading-progress-bar"
+            id="loading-progress-bar"
+            value="0"
+            max="100"
+          ></progress>
+        </div>
+      </div>
+
+      <div
         id="file-size-warning"
         class="notification"
         role="status"
