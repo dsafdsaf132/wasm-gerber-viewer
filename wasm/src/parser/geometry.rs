@@ -1081,12 +1081,7 @@ pub fn execute_interpolation(
     let start_x = state.x;
     let start_y = state.y;
 
-    // RS-274X draw and arc objects can only be created with a solid standard circle aperture.
     if let Some(aperture) = apertures.get(&state.current_aperture) {
-        if !aperture.is_solid_circle {
-            return Ok(());
-        }
-
         match state.interpolation_mode.as_str() {
             "linear" | "linear_x10" | "linear_x01" | "linear_x001" => {
                 // Draw line with Step and Repeat
@@ -1110,6 +1105,12 @@ pub fn execute_interpolation(
                                 state.mirror_y,
                                 state.layer_rotation,
                             )?;
+                            continue;
+                        }
+
+                        // RS-274X draw objects can only be created with a solid standard circle
+                        // aperture. Non-zero-length draws with other apertures are non-image.
+                        if !aperture.is_solid_circle {
                             continue;
                         }
 
@@ -1161,6 +1162,26 @@ pub fn execute_interpolation(
                         let sr_start_y = start_y + offset_y;
                         let sr_end_x = end_x + offset_x;
                         let sr_end_y = end_y + offset_y;
+
+                        if points_coincide(sr_start_x, sr_start_y, sr_end_x, sr_end_y) {
+                            flash_aperture_no_sr(
+                                aperture,
+                                primitives,
+                                sr_start_x,
+                                sr_start_y,
+                                state.layer_scale,
+                                state.mirror_x,
+                                state.mirror_y,
+                                state.layer_rotation,
+                            )?;
+                            continue;
+                        }
+
+                        // RS-274X arc objects can only be created with a solid standard circle
+                        // aperture. Non-zero-length arcs with other apertures are non-image.
+                        if !aperture.is_solid_circle {
+                            continue;
+                        }
 
                         if let Some((center_x, center_y, radius, start_angle, sweep_angle)) =
                             calculate_arc_parameters(

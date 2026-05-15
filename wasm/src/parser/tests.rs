@@ -1152,6 +1152,30 @@ M02*",
 }
 
 #[test]
+fn zero_length_non_solid_draw_matches_flash_image() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X1.0*%
+D10*
+X0000000Y0000000D02*
+X0000000Y0000000D01*
+M02*",
+    )
+    .expect("zero-length rectangle D01 should parse");
+
+    assert_eq!(layers.len(), 1);
+    let vertices = collect_triangle_vertices(&layers[0]);
+    assert_eq!(vertices.len(), 12);
+    let (min_x, max_x, min_y, max_y) = triangle_bounds(&vertices);
+    assert_approx_eq(min_x, -0.5);
+    assert_approx_eq(max_x, 0.5);
+    assert_approx_eq(min_y, -0.5);
+    assert_approx_eq(max_y, 0.5);
+}
+
+#[test]
 fn layer_scaling_transforms_aperture_block_about_origin() {
     let data = "\
 %FSLAX24Y24*%
