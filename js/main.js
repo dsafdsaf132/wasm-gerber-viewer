@@ -349,6 +349,7 @@ export class GerberViewer {
     this.isWebGlContextLost = false;
     this.isRestoringWebGlContext = false;
     this.isRecoveringWasmProcessor = false;
+    this.wasmRecoveryPromise = null;
     this.isInitialUrlLoading = Boolean(getInitialSourceUrl());
     this.isLoadingLayers = false;
     this.loadingWorkspaceStatus = "Loading files";
@@ -1986,8 +1987,18 @@ export class GerberViewer {
     }
   }
 
+  async waitForWasmProcessorRecovery() {
+    if (this.isRecoveringWasmProcessor && this.wasmRecoveryPromise) {
+      await this.wasmRecoveryPromise;
+    }
+  }
+
   async recoverWasmProcessorAfterFatalError(failedLayerName, error) {
-    if (this.isRecoveringWasmProcessor || this.isWebGlContextLost) {
+    if (this.isRecoveringWasmProcessor) {
+      await this.waitForWasmProcessorRecovery();
+      return;
+    }
+    if (this.isWebGlContextLost) {
       return;
     }
 
@@ -2003,7 +2014,11 @@ export class GerberViewer {
     const viewState = this.captureCanvasViewState();
     const nextLayerDomId = this.nextLayerDomId;
     const nextColorIndex = this.nextColorIndex;
+    let finishRecovery = null;
 
+    this.wasmRecoveryPromise = new Promise((resolve) => {
+      finishRecovery = resolve;
+    });
     this.isRecoveringWasmProcessor = true;
     this.addDiagnostic(
       "warning",
@@ -2045,6 +2060,8 @@ export class GerberViewer {
     } finally {
       this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       this.isRecoveringWasmProcessor = false;
+      finishRecovery?.();
+      this.wasmRecoveryPromise = null;
       this.updateUiState();
     }
   }
@@ -2119,6 +2136,9 @@ export class GerberViewer {
 
   async addLayer(name, content, options = {}) {
     try {
+      if (!options.skipFatalRecovery) {
+        await this.waitForWasmProcessorRecovery();
+      }
       if (!this.wasmProcessor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
@@ -2162,6 +2182,9 @@ export class GerberViewer {
 
   async createParsedLayerRecord(name, parsedLayer, options = {}) {
     try {
+      if (!options.skipFatalRecovery) {
+        await this.waitForWasmProcessorRecovery();
+      }
       if (!this.wasmProcessor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
