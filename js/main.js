@@ -1117,6 +1117,7 @@ export class GerberViewer {
       this.nextColorIndex = nextColorIndex;
       this.restoreCanvasViewState(viewState);
       this.renderLayerList();
+      this.render();
     } finally {
       this.isRecoveringWasmProcessor = false;
       this.updateUiState();
