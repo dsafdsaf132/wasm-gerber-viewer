@@ -1,5 +1,22 @@
 use wasm_bindgen::prelude::*;
 
+fn translate_point_pairs(values: &mut [f32], dx: f32, dy: f32) {
+    for point in values.chunks_exact_mut(2) {
+        point[0] += dx;
+        point[1] += dy;
+    }
+}
+
+fn translate_components(xs: &mut [f32], ys: &mut [f32], dx: f32, dy: f32) {
+    for x in xs {
+        *x += dx;
+    }
+
+    for y in ys {
+        *y += dy;
+    }
+}
+
 /// Triangle mesh data structure
 pub struct Triangles {
     pub(crate) vertices: Vec<f32>,
@@ -29,6 +46,11 @@ impl Triangles {
         self.hole_y = Vec::new();
         self.hole_radius = Vec::new();
     }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_point_pairs(&mut self.vertices, dx, dy);
+        translate_components(&mut self.hole_x, &mut self.hole_y, dx, dy);
+    }
 }
 
 /// Triangle mesh template rendered at many flash positions.
@@ -55,6 +77,10 @@ impl TriangleTemplateInstances {
         self.vertices = Vec::new();
         self.instance_x = Vec::new();
         self.instance_y = Vec::new();
+    }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_components(&mut self.instance_x, &mut self.instance_y, dx, dy);
     }
 }
 
@@ -95,6 +121,11 @@ impl Circles {
         self.hole_y = Vec::new();
         self.hole_radius = Vec::new();
     }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_components(&mut self.x, &mut self.y, dx, dy);
+        translate_components(&mut self.hole_x, &mut self.hole_y, dx, dy);
+    }
 }
 
 /// Arc primitive data structure
@@ -134,6 +165,10 @@ impl Arcs {
         self.sweep_angle = Vec::new();
         self.thickness = Vec::new();
     }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_components(&mut self.x, &mut self.y, dx, dy);
+    }
 }
 
 /// Thermal primitive data structure
@@ -172,6 +207,10 @@ impl Thermals {
         self.inner_diameter = Vec::new();
         self.gap_thickness = Vec::new();
         self.rotation = Vec::new();
+    }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_components(&mut self.x, &mut self.y, dx, dy);
     }
 }
 
@@ -214,6 +253,13 @@ impl Boundary {
     #[wasm_bindgen(getter)]
     pub fn max_y(&self) -> f32 {
         self.max_y
+    }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        self.min_x += dx;
+        self.max_x += dx;
+        self.min_y += dy;
+        self.max_y += dy;
     }
 }
 
@@ -259,5 +305,16 @@ impl GerberData {
             || !self.circles.x.is_empty()
             || !self.arcs.x.is_empty()
             || !self.thermals.x.is_empty()
+    }
+
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        self.triangles.translate(dx, dy);
+        for template in &mut self.triangle_templates {
+            template.translate(dx, dy);
+        }
+        self.circles.translate(dx, dy);
+        self.arcs.translate(dx, dy);
+        self.thermals.translate(dx, dy);
+        self.boundary.translate(dx, dy);
     }
 }

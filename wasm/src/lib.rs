@@ -4,7 +4,7 @@ mod shape;
 
 use crate::parser::parse_gerber;
 use crate::renderer::Renderer;
-use crate::shape::Boundary;
+use crate::shape::{Boundary, GerberData};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
 
@@ -51,6 +51,36 @@ pub fn reserve_input_capacity(byte_count: usize) -> Result<(), JsValue> {
 pub struct GerberProcessor {
     gl: Option<WebGl2RenderingContext>,
     renderer: Option<Renderer>,
+}
+
+impl GerberProcessor {
+    fn add_parsed_layers(&mut self, gerber_data_layers: Vec<GerberData>) -> Result<u32, JsValue> {
+        // Filter out empty layers (layers with no geometry)
+        let non_empty_layers: Vec<_> = gerber_data_layers
+            .into_iter()
+            .filter(|layer| layer.has_geometry())
+            .collect();
+
+        // If no non-empty layers found, reject the file as invalid Gerber
+        if non_empty_layers.is_empty() {
+            return Err(JsValue::from_str(
+                "File does not contain valid Gerber data (no geometry found)",
+            ));
+        }
+
+        // Add to renderer
+        if let Some(renderer) = &mut self.renderer {
+            let layer_index = renderer.add_layer(non_empty_layers)?;
+
+            // For now, layer_id matches layer_index
+            // In a more complex implementation, we could maintain a mapping
+            Ok(layer_index as u32)
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -101,32 +131,38 @@ impl GerberProcessor {
     pub fn add_layer(&mut self, content: String) -> Result<u32, JsValue> {
         // Parse Gerber content to get Vec<GerberData> (one per polarity layer)
         let gerber_data_layers = parse_gerber(&content)?;
+        self.add_parsed_layers(gerber_data_layers)
+    }
 
-        // Filter out empty layers (layers with no geometry)
-        let non_empty_layers: Vec<_> = gerber_data_layers
-            .into_iter()
-            .filter(|layer| layer.has_geometry())
-            .collect();
-
-        // If no non-empty layers found, reject the file as invalid Gerber
-        if non_empty_layers.is_empty() {
-            return Err(JsValue::from_str(
-                "File does not contain valid Gerber data (no geometry found)",
-            ));
+    /// Add a new layer after translating its parsed geometry.
+    ///
+    /// # Arguments
+    /// * `content` - Gerber file content as string
+    /// * `offset_x` - Horizontal offset in parsed Gerber world units
+    /// * `offset_y` - Vertical offset in parsed Gerber world units
+    ///
+    /// # Returns
+    /// * Layer ID (u32) for tracking this layer
+    pub fn add_layer_with_offset(
+        &mut self,
+        content: String,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<u32, JsValue> {
+        if !offset_x.is_finite() || !offset_y.is_finite() {
+            return Err(JsValue::from_str("Layer offset must be finite"));
         }
 
-        // Add to renderer
-        if let Some(renderer) = &mut self.renderer {
-            let layer_index = renderer.add_layer(non_empty_layers)?;
-
-            // For now, layer_id matches layer_index
-            // In a more complex implementation, we could maintain a mapping
-            Ok(layer_index as u32)
-        } else {
-            Err(JsValue::from_str(
-                "Renderer not initialized. Call init() first.",
-            ))
+        if offset_x == 0.0 && offset_y == 0.0 {
+            return self.add_layer(content);
         }
+
+        let mut gerber_data_layers = parse_gerber(&content)?;
+        for layer in &mut gerber_data_layers {
+            layer.translate(offset_x, offset_y);
+        }
+
+        self.add_parsed_layers(gerber_data_layers)
     }
 
     /// Remove a layer from the renderer
