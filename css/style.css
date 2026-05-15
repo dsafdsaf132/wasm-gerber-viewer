@@ -675,12 +675,14 @@ button {
 
 @container (max-width: 380px) {
   .panel-tab,
-  .layer-panel-controls .chip-button {
+  .layer-panel-controls .chip-button,
+  .filter-actions .chip-button {
     padding: 0;
   }
 
   .panel-tab span:not(.tab-badge),
-  .layer-panel-controls .chip-button span {
+  .layer-panel-controls .chip-button span,
+  .filter-actions .chip-button span {
     display: none;
   }
 }
@@ -999,20 +1001,24 @@ button {
 .filter-form {
   display: grid;
   gap: 12px;
+  min-width: 0;
 }
 
 .filter-actions {
   display: flex;
   gap: 6px;
+  min-width: 0;
 }
 
 .filter-actions .chip-button {
   flex: 1;
+  min-width: 0;
 }
 
 .filter-field {
   display: grid;
   gap: 6px;
+  min-width: 0;
 }
 
 .filter-field span,
@@ -1024,6 +1030,7 @@ button {
 
 .filter-field textarea {
   width: 100%;
+  min-width: 0;
   min-height: 148px;
   padding: 9px 10px;
   border: 1px solid var(--line);
