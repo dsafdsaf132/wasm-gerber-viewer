@@ -340,6 +340,8 @@ export class GerberViewer {
     });
     this.screenshotForm.addEventListener("submit", (e) => {
       e.preventDefault();
+      if (this.isExportingScreenshot) return;
+
       const options = {
         includeBackground: this.screenshotBackgroundToggle.checked,
         scale: this.getSelectedScreenshotScale(),
@@ -1057,7 +1059,8 @@ export class GerberViewer {
     this.screenshotResolution.textContent = limitMessage
       ? `Estimated ${width} x ${height} px · ${limitMessage}`
       : `Estimated ${width} x ${height} px`;
-    this.screenshotExportBtn.disabled = Boolean(limitMessage);
+    this.screenshotExportBtn.disabled =
+      this.isExportingScreenshot || Boolean(limitMessage);
   }
 
   shouldTileScreenshot(scale) {
