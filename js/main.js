@@ -142,12 +142,12 @@ export class GerberViewer {
 
     // Colors
     this.colorPalette = [
-      [1.0, 0.0, 0.0], // Red
       [0.0, 1.0, 0.0], // Green
       [0.0, 0.0, 1.0], // Blue
       [1.0, 1.0, 0.0], // Yellow
       [1.0, 0.0, 1.0], // Magenta
       [0.0, 1.0, 1.0], // Cyan
+      [1.0, 0.0, 0.0], // Red
     ];
     this.nextColorIndex = 0;
 
@@ -1094,7 +1094,7 @@ export class GerberViewer {
         return;
       }
 
-      const results = await this.loadLayerSourcesSequentially(layerSources, {
+      const results = await this.loadLayerSources(layerSources, {
         title: "Loading remote file",
       });
       const loadedCount = results.filter(Boolean).length;
@@ -1152,7 +1152,7 @@ export class GerberViewer {
         const layerSources = await this.collectLayerSources(validFiles);
 
         if (layerSources.length > 0) {
-          const results = await this.loadLayerSourcesSequentially(layerSources, {
+          const results = await this.loadLayerSources(layerSources, {
             title: "Loading files",
           });
           const loadedCount = results.filter(Boolean).length;
@@ -1175,26 +1175,33 @@ export class GerberViewer {
     this.fileInput.value = "";
   }
 
-  async loadLayerSourcesSequentially(layerSources, { title = "Loading files" } = {}) {
-    const results = [];
+  async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     const total = layerSources.length;
+    const readProgresses = Array(total).fill(0);
 
     this.showLoadingModal({
       title,
-      stage: "Processing",
+      stage: "Reading",
       current: 0,
       total,
       progress: 0,
     });
 
-    for (const [index, source] of layerSources.entries()) {
-      results.push(
-        await this.loadLayerSource(source.name, source.readText, {
+    const readResults = await Promise.all(
+      layerSources.map((source, index) =>
+        this.readLayerSource(source, {
           index,
           total,
           title,
-          offset: source.offset,
+          readProgresses,
         }),
+      ),
+    );
+
+    const results = [];
+    for (const readResult of readResults) {
+      results.push(
+        await this.addBufferedLayerSource(readResult, { title, total }),
       );
     }
 
@@ -1226,46 +1233,119 @@ export class GerberViewer {
     });
   }
 
-  async loadLayerSource(
-    name,
-    readText,
-    { index = 0, total = 1, title = "Loading files", offset } = {},
-  ) {
+  getAggregateReadProgress(readProgresses) {
+    if (readProgresses.length === 0) {
+      return 0;
+    }
+
+    const totalProgress = readProgresses.reduce(
+      (sum, progress) => sum + clampProgress(progress),
+      0,
+    );
+
+    return totalProgress / readProgresses.length;
+  }
+
+  getCompletedReadCount(readProgresses) {
+    return readProgresses.filter((progress) => progress >= 1).length;
+  }
+
+  async readLayerSource(source, { index, total, title, readProgresses }) {
+    const { name, readText } = source;
+
     try {
       this.updateLoadingModal({
         title,
         stage: "Reading",
         fileName: name,
-        current: index + 1,
+        current: this.getCompletedReadCount(readProgresses),
         total,
-        progress: this.getLayerLoadProgress(index, total, 0),
+        progress: this.getAggregateReadProgress(readProgresses) * 0.5,
       });
 
       const content = await readText((readProgress) => {
+        readProgresses[index] = clampProgress(readProgress);
         this.updateLoadingModal({
           stage: "Reading",
           fileName: name,
-          current: index + 1,
+          current: this.getCompletedReadCount(readProgresses),
           total,
-          progress: this.getLayerLoadProgress(index, total, readProgress * 0.45),
+          progress: this.getAggregateReadProgress(readProgresses) * 0.5,
         });
       });
 
+      readProgresses[index] = 1;
       this.updateLoadingModal({
+        stage: "Reading",
+        fileName: name,
+        current: this.getCompletedReadCount(readProgresses),
+        total,
+        progress: this.getAggregateReadProgress(readProgresses) * 0.5,
+      });
+
+      return {
+        ok: true,
+        index,
+        name,
+        content,
+        offset: source.offset,
+      };
+    } catch (error) {
+      readProgresses[index] = 1;
+      this.handleLayerLoadError(name, error);
+      this.updateLoadingModal({
+        stage: "Skipped",
+        fileName: name,
+        current: this.getCompletedReadCount(readProgresses),
+        total,
+        progress: this.getAggregateReadProgress(readProgresses) * 0.5,
+      });
+      return {
+        ok: false,
+        index,
+        name,
+      };
+    }
+  }
+
+  async addBufferedLayerSource(
+    readResult,
+    { title = "Loading files", total = 1 } = {},
+  ) {
+    const index = readResult.index ?? 0;
+    const name = readResult.name;
+
+    if (!readResult.ok) {
+      this.updateLoadingModal({
+        title,
+        stage: "Skipped",
+        fileName: name,
+        current: index + 1,
+        total,
+        progress: 0.5 + this.getLayerLoadProgress(index, total, 1) * 0.5,
+      });
+      return false;
+    }
+
+    try {
+      this.updateLoadingModal({
+        title,
         stage: "Parsing",
         fileName: name,
         current: index + 1,
         total,
-        progress: this.getLayerLoadProgress(index, total, 0.55),
+        progress: 0.5 + this.getLayerLoadProgress(index, total, 0) * 0.5,
       });
 
-      await this.addLayer(name, content, { offset });
+      await this.addLayer(name, readResult.content, {
+        offset: readResult.offset,
+      });
       this.updateLoadingModal({
         stage: "Loaded",
         fileName: name,
         current: index + 1,
         total,
-        progress: this.getLayerLoadProgress(index, total, 1),
+        progress: 0.5 + this.getLayerLoadProgress(index, total, 1) * 0.5,
       });
       return true;
     } catch (error) {
@@ -1275,7 +1355,7 @@ export class GerberViewer {
         fileName: name,
         current: index + 1,
         total,
-        progress: this.getLayerLoadProgress(index, total, 1),
+        progress: 0.5 + this.getLayerLoadProgress(index, total, 1) * 0.5,
       });
       return false;
     }
