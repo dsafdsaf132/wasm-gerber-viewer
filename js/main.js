@@ -84,6 +84,7 @@ export class GerberViewer {
     this.isWebGlContextLost = false;
     this.isRestoringWebGlContext = false;
     this.isRecoveringWasmProcessor = false;
+    this.isInitialUrlLoading = Boolean(getInitialSourceUrl());
 
     // Layers
     this.layers = [];
@@ -613,7 +614,10 @@ export class GerberViewer {
 
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;
     this.diagnosticsCount.textContent = String(this.diagnostics.count);
-    this.emptyState.classList.toggle("is-hidden", totalLayers > 0);
+    this.emptyState.classList.toggle(
+      "is-hidden",
+      totalLayers > 0 || this.isInitialUrlLoading,
+    );
     this.zoomReadout.textContent = this.formatZoom();
     this.boundsReadout.textContent = this.formatCombinedBounds();
     this.renderDiagnostics();
@@ -931,14 +935,22 @@ export class GerberViewer {
 
   async loadInitialUrlSource() {
     const sourceUrl = getInitialSourceUrl();
-    if (!sourceUrl) return;
+    if (!sourceUrl) {
+      this.isInitialUrlLoading = false;
+      return;
+    }
     const repeat = getInitialSourceRepeat();
 
     try {
+      this.isInitialUrlLoading = true;
+      this.updateUiState();
       const url = new URL(sourceUrl);
       await this.loadRemoteSource(url, { repeat });
     } catch (error) {
       this.handleLayerLoadError(sourceUrl, error);
+    } finally {
+      this.isInitialUrlLoading = false;
+      this.updateUiState();
     }
   }
 
