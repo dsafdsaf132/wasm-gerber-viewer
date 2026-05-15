@@ -40,7 +40,6 @@ export function getViewerElements(documentRef = document) {
     ),
     screenshotScaleSelect: requireElement(documentRef, "screenshot-scale-select"),
     screenshotResolution: requireElement(documentRef, "screenshot-resolution"),
-    screenshotProgress: requireElement(documentRef, "screenshot-progress"),
     screenshotProgressLabel: requireElement(
       documentRef,
       "screenshot-progress-label",
