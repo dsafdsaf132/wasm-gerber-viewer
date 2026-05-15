@@ -11,6 +11,7 @@ pub struct Fbo {
 pub struct BufferCache {
     // Triangles cache
     pub triangle_vao: Option<WebGlVertexArrayObject>,
+    pub triangle_vertex_count: i32,
     pub triangle_vertex_buffer: Option<WebGlBuffer>,
     pub triangle_hole_x_buffer: Option<WebGlBuffer>,
     pub triangle_hole_y_buffer: Option<WebGlBuffer>,
@@ -18,6 +19,7 @@ pub struct BufferCache {
 
     // Circles cache
     pub circle_vao: Option<WebGlVertexArrayObject>,
+    pub circle_instance_count: i32,
     pub circle_center_x_buffer: Option<WebGlBuffer>,
     pub circle_center_y_buffer: Option<WebGlBuffer>,
     pub circle_radius_buffer: Option<WebGlBuffer>,
@@ -27,6 +29,7 @@ pub struct BufferCache {
 
     // Arcs cache
     pub arc_vao: Option<WebGlVertexArrayObject>,
+    pub arc_instance_count: i32,
     pub arc_center_x_buffer: Option<WebGlBuffer>,
     pub arc_center_y_buffer: Option<WebGlBuffer>,
     pub arc_radius_buffer: Option<WebGlBuffer>,
@@ -36,6 +39,7 @@ pub struct BufferCache {
 
     // Thermals cache
     pub thermal_vao: Option<WebGlVertexArrayObject>,
+    pub thermal_instance_count: i32,
     pub thermal_center_x_buffer: Option<WebGlBuffer>,
     pub thermal_center_y_buffer: Option<WebGlBuffer>,
     pub thermal_outer_diameter_buffer: Option<WebGlBuffer>,

@@ -496,6 +496,7 @@ export class GerberViewer {
       color: [...layer.color],
       sourceContent: layer.sourceContent,
     }));
+    const viewState = this.captureCanvasViewState();
 
     this.isRestoringWebGlContext = true;
     this.updateUiState();
@@ -505,10 +506,18 @@ export class GerberViewer {
       if (!this.wasmProcessor) {
         throw new Error("No parsed layer data available for WebGL restore");
       }
-      this.wasmProcessor.restore_context(this.gl);
-      this.isWebGlContextLost = false;
-      this.resizeCanvas({ allowProcessorResize: true });
-      this.layers = layerSnapshot;
+      try {
+        this.wasmProcessor.restore_context(this.gl);
+        this.isWebGlContextLost = false;
+        this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
+        this.layers = layerSnapshot;
+      } catch (restoreError) {
+        await this.rebuildWebGlProcessorFromSnapshot(
+          layerSnapshot,
+          viewState,
+          restoreError,
+        );
+      }
 
       this.renderLayerList();
     } catch (error) {
@@ -521,6 +530,30 @@ export class GerberViewer {
       this.isRestoringWebGlContext = false;
       this.updateUiState();
       this.render();
+    }
+  }
+
+  async rebuildWebGlProcessorFromSnapshot(layerSnapshot, viewState, restoreError) {
+    this.addDiagnostic(
+      "warning",
+      "WebGL renderer rebuilt",
+      `Rebuilding layers after WebGL restore could not reuse cached geometry: ${getErrorMessage(restoreError)}`,
+    );
+
+    this.disposeWasmProcessor();
+    this.layers = [];
+    this.createWebGlProcessor();
+    this.isWebGlContextLost = false;
+    this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
+
+    for (const layer of layerSnapshot) {
+      await this.addLayer(layer.name, layer.sourceContent, {
+        id: layer.id,
+        visible: layer.visible,
+        color: layer.color,
+        sourceContent: layer.sourceContent,
+        skipFatalRecovery: true,
+      });
     }
   }
 

@@ -376,6 +376,38 @@ M02*",
 }
 
 #[test]
+fn mixed_hole_apertures_are_split_into_separate_sublayers() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+%ADD11C,1.0X0.2*%
+D10*
+X000000Y000000D03*
+D11*
+X2000000Y000000D03*
+M02*",
+    )
+    .expect("apertures should parse");
+
+    assert_eq!(layers.len(), 2);
+
+    let plain_circles = &layers[0].circles;
+    assert_eq!(plain_circles.x.len(), 1);
+    assert!(plain_circles.hole_x.is_empty());
+    assert!(plain_circles.hole_y.is_empty());
+    assert!(plain_circles.hole_radius.is_empty());
+
+    let holed_circles = &layers[1].circles;
+    assert_eq!(holed_circles.x.len(), 1);
+    assert_eq!(holed_circles.hole_x.len(), 1);
+    assert_eq!(holed_circles.hole_y.len(), 1);
+    assert_eq!(holed_circles.hole_radius.len(), 1);
+    assert!(holed_circles.hole_radius[0] > 0.0);
+}
+
+#[test]
 fn golden_macro_center_line_output_matches_current_parser() {
     assert_gerber_snapshot(
         "\

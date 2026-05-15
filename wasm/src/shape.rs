@@ -22,6 +22,13 @@ impl Triangles {
             hole_radius,
         }
     }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.vertices = Vec::new();
+        self.hole_x = Vec::new();
+        self.hole_y = Vec::new();
+        self.hole_radius = Vec::new();
+    }
 }
 
 /// Circle primitive data structure
@@ -51,6 +58,15 @@ impl Circles {
             hole_y,
             hole_radius,
         }
+    }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.x = Vec::new();
+        self.y = Vec::new();
+        self.radius = Vec::new();
+        self.hole_x = Vec::new();
+        self.hole_y = Vec::new();
+        self.hole_radius = Vec::new();
     }
 }
 
@@ -82,6 +98,15 @@ impl Arcs {
             thickness,
         }
     }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.x = Vec::new();
+        self.y = Vec::new();
+        self.radius = Vec::new();
+        self.start_angle = Vec::new();
+        self.sweep_angle = Vec::new();
+        self.thickness = Vec::new();
+    }
 }
 
 /// Thermal primitive data structure
@@ -111,6 +136,15 @@ impl Thermals {
             gap_thickness,
             rotation,
         }
+    }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.x = Vec::new();
+        self.y = Vec::new();
+        self.outer_diameter = Vec::new();
+        self.inner_diameter = Vec::new();
+        self.gap_thickness = Vec::new();
+        self.rotation = Vec::new();
     }
 }
 

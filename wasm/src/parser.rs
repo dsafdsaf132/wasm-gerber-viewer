@@ -40,25 +40,54 @@ struct PrimitiveBufferCounts {
 }
 
 impl PrimitiveBufferCounts {
+    fn include(&mut self, primitive: &Primitive) {
+        match primitive {
+            Primitive::Triangle { hole_radius, .. } => {
+                self.triangles += 1;
+                self.has_triangle_holes |= *hole_radius != 0.0;
+            }
+            Primitive::Circle { hole_radius, .. } => {
+                self.circles += 1;
+                self.has_circle_holes |= *hole_radius != 0.0;
+            }
+            Primitive::Arc { .. } => self.arcs += 1,
+            Primitive::Thermal { .. } => self.thermals += 1,
+        }
+    }
+
+    fn has_geometry(&self) -> bool {
+        self.triangles > 0 || self.circles > 0 || self.arcs > 0 || self.thermals > 0
+    }
+}
+
+#[derive(Default)]
+struct SplitPrimitiveBufferCounts {
+    plain: PrimitiveBufferCounts,
+    holed: PrimitiveBufferCounts,
+}
+
+impl SplitPrimitiveBufferCounts {
     fn from_primitives(primitives: &[Primitive]) -> Self {
         let mut counts = Self::default();
 
         for primitive in primitives {
-            match primitive {
-                Primitive::Triangle { hole_radius, .. } => {
-                    counts.triangles += 1;
-                    counts.has_triangle_holes |= *hole_radius != 0.0;
-                }
-                Primitive::Circle { hole_radius, .. } => {
-                    counts.circles += 1;
-                    counts.has_circle_holes |= *hole_radius != 0.0;
-                }
-                Primitive::Arc { .. } => counts.arcs += 1,
-                Primitive::Thermal { .. } => counts.thermals += 1,
+            if primitive_has_hole(primitive) {
+                counts.holed.include(primitive);
+            } else {
+                counts.plain.include(primitive);
             }
         }
 
         counts
+    }
+}
+
+fn primitive_has_hole(primitive: &Primitive) -> bool {
+    match primitive {
+        Primitive::Triangle { hole_radius, .. } | Primitive::Circle { hole_radius, .. } => {
+            *hole_radius != 0.0
+        }
+        Primitive::Arc { .. } | Primitive::Thermal { .. } => false,
     }
 }
 
@@ -90,8 +119,7 @@ struct PrimitiveOutputBuffers {
 }
 
 impl PrimitiveOutputBuffers {
-    fn reserved_for(primitives: &[Primitive]) -> Result<Self, JsValue> {
-        let counts = PrimitiveBufferCounts::from_primitives(primitives);
+    fn reserved_for(counts: &PrimitiveBufferCounts) -> Result<Self, JsValue> {
         let triangle_vertex_values =
             checked_capacity(counts.triangles, 6, "triangle vertex buffer")?;
 
@@ -215,6 +243,177 @@ impl PrimitiveOutputBuffers {
         )?;
 
         Ok(buffers)
+    }
+
+    fn push_primitive(&mut self, primitive: Primitive) {
+        // Unit conversion: aperture.rs already converts to mm using unit_multiplier.
+        const TO_MM: f32 = 1.0;
+
+        match primitive {
+            Primitive::Triangle {
+                vertices,
+                hole_x,
+                hole_y,
+                hole_radius,
+                ..
+            } => {
+                for vertex in vertices {
+                    self.triangle_vertices.push(vertex[0] * TO_MM);
+                    self.triangle_vertices.push(vertex[1] * TO_MM);
+                }
+
+                if self.has_triangle_holes {
+                    for _ in 0..3 {
+                        self.triangle_hole_x.push(hole_x * TO_MM);
+                        self.triangle_hole_y.push(hole_y * TO_MM);
+                        self.triangle_hole_radius.push(hole_radius * TO_MM);
+                    }
+                }
+            }
+            Primitive::Circle {
+                x,
+                y,
+                radius,
+                hole_x,
+                hole_y,
+                hole_radius,
+                ..
+            } => {
+                self.circles_x.push(x * TO_MM);
+                self.circles_y.push(y * TO_MM);
+                self.circles_radius.push(radius * TO_MM);
+                if self.has_circle_holes {
+                    self.circles_hole_x.push(hole_x * TO_MM);
+                    self.circles_hole_y.push(hole_y * TO_MM);
+                    self.circles_hole_radius.push(hole_radius * TO_MM);
+                }
+            }
+            Primitive::Arc {
+                x,
+                y,
+                radius,
+                start_angle,
+                end_angle,
+                thickness,
+                ..
+            } => {
+                self.arcs_x.push(x * TO_MM);
+                self.arcs_y.push(y * TO_MM);
+                self.arcs_radius.push(radius * TO_MM);
+                self.arcs_start_angle.push(start_angle);
+                self.arcs_sweep_angle.push(end_angle - start_angle);
+                self.arcs_thickness.push(thickness * TO_MM);
+            }
+            Primitive::Thermal {
+                x,
+                y,
+                outer_diameter,
+                inner_diameter,
+                gap_thickness,
+                rotation,
+                ..
+            } => {
+                self.thermals_x.push(x * TO_MM);
+                self.thermals_y.push(y * TO_MM);
+                self.thermals_outer_diameter.push(outer_diameter * TO_MM);
+                self.thermals_inner_diameter.push(inner_diameter * TO_MM);
+                self.thermals_gap_thickness.push(gap_thickness * TO_MM);
+                self.thermals_rotation.push(rotation);
+            }
+        }
+    }
+
+    fn into_gerber_data(self, is_negative: bool) -> GerberData {
+        let boundary = self.boundary();
+
+        GerberData::new(
+            Triangles::new(
+                self.triangle_vertices,
+                self.triangle_hole_x,
+                self.triangle_hole_y,
+                self.triangle_hole_radius,
+            ),
+            Circles::new(
+                self.circles_x,
+                self.circles_y,
+                self.circles_radius,
+                self.circles_hole_x,
+                self.circles_hole_y,
+                self.circles_hole_radius,
+            ),
+            Arcs::new(
+                self.arcs_x,
+                self.arcs_y,
+                self.arcs_radius,
+                self.arcs_start_angle,
+                self.arcs_sweep_angle,
+                self.arcs_thickness,
+            ),
+            Thermals::new(
+                self.thermals_x,
+                self.thermals_y,
+                self.thermals_outer_diameter,
+                self.thermals_inner_diameter,
+                self.thermals_gap_thickness,
+                self.thermals_rotation,
+            ),
+            boundary,
+            is_negative,
+        )
+    }
+
+    fn boundary(&self) -> Boundary {
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        for point in self.triangle_vertices.chunks_exact(2) {
+            let x = point[0];
+            let y = point[1];
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+
+        for i in 0..self.circles_x.len() {
+            let x = self.circles_x[i];
+            let y = self.circles_y[i];
+            let r = self.circles_radius[i];
+            min_x = min_x.min(x - r);
+            max_x = max_x.max(x + r);
+            min_y = min_y.min(y - r);
+            max_y = max_y.max(y + r);
+        }
+
+        for i in 0..self.arcs_x.len() {
+            let x = self.arcs_x[i];
+            let y = self.arcs_y[i];
+            let r = self.arcs_radius[i];
+            let t = self.arcs_thickness[i];
+            let outer = r + t / 2.0;
+            min_x = min_x.min(x - outer);
+            max_x = max_x.max(x + outer);
+            min_y = min_y.min(y - outer);
+            max_y = max_y.max(y + outer);
+        }
+
+        for i in 0..self.thermals_x.len() {
+            let x = self.thermals_x[i];
+            let y = self.thermals_y[i];
+            let r = self.thermals_outer_diameter[i] / 2.0;
+            min_x = min_x.min(x - r);
+            max_x = max_x.max(x + r);
+            min_y = min_y.min(y - r);
+            max_y = max_y.max(y + r);
+        }
+
+        if min_x == f32::INFINITY {
+            return Boundary::new(0.0, 0.0, 0.0, 0.0);
+        }
+
+        Boundary::new(min_x, max_x, min_y, max_y)
     }
 }
 
@@ -387,16 +586,18 @@ impl GerberParser {
         // can be dropped as soon as their render buffers are built.
         let polarity_layers = take(&mut self.polarity_layers);
         let mut gerber_data_layers: Vec<GerberData> = Vec::new();
+        let gerber_data_layer_capacity =
+            checked_capacity(polarity_layers.len(), 2, "Gerber data layer list")?;
         try_reserve_exact(
             &mut gerber_data_layers,
-            polarity_layers.len(),
+            gerber_data_layer_capacity,
             "Gerber data layer list",
         )?;
 
         for (polarity, primitives) in polarity_layers {
-            let gerber_data =
+            let mut gerber_data =
                 Self::primitives_to_gerber_data(primitives, polarity == Polarity::Negative)?;
-            gerber_data_layers.push(gerber_data);
+            gerber_data_layers.append(&mut gerber_data);
         }
 
         Ok(gerber_data_layers)
@@ -406,184 +607,36 @@ impl GerberParser {
     fn primitives_to_gerber_data(
         primitives: Vec<Primitive>,
         is_negative: bool,
-    ) -> Result<GerberData, JsValue> {
-        let mut buffers = PrimitiveOutputBuffers::reserved_for(&primitives)?;
-
-        // Unit conversion: aperture.rs already converts to mm using unit_multiplier
-        // No additional conversion needed
-        const TO_MM: f32 = 1.0;
+    ) -> Result<Vec<GerberData>, JsValue> {
+        let counts = SplitPrimitiveBufferCounts::from_primitives(&primitives);
+        let mut plain_buffers = PrimitiveOutputBuffers::reserved_for(&counts.plain)?;
+        let mut holed_buffers = PrimitiveOutputBuffers::reserved_for(&counts.holed)?;
 
         for primitive in primitives {
-            match primitive {
-                Primitive::Triangle {
-                    vertices,
-                    hole_x,
-                    hole_y,
-                    hole_radius,
-                    ..
-                } => {
-                    // Add triangle vertices to array (convert to mm units)
-                    for vertex in vertices {
-                        buffers.triangle_vertices.push(vertex[0] * TO_MM);
-                        buffers.triangle_vertices.push(vertex[1] * TO_MM);
-                    }
-
-                    if buffers.has_triangle_holes {
-                        // Add hole data for each vertex (3 times per triangle)
-                        for _ in 0..3 {
-                            buffers.triangle_hole_x.push(hole_x * TO_MM);
-                            buffers.triangle_hole_y.push(hole_y * TO_MM);
-                            buffers.triangle_hole_radius.push(hole_radius * TO_MM);
-                        }
-                    }
-                }
-                Primitive::Circle {
-                    x,
-                    y,
-                    radius,
-                    hole_x,
-                    hole_y,
-                    hole_radius,
-                    ..
-                } => {
-                    buffers.circles_x.push(x * TO_MM);
-                    buffers.circles_y.push(y * TO_MM);
-                    buffers.circles_radius.push(radius * TO_MM);
-                    if buffers.has_circle_holes {
-                        buffers.circles_hole_x.push(hole_x * TO_MM);
-                        buffers.circles_hole_y.push(hole_y * TO_MM);
-                        buffers.circles_hole_radius.push(hole_radius * TO_MM);
-                    }
-                }
-                Primitive::Arc {
-                    x,
-                    y,
-                    radius,
-                    start_angle,
-                    end_angle,
-                    thickness,
-                    ..
-                } => {
-                    buffers.arcs_x.push(x * TO_MM);
-                    buffers.arcs_y.push(y * TO_MM);
-                    buffers.arcs_radius.push(radius * TO_MM);
-                    buffers.arcs_start_angle.push(start_angle);
-                    // sweep_angle = end_angle - start_angle
-                    buffers.arcs_sweep_angle.push(end_angle - start_angle);
-                    buffers.arcs_thickness.push(thickness * TO_MM);
-                }
-                Primitive::Thermal {
-                    x,
-                    y,
-                    outer_diameter,
-                    inner_diameter,
-                    gap_thickness,
-                    rotation,
-                    ..
-                } => {
-                    buffers.thermals_x.push(x * TO_MM);
-                    buffers.thermals_y.push(y * TO_MM);
-                    buffers.thermals_outer_diameter.push(outer_diameter * TO_MM);
-                    buffers.thermals_inner_diameter.push(inner_diameter * TO_MM);
-                    buffers.thermals_gap_thickness.push(gap_thickness * TO_MM);
-                    buffers.thermals_rotation.push(rotation);
-                }
+            if primitive_has_hole(&primitive) {
+                holed_buffers.push_primitive(primitive);
+            } else {
+                plain_buffers.push_primitive(primitive);
             }
         }
 
-        // Calculate boundary from all geometry
-        let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
-        let mut min_y = f32::INFINITY;
-        let mut max_y = f32::NEG_INFINITY;
+        let mut gerber_data_layers = Vec::new();
+        let layer_count =
+            usize::from(counts.plain.has_geometry()) + usize::from(counts.holed.has_geometry());
+        try_reserve_exact(
+            &mut gerber_data_layers,
+            layer_count,
+            "Gerber data layer list",
+        )?;
 
-        // Include triangle vertices in boundary
-        for i in (0..buffers.triangle_vertices.len()).step_by(2) {
-            let x = buffers.triangle_vertices[i];
-            let y = buffers.triangle_vertices[i + 1];
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
+        if counts.plain.has_geometry() {
+            gerber_data_layers.push(plain_buffers.into_gerber_data(is_negative));
+        }
+        if counts.holed.has_geometry() {
+            gerber_data_layers.push(holed_buffers.into_gerber_data(is_negative));
         }
 
-        // Include circles in boundary (center +/- radius)
-        for i in 0..buffers.circles_x.len() {
-            let x = buffers.circles_x[i];
-            let y = buffers.circles_y[i];
-            let r = buffers.circles_radius[i];
-            min_x = min_x.min(x - r);
-            max_x = max_x.max(x + r);
-            min_y = min_y.min(y - r);
-            max_y = max_y.max(y + r);
-        }
-
-        // Include arcs in boundary (center +/- radius + thickness/2)
-        for i in 0..buffers.arcs_x.len() {
-            let x = buffers.arcs_x[i];
-            let y = buffers.arcs_y[i];
-            let r = buffers.arcs_radius[i];
-            let t = buffers.arcs_thickness[i];
-            let outer = r + t / 2.0;
-            min_x = min_x.min(x - outer);
-            max_x = max_x.max(x + outer);
-            min_y = min_y.min(y - outer);
-            max_y = max_y.max(y + outer);
-        }
-
-        // Include thermals in boundary (center +/- outer_diameter/2)
-        for i in 0..buffers.thermals_x.len() {
-            let x = buffers.thermals_x[i];
-            let y = buffers.thermals_y[i];
-            let r = buffers.thermals_outer_diameter[i] / 2.0;
-            min_x = min_x.min(x - r);
-            max_x = max_x.max(x + r);
-            min_y = min_y.min(y - r);
-            max_y = max_y.max(y + r);
-        }
-
-        // Handle empty geometry case
-        if min_x == f32::INFINITY {
-            min_x = 0.0;
-            max_x = 0.0;
-            min_y = 0.0;
-            max_y = 0.0;
-        }
-
-        Ok(GerberData::new(
-            Triangles::new(
-                buffers.triangle_vertices,
-                buffers.triangle_hole_x,
-                buffers.triangle_hole_y,
-                buffers.triangle_hole_radius,
-            ),
-            Circles::new(
-                buffers.circles_x,
-                buffers.circles_y,
-                buffers.circles_radius,
-                buffers.circles_hole_x,
-                buffers.circles_hole_y,
-                buffers.circles_hole_radius,
-            ),
-            Arcs::new(
-                buffers.arcs_x,
-                buffers.arcs_y,
-                buffers.arcs_radius,
-                buffers.arcs_start_angle,
-                buffers.arcs_sweep_angle,
-                buffers.arcs_thickness,
-            ),
-            Thermals::new(
-                buffers.thermals_x,
-                buffers.thermals_y,
-                buffers.thermals_outer_diameter,
-                buffers.thermals_inner_diameter,
-                buffers.thermals_gap_thickness,
-                buffers.thermals_rotation,
-            ),
-            Boundary::new(min_x, max_x, min_y, max_y),
-            is_negative,
-        ))
+        Ok(gerber_data_layers)
     }
 }
 
