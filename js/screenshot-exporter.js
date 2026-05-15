@@ -1,6 +1,20 @@
 import { MAX_SCREENSHOT_STREAM_BAND_BYTES } from "./config.js";
 import { formatFileSize, getErrorMessage } from "./file-utils.js";
 
+function normalizeLayerOffset(offset = {}) {
+  const x = Number(offset.x ?? 0);
+  const y = Number(offset.y ?? 0);
+
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+  };
+}
+
+function hasLayerOffset(offset) {
+  return offset.x !== 0 || offset.y !== 0;
+}
+
 export class ScreenshotExporter {
   constructor({
     canvas,
@@ -320,7 +334,16 @@ export class ScreenshotExporter {
         throw new Error("Reload files before using high-resolution screenshot export.");
       }
 
-      const layerId = processor.add_layer(layer.sourceContent);
+      const offset = normalizeLayerOffset(layer.offset);
+      if (
+        hasLayerOffset(offset) &&
+        typeof processor.add_layer_with_offset !== "function"
+      ) {
+        throw new Error("Layer offset requires an updated WASM module.");
+      }
+      const layerId = hasLayerOffset(offset)
+        ? processor.add_layer_with_offset(layer.sourceContent, offset.x, offset.y)
+        : processor.add_layer(layer.sourceContent);
       if (layer.visible) {
         activeLayerIds.push(layerId);
         colorData.push(layer.color[0], layer.color[1], layer.color[2]);

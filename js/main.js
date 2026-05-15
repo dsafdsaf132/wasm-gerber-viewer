@@ -19,6 +19,7 @@ import {
   collectLayerSources,
   fetchRemoteFile,
   getInitialSourceRepeat,
+  getInitialSourceRepeatOffset,
   getInitialSourceUrl,
   repeatLayerSources,
 } from "./source-loader.js";
@@ -60,6 +61,20 @@ function getUtf8ByteLength(value) {
   }
 
   return bytes;
+}
+
+function normalizeLayerOffset(offset = {}) {
+  const x = Number(offset.x ?? 0);
+  const y = Number(offset.y ?? 0);
+
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+  };
+}
+
+function hasLayerOffset(offset) {
+  return offset.x !== 0 || offset.y !== 0;
 }
 
 function isFatalWasmRuntimeError(error) {
@@ -496,6 +511,7 @@ export class GerberViewer {
       visible: layer.visible,
       color: [...layer.color],
       sourceContent: layer.sourceContent,
+      offset: { ...normalizeLayerOffset(layer.offset) },
     }));
     const viewState = this.captureCanvasViewState();
 
@@ -553,6 +569,7 @@ export class GerberViewer {
         visible: layer.visible,
         color: layer.color,
         sourceContent: layer.sourceContent,
+        offset: layer.offset,
         skipFatalRecovery: true,
       });
     }
@@ -940,12 +957,13 @@ export class GerberViewer {
       return;
     }
     const repeat = getInitialSourceRepeat();
+    const repeatOffset = getInitialSourceRepeatOffset();
 
     try {
       this.isInitialUrlLoading = true;
       this.updateUiState();
       const url = new URL(sourceUrl);
-      await this.loadRemoteSource(url, { repeat });
+      await this.loadRemoteSource(url, { repeat, repeatOffset });
     } catch (error) {
       this.handleLayerLoadError(sourceUrl, error);
     } finally {
@@ -954,12 +972,13 @@ export class GerberViewer {
     }
   }
 
-  async loadRemoteSource(url, { repeat = 1 } = {}) {
+  async loadRemoteSource(url, { repeat = 1, repeatOffset = {} } = {}) {
     this.setWorkspaceStatus("Loading remote file");
     const file = await fetchRemoteFile(url);
     const layerSources = repeatLayerSources(
       await this.collectLayerSources([file]),
       repeat,
+      { offset: repeatOffset },
     );
     if (layerSources.length === 0) {
       this.updateUiState();
@@ -1029,7 +1048,11 @@ export class GerberViewer {
     const results = [];
 
     for (const source of layerSources) {
-      results.push(await this.loadLayerSource(source.name, source.readText));
+      results.push(
+        await this.loadLayerSource(source.name, source.readText, {
+          offset: source.offset,
+        }),
+      );
     }
 
     return results;
@@ -1044,10 +1067,10 @@ export class GerberViewer {
     });
   }
 
-  async loadLayerSource(name, readText) {
+  async loadLayerSource(name, readText, options = {}) {
     try {
       const content = await readText();
-      await this.addLayer(name, content);
+      await this.addLayer(name, content, { offset: options.offset });
       return true;
     } catch (error) {
       this.handleLayerLoadError(name, error);
@@ -1090,6 +1113,7 @@ export class GerberViewer {
       visible: layer.visible,
       color: [...layer.color],
       sourceContent: layer.sourceContent,
+      offset: { ...normalizeLayerOffset(layer.offset) },
     }));
   }
 
@@ -1144,6 +1168,7 @@ export class GerberViewer {
             visible: layer.visible,
             color: layer.color,
             sourceContent: layer.sourceContent,
+            offset: layer.offset,
             skipFatalRecovery: true,
           });
         } catch (restoreError) {
@@ -1191,7 +1216,16 @@ export class GerberViewer {
 
       // add layer to WASM processor and get layer ID
       this.reserveWasmInputCapacity(content);
-      const layerId = this.wasmProcessor.add_layer(content);
+      const offset = normalizeLayerOffset(options.offset);
+      if (
+        hasLayerOffset(offset) &&
+        typeof this.wasmProcessor.add_layer_with_offset !== "function"
+      ) {
+        throw new Error("Layer offset requires an updated WASM module");
+      }
+      const layerId = hasLayerOffset(offset)
+        ? this.wasmProcessor.add_layer_with_offset(content, offset.x, offset.y)
+        : this.wasmProcessor.add_layer(content);
       if (layerId === undefined || layerId === null) {
         throw new Error("Failed to get layer ID from WASM processor");
       }
@@ -1213,6 +1247,7 @@ export class GerberViewer {
         visible: options.visible ?? true,
         color: color,
         sourceContent: options.sourceContent ?? content,
+        offset,
         bounds: {
           minX: bounds.min_x,
           maxX: bounds.max_x,

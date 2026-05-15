@@ -21,6 +21,17 @@ export function getInitialSourceRepeat(search = globalThis.location?.search ?? "
   return Math.max(repeat, 1);
 }
 
+export function getInitialSourceRepeatOffset(
+  search = globalThis.location?.search ?? "",
+) {
+  const params = new URLSearchParams(search);
+
+  return {
+    x: getNumberParam(params, "repeatOffsetX", 0),
+    y: getNumberParam(params, "repeatOffsetY", 0),
+  };
+}
+
 export async function fetchRemoteFile(url) {
   const response = await fetch(url.href);
   if (!response.ok) {
@@ -51,17 +62,53 @@ export async function collectLayerSources(files, callbacks = {}) {
   return layerSources;
 }
 
-export function repeatLayerSources(layerSources, repeat) {
+export function repeatLayerSources(layerSources, repeat, { offset = {} } = {}) {
   if (repeat <= 1) {
     return layerSources;
   }
+
+  const repeatOffset = normalizeLayerOffset(offset);
 
   return layerSources.flatMap((source) =>
     Array.from({ length: repeat }, (_, index) => ({
       name: `${source.name} #${index + 1}`,
       readText: source.readText,
+      offset: addLayerOffsets(source.offset, {
+        x: repeatOffset.x * index,
+        y: repeatOffset.y * index,
+      }),
     })),
   );
+}
+
+function getNumberParam(params, key, fallback) {
+  const rawValue = params.get(key);
+  if (rawValue === null || rawValue.trim() === "") {
+    return fallback;
+  }
+
+  const value = Number.parseFloat(rawValue);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeLayerOffset(offset = {}) {
+  const x = Number(offset.x ?? 0);
+  const y = Number(offset.y ?? 0);
+
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+  };
+}
+
+function addLayerOffsets(first, second) {
+  const normalizedFirst = normalizeLayerOffset(first);
+  const normalizedSecond = normalizeLayerOffset(second);
+
+  return {
+    x: normalizedFirst.x + normalizedSecond.x,
+    y: normalizedFirst.y + normalizedSecond.y,
+  };
 }
 
 async function collectZipLayerSources(
