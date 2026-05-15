@@ -20,7 +20,8 @@ pub const ZERO: u32 = WebGl2RenderingContext::ZERO;
 pub const TRIANGLE_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 in vec2 position;
-in vec2 hole_center_instance;
+in float hole_x_instance;
+in float hole_y_instance;
 in float hole_radius_instance;
 uniform mat3 transform;
 out highp vec2 vPosition;
@@ -30,7 +31,7 @@ void main() {
     vec3 transformed = transform * vec3(position, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
-    vHoleCenter = hole_center_instance;
+    vHoleCenter = vec2(hole_x_instance, hole_y_instance);
     vHoleRadius = hole_radius_instance;
 }
 "#;
@@ -54,21 +55,24 @@ void main() {
 pub const CIRCLE_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 in vec2 position;
-in vec2 center_instance;
+in float center_x_instance;
+in float center_y_instance;
 in float radius_instance;
-in vec2 hole_center_instance;
+in float hole_x_instance;
+in float hole_y_instance;
 in float hole_radius_instance;
 uniform mat3 transform;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
 void main() {
-    vec2 scaledPos = position * radius_instance + center_instance;
+    vec2 center = vec2(center_x_instance, center_y_instance);
+    vec2 scaledPos = position * radius_instance + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
     float safeRadius = max(radius_instance, 0.000000001);
-    vHoleCenter = (hole_center_instance - center_instance) / safeRadius;
+    vHoleCenter = (vec2(hole_x_instance, hole_y_instance) - center) / safeRadius;
     vHoleRadius = hole_radius_instance / safeRadius;
 }
 "#;
@@ -94,7 +98,8 @@ void main() {
 pub const ARC_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 in vec2 position;
-in vec2 center_instance;
+in float center_x_instance;
+in float center_y_instance;
 in float radius_instance;
 in float startAngle_instance;
 in float sweepAngle_instance;
@@ -107,7 +112,7 @@ out highp float vSweepAngle;
 out highp float vThickness;
 void main() {
     float maxRadius = max(radius_instance + thickness_instance * 0.5, 0.0);
-    vec2 scaledPos = position * maxRadius + center_instance;
+    vec2 scaledPos = position * maxRadius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position * maxRadius;
@@ -180,7 +185,8 @@ void main() {
 pub const THERMAL_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 in vec2 position;
-in vec2 center_instance;
+in float center_x_instance;
+in float center_y_instance;
 in float outer_diameter_instance;
 in float inner_diameter_instance;
 in float gap_thickness_instance;
@@ -193,7 +199,7 @@ out highp float vGapThickness;
 out highp float vRotation;
 void main() {
     float outer_radius = max(outer_diameter_instance, 0.0) * 0.5;
-    vec2 scaledPos = position * outer_radius + center_instance;
+    vec2 scaledPos = position * outer_radius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
@@ -292,7 +298,12 @@ impl ShaderPrograms {
             gl,
             TRIANGLE_VERTEX_SHADER,
             TRIANGLE_FRAGMENT_SHADER,
-            &["position", "hole_center_instance", "hole_radius_instance"],
+            &[
+                "position",
+                "hole_x_instance",
+                "hole_y_instance",
+                "hole_radius_instance",
+            ],
             &["transform", "color"],
         )?;
 
@@ -302,9 +313,11 @@ impl ShaderPrograms {
             CIRCLE_FRAGMENT_SHADER,
             &[
                 "position",
-                "center_instance",
+                "center_x_instance",
+                "center_y_instance",
                 "radius_instance",
-                "hole_center_instance",
+                "hole_x_instance",
+                "hole_y_instance",
                 "hole_radius_instance",
             ],
             &["transform", "color"],
@@ -316,7 +329,8 @@ impl ShaderPrograms {
             ARC_FRAGMENT_SHADER,
             &[
                 "position",
-                "center_instance",
+                "center_x_instance",
+                "center_y_instance",
                 "radius_instance",
                 "startAngle_instance",
                 "sweepAngle_instance",
@@ -331,7 +345,8 @@ impl ShaderPrograms {
             THERMAL_FRAGMENT_SHADER,
             &[
                 "position",
-                "center_instance",
+                "center_x_instance",
+                "center_y_instance",
                 "outer_diameter_instance",
                 "inner_diameter_instance",
                 "gap_thickness_instance",

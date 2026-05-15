@@ -383,17 +383,19 @@ impl GerberParser {
             ));
         }
 
-        // Convert each layer to individual GerberData
+        // Convert each polarity layer one at a time so parsed Primitive buffers
+        // can be dropped as soon as their render buffers are built.
+        let polarity_layers = take(&mut self.polarity_layers);
         let mut gerber_data_layers: Vec<GerberData> = Vec::new();
         try_reserve_exact(
             &mut gerber_data_layers,
-            self.polarity_layers.len(),
+            polarity_layers.len(),
             "Gerber data layer list",
         )?;
 
-        for (polarity, primitives) in &self.polarity_layers {
+        for (polarity, primitives) in polarity_layers {
             let gerber_data =
-                Self::primitives_to_gerber_data(primitives, *polarity == Polarity::Negative)?;
+                Self::primitives_to_gerber_data(primitives, polarity == Polarity::Negative)?;
             gerber_data_layers.push(gerber_data);
         }
 
@@ -402,10 +404,10 @@ impl GerberParser {
 
     /// Convert a vector of primitives to GerberData
     fn primitives_to_gerber_data(
-        primitives: &[Primitive],
+        primitives: Vec<Primitive>,
         is_negative: bool,
     ) -> Result<GerberData, JsValue> {
-        let mut buffers = PrimitiveOutputBuffers::reserved_for(primitives)?;
+        let mut buffers = PrimitiveOutputBuffers::reserved_for(&primitives)?;
 
         // Unit conversion: aperture.rs already converts to mm using unit_multiplier
         // No additional conversion needed
@@ -429,9 +431,9 @@ impl GerberParser {
                     if buffers.has_triangle_holes {
                         // Add hole data for each vertex (3 times per triangle)
                         for _ in 0..3 {
-                            buffers.triangle_hole_x.push(*hole_x * TO_MM);
-                            buffers.triangle_hole_y.push(*hole_y * TO_MM);
-                            buffers.triangle_hole_radius.push(*hole_radius * TO_MM);
+                            buffers.triangle_hole_x.push(hole_x * TO_MM);
+                            buffers.triangle_hole_y.push(hole_y * TO_MM);
+                            buffers.triangle_hole_radius.push(hole_radius * TO_MM);
                         }
                     }
                 }
@@ -444,13 +446,13 @@ impl GerberParser {
                     hole_radius,
                     ..
                 } => {
-                    buffers.circles_x.push(*x * TO_MM);
-                    buffers.circles_y.push(*y * TO_MM);
-                    buffers.circles_radius.push(*radius * TO_MM);
+                    buffers.circles_x.push(x * TO_MM);
+                    buffers.circles_y.push(y * TO_MM);
+                    buffers.circles_radius.push(radius * TO_MM);
                     if buffers.has_circle_holes {
-                        buffers.circles_hole_x.push(*hole_x * TO_MM);
-                        buffers.circles_hole_y.push(*hole_y * TO_MM);
-                        buffers.circles_hole_radius.push(*hole_radius * TO_MM);
+                        buffers.circles_hole_x.push(hole_x * TO_MM);
+                        buffers.circles_hole_y.push(hole_y * TO_MM);
+                        buffers.circles_hole_radius.push(hole_radius * TO_MM);
                     }
                 }
                 Primitive::Arc {
@@ -462,13 +464,13 @@ impl GerberParser {
                     thickness,
                     ..
                 } => {
-                    buffers.arcs_x.push(*x * TO_MM);
-                    buffers.arcs_y.push(*y * TO_MM);
-                    buffers.arcs_radius.push(*radius * TO_MM);
-                    buffers.arcs_start_angle.push(*start_angle);
+                    buffers.arcs_x.push(x * TO_MM);
+                    buffers.arcs_y.push(y * TO_MM);
+                    buffers.arcs_radius.push(radius * TO_MM);
+                    buffers.arcs_start_angle.push(start_angle);
                     // sweep_angle = end_angle - start_angle
-                    buffers.arcs_sweep_angle.push(*end_angle - *start_angle);
-                    buffers.arcs_thickness.push(*thickness * TO_MM);
+                    buffers.arcs_sweep_angle.push(end_angle - start_angle);
+                    buffers.arcs_thickness.push(thickness * TO_MM);
                 }
                 Primitive::Thermal {
                     x,
@@ -479,16 +481,12 @@ impl GerberParser {
                     rotation,
                     ..
                 } => {
-                    buffers.thermals_x.push(*x * TO_MM);
-                    buffers.thermals_y.push(*y * TO_MM);
-                    buffers
-                        .thermals_outer_diameter
-                        .push(*outer_diameter * TO_MM);
-                    buffers
-                        .thermals_inner_diameter
-                        .push(*inner_diameter * TO_MM);
-                    buffers.thermals_gap_thickness.push(*gap_thickness * TO_MM);
-                    buffers.thermals_rotation.push(*rotation);
+                    buffers.thermals_x.push(x * TO_MM);
+                    buffers.thermals_y.push(y * TO_MM);
+                    buffers.thermals_outer_diameter.push(outer_diameter * TO_MM);
+                    buffers.thermals_inner_diameter.push(inner_diameter * TO_MM);
+                    buffers.thermals_gap_thickness.push(gap_thickness * TO_MM);
+                    buffers.thermals_rotation.push(rotation);
                 }
             }
         }

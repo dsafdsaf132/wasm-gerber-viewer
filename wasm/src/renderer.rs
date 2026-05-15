@@ -392,7 +392,10 @@ impl Renderer {
         if let Some(buf) = cache.triangle_vertex_buffer {
             gl.delete_buffer(Some(&buf));
         }
-        if let Some(buf) = cache.triangle_hole_center_buffer {
+        if let Some(buf) = cache.triangle_hole_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.triangle_hole_y_buffer {
             gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.triangle_hole_radius_buffer {
@@ -402,13 +405,19 @@ impl Renderer {
         if let Some(vao) = cache.circle_vao {
             gl.delete_vertex_array(Some(&vao));
         }
-        if let Some(buf) = cache.circle_center_buffer {
+        if let Some(buf) = cache.circle_center_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.circle_center_y_buffer {
             gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.circle_radius_buffer {
             gl.delete_buffer(Some(&buf));
         }
-        if let Some(buf) = cache.circle_hole_center_buffer {
+        if let Some(buf) = cache.circle_hole_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.circle_hole_y_buffer {
             gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.circle_hole_radius_buffer {
@@ -418,7 +427,10 @@ impl Renderer {
         if let Some(vao) = cache.arc_vao {
             gl.delete_vertex_array(Some(&vao));
         }
-        if let Some(buf) = cache.arc_center_buffer {
+        if let Some(buf) = cache.arc_center_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.arc_center_y_buffer {
             gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.arc_radius_buffer {
@@ -437,7 +449,10 @@ impl Renderer {
         if let Some(vao) = cache.thermal_vao {
             gl.delete_vertex_array(Some(&vao));
         }
-        if let Some(buf) = cache.thermal_center_buffer {
+        if let Some(buf) = cache.thermal_center_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.thermal_center_y_buffer {
             gl.delete_buffer(Some(&buf));
         }
         if let Some(buf) = cache.thermal_outer_diameter_buffer {
@@ -566,31 +581,6 @@ impl Renderer {
         Ok(buffer)
     }
 
-    /// Create and bind a dual-channel (2D) instance buffer
-    fn create_instance_buffer_2d(
-        gl: &WebGl2RenderingContext,
-        data: &[f32],
-        program: &ShaderProgram,
-        attr_name: &str,
-        divisor: u32,
-    ) -> Result<WebGlBuffer, JsValue> {
-        let buffer = gl
-            .create_buffer()
-            .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
-        gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        unsafe {
-            let array = Float32Array::view(data);
-            gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
-        }
-        let loc = program.attributes.get(attr_name).ok_or_else(|| {
-            JsValue::from_str(&format!("Missing shader attribute: {}", attr_name))
-        })?;
-        gl.enable_vertex_attrib_array(*loc);
-        gl.vertex_attrib_pointer_with_i32(*loc, 2, FLOAT, false, 0, 0);
-        gl.vertex_attrib_divisor(*loc, divisor);
-        Ok(buffer)
-    }
-
     fn use_constant_vertex_attrib_1f(
         gl: &WebGl2RenderingContext,
         program: &ShaderProgram,
@@ -601,41 +591,6 @@ impl Renderer {
         gl.disable_vertex_attrib_array(loc);
         gl.vertex_attrib1f(loc, x);
         Ok(())
-    }
-
-    fn use_constant_vertex_attrib_2f(
-        gl: &WebGl2RenderingContext,
-        program: &ShaderProgram,
-        attr_name: &str,
-        x: f32,
-        y: f32,
-    ) -> Result<(), JsValue> {
-        let loc = Self::shader_attribute(program, attr_name)?;
-        gl.disable_vertex_attrib_array(loc);
-        gl.vertex_attrib2f(loc, x, y);
-        Ok(())
-    }
-
-    /// Interleave x,y arrays into a single flat array
-    fn interleave_xy(x: &[f32], y: &[f32], label: &str) -> Result<Vec<f32>, JsValue> {
-        let capacity = x.len().checked_mul(2).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "Renderer temporary buffer is too large: {} size overflow",
-                label
-            ))
-        })?;
-        let mut result = Vec::new();
-        result.try_reserve_exact(capacity).map_err(|_| {
-            JsValue::from_str(&format!(
-                "Not enough memory for renderer temporary buffer: {} ({} values)",
-                label, capacity
-            ))
-        })?;
-        for i in 0..x.len() {
-            result.push(x[i]);
-            result.push(y[i]);
-        }
-        Ok(result)
     }
 
     /// Create quad buffer for instanced rendering
@@ -831,13 +786,8 @@ impl Renderer {
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
 
                 if triangles.hole_radius.is_empty() {
-                    Self::use_constant_vertex_attrib_2f(
-                        &self.gl,
-                        program,
-                        "hole_center_instance",
-                        0.0,
-                        0.0,
-                    )?;
+                    Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
+                    Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
                     Self::use_constant_vertex_attrib_1f(
                         &self.gl,
                         program,
@@ -845,49 +795,30 @@ impl Renderer {
                         0.0,
                     )?;
                 } else {
-                    // Create regular attribute buffers for hole data (per-vertex)
-                    let hole_centers = Self::interleave_xy(
+                    let hole_x_buffer = Self::create_instance_buffer(
+                        &self.gl,
                         &triangles.hole_x,
-                        &triangles.hole_y,
-                        "triangle holes",
+                        program,
+                        "hole_x_instance",
+                        0,
                     )?;
-                    let hole_center_buffer = self
-                        .gl
-                        .create_buffer()
-                        .ok_or_else(|| JsValue::from_str("Failed to create hole center buffer"))?;
-                    self.gl.bind_buffer(ARRAY_BUFFER, Some(&hole_center_buffer));
-                    unsafe {
-                        let array = Float32Array::view(&hole_centers);
-                        self.gl.buffer_data_with_array_buffer_view(
-                            ARRAY_BUFFER,
-                            &array,
-                            STATIC_DRAW,
-                        );
-                    }
-                    let hole_center_loc = Self::shader_attribute(program, "hole_center_instance")?;
-                    self.gl.enable_vertex_attrib_array(hole_center_loc);
-                    self.gl
-                        .vertex_attrib_pointer_with_i32(hole_center_loc, 2, FLOAT, false, 0, 0);
+                    let hole_y_buffer = Self::create_instance_buffer(
+                        &self.gl,
+                        &triangles.hole_y,
+                        program,
+                        "hole_y_instance",
+                        0,
+                    )?;
+                    let hole_radius_buffer = Self::create_instance_buffer(
+                        &self.gl,
+                        &triangles.hole_radius,
+                        program,
+                        "hole_radius_instance",
+                        0,
+                    )?;
 
-                    let hole_radius_buffer = self
-                        .gl
-                        .create_buffer()
-                        .ok_or_else(|| JsValue::from_str("Failed to create hole radius buffer"))?;
-                    self.gl.bind_buffer(ARRAY_BUFFER, Some(&hole_radius_buffer));
-                    unsafe {
-                        let array = Float32Array::view(&triangles.hole_radius);
-                        self.gl.buffer_data_with_array_buffer_view(
-                            ARRAY_BUFFER,
-                            &array,
-                            STATIC_DRAW,
-                        );
-                    }
-                    let hole_radius_loc = Self::shader_attribute(program, "hole_radius_instance")?;
-                    self.gl.enable_vertex_attrib_array(hole_radius_loc);
-                    self.gl
-                        .vertex_attrib_pointer_with_i32(hole_radius_loc, 1, FLOAT, false, 0, 0);
-
-                    buffer_cache.triangle_hole_center_buffer = Some(hole_center_buffer);
+                    buffer_cache.triangle_hole_x_buffer = Some(hole_x_buffer);
+                    buffer_cache.triangle_hole_y_buffer = Some(hole_y_buffer);
                     buffer_cache.triangle_hole_radius_buffer = Some(hole_radius_buffer);
                 }
 
@@ -910,13 +841,8 @@ impl Renderer {
         self.gl
             .bind_vertex_array(buffer_cache.triangle_vao.as_ref());
         if buffer_cache.triangle_hole_radius_buffer.is_none() {
-            Self::use_constant_vertex_attrib_2f(
-                &self.gl,
-                program,
-                "hole_center_instance",
-                0.0,
-                0.0,
-            )?;
+            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
+            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
             Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_radius_instance", 0.0)?;
         }
 
@@ -982,10 +908,20 @@ impl Renderer {
             self.gl
                 .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
 
-            // Create instance buffers
-            let centers = Self::interleave_xy(&circles.x, &circles.y, "circle centers")?;
-            let center_buffer =
-                Self::create_instance_buffer_2d(&self.gl, &centers, program, "center_instance", 1)?;
+            let center_x_buffer = Self::create_instance_buffer(
+                &self.gl,
+                &circles.x,
+                program,
+                "center_x_instance",
+                1,
+            )?;
+            let center_y_buffer = Self::create_instance_buffer(
+                &self.gl,
+                &circles.y,
+                program,
+                "center_y_instance",
+                1,
+            )?;
             let radius_buffer = Self::create_instance_buffer(
                 &self.gl,
                 &circles.radius,
@@ -994,13 +930,8 @@ impl Renderer {
                 1,
             )?;
             if circles.hole_radius.is_empty() {
-                Self::use_constant_vertex_attrib_2f(
-                    &self.gl,
-                    program,
-                    "hole_center_instance",
-                    0.0,
-                    0.0,
-                )?;
+                Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
+                Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
                 Self::use_constant_vertex_attrib_1f(
                     &self.gl,
                     program,
@@ -1008,13 +939,18 @@ impl Renderer {
                     0.0,
                 )?;
             } else {
-                let hole_centers =
-                    Self::interleave_xy(&circles.hole_x, &circles.hole_y, "circle holes")?;
-                let hole_center_buffer = Self::create_instance_buffer_2d(
+                let hole_x_buffer = Self::create_instance_buffer(
                     &self.gl,
-                    &hole_centers,
+                    &circles.hole_x,
                     program,
-                    "hole_center_instance",
+                    "hole_x_instance",
+                    1,
+                )?;
+                let hole_y_buffer = Self::create_instance_buffer(
+                    &self.gl,
+                    &circles.hole_y,
+                    program,
+                    "hole_y_instance",
                     1,
                 )?;
                 let hole_radius_buffer = Self::create_instance_buffer(
@@ -1025,7 +961,8 @@ impl Renderer {
                     1,
                 )?;
 
-                buffer_cache.circle_hole_center_buffer = Some(hole_center_buffer);
+                buffer_cache.circle_hole_x_buffer = Some(hole_x_buffer);
+                buffer_cache.circle_hole_y_buffer = Some(hole_y_buffer);
                 buffer_cache.circle_hole_radius_buffer = Some(hole_radius_buffer);
             }
 
@@ -1034,7 +971,8 @@ impl Renderer {
 
             // Cache VAO and buffers for this sublayer
             buffer_cache.circle_vao = Some(vao);
-            buffer_cache.circle_center_buffer = Some(center_buffer);
+            buffer_cache.circle_center_x_buffer = Some(center_x_buffer);
+            buffer_cache.circle_center_y_buffer = Some(center_y_buffer);
             buffer_cache.circle_radius_buffer = Some(radius_buffer);
         }
 
@@ -1045,13 +983,8 @@ impl Renderer {
         // Bind cached VAO for this sublayer
         self.gl.bind_vertex_array(buffer_cache.circle_vao.as_ref());
         if buffer_cache.circle_hole_radius_buffer.is_none() {
-            Self::use_constant_vertex_attrib_2f(
-                &self.gl,
-                program,
-                "hole_center_instance",
-                0.0,
-                0.0,
-            )?;
+            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
+            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
             Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_radius_instance", 0.0)?;
         }
 
@@ -1118,10 +1051,10 @@ impl Renderer {
             self.gl
                 .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
 
-            // Create instance buffers
-            let centers = Self::interleave_xy(&arcs.x, &arcs.y, "arc centers")?;
-            let center_buffer =
-                Self::create_instance_buffer_2d(&self.gl, &centers, program, "center_instance", 1)?;
+            let center_x_buffer =
+                Self::create_instance_buffer(&self.gl, &arcs.x, program, "center_x_instance", 1)?;
+            let center_y_buffer =
+                Self::create_instance_buffer(&self.gl, &arcs.y, program, "center_y_instance", 1)?;
             let radius_buffer = Self::create_instance_buffer(
                 &self.gl,
                 &arcs.radius,
@@ -1156,7 +1089,8 @@ impl Renderer {
 
             // Cache VAO and buffers for this sublayer
             buffer_cache.arc_vao = Some(vao);
-            buffer_cache.arc_center_buffer = Some(center_buffer);
+            buffer_cache.arc_center_x_buffer = Some(center_x_buffer);
+            buffer_cache.arc_center_y_buffer = Some(center_y_buffer);
             buffer_cache.arc_radius_buffer = Some(radius_buffer);
             buffer_cache.arc_start_angle_buffer = Some(start_angle_buffer);
             buffer_cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
@@ -1233,10 +1167,20 @@ impl Renderer {
             self.gl
                 .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
 
-            // Create instance buffers
-            let centers = Self::interleave_xy(&thermals.x, &thermals.y, "thermal centers")?;
-            let center_buffer =
-                Self::create_instance_buffer_2d(&self.gl, &centers, program, "center_instance", 1)?;
+            let center_x_buffer = Self::create_instance_buffer(
+                &self.gl,
+                &thermals.x,
+                program,
+                "center_x_instance",
+                1,
+            )?;
+            let center_y_buffer = Self::create_instance_buffer(
+                &self.gl,
+                &thermals.y,
+                program,
+                "center_y_instance",
+                1,
+            )?;
             let outer_diameter_buffer = Self::create_instance_buffer(
                 &self.gl,
                 &thermals.outer_diameter,
@@ -1271,7 +1215,8 @@ impl Renderer {
 
             // Cache VAO and buffers for this sublayer
             buffer_cache.thermal_vao = Some(vao);
-            buffer_cache.thermal_center_buffer = Some(center_buffer);
+            buffer_cache.thermal_center_x_buffer = Some(center_x_buffer);
+            buffer_cache.thermal_center_y_buffer = Some(center_y_buffer);
             buffer_cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
             buffer_cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
             buffer_cache.thermal_gap_thickness_buffer = Some(gap_thickness_buffer);
