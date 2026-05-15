@@ -49,6 +49,17 @@ const PARSE_MEMORY_HEADROOM_RATIO = 0.5;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
 
+class ParseWorkerUnavailableError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ParseWorkerUnavailableError";
+  }
+}
+
+function isParseWorkerUnavailableError(error) {
+  return error instanceof ParseWorkerUnavailableError;
+}
+
 function getUtf8ByteLength(value) {
   let bytes = 0;
 
@@ -165,6 +176,7 @@ class GerberParseWorkerPool {
     this.activeTasks = new Map();
     this.nextTaskId = 0;
     this.isDisposed = false;
+    this.unavailableError = null;
     this.workerUrl = new URL("./gerber-parse-worker.js", import.meta.url);
 
     for (let index = 0; index < workerCount; index++) {
@@ -199,7 +211,10 @@ class GerberParseWorkerPool {
       return Promise.reject(new Error("Parse worker pool has been disposed"));
     }
     if (this.workers.length === 0) {
-      return Promise.reject(new Error("No parse workers are available"));
+      return Promise.reject(
+        this.unavailableError ??
+          new ParseWorkerUnavailableError("No parse workers are available"),
+      );
     }
 
     const id = this.nextTaskId++;
@@ -277,11 +292,11 @@ class GerberParseWorkerPool {
       this.addIdleWorker();
     } catch (error) {
       if (this.workers.length === 0) {
-        const message = getErrorMessage(error);
+        this.unavailableError = new ParseWorkerUnavailableError(
+          `Failed to recreate parse worker: ${getErrorMessage(error)}`,
+        );
         for (const queuedTask of this.queue) {
-          queuedTask.reject(
-            new Error(`Failed to recreate parse worker: ${message}`),
-          );
+          queuedTask.reject(this.unavailableError);
         }
         this.queue = [];
       }
@@ -294,13 +309,23 @@ class GerberParseWorkerPool {
     worker.terminate();
     this.workers = this.workers.filter((item) => item !== worker);
     this.idleWorkers = this.idleWorkers.filter((item) => item !== worker);
+    const isUnavailable = this.workers.length === 0;
+    if (isUnavailable) {
+      this.unavailableError = new ParseWorkerUnavailableError(
+        event.message || "No parse workers are available",
+      );
+    }
 
     if (task) {
-      task.reject(new Error(event.message || "Gerber parse worker failed"));
+      task.reject(
+        isUnavailable
+          ? this.unavailableError
+          : new Error(event.message || "Gerber parse worker failed"),
+      );
     }
-    if (this.workers.length === 0) {
+    if (isUnavailable) {
       for (const queuedTask of this.queue) {
-        queuedTask.reject(new Error("No parse workers are available"));
+        queuedTask.reject(this.unavailableError);
       }
       this.queue = [];
     }
@@ -1445,6 +1470,18 @@ export class GerberViewer {
         parseWorkerPool,
         parseTasks,
       });
+    } catch (error) {
+      if (!isParseWorkerUnavailableError(error)) {
+        throw error;
+      }
+
+      parseWorkerPool.dispose();
+      this.addDiagnostic(
+        "warning",
+        "Parallel parsing unavailable",
+        `${getErrorMessage(error)} Falling back to serial parsing.`,
+      );
+      return this.loadLayerSourcesSerially(layerSources, { title, total });
     } finally {
       parseWorkerPool?.dispose();
     }
@@ -1514,7 +1551,51 @@ export class GerberViewer {
     let activeMemoryBytes = 0;
     let isResolved = false;
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      const restorePendingLayerRecords = () => {
+        if (this.pendingLayerRecordsForRecovery === layerRecords) {
+          this.pendingLayerRecordsForRecovery = previousPendingLayerRecords;
+        }
+      };
+
+      const discardLayerRecord = (layerRecord) => {
+        if (
+          !layerRecord ||
+          layerRecord.layerId === undefined ||
+          layerRecord.layerId === null ||
+          typeof this.wasmProcessor?.remove_layer !== "function"
+        ) {
+          return;
+        }
+
+        try {
+          this.wasmProcessor.remove_layer(layerRecord.layerId);
+        } catch (error) {
+          console.warn(
+            `[Layer] Failed to discard pending layer ${layerRecord.name}:`,
+            error,
+          );
+        }
+      };
+
+      const discardPendingLayerRecords = () => {
+        for (let index = 0; index < layerRecords.length; index++) {
+          discardLayerRecord(layerRecords[index]);
+          layerRecords[index] = null;
+        }
+      };
+
+      const abortWithWorkerFallback = (error) => {
+        if (isResolved) {
+          return;
+        }
+
+        isResolved = true;
+        discardPendingLayerRecords();
+        restorePendingLayerRecords();
+        reject(error);
+      };
+
       const finishIfDone = () => {
         if (isResolved || completedTasks < total) {
           return;
@@ -1525,14 +1606,13 @@ export class GerberViewer {
         for (let index = 0; index < layerRecords.length; index++) {
           const layerRecord = layerRecords[index];
           if (layerRecord) {
+            this.prepareLayerMetadata(layerRecord);
             this.commitLayerMetadata(layerRecord, { updateUiState: false });
             layerRecords[index] = null;
             didCommitLayer = true;
           }
         }
-        if (this.pendingLayerRecordsForRecovery === layerRecords) {
-          this.pendingLayerRecordsForRecovery = previousPendingLayerRecords;
-        }
+        restorePendingLayerRecords();
         if (didCommitLayer) {
           this.updateUiState();
         }
@@ -1566,13 +1646,23 @@ export class GerberViewer {
                 total,
                 progress,
               });
+              if (isResolved) {
+                discardLayerRecord(layerRecord);
+                return;
+              }
               if (layerRecord) {
-                this.prepareLayerMetadata(layerRecord);
                 layerRecords[index] = layerRecord;
                 results[index] = true;
               }
             })
             .catch((error) => {
+              if (isParseWorkerUnavailableError(error)) {
+                abortWithWorkerFallback(error);
+                return;
+              }
+              if (isResolved) {
+                return;
+              }
               const completed = this.markLayerLoadComplete(progress);
               this.handleLayerLoadError(source.name, error);
               this.updateLoadingModal({
@@ -1590,6 +1680,9 @@ export class GerberViewer {
                 0,
                 activeMemoryBytes - estimatedMemoryBytes,
               );
+              if (isResolved) {
+                return;
+              }
               launchMore();
               finishIfDone();
             });
@@ -1761,6 +1854,9 @@ export class GerberViewer {
         offset: source.offset,
       };
     } catch (error) {
+      if (isParseWorkerUnavailableError(error)) {
+        throw error;
+      }
       this.handleLayerLoadError(name, error);
       this.updateLoadingModal({
         stage: "Skipped",
@@ -1930,7 +2026,16 @@ export class GerberViewer {
     };
   }
 
+  preparePendingLayerRecordsForRecovery() {
+    for (const layer of this.pendingLayerRecordsForRecovery ?? []) {
+      if (layer && typeof layer.sourceContent === "string") {
+        this.prepareLayerMetadata(layer);
+      }
+    }
+  }
+
   snapshotLayersForRecovery() {
+    this.preparePendingLayerRecordsForRecovery();
     const committedSnapshots = this.layers.map((layer) =>
       this.createLayerRecoverySnapshot(layer),
     );
@@ -2176,6 +2281,12 @@ export class GerberViewer {
   }
 
   async addParsedLayer(name, parsedLayer, options = {}) {
+    if (typeof options.sourceContent !== "string") {
+      throw new Error(
+        "addParsedLayer requires options.sourceContent for renderer recovery",
+      );
+    }
+
     const layer = await this.createParsedLayerRecord(name, parsedLayer, options);
     return this.commitLayerMetadata(layer);
   }
