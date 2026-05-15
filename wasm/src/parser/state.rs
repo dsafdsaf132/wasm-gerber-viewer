@@ -254,7 +254,7 @@ pub fn parse_lp(
     state: &mut ParserState,
     current_primitives: &mut Vec<Primitive>,
     polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
-) {
+) -> Result<(), String> {
     // Extract D or C from %LPD* or %LPC* format
     let spec_str = line
         .trim_start_matches('%')
@@ -262,7 +262,7 @@ pub fn parse_lp(
         .trim_end_matches('*');
 
     if !spec_str.starts_with("LP") {
-        return;
+        return Ok(());
     }
 
     let polarity_char = spec_str.chars().nth(2);
@@ -270,16 +270,24 @@ pub fn parse_lp(
     let new_polarity = match polarity_char {
         Some('D') => Polarity::Positive, // Dark mode
         Some('C') => Polarity::Negative, // Clear mode
-        _ => return,
+        _ => return Ok(()),
     };
 
     // Check if polarity has changed
     if state.polarity != new_polarity && !current_primitives.is_empty() {
+        polarity_layers.try_reserve(1).map_err(|error| {
+            format!(
+                "Gerber layer is too large to parse: unable to allocate polarity layer list: {:?}",
+                error
+            )
+        })?;
         polarity_layers.push((state.polarity, take(current_primitives)));
     }
 
     // Set new polarity
     state.polarity = new_polarity;
+
+    Ok(())
 }
 
 pub fn parse_if(line: &str, state: &mut ParserState) {

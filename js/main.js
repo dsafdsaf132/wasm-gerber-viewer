@@ -18,7 +18,9 @@ import { NotificationCenter } from "./notifications.js";
 import {
   collectLayerSources,
   fetchRemoteFile,
+  getInitialSourceRepeat,
   getInitialSourceUrl,
+  repeatLayerSources,
 } from "./source-loader.js";
 import { ScreenshotExporter } from "./screenshot-exporter.js";
 import {
@@ -33,6 +35,43 @@ import {
   zoomCameraAtCanvasPoint,
 } from "./viewport.js";
 
+const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
+
+function getUtf8ByteLength(value) {
+  let bytes = 0;
+
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < value.length) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        i += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+
+  return bytes;
+}
+
+function isFatalWasmRuntimeError(error) {
+  const message = getErrorMessage(error);
+  return (
+    (typeof WebAssembly !== "undefined" &&
+      error instanceof WebAssembly.RuntimeError &&
+      message.includes("unreachable")) ||
+    message.includes("recursive use of an object detected")
+  );
+}
+
 export class GerberViewer {
   constructor() {
     Object.assign(this, getViewerElements());
@@ -40,9 +79,11 @@ export class GerberViewer {
 
     // WASM module and single processor
     this.wasmModule = null;
+    this.wasmExports = null;
     this.wasmProcessor = null;
     this.isWebGlContextLost = false;
     this.isRestoringWebGlContext = false;
+    this.isRecoveringWasmProcessor = false;
 
     // Layers
     this.layers = [];
@@ -157,7 +198,7 @@ export class GerberViewer {
   async init() {
     // Load WASM module
     this.wasmModule = await import("../wasm/pkg/wasm_gerber_processor.js");
-    await this.wasmModule.default();
+    this.wasmExports = await this.wasmModule.default();
     this.wasmModule.init_panic_hook();
 
     this.createWebGlProcessor();
@@ -858,29 +899,29 @@ export class GerberViewer {
   async loadInitialUrlSource() {
     const sourceUrl = getInitialSourceUrl();
     if (!sourceUrl) return;
+    const repeat = getInitialSourceRepeat();
 
     try {
       const url = new URL(sourceUrl);
-      await this.loadRemoteSource(url);
+      await this.loadRemoteSource(url, { repeat });
     } catch (error) {
       this.handleLayerLoadError(sourceUrl, error);
     }
   }
 
-  async loadRemoteSource(url) {
+  async loadRemoteSource(url, { repeat = 1 } = {}) {
     this.setWorkspaceStatus("Loading remote file");
     const file = await fetchRemoteFile(url);
-    const layerSources = await this.collectLayerSources([file]);
+    const layerSources = repeatLayerSources(
+      await this.collectLayerSources([file]),
+      repeat,
+    );
     if (layerSources.length === 0) {
       this.updateUiState();
       return;
     }
 
-    const results = await Promise.all(
-      layerSources.map((source) =>
-        this.loadLayerSource(source.name, source.readText),
-      ),
-    );
+    const results = await this.loadLayerSourcesSequentially(layerSources);
     const loadedCount = results.filter(Boolean).length;
 
     if (loadedCount > 0) {
@@ -921,11 +962,7 @@ export class GerberViewer {
       const layerSources = await this.collectLayerSources(validFiles);
 
       if (layerSources.length > 0) {
-        const results = await Promise.all(
-          layerSources.map((source) =>
-            this.loadLayerSource(source.name, source.readText),
-          ),
-        );
+        const results = await this.loadLayerSourcesSequentially(layerSources);
         const loadedCount = results.filter(Boolean).length;
 
         if (loadedCount > 0) {
@@ -941,6 +978,16 @@ export class GerberViewer {
 
     // Clear file input
     this.fileInput.value = "";
+  }
+
+  async loadLayerSourcesSequentially(layerSources) {
+    const results = [];
+
+    for (const source of layerSources) {
+      results.push(await this.loadLayerSource(source.name, source.readText));
+    }
+
+    return results;
   }
 
   async collectLayerSources(files) {
@@ -976,6 +1023,106 @@ export class GerberViewer {
     this.showError(`Failed to load file ${name}: ${message}`);
   }
 
+  reserveWasmInputCapacity(content) {
+    if (typeof this.wasmModule?.reserve_input_capacity !== "function") {
+      return;
+    }
+
+    const byteLength = getUtf8ByteLength(content);
+    const reserveBytes = byteLength + WASM_INPUT_RESERVE_MARGIN_BYTES;
+
+    try {
+      this.wasmModule.reserve_input_capacity(reserveBytes);
+    } catch (error) {
+      throw new Error(
+        `Not enough WebAssembly memory to load ${formatFileSize(byteLength)} input: ${getErrorMessage(error)}`,
+      );
+    }
+  }
+
+  snapshotLayersForRecovery() {
+    return this.layers.map((layer) => ({
+      id: layer.id,
+      name: layer.name,
+      visible: layer.visible,
+      color: [...layer.color],
+      sourceContent: layer.sourceContent,
+    }));
+  }
+
+  disposeWasmProcessor() {
+    if (!this.wasmProcessor) return;
+
+    const processor = this.wasmProcessor;
+    this.wasmProcessor = null;
+
+    if (typeof processor.free === "function") {
+      try {
+        processor.free();
+      } catch (error) {
+        console.warn("[WASM] Failed to dispose processor after fatal error:", error);
+      }
+    }
+  }
+
+  async recoverWasmProcessorAfterFatalError(failedLayerName, error) {
+    if (this.isRecoveringWasmProcessor || this.isWebGlContextLost) {
+      return;
+    }
+
+    const layerSnapshot = this.snapshotLayersForRecovery();
+    if (layerSnapshot.length === 0) {
+      this.disposeWasmProcessor();
+      this.createWebGlProcessor();
+      return;
+    }
+
+    const viewState = this.captureCanvasViewState();
+    const nextLayerDomId = this.nextLayerDomId;
+    const nextColorIndex = this.nextColorIndex;
+
+    this.isRecoveringWasmProcessor = true;
+    this.addDiagnostic(
+      "warning",
+      "Renderer recovered",
+      `Rebuilding layers after ${failedLayerName} caused a fatal WebAssembly error: ${getErrorMessage(error)}`,
+    );
+
+    try {
+      this.disposeWasmProcessor();
+      this.layers = [];
+      this.createWebGlProcessor();
+      this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
+
+      for (const layer of layerSnapshot) {
+        try {
+          await this.addLayer(layer.name, layer.sourceContent, {
+            id: layer.id,
+            visible: layer.visible,
+            color: layer.color,
+            sourceContent: layer.sourceContent,
+            skipFatalRecovery: true,
+          });
+        } catch (restoreError) {
+          const message = getErrorMessage(restoreError);
+          console.error(`[WASM] Failed to restore layer ${layer.name}:`, restoreError);
+          this.addDiagnostic("error", `Restore failed: ${layer.name}`, message);
+          if (isFatalWasmRuntimeError(restoreError)) {
+            break;
+          }
+        }
+      }
+
+      this.nextLayerDomId = nextLayerDomId;
+      this.nextColorIndex = nextColorIndex;
+      this.restoreCanvasViewState(viewState);
+      this.renderLayerList();
+    } finally {
+      this.isRecoveringWasmProcessor = false;
+      this.updateUiState();
+    }
+  }
+
   showFileSizeWarning(oversizedFiles) {
     this.notifications.showFileSizeWarning(oversizedFiles);
   }
@@ -999,6 +1146,7 @@ export class GerberViewer {
       }
 
       // add layer to WASM processor and get layer ID
+      this.reserveWasmInputCapacity(content);
       const layerId = this.wasmProcessor.add_layer(content);
       if (layerId === undefined || layerId === null) {
         throw new Error("Failed to get layer ID from WASM processor");
@@ -1035,6 +1183,10 @@ export class GerberViewer {
       if (isNoGeometryError(getErrorMessage(error))) {
         console.warn(`[Layer] Skipped layer ${name}:`, error);
         throw error;
+      }
+
+      if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
+        await this.recoverWasmProcessorAfterFatalError(name, error);
       }
 
       console.error(`[Layer] Failed to add layer ${name}:`, error);

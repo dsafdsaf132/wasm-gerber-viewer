@@ -5,9 +5,22 @@ import {
   isZipFile,
 } from "./file-utils.js";
 
+export const MAX_INITIAL_SOURCE_REPEAT = 10;
+
 export function getInitialSourceUrl(search = globalThis.location?.search ?? "") {
   const params = new URLSearchParams(search);
   return params.get("url") || params.get("source") || params.get("file");
+}
+
+export function getInitialSourceRepeat(search = globalThis.location?.search ?? "") {
+  const params = new URLSearchParams(search);
+  const rawRepeat = params.get("repeat");
+  if (!rawRepeat) return 1;
+
+  const repeat = Number.parseInt(rawRepeat, 10);
+  if (!Number.isFinite(repeat)) return 1;
+
+  return Math.min(Math.max(repeat, 1), MAX_INITIAL_SOURCE_REPEAT);
 }
 
 export async function fetchRemoteFile(url) {
@@ -38,6 +51,19 @@ export async function collectLayerSources(files, callbacks = {}) {
   }
 
   return layerSources;
+}
+
+export function repeatLayerSources(layerSources, repeat) {
+  if (repeat <= 1) {
+    return layerSources;
+  }
+
+  return layerSources.flatMap((source) =>
+    Array.from({ length: repeat }, (_, index) => ({
+      name: `${source.name} #${index + 1}`,
+      readText: source.readText,
+    })),
+  );
 }
 
 async function collectZipLayerSources(

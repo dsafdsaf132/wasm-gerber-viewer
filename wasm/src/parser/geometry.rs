@@ -6,6 +6,53 @@ use i_triangle::float::triangulatable::Triangulatable;
 use std::collections::HashMap;
 use std::mem::take;
 
+fn primitive_allocation_error(
+    context: &str,
+    additional: usize,
+    error: impl std::fmt::Debug,
+) -> String {
+    format!(
+        "Gerber layer is too large to parse: unable to allocate {} ({} primitives): {:?}",
+        context, additional, error
+    )
+}
+
+fn checked_primitive_count(
+    count: usize,
+    multiplier: usize,
+    context: &str,
+) -> Result<usize, String> {
+    count.checked_mul(multiplier).ok_or_else(|| {
+        format!(
+            "Gerber layer is too large to parse: {} primitive count overflow",
+            context
+        )
+    })
+}
+
+fn try_reserve_primitives(
+    primitives: &mut Vec<Primitive>,
+    additional: usize,
+    context: &str,
+) -> Result<(), String> {
+    primitives
+        .try_reserve(additional)
+        .map_err(|error| primitive_allocation_error(context, additional, error))
+}
+
+fn try_reserve_layers(
+    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    additional: usize,
+    context: &str,
+) -> Result<(), String> {
+    polarity_layers.try_reserve(additional).map_err(|error| {
+        format!(
+            "Gerber layer is too large to parse: unable to allocate {} ({} polarity layers): {:?}",
+            context, additional, error
+        )
+    })
+}
+
 /// Basic primitive shape - created directly by parser
 #[derive(Clone, Debug)]
 pub enum Primitive {
@@ -714,7 +761,7 @@ fn flash_aperture_no_sr(
     mirror_x: bool,
     mirror_y: bool,
     layer_rotation: f32,
-) {
+) -> Result<(), String> {
     // Use pre-calculated has_negative field for performance
     if aperture.has_negative {
         // Boolean operations with hole preservation
@@ -742,9 +789,11 @@ fn flash_aperture_no_sr(
 
         // Apply boolean operations with hole preservation
         let result_primitives = apply_boolean_operations(&shapes_with_exposure);
+        try_reserve_primitives(primitives, result_primitives.len(), "aperture flash")?;
         primitives.extend(result_primitives);
     } else {
         // Direct primitive cloning
+        try_reserve_primitives(primitives, aperture.primitives.len(), "aperture flash")?;
         for primitive in &aperture.primitives {
             let mut new_primitive = primitive.clone();
             scale_primitive(&mut new_primitive, layer_scale);
@@ -788,6 +837,8 @@ fn flash_aperture_no_sr(
             primitives.push(new_primitive);
         }
     }
+
+    Ok(())
 }
 
 fn transform_primitive_for_flash(
@@ -810,10 +861,13 @@ fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
     polarity: Polarity,
     polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
-) {
+) -> Result<(), String> {
     if !primitives.is_empty() {
+        try_reserve_layers(polarity_layers, 1, "polarity layer")?;
         polarity_layers.push((polarity, take(primitives)));
     }
+
+    Ok(())
 }
 
 fn toggled_block_polarity(block_polarity: Polarity, flash_polarity: Polarity) -> Polarity {
@@ -834,8 +888,8 @@ fn flash_block_aperture(
     polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
     x: f32,
     y: f32,
-) {
-    flush_primitives_to_layer(primitives, state.polarity, polarity_layers);
+) -> Result<(), String> {
+    flush_primitives_to_layer(primitives, state.polarity, polarity_layers)?;
 
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {
@@ -843,22 +897,27 @@ fn flash_block_aperture(
             let flash_y = y + sy as f32 * state.sr_j;
 
             for (block_polarity, block_primitives) in block_layers {
-                let transformed: Vec<Primitive> = block_primitives
-                    .iter()
-                    .map(|primitive| {
-                        transform_primitive_for_flash(
-                            primitive,
-                            flash_x,
-                            flash_y,
-                            state.layer_scale,
-                            state.mirror_x,
-                            state.mirror_y,
-                            state.layer_rotation,
-                        )
-                    })
-                    .collect();
+                let mut transformed = Vec::new();
+                try_reserve_primitives(
+                    &mut transformed,
+                    block_primitives.len(),
+                    "aperture block flash",
+                )?;
+
+                for primitive in block_primitives {
+                    transformed.push(transform_primitive_for_flash(
+                        primitive,
+                        flash_x,
+                        flash_y,
+                        state.layer_scale,
+                        state.mirror_x,
+                        state.mirror_y,
+                        state.layer_rotation,
+                    ));
+                }
 
                 if !transformed.is_empty() {
+                    try_reserve_layers(polarity_layers, 1, "aperture block polarity layer")?;
                     polarity_layers.push((
                         toggled_block_polarity(*block_polarity, state.polarity),
                         transformed,
@@ -867,6 +926,8 @@ fn flash_block_aperture(
             }
         }
     }
+
+    Ok(())
 }
 
 /// Flash aperture at given position - add all primitives of the aperture to the position
@@ -877,11 +938,11 @@ pub fn flash_aperture(
     polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
     x: f32,
     y: f32,
-) {
+) -> Result<(), String> {
     if let Some(aperture) = apertures.get(&state.current_aperture) {
         if let Some(block_layers) = aperture.block_layers.as_ref() {
-            flash_block_aperture(block_layers, state, primitives, polarity_layers, x, y);
-            return;
+            flash_block_aperture(block_layers, state, primitives, polarity_layers, x, y)?;
+            return Ok(());
         }
 
         // Step and Repeat iteration
@@ -898,10 +959,12 @@ pub fn flash_aperture(
                     state.mirror_x,
                     state.mirror_y,
                     state.layer_rotation,
-                );
+                )?;
             }
         }
     }
+
+    Ok(())
 }
 
 /// Execute interpolation (draw line or arc)
@@ -913,7 +976,7 @@ pub fn execute_interpolation(
     end_y: f32,
     i: f32,
     j: f32,
-) {
+) -> Result<(), String> {
     let start_x = state.x;
     let start_y = state.y;
 
@@ -942,16 +1005,19 @@ pub fn execute_interpolation(
                                 state.mirror_x,
                                 state.mirror_y,
                                 state.layer_rotation,
-                            );
+                            )?;
 
                             // Convert vector line with width of aperture diameter to triangle
                             let diameter = aperture.radius * 2.0 * state.layer_scale;
                             let line_triangles = line_to_triangles(
                                 sr_start_x, sr_start_y, sr_end_x, sr_end_y, diameter, 1.0,
                             );
-                            for triangle in line_triangles {
-                                primitives.push(triangle);
-                            }
+                            try_reserve_primitives(
+                                primitives,
+                                line_triangles.len(),
+                                "linear interpolation",
+                            )?;
+                            primitives.extend(line_triangles);
 
                             // Flash aperture at end point (no SR since we're already in SR loop)
                             flash_aperture_no_sr(
@@ -963,7 +1029,7 @@ pub fn execute_interpolation(
                                 state.mirror_x,
                                 state.mirror_y,
                                 state.layer_rotation,
-                            );
+                            )?;
                         }
                     }
                 }
@@ -1003,9 +1069,10 @@ pub fn execute_interpolation(
                                     state.mirror_x,
                                     state.mirror_y,
                                     state.layer_rotation,
-                                );
+                                )?;
 
                                 // Add Arc primitive
+                                try_reserve_primitives(primitives, 1, "arc interpolation")?;
                                 primitives.push(Primitive::Arc {
                                     x: center_x,
                                     y: center_y,
@@ -1026,7 +1093,7 @@ pub fn execute_interpolation(
                                     state.mirror_x,
                                     state.mirror_y,
                                     state.layer_rotation,
-                                );
+                                )?;
                             } else {
                                 flash_aperture_no_sr(
                                     aperture,
@@ -1037,7 +1104,7 @@ pub fn execute_interpolation(
                                     state.mirror_x,
                                     state.mirror_y,
                                     state.layer_rotation,
-                                );
+                                )?;
                                 flash_aperture_no_sr(
                                     aperture,
                                     primitives,
@@ -1047,7 +1114,7 @@ pub fn execute_interpolation(
                                     state.mirror_x,
                                     state.mirror_y,
                                     state.layer_rotation,
-                                );
+                                )?;
                             }
                         }
                     }
@@ -1056,6 +1123,8 @@ pub fn execute_interpolation(
             _ => {}
         }
     }
+
+    Ok(())
 }
 
 fn calculate_arc_parameters(
@@ -1215,7 +1284,7 @@ pub fn parse_graphic_command(
     primitives: &mut Vec<Primitive>,
     region_contours: &mut Vec<Vec<[f32; 2]>>,
     polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
-) {
+) -> Result<(), String> {
     let clean_line = line.trim_end_matches('*');
 
     // Process G-code
@@ -1267,6 +1336,18 @@ pub fn parse_graphic_command(
                             match triangulate_outline(contour, 1.0) {
                                 Ok(triangles) => {
                                     // Apply Step and Repeat to region triangles
+                                    let repeat_count = checked_primitive_count(
+                                        state.sr_x as usize,
+                                        state.sr_y as usize,
+                                        "region step repeat",
+                                    )?;
+                                    let additional = checked_primitive_count(
+                                        triangles.len(),
+                                        repeat_count,
+                                        "region",
+                                    )?;
+                                    try_reserve_primitives(primitives, additional, "region")?;
+
                                     for sy in 0..state.sr_y {
                                         for sx in 0..state.sr_x {
                                             let offset_x = sx as f32 * state.sr_i;
@@ -1391,7 +1472,7 @@ pub fn parse_graphic_command(
                             append_region_segment(last_contour, state, x, y, i, j);
                         }
                     } else {
-                        execute_interpolation(state, apertures, primitives, x, y, i, j);
+                        execute_interpolation(state, apertures, primitives, x, y, i, j)?;
                     }
                 }
                 2 => {
@@ -1415,7 +1496,7 @@ pub fn parse_graphic_command(
                 }
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
-                    flash_aperture(state, apertures, primitives, polarity_layers, x, y);
+                    flash_aperture(state, apertures, primitives, polarity_layers, x, y)?;
                 }
                 _ if d_code >= 10 => {
                     // D10+: Aperture selection
@@ -1431,7 +1512,7 @@ pub fn parse_graphic_command(
                 append_region_segment(last_contour, state, x, y, i, j);
             }
         } else {
-            execute_interpolation(state, apertures, primitives, x, y, i, j);
+            execute_interpolation(state, apertures, primitives, x, y, i, j)?;
         }
     } else {
         // No drawing operation
@@ -1442,4 +1523,6 @@ pub fn parse_graphic_command(
     state.y = y;
     state.i = i;
     state.j = j;
+
+    Ok(())
 }

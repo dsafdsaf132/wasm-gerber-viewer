@@ -15,6 +15,19 @@ pub fn init_panic_hook() {
     console_error_panic_hook::set_once();
 }
 
+/// Preflight a large JS-to-WASM input copy with catchable allocation failure.
+#[wasm_bindgen]
+pub fn reserve_input_capacity(byte_count: usize) -> Result<(), JsValue> {
+    let mut buffer = Vec::<u8>::new();
+    buffer.try_reserve_exact(byte_count).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Not enough WebAssembly memory to load file input ({} bytes): {:?}",
+            byte_count, error
+        ))
+    })?;
+    Ok(())
+}
+
 /// Main Gerber processor with stateful WebGL renderer
 #[wasm_bindgen]
 #[derive(Default)]
