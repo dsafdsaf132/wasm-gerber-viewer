@@ -75,6 +75,7 @@ export class DrawerController {
 
   syncLayout() {
     if (this.drawer.classList.contains("collapsed")) {
+      this.syncCollapsedLayout();
       this.updateCanvasReservationForState();
       return;
     }
@@ -84,6 +85,17 @@ export class DrawerController {
     } else {
       this.setWidth(this.currentWidth);
     }
+  }
+
+  syncCollapsedLayout() {
+    if (this.isMobileLayout()) {
+      this.drawer.style.width = "";
+      this.drawer.style.height = `${this.currentHeight}px`;
+      return;
+    }
+
+    this.drawer.style.height = "";
+    this.drawer.style.width = `${this.currentWidth}px`;
   }
 
   isMobileLayout() {
