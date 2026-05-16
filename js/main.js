@@ -273,11 +273,21 @@ class GerberParseWorkerPool {
       const worker = this.idleWorkers.pop();
       const task = this.queue.shift();
       this.activeTasks.set(worker, task);
-      worker.postMessage({
-        id: task.id,
-        content: task.content,
-        offset: task.offset,
-      });
+      try {
+        worker.postMessage({
+          id: task.id,
+          content: task.content,
+          offset: task.offset,
+        });
+      } catch (error) {
+        this.activeTasks.delete(worker);
+        const unavailableError = new ParseWorkerUnavailableError(
+          `Failed to send parse task to worker: ${getErrorMessage(error)}`,
+        );
+        task.reject(unavailableError);
+        this.rejectRemainingTasksAsUnavailable(unavailableError);
+        return;
+      }
     }
   }
 

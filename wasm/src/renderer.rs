@@ -14,7 +14,7 @@ use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Thermals, TriangleTemplateInstances, Triangles,
 };
 use js_sys::{Array, Float32Array, Reflect};
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlTexture};
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
@@ -273,6 +273,7 @@ impl Renderer {
         }
 
         let vertex_count = Self::validate_triangle_vertex_array("triangle vertices", &vertices)?;
+        Self::validate_js_finite_array("triangle vertices", &vertices)?;
         let vao = self
             .gl
             .create_vertex_array()
@@ -316,6 +317,9 @@ impl Renderer {
             Self::validate_js_array_len("triangle hole_x", &hole_x, vertex_count as u32)?;
             Self::validate_js_array_len("triangle hole_y", &hole_y, vertex_count as u32)?;
             Self::validate_js_array_len("triangle hole_radius", &hole_radius, vertex_count as u32)?;
+            Self::validate_js_finite_array("triangle hole_x", &hole_x)?;
+            Self::validate_js_finite_array("triangle hole_y", &hole_y)?;
+            Self::validate_js_non_negative_array("triangle hole_radius", &hole_radius)?;
             buffer_cache.triangle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &hole_x,
@@ -375,6 +379,9 @@ impl Renderer {
                 &instance_y,
                 instance_count as u32,
             )?;
+            Self::validate_js_finite_array("triangle template vertices", &vertices)?;
+            Self::validate_js_finite_array("triangle template instance_x", &instance_x)?;
+            Self::validate_js_finite_array("triangle template instance_y", &instance_y)?;
 
             let vao = self
                 .gl
@@ -434,6 +441,9 @@ impl Renderer {
         let instance_count = Self::validate_instance_array("circle", &x)?;
         Self::validate_js_array_len("circle y", &y, instance_count as u32)?;
         Self::validate_js_array_len("circle radius", &radius, instance_count as u32)?;
+        Self::validate_js_finite_array("circle x", &x)?;
+        Self::validate_js_finite_array("circle y", &y)?;
+        Self::validate_js_non_negative_array("circle radius", &radius)?;
 
         let vao = self
             .gl
@@ -497,6 +507,9 @@ impl Renderer {
             Self::validate_js_array_len("circle hole_x", &hole_x, instance_count as u32)?;
             Self::validate_js_array_len("circle hole_y", &hole_y, instance_count as u32)?;
             Self::validate_js_array_len("circle hole_radius", &hole_radius, instance_count as u32)?;
+            Self::validate_js_finite_array("circle hole_x", &hole_x)?;
+            Self::validate_js_finite_array("circle hole_y", &hole_y)?;
+            Self::validate_js_non_negative_array("circle hole_radius", &hole_radius)?;
             buffer_cache.circle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &hole_x,
@@ -550,6 +563,12 @@ impl Renderer {
         Self::validate_js_array_len("arc start_angle", &start_angle, instance_count as u32)?;
         Self::validate_js_array_len("arc sweep_angle", &sweep_angle, instance_count as u32)?;
         Self::validate_js_array_len("arc thickness", &thickness, instance_count as u32)?;
+        Self::validate_js_finite_array("arc x", &x)?;
+        Self::validate_js_finite_array("arc y", &y)?;
+        Self::validate_js_non_negative_array("arc radius", &radius)?;
+        Self::validate_js_finite_array("arc start_angle", &start_angle)?;
+        Self::validate_js_finite_array("arc sweep_angle", &sweep_angle)?;
+        Self::validate_js_non_negative_array("arc thickness", &thickness)?;
 
         let vao = self
             .gl
@@ -652,6 +671,12 @@ impl Renderer {
             instance_count as u32,
         )?;
         Self::validate_js_array_len("thermal rotation", &rotation, instance_count as u32)?;
+        Self::validate_js_finite_array("thermal x", &x)?;
+        Self::validate_js_finite_array("thermal y", &y)?;
+        Self::validate_js_non_negative_array("thermal outer_diameter", &outer_diameter)?;
+        Self::validate_js_non_negative_array("thermal inner_diameter", &inner_diameter)?;
+        Self::validate_js_non_negative_array("thermal gap_thickness", &gap_thickness)?;
+        Self::validate_js_finite_array("thermal rotation", &rotation)?;
 
         let vao = self
             .gl
@@ -816,7 +841,13 @@ impl Renderer {
     }
 
     fn js_f32_array(value: &JsValue, key: &str) -> Result<Float32Array, JsValue> {
-        Ok(Float32Array::new(&Self::js_property(value, key)?))
+        Self::js_property(value, key)?
+            .dyn_into::<Float32Array>()
+            .map_err(|_| {
+                JsValue::from_str(&format!(
+                    "Render payload field `{key}` must be a Float32Array"
+                ))
+            })
     }
 
     fn js_f32_property(value: &JsValue, key: &str) -> Result<f32, JsValue> {
@@ -1095,6 +1126,27 @@ impl Renderer {
     fn validate_finite_value(label: &str, value: f32) -> Result<(), JsValue> {
         if !value.is_finite() {
             return Err(JsValue::from_str(&format!("{} is not finite", label)));
+        }
+        Ok(())
+    }
+
+    fn validate_js_finite_array(label: &str, values: &Float32Array) -> Result<(), JsValue> {
+        for index in 0..values.length() {
+            Self::validate_finite_value(label, values.get_index(index))?;
+        }
+        Ok(())
+    }
+
+    fn validate_js_non_negative_array(label: &str, values: &Float32Array) -> Result<(), JsValue> {
+        for index in 0..values.length() {
+            let value = values.get_index(index);
+            Self::validate_finite_value(label, value)?;
+            if value < 0.0 {
+                return Err(JsValue::from_str(&format!(
+                    "{} contains a negative value",
+                    label
+                )));
+            }
         }
         Ok(())
     }
