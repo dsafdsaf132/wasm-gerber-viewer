@@ -60,6 +60,17 @@ function isParseWorkerUnavailableError(error) {
   return error instanceof ParseWorkerUnavailableError;
 }
 
+function isParseWorkerCapabilityErrorMessage(message) {
+  const normalizedMessage = String(message ?? "").toLowerCase();
+  return (
+    normalizedMessage.includes("parse_gerber_layer") ||
+    normalizedMessage.includes("parse worker api") ||
+    normalizedMessage.includes("parse worker requires an updated wasm module") ||
+    normalizedMessage.includes("failed to fetch dynamically imported module") ||
+    normalizedMessage.includes("wasm_gerber_processor")
+  );
+}
+
 function getUtf8ByteLength(value) {
   let bytes = 0;
 
@@ -179,8 +190,17 @@ class GerberParseWorkerPool {
     this.unavailableError = null;
     this.workerUrl = new URL("./gerber-parse-worker.js", import.meta.url);
 
-    for (let index = 0; index < workerCount; index++) {
-      this.addIdleWorker();
+    try {
+      for (let index = 0; index < workerCount; index++) {
+        this.addIdleWorker();
+      }
+    } catch (error) {
+      for (const worker of this.workers) {
+        worker.terminate();
+      }
+      this.workers = [];
+      this.idleWorkers = [];
+      throw error;
     }
   }
 
@@ -204,6 +224,30 @@ class GerberParseWorkerPool {
     this.workers.push(worker);
     this.idleWorkers.push(worker);
     return worker;
+  }
+
+  rejectRemainingTasksAsUnavailable(error) {
+    const unavailableError =
+      error instanceof ParseWorkerUnavailableError
+        ? error
+        : new ParseWorkerUnavailableError(getErrorMessage(error));
+    this.unavailableError = unavailableError;
+
+    for (const queuedTask of this.queue) {
+      queuedTask.reject(unavailableError);
+    }
+    this.queue = [];
+
+    for (const activeTask of this.activeTasks.values()) {
+      activeTask.reject(unavailableError);
+    }
+    this.activeTasks.clear();
+
+    for (const worker of this.workers) {
+      worker.terminate();
+    }
+    this.workers = [];
+    this.idleWorkers = [];
   }
 
   parse(content, offset) {
@@ -249,8 +293,18 @@ class GerberParseWorkerPool {
     if (event.data.ok) {
       task.resolve(event.data.parsedLayer);
     } else {
-      const error = new Error(event.data.error || "Failed to parse Gerber layer");
-      task.reject(error);
+      const errorMessage = event.data.error || "Failed to parse Gerber layer";
+      if (
+        event.data.workerUnavailable ||
+        isParseWorkerCapabilityErrorMessage(errorMessage)
+      ) {
+        const error = new ParseWorkerUnavailableError(errorMessage);
+        task.reject(error);
+        this.rejectRemainingTasksAsUnavailable(error);
+        return;
+      }
+
+      task.reject(new Error(errorMessage));
     }
 
     if (!this.isDisposed) {
@@ -2053,6 +2107,7 @@ export class GerberViewer {
   }
 
   collectPendingLayerRecoveryIds() {
+    this.preparePendingLayerRecordsForRecovery();
     return new Set(
       (this.pendingLayerRecordsForRecovery ?? [])
         .filter((layer) => layer && typeof layer.sourceContent === "string")

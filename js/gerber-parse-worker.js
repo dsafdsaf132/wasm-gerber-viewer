@@ -45,6 +45,17 @@ function getErrorMessage(error) {
   return "Unknown error";
 }
 
+function isWorkerUnavailableErrorMessage(message) {
+  const normalizedMessage = String(message ?? "").toLowerCase();
+  return (
+    normalizedMessage.includes("parse_gerber_layer") ||
+    normalizedMessage.includes("parse worker api") ||
+    normalizedMessage.includes("parse worker requires an updated wasm module") ||
+    normalizedMessage.includes("failed to fetch dynamically imported module") ||
+    normalizedMessage.includes("wasm_gerber_processor")
+  );
+}
+
 async function getWasmModule() {
   if (!wasmModulePromise) {
     wasmModulePromise = import("../wasm/pkg/wasm_gerber_processor.js").then(
@@ -102,6 +113,9 @@ self.addEventListener("message", async (event) => {
 
   try {
     const wasmModule = await getWasmModule();
+    if (typeof wasmModule.parse_gerber_layer !== "function") {
+      throw new Error("Parse worker API unavailable: parse_gerber_layer is missing");
+    }
     beforeBytes = getWorkerWasmMemoryBytes();
     reserveWasmInputCapacity(wasmModule, content);
     const parsedLayer = wasmModule.parse_gerber_layer(
@@ -123,10 +137,12 @@ self.addEventListener("message", async (event) => {
       transferables,
     );
   } catch (error) {
+    const errorMessage = getErrorMessage(error);
     self.postMessage({
       id,
       ok: false,
-      error: getErrorMessage(error),
+      error: errorMessage,
+      workerUnavailable: isWorkerUnavailableErrorMessage(errorMessage),
       workerMemory: {
         beforeBytes,
         afterBytes: getWorkerWasmMemoryBytes(),
