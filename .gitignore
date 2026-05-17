@@ -21,8 +21,19 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+.env
+.env.*
 
 # WASM build artifacts
 wasm_gerber_processor/target/
 wasm/target
 wasm/pkg/
+
+# Large demo files are stored in Vercel Blob.
+demo/performance-test-arc-region-*.gbr
+demo/performance-test-region-648K.gbr
+demo/performance-test-region-1.8M.gbr
+demo/performance-test-stars-100K.gbr
+demo/performance-test-stars-1M.gbr
+.vercel
+.env*.local
