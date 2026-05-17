@@ -14,14 +14,22 @@ use state::{
     parse_format_spec, parse_if, parse_lm, parse_lp, parse_lr, parse_ls, parse_mo, parse_sr,
 };
 
-use self::geometry::{parse_graphic_command, Primitive};
+use self::geometry::{parse_graphic_command, Primitive, RegionContour};
 use crate::shape::{
-    Arcs, Boundary, Circles, GerberData, Thermals, TriangleTemplateInstances, Triangles,
+    Arcs, Boundary, Circles, GerberData, PathRegions, Thermals, TriangleTemplateInstances,
+    Triangles,
 };
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
 use wasm_bindgen::prelude::*;
+
+#[derive(Clone, Debug)]
+pub struct PolarityLayer {
+    pub(crate) polarity: Polarity,
+    pub(crate) primitives: Vec<Primitive>,
+    pub(crate) path_regions: PathRegions,
+}
 
 fn collect_lines(data: &str) -> Result<Vec<&str>, JsValue> {
     let line_count = data.bytes().filter(|byte| *byte == b'\n').count() + 1;
@@ -404,8 +412,8 @@ impl PrimitiveOutputBuffers {
         Ok(())
     }
 
-    fn into_gerber_data(self, is_negative: bool) -> GerberData {
-        let boundary = self.boundary();
+    fn into_gerber_data(self, path_regions: PathRegions, is_negative: bool) -> GerberData {
+        let boundary = combined_boundary(self.boundary(), self.has_geometry(), &path_regions);
         let triangle_templates = self
             .triangle_templates
             .into_iter()
@@ -450,6 +458,7 @@ impl PrimitiveOutputBuffers {
                 self.thermals_gap_thickness,
                 self.thermals_rotation,
             ),
+            path_regions,
             boundary,
             is_negative,
         )
@@ -547,6 +556,45 @@ impl PrimitiveOutputBuffers {
     }
 }
 
+fn combined_boundary(
+    primitive_boundary: Boundary,
+    has_primitives: bool,
+    path_regions: &PathRegions,
+) -> Boundary {
+    let Some(path_boundary) = path_regions_boundary(path_regions) else {
+        return primitive_boundary;
+    };
+
+    if !has_primitives {
+        return path_boundary;
+    }
+
+    Boundary::new(
+        primitive_boundary.min_x.min(path_boundary.min_x),
+        primitive_boundary.max_x.max(path_boundary.max_x),
+        primitive_boundary.min_y.min(path_boundary.min_y),
+        primitive_boundary.max_y.max(path_boundary.max_y),
+    )
+}
+
+fn path_regions_boundary(path_regions: &PathRegions) -> Option<Boundary> {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for point in path_regions.cover_vertices.chunks_exact(2) {
+        min_x = min_x.min(point[0]);
+        max_x = max_x.max(point[0]);
+        min_y = min_y.min(point[1]);
+        max_y = max_y.max(point[1]);
+    }
+
+    min_x
+        .is_finite()
+        .then_some(Boundary::new(min_x, max_x, min_y, max_y))
+}
+
 fn checked_capacity(
     count: usize,
     values_per_primitive: usize,
@@ -634,9 +682,10 @@ pub struct GerberParser {
     pub macros: HashMap<String, ApertureMacro>,
     pub current_state: ParserState,
     // Store primitive batches in object-stream polarity order.
-    pub polarity_layers: Vec<(Polarity, Vec<Primitive>)>,
+    pub polarity_layers: Vec<PolarityLayer>,
     pub current_primitives: Vec<Primitive>, // Accumulating primitives for current polarity
-    pub region_contours: Vec<Vec<[f32; 2]>>, // Contour points collected in Region mode
+    pub current_path_regions: PathRegions,
+    pub region_contours: Vec<RegionContour>, // Contours collected in Region mode
 }
 
 impl GerberParser {
@@ -648,6 +697,7 @@ impl GerberParser {
             current_state: ParserState::default(),
             polarity_layers: Vec::new(),
             current_primitives: Vec::new(),
+            current_path_regions: PathRegions::empty(),
             region_contours: Vec::new(),
         }
     }
@@ -678,6 +728,7 @@ impl GerberParser {
                     &mut self.apertures,
                     &mut self.macros,
                     &mut self.current_primitives,
+                    &mut self.current_path_regions,
                     &mut self.polarity_layers,
                 )?;
             } else if line_ref.starts_with("G04") {
@@ -695,7 +746,9 @@ impl GerberParser {
                     &self.apertures,
                     &mut self.current_primitives,
                     &mut self.region_contours,
+                    &mut self.current_path_regions,
                     &mut self.polarity_layers,
+                    true,
                 )
                 .map_err(|message| JsValue::from_str(&message))?;
             }
@@ -704,12 +757,13 @@ impl GerberParser {
         }
 
         // Save last accumulated primitives by polarity
-        if !self.current_primitives.is_empty() {
+        if !self.current_primitives.is_empty() || self.current_path_regions.has_geometry() {
             try_reserve_exact(&mut self.polarity_layers, 1, "polarity layer list")?;
-            self.polarity_layers.push((
-                self.current_state.polarity,
-                take(&mut self.current_primitives),
-            ));
+            self.polarity_layers.push(PolarityLayer {
+                polarity: self.current_state.polarity,
+                primitives: take(&mut self.current_primitives),
+                path_regions: take(&mut self.current_path_regions),
+            });
         }
 
         // Convert each polarity layer one at a time so parsed Primitive buffers
@@ -724,9 +778,12 @@ impl GerberParser {
             "Gerber data layer list",
         )?;
 
-        for (polarity, primitives) in polarity_layers {
-            let mut gerber_data =
-                Self::primitives_to_gerber_data(primitives, polarity == Polarity::Negative)?;
+        for layer in polarity_layers {
+            let mut gerber_data = Self::primitives_to_gerber_data(
+                layer.primitives,
+                layer.path_regions,
+                layer.polarity == Polarity::Negative,
+            )?;
             gerber_data_layers.append(&mut gerber_data);
         }
 
@@ -736,6 +793,7 @@ impl GerberParser {
     /// Convert a vector of primitives to GerberData
     fn primitives_to_gerber_data(
         primitives: Vec<Primitive>,
+        path_regions: PathRegions,
         is_negative: bool,
     ) -> Result<Vec<GerberData>, JsValue> {
         let counts = SplitPrimitiveBufferCounts::from_primitives(&primitives);
@@ -751,19 +809,20 @@ impl GerberParser {
         }
 
         let mut gerber_data_layers = Vec::new();
-        let layer_count =
-            usize::from(plain_buffers.has_geometry()) + usize::from(holed_buffers.has_geometry());
+        let layer_count = usize::from(plain_buffers.has_geometry() || path_regions.has_geometry())
+            + usize::from(holed_buffers.has_geometry());
         try_reserve_exact(
             &mut gerber_data_layers,
             layer_count,
             "Gerber data layer list",
         )?;
 
-        if plain_buffers.has_geometry() {
-            gerber_data_layers.push(plain_buffers.into_gerber_data(is_negative));
+        if plain_buffers.has_geometry() || path_regions.has_geometry() {
+            gerber_data_layers.push(plain_buffers.into_gerber_data(path_regions, is_negative));
         }
         if holed_buffers.has_geometry() {
-            gerber_data_layers.push(holed_buffers.into_gerber_data(is_negative));
+            gerber_data_layers
+                .push(holed_buffers.into_gerber_data(PathRegions::empty(), is_negative));
         }
 
         Ok(gerber_data_layers)
@@ -779,7 +838,8 @@ fn parse_command(
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
     current_primitives: &mut Vec<Primitive>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    current_path_regions: &mut PathRegions,
+    polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), JsValue> {
     let line = if !line_ref.ends_with('%') {
         let mut buffer = String::new();
@@ -815,8 +875,14 @@ fn parse_command(
         parse_format_spec(&line, state);
     } else if line.starts_with("%LP") {
         // Polarity: %LPD* (dark/positive) or %LPC* (clear/negative)
-        parse_lp(&line, state, current_primitives, polarity_layers)
-            .map_err(|message| JsValue::from_str(&message))?;
+        parse_lp(
+            &line,
+            state,
+            current_primitives,
+            current_path_regions,
+            polarity_layers,
+        )
+        .map_err(|message| JsValue::from_str(&message))?;
     } else if line.starts_with("%SR") {
         // Step and repeat: %SRX3Y2I10J20*%
         parse_sr(&line, state);
@@ -834,6 +900,7 @@ fn parse_command(
             apertures,
             macros,
             current_primitives,
+            current_path_regions,
             polarity_layers,
         )?;
     } else if line.starts_with("%LM") {
@@ -854,12 +921,17 @@ fn parse_command(
 
 fn flush_primitives(
     current_primitives: &mut Vec<Primitive>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    current_path_regions: &mut PathRegions,
+    polarity_layers: &mut Vec<PolarityLayer>,
     polarity: Polarity,
 ) -> Result<(), JsValue> {
-    if !current_primitives.is_empty() {
+    if !current_primitives.is_empty() || current_path_regions.has_geometry() {
         try_reserve_exact(polarity_layers, 1, "polarity layer list")?;
-        polarity_layers.push((polarity, take(current_primitives)));
+        polarity_layers.push(PolarityLayer {
+            polarity,
+            primitives: take(current_primitives),
+            path_regions: take(current_path_regions),
+        });
     }
 
     Ok(())
@@ -899,17 +971,24 @@ fn parse_aperture_block(
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
     current_primitives: &mut Vec<Primitive>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    current_path_regions: &mut PathRegions,
+    polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), JsValue> {
     let Some(block_code) = parse_aperture_block_code(line) else {
         return Ok(());
     };
 
-    flush_primitives(current_primitives, polarity_layers, state.polarity)?;
+    flush_primitives(
+        current_primitives,
+        current_path_regions,
+        polarity_layers,
+        state.polarity,
+    )?;
 
     let mut block_primitives: Vec<Primitive> = Vec::new();
-    let mut block_layers: Vec<(Polarity, Vec<Primitive>)> = Vec::new();
-    let mut block_region_contours: Vec<Vec<[f32; 2]>> = Vec::new();
+    let mut block_path_regions = PathRegions::empty();
+    let mut block_layers: Vec<PolarityLayer> = Vec::new();
+    let mut block_region_contours: Vec<RegionContour> = Vec::new();
 
     while *i + 1 < length {
         *i += 1;
@@ -934,6 +1013,7 @@ fn parse_aperture_block(
                 apertures,
                 macros,
                 &mut block_primitives,
+                &mut block_path_regions,
                 &mut block_layers,
             )?;
             if let Some(enclosing_state) = nested_block_state {
@@ -952,13 +1032,20 @@ fn parse_aperture_block(
                 apertures,
                 &mut block_primitives,
                 &mut block_region_contours,
+                &mut block_path_regions,
                 &mut block_layers,
+                true,
             )
             .map_err(|message| JsValue::from_str(&message))?;
         }
     }
 
-    flush_primitives(&mut block_primitives, &mut block_layers, state.polarity)?;
+    flush_primitives(
+        &mut block_primitives,
+        &mut block_path_regions,
+        &mut block_layers,
+        state.polarity,
+    )?;
 
     state.x = 0.0;
     state.y = 0.0;

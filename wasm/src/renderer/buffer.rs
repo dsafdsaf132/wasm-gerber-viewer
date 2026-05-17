@@ -1,9 +1,12 @@
-use web_sys::{WebGlBuffer, WebGlFramebuffer, WebGlTexture, WebGlVertexArrayObject};
+use web_sys::{
+    WebGlBuffer, WebGlFramebuffer, WebGlRenderbuffer, WebGlTexture, WebGlVertexArrayObject,
+};
 
 /// Frame buffer object for off-screen rendering
 pub struct Fbo {
     pub framebuffer: WebGlFramebuffer,
     pub texture: WebGlTexture,
+    pub stencil: Option<WebGlRenderbuffer>,
 }
 
 /// Buffer cache for one repeated triangle mesh template.
@@ -58,4 +61,18 @@ pub struct BufferCache {
     pub thermal_inner_diameter_buffer: Option<WebGlBuffer>,
     pub thermal_gap_thickness_buffer: Option<WebGlBuffer>,
     pub thermal_rotation_buffer: Option<WebGlBuffer>,
+
+    // Arc-containing region path cache
+    pub path_wedge_vao: Option<WebGlVertexArrayObject>,
+    pub path_wedge_vertex_count: i32,
+    pub path_wedge_vertex_buffer: Option<WebGlBuffer>,
+    pub path_sector_vao: Option<WebGlVertexArrayObject>,
+    pub path_sector_vertex_count: i32,
+    pub path_sector_vertex_buffer: Option<WebGlBuffer>,
+    pub path_cover_vao: Option<WebGlVertexArrayObject>,
+    pub path_cover_vertex_count: i32,
+    pub path_cover_vertex_buffer: Option<WebGlBuffer>,
+    pub path_clear_vao: Option<WebGlVertexArrayObject>,
+    pub path_clear_vertex_count: i32,
+    pub path_clear_vertex_buffer: Option<WebGlBuffer>,
 }

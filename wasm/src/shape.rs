@@ -1,4 +1,4 @@
-use js_sys::{Array, Float32Array, Object, Reflect};
+use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 
 fn set_property(object: &Object, key: &str, value: &JsValue) -> Result<(), JsValue> {
@@ -20,6 +20,16 @@ fn f32_array_to_js(values: &[f32]) -> JsValue {
 
 fn f32_array_from_js(value: &JsValue, key: &str) -> Result<Vec<f32>, JsValue> {
     Ok(Float32Array::new(&get_property(value, key)?).to_vec())
+}
+
+fn u32_array_to_js(values: &[u32]) -> JsValue {
+    let array = Uint32Array::new_with_length(values.len() as u32);
+    array.copy_from(values);
+    array.into()
+}
+
+fn u32_array_from_js(value: &JsValue, key: &str) -> Result<Vec<u32>, JsValue> {
+    Ok(Uint32Array::new(&get_property(value, key)?).to_vec())
 }
 
 fn f32_property_from_js(value: &JsValue, key: &str) -> Result<f32, JsValue> {
@@ -362,6 +372,273 @@ impl Thermals {
     }
 }
 
+/// Arc-containing region path data rendered by the WebGL stencil path renderer.
+///
+/// Large regions are stored in flat buffers to avoid per-segment JS objects:
+/// - `wedge_vertices`: one or two stencil fan triangles per path segment
+/// - `sector_vertices`: expanded analytic arc-sector quads, 7 floats per vertex
+/// - `cover_vertices`: one screen-coverable bounding quad per region
+/// - `clear_vertices`: one quad covering all stencil writes per region
+#[derive(Clone, Debug)]
+pub struct PathRegions {
+    pub(crate) wedge_vertices: Vec<f32>,
+    pub(crate) wedge_vertex_offsets: Vec<u32>,
+    pub(crate) sector_vertices: Vec<f32>,
+    pub(crate) sector_vertex_offsets: Vec<u32>,
+    pub(crate) cover_vertices: Vec<f32>,
+    pub(crate) clear_vertices: Vec<f32>,
+}
+
+impl PathRegions {
+    pub fn new(
+        wedge_vertices: Vec<f32>,
+        wedge_vertex_offsets: Vec<u32>,
+        sector_vertices: Vec<f32>,
+        sector_vertex_offsets: Vec<u32>,
+        cover_vertices: Vec<f32>,
+        clear_vertices: Vec<f32>,
+    ) -> PathRegions {
+        PathRegions {
+            wedge_vertices,
+            wedge_vertex_offsets: normalize_offsets(wedge_vertex_offsets),
+            sector_vertices,
+            sector_vertex_offsets: normalize_offsets(sector_vertex_offsets),
+            cover_vertices,
+            clear_vertices,
+        }
+    }
+
+    pub fn empty() -> PathRegions {
+        PathRegions {
+            wedge_vertices: Vec::new(),
+            wedge_vertex_offsets: vec![0],
+            sector_vertices: Vec::new(),
+            sector_vertex_offsets: vec![0],
+            cover_vertices: Vec::new(),
+            clear_vertices: Vec::new(),
+        }
+    }
+
+    pub(crate) fn region_count(&self) -> usize {
+        self.wedge_vertex_offsets.len().saturating_sub(1)
+    }
+
+    pub(crate) fn has_geometry(&self) -> bool {
+        self.region_count() > 0 || !self.cover_vertices.is_empty()
+    }
+
+    pub(crate) fn append(&mut self, other: PathRegions) {
+        if !other.has_geometry() {
+            return;
+        }
+
+        let wedge_base = (self.wedge_vertices.len() / 2) as u32;
+        let sector_base = (self.sector_vertices.len() / 7) as u32;
+        self.wedge_vertices.extend(other.wedge_vertices);
+        self.sector_vertices.extend(other.sector_vertices);
+        self.cover_vertices.extend(other.cover_vertices);
+        self.clear_vertices.extend(other.clear_vertices);
+
+        for offset in other.wedge_vertex_offsets.iter().skip(1) {
+            self.wedge_vertex_offsets.push(wedge_base + offset);
+        }
+        for offset in other.sector_vertex_offsets.iter().skip(1) {
+            self.sector_vertex_offsets.push(sector_base + offset);
+        }
+    }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.wedge_vertices = Vec::new();
+        self.sector_vertices = Vec::new();
+        self.cover_vertices = Vec::new();
+        self.clear_vertices = Vec::new();
+    }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_point_pairs(&mut self.wedge_vertices, dx, dy);
+
+        for vertex in self.sector_vertices.chunks_exact_mut(7) {
+            vertex[0] += dx;
+            vertex[1] += dy;
+            vertex[2] += dx;
+            vertex[3] += dy;
+        }
+
+        translate_point_pairs(&mut self.cover_vertices, dx, dy);
+        translate_point_pairs(&mut self.clear_vertices, dx, dy);
+    }
+
+    pub(crate) fn transform_for_flash(
+        &mut self,
+        scale: f32,
+        mirror_x: bool,
+        mirror_y: bool,
+        rotation: f32,
+        dx: f32,
+        dy: f32,
+    ) {
+        for point in self.wedge_vertices.chunks_exact_mut(2) {
+            let (x, y) = transformed_point_for_flash(
+                point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+            );
+            point[0] = x;
+            point[1] = y;
+        }
+
+        for vertex in self.sector_vertices.chunks_exact_mut(7) {
+            let (position_x, position_y) = transformed_point_for_flash(
+                vertex[0], vertex[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+            );
+            vertex[0] = position_x;
+            vertex[1] = position_y;
+
+            let (center_x, center_y) = transformed_point_for_flash(
+                vertex[2], vertex[3], scale, mirror_x, mirror_y, rotation, dx, dy,
+            );
+            vertex[2] = center_x;
+            vertex[3] = center_y;
+
+            vertex[4] *= scale.abs();
+            let (start_angle, sweep_angle) =
+                transform_arc_angles(vertex[5], vertex[6], scale, mirror_x, mirror_y, rotation);
+            vertex[5] = start_angle;
+            vertex[6] = sweep_angle;
+        }
+
+        for point in self.cover_vertices.chunks_exact_mut(2) {
+            let (x, y) = transformed_point_for_flash(
+                point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+            );
+            point[0] = x;
+            point[1] = y;
+        }
+
+        for point in self.clear_vertices.chunks_exact_mut(2) {
+            let (x, y) = transformed_point_for_flash(
+                point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+            );
+            point[0] = x;
+            point[1] = y;
+        }
+    }
+
+    pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
+        let object = Object::new();
+        set_property(
+            &object,
+            "wedgeVertices",
+            &f32_array_to_js(&self.wedge_vertices),
+        )?;
+        set_property(
+            &object,
+            "wedgeVertexOffsets",
+            &u32_array_to_js(&self.wedge_vertex_offsets),
+        )?;
+        set_property(
+            &object,
+            "sectorVertices",
+            &f32_array_to_js(&self.sector_vertices),
+        )?;
+        set_property(
+            &object,
+            "sectorVertexOffsets",
+            &u32_array_to_js(&self.sector_vertex_offsets),
+        )?;
+        set_property(
+            &object,
+            "coverVertices",
+            &f32_array_to_js(&self.cover_vertices),
+        )?;
+        set_property(
+            &object,
+            "clearVertices",
+            &f32_array_to_js(&self.clear_vertices),
+        )?;
+        Ok(object.into())
+    }
+
+    pub(crate) fn from_js(value: &JsValue) -> Result<PathRegions, JsValue> {
+        Ok(PathRegions::new(
+            f32_array_from_js(value, "wedgeVertices")?,
+            u32_array_from_js(value, "wedgeVertexOffsets")?,
+            f32_array_from_js(value, "sectorVertices")?,
+            u32_array_from_js(value, "sectorVertexOffsets")?,
+            f32_array_from_js(value, "coverVertices")?,
+            f32_array_from_js(value, "clearVertices")?,
+        ))
+    }
+}
+
+impl Default for PathRegions {
+    fn default() -> Self {
+        PathRegions::empty()
+    }
+}
+
+fn normalize_offsets(mut offsets: Vec<u32>) -> Vec<u32> {
+    if offsets.is_empty() {
+        offsets.push(0);
+    }
+    offsets
+}
+
+fn transformed_point_for_flash(
+    x: f32,
+    y: f32,
+    scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    rotation: f32,
+    dx: f32,
+    dy: f32,
+) -> (f32, f32) {
+    let mut tx = x * scale;
+    let mut ty = y * scale;
+
+    if mirror_x {
+        tx = -tx;
+    }
+    if mirror_y {
+        ty = -ty;
+    }
+
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let rotated_x = tx * cos_r - ty * sin_r;
+    let rotated_y = tx * sin_r + ty * cos_r;
+
+    (rotated_x + dx, rotated_y + dy)
+}
+
+fn transform_arc_angles(
+    start_angle: f32,
+    sweep_angle: f32,
+    scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    rotation: f32,
+) -> (f32, f32) {
+    let mut start = start_angle;
+    let mut end = start_angle + sweep_angle;
+
+    if scale < 0.0 {
+        start += std::f32::consts::PI;
+        end += std::f32::consts::PI;
+    }
+    if mirror_x {
+        start = std::f32::consts::PI - start;
+        end = std::f32::consts::PI - end;
+    }
+    if mirror_y {
+        start = -start;
+        end = -end;
+    }
+
+    start += rotation;
+    end += rotation;
+    (start, end - start)
+}
+
 /// Boundary information for the entire Gerber layer
 #[wasm_bindgen]
 pub struct Boundary {
@@ -436,6 +713,7 @@ pub struct GerberData {
     pub(crate) circles: Circles,
     pub(crate) arcs: Arcs,
     pub(crate) thermals: Thermals,
+    pub(crate) path_regions: PathRegions,
     pub(crate) boundary: Boundary,
     pub(crate) is_negative: bool,
 }
@@ -447,6 +725,7 @@ impl GerberData {
         circles: Circles,
         arcs: Arcs,
         thermals: Thermals,
+        path_regions: PathRegions,
         boundary: Boundary,
         is_negative: bool,
     ) -> GerberData {
@@ -456,6 +735,7 @@ impl GerberData {
             circles,
             arcs,
             thermals,
+            path_regions,
             boundary,
             is_negative,
         }
@@ -471,6 +751,7 @@ impl GerberData {
             || !self.circles.x.is_empty()
             || !self.arcs.x.is_empty()
             || !self.thermals.x.is_empty()
+            || self.path_regions.has_geometry()
     }
 
     pub fn translate(&mut self, dx: f32, dy: f32) {
@@ -481,6 +762,7 @@ impl GerberData {
         self.circles.translate(dx, dy);
         self.arcs.translate(dx, dy);
         self.thermals.translate(dx, dy);
+        self.path_regions.translate(dx, dy);
         self.boundary.translate(dx, dy);
     }
 
@@ -496,6 +778,7 @@ impl GerberData {
         set_property(&object, "circles", &self.circles.to_js()?)?;
         set_property(&object, "arcs", &self.arcs.to_js()?)?;
         set_property(&object, "thermals", &self.thermals.to_js()?)?;
+        set_property(&object, "pathRegions", &self.path_regions.to_js()?)?;
         set_property(&object, "boundary", &self.boundary.to_js()?)?;
         set_property(&object, "isNegative", &JsValue::from_bool(self.is_negative))?;
         Ok(object.into())
@@ -514,6 +797,7 @@ impl GerberData {
             Circles::from_js(&get_property(value, "circles")?)?,
             Arcs::from_js(&get_property(value, "arcs")?)?,
             Thermals::from_js(&get_property(value, "thermals")?)?,
+            PathRegions::from_js(&get_property(value, "pathRegions")?)?,
             Boundary::from_js(&get_property(value, "boundary")?)?,
             get_property(value, "isNegative")?
                 .as_bool()

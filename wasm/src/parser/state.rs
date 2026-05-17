@@ -1,4 +1,6 @@
 use super::geometry::Primitive;
+use super::PolarityLayer;
+use crate::shape::PathRegions;
 use std::mem::take;
 
 /// Polarity - Dark (positive) or Clear (negative)
@@ -253,7 +255,8 @@ pub fn parse_lp(
     line: &str,
     state: &mut ParserState,
     current_primitives: &mut Vec<Primitive>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    current_path_regions: &mut PathRegions,
+    polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
     // Extract D or C from %LPD* or %LPC* format
     let spec_str = line
@@ -274,12 +277,18 @@ pub fn parse_lp(
     };
 
     // Check if polarity has changed
-    if state.polarity != new_polarity && !current_primitives.is_empty() {
+    if state.polarity != new_polarity
+        && (!current_primitives.is_empty() || current_path_regions.has_geometry())
+    {
         polarity_layers.try_reserve(1).map_err(|_| {
             "Gerber layer is too large to parse: not enough memory for polarity layer list"
                 .to_string()
         })?;
-        polarity_layers.push((state.polarity, take(current_primitives)));
+        polarity_layers.push(PolarityLayer {
+            polarity: state.polarity,
+            primitives: take(current_primitives),
+            path_regions: take(current_path_regions),
+        });
     }
 
     // Set new polarity

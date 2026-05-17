@@ -1,4 +1,5 @@
-use crate::parser::{Aperture, FormatSpec, ParserState, Polarity};
+use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
+use crate::shape::PathRegions;
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
@@ -76,13 +77,27 @@ fn try_reserve_primitives(
 }
 
 fn try_reserve_layers(
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    polarity_layers: &mut Vec<PolarityLayer>,
     additional: usize,
     context: &str,
 ) -> Result<(), String> {
     polarity_layers.try_reserve(additional).map_err(|_| {
         format!(
             "Gerber layer is too large to parse: not enough memory for {} ({} polarity layers)",
+            context,
+            format_count(additional)
+        )
+    })
+}
+
+fn try_reserve_values<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    context: &str,
+) -> Result<(), String> {
+    values.try_reserve(additional).map_err(|_| {
+        format!(
+            "Gerber region is too large to render: not enough memory for {} ({} values)",
             context,
             format_count(additional)
         )
@@ -131,6 +146,79 @@ pub enum Primitive {
         x: f32,
         y: f32,
     },
+}
+
+#[derive(Clone, Debug)]
+pub enum RegionSegment {
+    Line {
+        start: [f32; 2],
+        end: [f32; 2],
+    },
+    Arc {
+        start: [f32; 2],
+        end: [f32; 2],
+        center: [f32; 2],
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RegionContour {
+    pub points: Vec<[f32; 2]>,
+    pub segments: Vec<RegionSegment>,
+    pub has_arc: bool,
+}
+
+impl RegionContour {
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty() && self.segments.is_empty()
+    }
+
+    pub fn push_start(&mut self, point: [f32; 2]) -> Result<(), String> {
+        try_reserve_values(&mut self.points, 1, "region points")?;
+        self.points.push(point);
+        Ok(())
+    }
+
+    fn push_line(&mut self, start: [f32; 2], end: [f32; 2]) -> Result<(), String> {
+        try_reserve_values(&mut self.points, 1, "region points")?;
+        try_reserve_values(&mut self.segments, 1, "region segments")?;
+        if self.points.is_empty() {
+            self.points.push(start);
+        }
+        self.points.push(end);
+        self.segments.push(RegionSegment::Line { start, end });
+        Ok(())
+    }
+
+    fn push_arc(
+        &mut self,
+        start: [f32; 2],
+        end: [f32; 2],
+        center: [f32; 2],
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+    ) -> Result<(), String> {
+        try_reserve_values(&mut self.points, 1, "region points")?;
+        try_reserve_values(&mut self.segments, 1, "region segments")?;
+        if self.points.is_empty() {
+            self.points.push(start);
+        }
+        self.points.push(end);
+        self.segments.push(RegionSegment::Arc {
+            start,
+            end,
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        });
+        self.has_arc = true;
+        Ok(())
+    }
 }
 
 /// Rotate point around given center
@@ -961,11 +1049,32 @@ fn transform_primitive_for_flash(
 fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
     polarity: Polarity,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
     if !primitives.is_empty() {
         try_reserve_layers(polarity_layers, 1, "polarity layer")?;
-        polarity_layers.push((polarity, take(primitives)));
+        polarity_layers.push(PolarityLayer {
+            polarity,
+            primitives: take(primitives),
+            path_regions: PathRegions::empty(),
+        });
+    }
+
+    Ok(())
+}
+
+fn flush_path_regions_to_layer(
+    path_regions: &mut PathRegions,
+    polarity: Polarity,
+    polarity_layers: &mut Vec<PolarityLayer>,
+) -> Result<(), String> {
+    if path_regions.has_geometry() {
+        try_reserve_layers(polarity_layers, 1, "polarity layer")?;
+        polarity_layers.push(PolarityLayer {
+            polarity,
+            primitives: Vec::new(),
+            path_regions: take(path_regions),
+        });
     }
 
     Ok(())
@@ -983,10 +1092,10 @@ fn toggled_block_polarity(block_polarity: Polarity, flash_polarity: Polarity) ->
 }
 
 fn flash_block_aperture(
-    block_layers: &[(Polarity, Vec<Primitive>)],
+    block_layers: &[PolarityLayer],
     state: &ParserState,
     primitives: &mut Vec<Primitive>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
 ) -> Result<(), String> {
@@ -997,15 +1106,15 @@ fn flash_block_aperture(
             let flash_x = x + sx as f32 * state.sr_i;
             let flash_y = y + sy as f32 * state.sr_j;
 
-            for (block_polarity, block_primitives) in block_layers {
+            for block_layer in block_layers {
                 let mut transformed = Vec::new();
                 try_reserve_primitives(
                     &mut transformed,
-                    block_primitives.len(),
+                    block_layer.primitives.len(),
                     "aperture block flash",
                 )?;
 
-                for primitive in block_primitives {
+                for primitive in &block_layer.primitives {
                     transformed.push(transform_primitive_for_flash(
                         primitive,
                         flash_x,
@@ -1017,12 +1126,23 @@ fn flash_block_aperture(
                     ));
                 }
 
-                if !transformed.is_empty() {
+                let mut transformed_path_regions = block_layer.path_regions.clone();
+                transformed_path_regions.transform_for_flash(
+                    state.layer_scale,
+                    state.mirror_x,
+                    state.mirror_y,
+                    state.layer_rotation,
+                    flash_x,
+                    flash_y,
+                );
+
+                if !transformed.is_empty() || transformed_path_regions.has_geometry() {
                     try_reserve_layers(polarity_layers, 1, "aperture block polarity layer")?;
-                    polarity_layers.push((
-                        toggled_block_polarity(*block_polarity, state.polarity),
-                        transformed,
-                    ));
+                    polarity_layers.push(PolarityLayer {
+                        polarity: toggled_block_polarity(block_layer.polarity, state.polarity),
+                        primitives: transformed,
+                        path_regions: transformed_path_regions,
+                    });
                 }
             }
         }
@@ -1036,7 +1156,7 @@ pub fn flash_aperture(
     state: &ParserState,
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
 ) -> Result<(), String> {
@@ -1381,42 +1501,499 @@ fn arc_center_offset_present(i: f32, j: f32) -> bool {
     i.abs() >= 0.0001 || j.abs() >= 0.0001
 }
 
+pub fn region_contours_have_arcs(region_contours: &[RegionContour]) -> bool {
+    region_contours.iter().any(|contour| contour.has_arc)
+}
+
+pub fn region_contours_to_point_slices(
+    region_contours: &[RegionContour],
+) -> impl Iterator<Item = &[[f32; 2]]> {
+    region_contours
+        .iter()
+        .map(|contour| contour.points.as_slice())
+}
+
+pub fn flatten_region_contours(
+    region_contours: &[RegionContour],
+) -> Result<Vec<Vec<[f32; 2]>>, String> {
+    let mut contours = Vec::new();
+    try_reserve_values(&mut contours, region_contours.len(), "region contours")?;
+
+    for contour in region_contours {
+        let mut points = Vec::new();
+
+        if contour.segments.is_empty() {
+            try_reserve_values(&mut points, contour.points.len(), "region points")?;
+            points.extend_from_slice(&contour.points);
+            contours.push(points);
+            continue;
+        }
+
+        for segment in &contour.segments {
+            match *segment {
+                RegionSegment::Line { start, end } => {
+                    if points.is_empty() {
+                        try_reserve_values(&mut points, 1, "region points")?;
+                        points.push(start);
+                    }
+                    try_reserve_values(&mut points, 1, "region points")?;
+                    points.push(end);
+                }
+                RegionSegment::Arc {
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                } => {
+                    if points.is_empty() {
+                        try_reserve_values(&mut points, 1, "region points")?;
+                        points.push(start);
+                    }
+
+                    let max_angle_step = std::f32::consts::PI / 36.0;
+                    let segment_count =
+                        ((sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
+                    try_reserve_values(&mut points, segment_count, "region arc points")?;
+                    for segment_idx in 1..segment_count {
+                        let t = segment_idx as f32 / segment_count as f32;
+                        let angle = start_angle + sweep_angle * t;
+                        points.push([
+                            center[0] + radius * angle.cos(),
+                            center[1] + radius * angle.sin(),
+                        ]);
+                    }
+                    points.push(end);
+                }
+            }
+        }
+
+        contours.push(points);
+    }
+
+    Ok(contours)
+}
+
+pub fn build_path_regions(
+    region_contours: &[RegionContour],
+    state: &ParserState,
+) -> Result<PathRegions, String> {
+    let mut path_regions = PathRegions::empty();
+
+    for sy in 0..state.sr_y {
+        for sx in 0..state.sr_x {
+            let offset_x = sx as f32 * state.sr_i;
+            let offset_y = sy as f32 * state.sr_j;
+            append_path_region(&mut path_regions, region_contours, offset_x, offset_y)?;
+        }
+    }
+
+    Ok(path_regions)
+}
+
+fn append_path_region(
+    path_regions: &mut PathRegions,
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<(), String> {
+    let Some((min_x, max_x, min_y, max_y)) =
+        path_region_bounds(region_contours, offset_x, offset_y)
+    else {
+        return Ok(());
+    };
+
+    let margin = 1.0e-3_f32.max((max_x - min_x).abs().max((max_y - min_y).abs()) * 1.0e-6);
+    let reference = [min_x - margin, min_y - margin];
+    let (clear_min_x, clear_max_x, clear_min_y, clear_max_y) =
+        path_region_stencil_bounds(region_contours, offset_x, offset_y, reference)
+            .unwrap_or((min_x, max_x, min_y, max_y));
+
+    push_cover_quad(&mut path_regions.cover_vertices, min_x, max_x, min_y, max_y)?;
+    push_cover_quad(
+        &mut path_regions.clear_vertices,
+        clear_min_x,
+        clear_max_x,
+        clear_min_y,
+        clear_max_y,
+    )?;
+
+    for contour in region_contours {
+        append_contour_segments(path_regions, contour, reference, offset_x, offset_y)?;
+    }
+
+    path_regions
+        .wedge_vertex_offsets
+        .push((path_regions.wedge_vertices.len() / 2) as u32);
+    path_regions
+        .sector_vertex_offsets
+        .push((path_regions.sector_vertices.len() / 7) as u32);
+
+    Ok(())
+}
+
+fn append_contour_segments(
+    path_regions: &mut PathRegions,
+    contour: &RegionContour,
+    reference: [f32; 2],
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<(), String> {
+    for segment in &contour.segments {
+        match *segment {
+            RegionSegment::Line { start, end } => {
+                push_wedge_triangle(
+                    &mut path_regions.wedge_vertices,
+                    reference,
+                    offset_point(start, offset_x, offset_y),
+                    offset_point(end, offset_x, offset_y),
+                )?;
+            }
+            RegionSegment::Arc {
+                start,
+                end,
+                center,
+                radius,
+                start_angle,
+                sweep_angle,
+            } => {
+                let start = offset_point(start, offset_x, offset_y);
+                let end = offset_point(end, offset_x, offset_y);
+                let center = offset_point(center, offset_x, offset_y);
+                push_wedge_triangle(&mut path_regions.wedge_vertices, reference, start, end)?;
+                push_wedge_triangle(&mut path_regions.wedge_vertices, center, start, end)?;
+                push_sector_quad(
+                    &mut path_regions.sector_vertices,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                )?;
+            }
+        }
+    }
+
+    if let (Some(first), Some(last)) = (contour.points.first(), contour.points.last()) {
+        if !points_coincide(first[0], first[1], last[0], last[1]) {
+            push_wedge_triangle(
+                &mut path_regions.wedge_vertices,
+                reference,
+                offset_point(*last, offset_x, offset_y),
+                offset_point(*first, offset_x, offset_y),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn path_region_bounds(
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for contour in region_contours {
+        for point in &contour.points {
+            let x = point[0] + offset_x;
+            let y = point[1] + offset_y;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+
+        for segment in &contour.segments {
+            if let RegionSegment::Arc {
+                center,
+                radius,
+                start_angle,
+                sweep_angle,
+                ..
+            } = *segment
+            {
+                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = arc_curve_bounds(
+                    offset_point(center, offset_x, offset_y),
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                );
+                min_x = min_x.min(arc_min_x);
+                max_x = max_x.max(arc_max_x);
+                min_y = min_y.min(arc_min_y);
+                max_y = max_y.max(arc_max_y);
+            }
+        }
+    }
+
+    min_x.is_finite().then_some((min_x, max_x, min_y, max_y))
+}
+
+fn path_region_stencil_bounds(
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+    reference: [f32; 2],
+) -> Option<(f32, f32, f32, f32)> {
+    let mut min_x = reference[0];
+    let mut max_x = reference[0];
+    let mut min_y = reference[1];
+    let mut max_y = reference[1];
+
+    for contour in region_contours {
+        for point in &contour.points {
+            include_point_bounds(
+                &mut min_x,
+                &mut max_x,
+                &mut min_y,
+                &mut max_y,
+                offset_point(*point, offset_x, offset_y),
+            );
+        }
+
+        for segment in &contour.segments {
+            if let RegionSegment::Arc {
+                center,
+                radius,
+                start_angle,
+                sweep_angle,
+                ..
+            } = *segment
+            {
+                let center = offset_point(center, offset_x, offset_y);
+                include_point_bounds(&mut min_x, &mut max_x, &mut min_y, &mut max_y, center);
+                let (sector_min_x, sector_max_x, sector_min_y, sector_max_y) =
+                    arc_sector_bounds(center, radius, start_angle, sweep_angle);
+                min_x = min_x.min(sector_min_x);
+                max_x = max_x.max(sector_max_x);
+                min_y = min_y.min(sector_min_y);
+                max_y = max_y.max(sector_max_y);
+            }
+        }
+    }
+
+    min_x.is_finite().then_some((min_x, max_x, min_y, max_y))
+}
+
+fn offset_point(point: [f32; 2], offset_x: f32, offset_y: f32) -> [f32; 2] {
+    [point[0] + offset_x, point[1] + offset_y]
+}
+
+fn push_wedge_triangle(
+    vertices: &mut Vec<f32>,
+    a: [f32; 2],
+    b: [f32; 2],
+    c: [f32; 2],
+) -> Result<(), String> {
+    try_reserve_values(vertices, 6, "path region wedge vertices")?;
+    vertices.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
+    Ok(())
+}
+
+fn push_cover_quad(
+    vertices: &mut Vec<f32>,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+) -> Result<(), String> {
+    try_reserve_values(vertices, 12, "path region cover vertices")?;
+    vertices.extend_from_slice(&[
+        min_x, min_y, max_x, min_y, min_x, max_y, min_x, max_y, max_x, min_y, max_x, max_y,
+    ]);
+    Ok(())
+}
+
+fn push_sector_quad(
+    vertices: &mut Vec<f32>,
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+) -> Result<(), String> {
+    let (min_x, max_x, min_y, max_y) = arc_sector_bounds(center, radius, start_angle, sweep_angle);
+    let quad = [
+        [min_x, min_y],
+        [max_x, min_y],
+        [min_x, max_y],
+        [min_x, max_y],
+        [max_x, min_y],
+        [max_x, max_y],
+    ];
+
+    try_reserve_values(vertices, 42, "path region arc sector vertices")?;
+    for point in quad {
+        vertices.extend_from_slice(&[
+            point[0],
+            point[1],
+            center[0],
+            center[1],
+            radius,
+            start_angle,
+            sweep_angle,
+        ]);
+    }
+    Ok(())
+}
+
+fn arc_curve_bounds(
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+) -> (f32, f32, f32, f32) {
+    let end_angle = start_angle + sweep_angle;
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    include_angle_point(
+        &mut min_x,
+        &mut max_x,
+        &mut min_y,
+        &mut max_y,
+        center,
+        radius,
+        start_angle,
+    );
+    include_angle_point(
+        &mut min_x, &mut max_x, &mut min_y, &mut max_y, center, radius, end_angle,
+    );
+
+    for angle in [
+        0.0,
+        std::f32::consts::FRAC_PI_2,
+        std::f32::consts::PI,
+        std::f32::consts::PI * 1.5,
+    ] {
+        if angle_in_sweep(angle, start_angle, sweep_angle) {
+            include_angle_point(
+                &mut min_x, &mut max_x, &mut min_y, &mut max_y, center, radius, angle,
+            );
+        }
+    }
+
+    (min_x, max_x, min_y, max_y)
+}
+
+fn arc_sector_bounds(
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+) -> (f32, f32, f32, f32) {
+    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+        arc_curve_bounds(center, radius, start_angle, sweep_angle);
+    min_x = min_x.min(center[0]);
+    max_x = max_x.max(center[0]);
+    min_y = min_y.min(center[1]);
+    max_y = max_y.max(center[1]);
+    (min_x, max_x, min_y, max_y)
+}
+
+fn include_angle_point(
+    min_x: &mut f32,
+    max_x: &mut f32,
+    min_y: &mut f32,
+    max_y: &mut f32,
+    center: [f32; 2],
+    radius: f32,
+    angle: f32,
+) {
+    let x = center[0] + radius * angle.cos();
+    let y = center[1] + radius * angle.sin();
+    *min_x = min_x.min(x);
+    *max_x = max_x.max(x);
+    *min_y = min_y.min(y);
+    *max_y = max_y.max(y);
+}
+
+fn include_point_bounds(
+    min_x: &mut f32,
+    max_x: &mut f32,
+    min_y: &mut f32,
+    max_y: &mut f32,
+    point: [f32; 2],
+) {
+    *min_x = min_x.min(point[0]);
+    *max_x = max_x.max(point[0]);
+    *min_y = min_y.min(point[1]);
+    *max_y = max_y.max(point[1]);
+}
+
+fn angle_in_sweep(angle: f32, start_angle: f32, sweep_angle: f32) -> bool {
+    let full_turn = std::f32::consts::PI * 2.0;
+    if sweep_angle.abs() >= full_turn - 0.00001 {
+        return true;
+    }
+
+    let angle = normalize_angle(angle);
+    let start = normalize_angle(start_angle);
+    let end = normalize_angle(start_angle + sweep_angle);
+
+    if sweep_angle >= 0.0 {
+        if end >= start {
+            angle >= start && angle <= end
+        } else {
+            angle >= start || angle <= end
+        }
+    } else if end <= start {
+        angle <= start && angle >= end
+    } else {
+        angle <= start || angle >= end
+    }
+}
+
+fn normalize_angle(angle: f32) -> f32 {
+    let full_turn = std::f32::consts::PI * 2.0;
+    let mut angle = angle % full_turn;
+    if angle < 0.0 {
+        angle += full_turn;
+    }
+    angle
+}
+
 fn append_region_segment(
-    contour: &mut Vec<[f32; 2]>,
+    contour: &mut RegionContour,
     state: &ParserState,
     end_x: f32,
     end_y: f32,
     i: f32,
     j: f32,
-) {
+) -> Result<(), String> {
+    let start = [state.x, state.y];
+    let end = [end_x, end_y];
+
     if state.interpolation_mode != "clockwise" && state.interpolation_mode != "counterclockwise" {
-        contour.push([end_x, end_y]);
-        return;
+        contour.push_line(start, end)?;
+        return Ok(());
     }
 
     let start_x = state.x;
     let start_y = state.y;
-    if contour.is_empty() {
-        contour.push([start_x, start_y]);
-    }
 
     if let Some((center_x, center_y, radius, start_angle, sweep_angle)) =
         calculate_arc_parameters(state, start_x, start_y, end_x, end_y, i, j)
     {
-        let max_angle_step = std::f32::consts::PI / 36.0;
-        let segment_count = ((sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
-
-        for segment_idx in 1..segment_count {
-            let t = segment_idx as f32 / segment_count as f32;
-            let angle = start_angle + sweep_angle * t;
-            contour.push([
-                center_x + radius * angle.cos(),
-                center_y + radius * angle.sin(),
-            ]);
-        }
+        contour.push_arc(
+            start,
+            end,
+            [center_x, center_y],
+            radius,
+            start_angle,
+            sweep_angle,
+        )?;
+    } else {
+        contour.push_line(start, end)?;
     }
 
-    contour.push([end_x, end_y]);
+    Ok(())
 }
 
 /// Parse graphic commands - process G/D/XY codes
@@ -1426,8 +2003,10 @@ pub fn parse_graphic_command(
     state: &mut ParserState,
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
-    region_contours: &mut Vec<Vec<[f32; 2]>>,
-    polarity_layers: &mut Vec<(Polarity, Vec<Primitive>)>,
+    region_contours: &mut Vec<RegionContour>,
+    path_regions: &mut PathRegions,
+    polarity_layers: &mut Vec<PolarityLayer>,
+    preserve_arc_regions: bool,
 ) -> Result<(), String> {
     let clean_line = line.trim_end_matches('*');
 
@@ -1467,47 +2046,62 @@ pub fn parse_graphic_command(
                     // G36: Start region fill mode
                     state.region_mode = true;
                     region_contours.clear();
-                    region_contours.push(Vec::new()); // Start new contour
+                    region_contours.push(RegionContour::default()); // Start new contour
                 }
                 37 => {
                     // G37: End region fill mode
                     state.region_mode = false;
 
-                    // Triangulate region and add to primitives with Step and Repeat
-                    // Regions are always positive (add material)
-                    for contour in region_contours.iter() {
-                        if contour.len() >= 3 {
-                            match triangulate_outline(contour, 1.0) {
-                                Ok(triangles) => {
-                                    // Apply Step and Repeat to region triangles
-                                    let repeat_count = checked_primitive_count(
-                                        state.sr_x as usize,
-                                        state.sr_y as usize,
-                                        "region step repeat",
-                                    )?;
-                                    let additional = checked_primitive_count(
-                                        triangles.len(),
-                                        repeat_count,
-                                        "region",
-                                    )?;
-                                    try_reserve_primitives(primitives, additional, "region")?;
+                    if preserve_arc_regions && region_contours_have_arcs(region_contours) {
+                        flush_primitives_to_layer(primitives, state.polarity, polarity_layers)?;
+                        path_regions.append(build_path_regions(region_contours, state)?);
+                    } else {
+                        flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+                        // Triangulate region and add to primitives with Step and Repeat
+                        // Regions are always positive (add material)
+                        let flattened_contours;
+                        let mut contour_iter: Box<dyn Iterator<Item = &[[f32; 2]]> + '_> =
+                            if region_contours_have_arcs(region_contours) {
+                                flattened_contours = flatten_region_contours(region_contours)?;
+                                Box::new(flattened_contours.iter().map(Vec::as_slice))
+                            } else {
+                                Box::new(region_contours_to_point_slices(region_contours))
+                            };
 
-                                    for sy in 0..state.sr_y {
-                                        for sx in 0..state.sr_x {
-                                            let offset_x = sx as f32 * state.sr_i;
-                                            let offset_y = sy as f32 * state.sr_j;
+                        for contour in contour_iter.by_ref() {
+                            if contour.len() >= 3 {
+                                match triangulate_outline(contour, 1.0) {
+                                    Ok(triangles) => {
+                                        // Apply Step and Repeat to region triangles
+                                        let repeat_count = checked_primitive_count(
+                                            state.sr_x as usize,
+                                            state.sr_y as usize,
+                                            "region step repeat",
+                                        )?;
+                                        let additional = checked_primitive_count(
+                                            triangles.len(),
+                                            repeat_count,
+                                            "region",
+                                        )?;
+                                        try_reserve_primitives(primitives, additional, "region")?;
 
-                                            for triangle in &triangles {
-                                                let offset_triangle = offset_primitive_by(
-                                                    triangle, offset_x, offset_y,
-                                                );
-                                                primitives.push(offset_triangle);
+                                        for sy in 0..state.sr_y {
+                                            for sx in 0..state.sr_x {
+                                                let offset_x = sx as f32 * state.sr_i;
+                                                let offset_y = sy as f32 * state.sr_j;
+
+                                                for triangle in &triangles {
+                                                    let offset_triangle = offset_primitive_by(
+                                                        triangle, offset_x, offset_y,
+                                                    );
+                                                    primitives.push(offset_triangle);
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(_e) => {
-                                    // Triangulation failed, skip this contour
+                                    Err(_e) => {
+                                        // Triangulation failed, skip this contour
+                                    }
                                 }
                             }
                         }
@@ -1613,9 +2207,10 @@ pub fn parse_graphic_command(
                     // If in region mode, add coordinates to contour
                     if state.region_mode {
                         if let Some(last_contour) = region_contours.last_mut() {
-                            append_region_segment(last_contour, state, x, y, i, j);
+                            append_region_segment(last_contour, state, x, y, i, j)?;
                         }
                     } else {
+                        flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
                         execute_interpolation(state, apertures, primitives, x, y, i, j)?;
                     }
                 }
@@ -1630,16 +2225,17 @@ pub fn parse_graphic_command(
                             .last()
                             .is_none_or(|last_contour| !last_contour.is_empty())
                         {
-                            region_contours.push(Vec::new());
+                            region_contours.push(RegionContour::default());
                         }
 
                         if let Some(last_contour) = region_contours.last_mut() {
-                            last_contour.push([x, y]);
+                            last_contour.push_start([x, y])?;
                         }
                     }
                 }
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
+                    flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
                     flash_aperture(state, apertures, primitives, polarity_layers, x, y)?;
                 }
                 _ if d_code >= 10 => {
@@ -1653,9 +2249,10 @@ pub fn parse_graphic_command(
         // If there is only X/Y without D-code and the pen is down, execute interpolation
         if state.region_mode {
             if let Some(last_contour) = region_contours.last_mut() {
-                append_region_segment(last_contour, state, x, y, i, j);
+                append_region_segment(last_contour, state, x, y, i, j)?;
             }
         } else {
+            flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
             execute_interpolation(state, apertures, primitives, x, y, i, j)?;
         }
     } else {

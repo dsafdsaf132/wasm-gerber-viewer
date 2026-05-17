@@ -4,6 +4,7 @@ use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlShader, WebGlUniformLoc
 
 // WebGL constants
 pub const COLOR_BUFFER_BIT: u32 = WebGl2RenderingContext::COLOR_BUFFER_BIT;
+pub const STENCIL_BUFFER_BIT: u32 = WebGl2RenderingContext::STENCIL_BUFFER_BIT;
 pub const TRIANGLES: u32 = WebGl2RenderingContext::TRIANGLES;
 pub const FLOAT: u32 = WebGl2RenderingContext::FLOAT;
 pub const ARRAY_BUFFER: u32 = WebGl2RenderingContext::ARRAY_BUFFER;
@@ -15,6 +16,11 @@ pub const ONE_MINUS_SRC_ALPHA: u32 = WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA
 pub const ONE: u32 = WebGl2RenderingContext::ONE;
 pub const FUNC_ADD: u32 = WebGl2RenderingContext::FUNC_ADD;
 pub const ZERO: u32 = WebGl2RenderingContext::ZERO;
+pub const STENCIL_TEST: u32 = WebGl2RenderingContext::STENCIL_TEST;
+pub const ALWAYS: u32 = WebGl2RenderingContext::ALWAYS;
+pub const NOTEQUAL: u32 = WebGl2RenderingContext::NOTEQUAL;
+pub const KEEP: u32 = WebGl2RenderingContext::KEEP;
+pub const INVERT: u32 = WebGl2RenderingContext::INVERT;
 
 // Shader sources
 pub const TRIANGLE_VERTEX_SHADER: &str = r#"#version 300 es
@@ -297,6 +303,98 @@ void main() {
 }
 "#;
 
+pub const PATH_SOLID_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
+in vec2 position;
+uniform mat3 transform;
+void main() {
+    vec3 transformed = transform * vec3(position, 1.0);
+    gl_Position = vec4(transformed.xy, 0.0, 1.0);
+}
+"#;
+
+pub const PATH_SOLID_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
+void main() {
+    fragColor = color;
+}
+"#;
+
+pub const PATH_SECTOR_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
+in vec2 position;
+in vec2 center;
+in float radius;
+in float startAngle;
+in float sweepAngle;
+uniform mat3 transform;
+out highp vec2 vPosition;
+out highp float vStartAngle;
+out highp float vSweepAngle;
+void main() {
+    float safeRadius = max(radius, 0.0);
+    vec3 transformed = transform * vec3(position, 1.0);
+    gl_Position = vec4(transformed.xy, 0.0, 1.0);
+    vPosition = safeRadius > 0.0 ? (position - center) / safeRadius : vec2(2.0, 2.0);
+    vStartAngle = startAngle;
+    vSweepAngle = sweepAngle;
+}
+"#;
+
+pub const PATH_SECTOR_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+in highp vec2 vPosition;
+in highp float vStartAngle;
+in highp float vSweepAngle;
+out lowp vec4 fragColor;
+
+const float TWO_PI = 6.28318530718;
+
+float normalizeAngle(float angle) {
+    float normalized = mod(angle, TWO_PI);
+    if (normalized < 0.0) {
+        normalized += TWO_PI;
+    }
+    return normalized;
+}
+
+void main() {
+    if (dot(vPosition, vPosition) > 1.0) {
+        discard;
+    }
+
+    float angle = normalizeAngle(atan(vPosition.y, vPosition.x));
+    float startAngle = normalizeAngle(vStartAngle);
+    float sweep = clamp(vSweepAngle, -TWO_PI, TWO_PI);
+    float endAngle = normalizeAngle(startAngle + sweep);
+
+    bool inRange;
+    if (abs(sweep) >= TWO_PI - 0.00001) {
+        inRange = true;
+    } else if (sweep > 0.0) {
+        if (endAngle > startAngle) {
+            inRange = angle >= startAngle && angle <= endAngle;
+        } else {
+            inRange = angle >= startAngle || angle <= endAngle;
+        }
+    } else {
+        if (endAngle < startAngle) {
+            inRange = angle <= startAngle && angle >= endAngle;
+        } else {
+            inRange = angle <= startAngle || angle >= endAngle;
+        }
+    }
+
+    if (!inRange) {
+        discard;
+    }
+
+    fragColor = vec4(1.0);
+}
+"#;
+
 /// Shader program with uniform locations
 pub struct ShaderProgram {
     pub program: WebGlProgram,
@@ -312,6 +410,8 @@ pub struct ShaderPrograms {
     pub arc: ShaderProgram,
     pub thermal: ShaderProgram,
     pub texture: ShaderProgram,
+    pub path_solid: ShaderProgram,
+    pub path_sector: ShaderProgram,
 }
 
 impl ShaderPrograms {
@@ -394,6 +494,22 @@ impl ShaderPrograms {
             &["u_texture", "u_color"],
         )?;
 
+        let path_solid = compile_program(
+            gl,
+            PATH_SOLID_VERTEX_SHADER,
+            PATH_SOLID_FRAGMENT_SHADER,
+            &["position"],
+            &["transform", "color"],
+        )?;
+
+        let path_sector = compile_program(
+            gl,
+            PATH_SECTOR_VERTEX_SHADER,
+            PATH_SECTOR_FRAGMENT_SHADER,
+            &["position", "center", "radius", "startAngle", "sweepAngle"],
+            &["transform"],
+        )?;
+
         Ok(ShaderPrograms {
             triangle,
             triangle_template,
@@ -401,6 +517,8 @@ impl ShaderPrograms {
             arc,
             thermal,
             texture,
+            path_solid,
+            path_sector,
         })
     }
 }

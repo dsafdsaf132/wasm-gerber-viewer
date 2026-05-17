@@ -334,6 +334,166 @@ layer[0].triangles.vertices=[10000, 0, 0, 10000, 0, 0, 10000, 10000, 0, 10000, 1
 }
 
 #[test]
+fn region_arc_is_preserved_for_path_renderer() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+    )
+    .expect("region arc should parse");
+
+    assert_eq!(layers.len(), 1);
+    let layer = &layers[0];
+    assert!(layer.triangles.vertices.is_empty());
+    assert_eq!(layer.path_regions.region_count(), 1);
+    assert_eq!(layer.path_regions.wedge_vertex_offsets, vec![0, 9]);
+    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 6]);
+    assert_eq!(layer.path_regions.cover_vertices.len(), 12);
+    assert_eq!(layer.path_regions.clear_vertices.len(), 12);
+    assert_approx_eq(layer.boundary.min_x, -1.0);
+    assert_approx_eq(layer.boundary.max_x, 1.0);
+    assert_approx_eq(layer.boundary.min_y, 0.0);
+    assert_approx_eq(layer.boundary.max_y, 1.0);
+}
+
+#[test]
+fn aperture_block_region_arc_is_preserved_for_path_renderer() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+D10*
+X000000Y000000D03*
+M02*",
+    )
+    .expect("aperture block arc region should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert!(layers[0].triangles.vertices.is_empty());
+    assert_eq!(layers[0].path_regions.region_count(), 1);
+}
+
+#[test]
+fn aperture_block_path_region_flash_transform_is_applied() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+%LR90*%
+D10*
+X100000Y200000D03*
+M02*",
+    )
+    .expect("aperture block arc region should transform");
+
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].path_regions.region_count(), 1);
+    assert_approx_eq(layers[0].boundary.min_x, 9.0);
+    assert_approx_eq(layers[0].boundary.max_x, 10.0);
+    assert_approx_eq(layers[0].boundary.min_y, 19.0);
+    assert_approx_eq(layers[0].boundary.max_y, 21.0);
+}
+
+#[test]
+fn path_region_before_flash_preserves_sublayer_order() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,1.0*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+D10*
+X030000Y000000D03*
+M02*",
+    )
+    .expect("path region followed by flash should parse");
+
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].path_regions.region_count(), 1);
+    assert!(layers[0].circles.x.is_empty());
+    assert_eq!(layers[1].path_regions.region_count(), 0);
+    assert_eq!(layers[1].circles.x.len(), 1);
+}
+
+#[test]
+fn flash_before_path_region_preserves_sublayer_order() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X-030000Y000000D03*
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+    )
+    .expect("flash followed by path region should parse");
+
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].circles.x.len(), 1);
+    assert_eq!(layers[0].path_regions.region_count(), 0);
+    assert!(layers[1].circles.x.is_empty());
+    assert_eq!(layers[1].path_regions.region_count(), 1);
+}
+
+#[test]
+fn path_region_translate_moves_arc_sector_bounds_and_center() {
+    let mut layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+    )
+    .expect("region arc should parse");
+
+    layers[0].translate(10.0, 20.0);
+    let sector = &layers[0].path_regions.sector_vertices;
+    assert_approx_eq(sector[0], 9.0);
+    assert_approx_eq(sector[1], 20.0);
+    assert_approx_eq(sector[2], 10.0);
+    assert_approx_eq(sector[3], 20.0);
+}
+
+#[test]
 fn golden_step_repeat_output_matches_current_parser() {
     assert_gerber_snapshot(
         "\
