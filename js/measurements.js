@@ -1,10 +1,12 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
+const MM_PER_INCH = 25.4;
+const MILS_PER_INCH = 1000;
+const MIL_THRESHOLD_INCHES = 1;
 
 export function formatMeasurementLength(length, unit) {
   if (unit === "inch") {
-    const inches = length / 25.4;
-    const decimals = inches >= 1 ? 4 : 5;
-    return `${inches.toFixed(decimals)} in`;
+    const formatted = formatImperialLength(length);
+    return `${formatted.value} ${formatted.unit}`;
   }
 
   const decimals = length >= 10 ? 2 : 3;
@@ -13,10 +15,28 @@ export function formatMeasurementLength(length, unit) {
 
 export function formatDimensionPair(widthMm, heightMm, unit) {
   if (unit === "inch") {
-    return `${(widthMm / 25.4).toFixed(4)} x ${(heightMm / 25.4).toFixed(4)} in`;
+    return `${(widthMm / MM_PER_INCH).toFixed(4)} x ${(
+      heightMm / MM_PER_INCH
+    ).toFixed(4)} in`;
   }
 
   return `${widthMm.toFixed(3)} x ${heightMm.toFixed(3)} mm`;
+}
+
+function formatImperialLength(lengthMm) {
+  const inches = lengthMm / MM_PER_INCH;
+  if (Math.abs(inches) < MIL_THRESHOLD_INCHES) {
+    const mils = inches * MILS_PER_INCH;
+    return {
+      value: mils.toFixed(3),
+      unit: "mil",
+    };
+  }
+
+  return {
+    value: inches.toFixed(4),
+    unit: "in",
+  };
 }
 
 export function drawMeasurementsOnContext(
