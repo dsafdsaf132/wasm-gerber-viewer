@@ -203,8 +203,7 @@ impl GerberProcessor {
     /// Configure minimum display size for tiny rendered features.
     ///
     /// `0.0` disables the adjustment. Current implementation applies to
-    /// triangle mesh bodies and circle flashes, which covers standard line
-    /// draws represented as two cap flashes plus two body triangles.
+    /// analytic line and arc strokes in the WebGL renderer.
     pub fn set_minimum_feature_pixels(&mut self, pixels: f32) {
         self.minimum_feature_pixels = if pixels.is_finite() {
             pixels.clamp(0.0, 8.0)

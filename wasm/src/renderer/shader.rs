@@ -191,13 +191,20 @@ in float startAngle_instance;
 in float sweepAngle_instance;
 in float thickness_instance;
 uniform mat3 transform;
+uniform vec2 viewport_size;
+uniform float minimum_feature_pixels;
 out highp vec2 vPosition;
 out highp float vRadius;
 out highp float vStartAngle;
 out highp float vSweepAngle;
 out highp float vThickness;
 void main() {
-    float maxRadius = max(radius_instance + thickness_instance * 0.5, 0.0);
+    vec2 unitWorldX = vec2(1.0, 0.0);
+    vec2 unitClipX = mat2(transform) * unitWorldX;
+    float pixelsPerWorld = length(unitClipX * viewport_size * 0.5);
+    float minimumWorldThickness = minimum_feature_pixels / max(pixelsPerWorld, 0.000001);
+    float effectiveThickness = max(thickness_instance, minimumWorldThickness);
+    float maxRadius = max(radius_instance + effectiveThickness * 0.5, 0.0);
     vec2 scaledPos = position * maxRadius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
@@ -205,7 +212,7 @@ void main() {
     vRadius = radius_instance;
     vStartAngle = startAngle_instance;
     vSweepAngle = sweepAngle_instance;
-    vThickness = thickness_instance;
+    vThickness = effectiveThickness;
 }
 "#;
 
@@ -241,10 +248,6 @@ void main() {
     float innerRadius = vRadius - vThickness * 0.5;
     float outerRadius = vRadius + vThickness * 0.5;
 
-    if (dist < innerRadius || dist > outerRadius) {
-        discard;
-    }
-
     bool inRange;
     if (vSweepAngle > 0.0) {
         if (endAngle > startAngle) {
@@ -260,7 +263,18 @@ void main() {
         }
     }
 
-    if (!inRange) {
+    bool inArcBody = dist >= innerRadius && dist <= outerRadius && inRange;
+    bool hasCaps = abs(vSweepAngle) < TWO_PI - 0.001;
+    bool inCap = false;
+    if (hasCaps) {
+        float halfThickness = vThickness * 0.5;
+        vec2 startPoint = vec2(cos(vStartAngle), sin(vStartAngle)) * vRadius;
+        vec2 endPoint = vec2(cos(vStartAngle + vSweepAngle), sin(vStartAngle + vSweepAngle)) * vRadius;
+        inCap = length(vPosition - startPoint) <= halfThickness
+            || length(vPosition - endPoint) <= halfThickness;
+    }
+
+    if (!inArcBody && !inCap) {
         discard;
     }
 
@@ -546,7 +560,12 @@ impl ShaderPrograms {
                 "sweepAngle_instance",
                 "thickness_instance",
             ],
-            &["transform", "color"],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "minimum_feature_pixels",
+            ],
         )?;
 
         let thermal = compile_program(

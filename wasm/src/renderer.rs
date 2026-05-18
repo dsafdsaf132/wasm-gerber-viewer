@@ -2660,6 +2660,8 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), JsValue> {
         let program = &self.programs.arc;
         self.gl.use_program(Some(&program.program));
@@ -2771,6 +2773,7 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
+        self.set_view_feature_uniforms(program, viewport_width, viewport_height);
 
         // Draw
         self.gl
@@ -3249,7 +3252,14 @@ impl Renderer {
                 viewport_height,
             )?;
             self.draw_instanced_circles(transform, &white_color, layer_id, sublayer_idx)?;
-            self.draw_instanced_arcs(transform, &white_color, layer_id, sublayer_idx)?;
+            self.draw_instanced_arcs(
+                transform,
+                &white_color,
+                layer_id,
+                sublayer_idx,
+                viewport_width,
+                viewport_height,
+            )?;
             self.draw_instanced_thermals(transform, &white_color, layer_id, sublayer_idx)?;
             self.draw_path_regions(transform, &white_color, layer_id, sublayer_idx)?;
         }
