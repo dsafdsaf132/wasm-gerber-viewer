@@ -576,6 +576,7 @@ export class GerberViewer {
     this.wasmModule.init_panic_hook();
 
     this.createWebGlProcessor();
+    this.normalizePersistedParserOptions();
 
     // Resize Canvas
     this.resizeCanvas();
@@ -642,6 +643,41 @@ export class GerberViewer {
     if (typeof processor?.set_arc_tessellation_quality === "function") {
       processor.set_arc_tessellation_quality(this.getArcTessellationQualityLevel());
     }
+  }
+
+  normalizePersistedParserOptions() {
+    let nextPreserveArcRegions = this.preserveArcRegions;
+    let nextArcTessellationQuality = this.arcTessellationQuality;
+
+    if (
+      !nextPreserveArcRegions &&
+      typeof this.wasmProcessor?.set_preserve_arc_regions !== "function"
+    ) {
+      nextPreserveArcRegions = true;
+    }
+
+    if (
+      nextArcTessellationQuality !== "normal" &&
+      typeof this.wasmProcessor?.set_arc_tessellation_quality !== "function"
+    ) {
+      nextArcTessellationQuality = "normal";
+    }
+
+    if (
+      nextPreserveArcRegions === this.preserveArcRegions &&
+      nextArcTessellationQuality === this.arcTessellationQuality
+    ) {
+      return;
+    }
+
+    this.preserveArcRegions = nextPreserveArcRegions;
+    this.arcTessellationQuality = nextArcTessellationQuality;
+    this.viewerOptionsStore.set("preserveArcRegions", this.preserveArcRegions);
+    this.viewerOptionsStore.set(
+      "arcTessellationQuality",
+      this.arcTessellationQuality,
+    );
+    this.configureWasmProcessorOptions(this.wasmProcessor);
   }
 
   ensureParserOptionsSupported({
