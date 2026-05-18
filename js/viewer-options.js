@@ -1,9 +1,11 @@
 const DEFAULT_VIEWER_OPTIONS = {
   preserveArcRegions: true,
   arcTessellationQuality: "normal",
+  minimumFeaturePixels: 0,
 };
 
 const ARC_TESSELLATION_QUALITIES = new Set(["low", "normal", "high"]);
+const MINIMUM_FEATURE_PIXELS = new Set([0, 1, 2]);
 
 function createMemoryStorage() {
   const values = new Map();
@@ -54,6 +56,11 @@ export class ViewerOptionsStore {
         )
           ? stored.arcTessellationQuality
           : DEFAULT_VIEWER_OPTIONS.arcTessellationQuality,
+        minimumFeaturePixels: MINIMUM_FEATURE_PIXELS.has(
+          stored.minimumFeaturePixels,
+        )
+          ? stored.minimumFeaturePixels
+          : DEFAULT_VIEWER_OPTIONS.minimumFeaturePixels,
       };
     } catch {
       return this.getDefaults();

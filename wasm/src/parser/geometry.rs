@@ -146,6 +146,14 @@ pub enum Primitive {
         x: f32,
         y: f32,
     },
+    Line {
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        width: f32,
+        exposure: f32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +311,20 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *x *= scale;
             *y *= scale;
         }
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            ..
+        } => {
+            *start_x *= scale;
+            *start_y *= scale;
+            *end_x *= scale;
+            *end_y *= scale;
+            *width *= scale;
+        }
     }
 }
 
@@ -404,6 +426,22 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
                 *y = -*y;
             }
         }
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            ..
+        } => {
+            if mirror_x {
+                *start_x = -*start_x;
+                *end_x = -*end_x;
+            }
+            if mirror_y {
+                *start_y = -*start_y;
+                *end_y = -*end_y;
+            }
+        }
     }
 }
 
@@ -484,6 +522,22 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             *x = center[0];
             *y = center[1];
         }
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            ..
+        } => {
+            let mut start = [*start_x, *start_y];
+            let mut end = [*end_x, *end_y];
+            rotate_point(&mut start, angle, 0.0, 0.0);
+            rotate_point(&mut end, angle, 0.0, 0.0);
+            *start_x = start[0];
+            *start_y = start[1];
+            *end_x = end[0];
+            *end_y = end[1];
+        }
     }
 }
 
@@ -530,7 +584,30 @@ pub fn triangulate_outline(vertices: &[[f32; 2]], exposure: f32) -> Result<Vec<P
     }
 }
 
-/// Split line into two triangles (including width)
+/// Store a stroked straight line body for instanced rendering.
+pub fn line_to_body(
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    width: f32,
+    exposure: f32,
+) -> Option<Primitive> {
+    if width <= 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
+        return None;
+    }
+
+    Some(Primitive::Line {
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        width,
+        exposure,
+    })
+}
+
+/// Split a macro line primitive into two triangles.
 pub fn line_to_triangles(
     start_x: f32,
     start_y: f32,
@@ -539,7 +616,6 @@ pub fn line_to_triangles(
     width: f32,
     exposure: f32,
 ) -> Vec<Primitive> {
-    // Line direction vector
     let dx = end_x - start_x;
     let dy = end_y - start_y;
     let len = (dx * dx + dy * dy).sqrt();
@@ -548,18 +624,15 @@ pub fn line_to_triangles(
         return Vec::new();
     }
 
-    // Perpendicular vector (width direction)
     let half_width = width / 2.0;
     let perp_x = -dy / len * half_width;
     let perp_y = dx / len * half_width;
 
-    // 4 vertices on both sides of the line
     let v1 = [start_x + perp_x, start_y + perp_y];
     let v2 = [start_x - perp_x, start_y - perp_y];
     let v3 = [end_x + perp_x, end_y + perp_y];
     let v4 = [end_x - perp_x, end_y - perp_y];
 
-    // Two triangles: (v1, v2, v3), (v2, v4, v3)
     vec![
         Primitive::Triangle {
             vertices: [v1, v2, v3],
@@ -650,6 +723,30 @@ pub fn primitive_to_polygon(primitive: &Primitive) -> Vec<[f32; 2]> {
             .chunks_exact(2)
             .map(|point| [point[0] + *x, point[1] + *y])
             .collect(),
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            ..
+        } => {
+            let dx = end_x - start_x;
+            let dy = end_y - start_y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len <= f32::EPSILON {
+                return Vec::new();
+            }
+            let half_width = width * 0.5;
+            let perp_x = -dy / len * half_width;
+            let perp_y = dx / len * half_width;
+            vec![
+                [start_x + perp_x, start_y + perp_y],
+                [end_x + perp_x, end_y + perp_y],
+                [end_x - perp_x, end_y - perp_y],
+                [start_x - perp_x, start_y - perp_y],
+            ]
+        }
     }
 }
 
@@ -856,6 +953,21 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             x: x + dx,
             y: y + dy,
         },
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+        } => Primitive::Line {
+            start_x: start_x + dx,
+            start_y: start_y + dy,
+            end_x: end_x + dx,
+            end_y: end_y + dy,
+            width: *width,
+            exposure: *exposure,
+        },
     }
 }
 
@@ -953,6 +1065,7 @@ fn flash_aperture_no_sr(
                     Primitive::Triangle { exposure, .. } => *exposure,
                     Primitive::Arc { exposure, .. } => *exposure,
                     Primitive::Thermal { exposure, .. } => *exposure,
+                    Primitive::Line { exposure, .. } => *exposure,
                     Primitive::TriangleTemplateFlash { .. } => 1.0,
                 };
                 // Wrap polygon in shape format (single contour)
@@ -1021,6 +1134,18 @@ fn flash_aperture_no_sr(
                 Primitive::TriangleTemplateFlash { x: tx, y: ty, .. } => {
                     *tx += x;
                     *ty += y;
+                }
+                Primitive::Line {
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    ..
+                } => {
+                    *start_x += x;
+                    *start_y += y;
+                    *end_x += x;
+                    *end_y += y;
                 }
             }
             primitives.push(new_primitive);
@@ -1246,17 +1371,15 @@ pub fn execute_interpolation(
                             state.layer_rotation,
                         )?;
 
-                        // Convert vector line with width of aperture diameter to triangle
+                        // Store line body separately from the two round cap flashes so
+                        // the renderer can keep it instanced and clamp screen thickness.
                         let diameter = aperture.radius * 2.0 * state.layer_scale;
-                        let line_triangles = line_to_triangles(
-                            sr_start_x, sr_start_y, sr_end_x, sr_end_y, diameter, 1.0,
-                        );
-                        try_reserve_primitives(
-                            primitives,
-                            line_triangles.len(),
-                            "linear interpolation",
-                        )?;
-                        primitives.extend(line_triangles);
+                        if let Some(line) =
+                            line_to_body(sr_start_x, sr_start_y, sr_end_x, sr_end_y, diameter, 1.0)
+                        {
+                            try_reserve_primitives(primitives, 1, "linear interpolation")?;
+                            primitives.push(line);
+                        }
 
                         // Flash aperture at end point (no SR since we're already in SR loop)
                         flash_aperture_no_sr(

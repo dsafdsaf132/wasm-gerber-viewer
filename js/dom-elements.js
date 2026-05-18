@@ -97,6 +97,18 @@ export function getViewerElements(documentRef = document) {
     arcQualityLowInput: requireElement(documentRef, "arc-quality-low"),
     arcQualityNormalInput: requireElement(documentRef, "arc-quality-normal"),
     arcQualityHighInput: requireElement(documentRef, "arc-quality-high"),
+    minimumVisibilityOffInput: requireElement(
+      documentRef,
+      "minimum-visibility-off",
+    ),
+    minimumVisibility1Input: requireElement(
+      documentRef,
+      "minimum-visibility-1",
+    ),
+    minimumVisibility2Input: requireElement(
+      documentRef,
+      "minimum-visibility-2",
+    ),
     topFilterInput: requireElement(documentRef, "top-filter-input"),
     bottomFilterInput: requireElement(documentRef, "bottom-filter-input"),
     filterSaveBtn: requireElement(documentRef, "filter-save-btn"),

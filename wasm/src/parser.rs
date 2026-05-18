@@ -16,7 +16,7 @@ use state::{
 
 use self::geometry::{parse_graphic_command, Primitive, RegionContour};
 use crate::shape::{
-    Arcs, Boundary, Circles, GerberData, PathRegions, Thermals, TriangleTemplateInstances,
+    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
 };
 use std::collections::HashMap;
@@ -44,6 +44,7 @@ struct PrimitiveBufferCounts {
     triangles: usize,
     has_triangle_holes: bool,
     triangle_template_instance_counts: HashMap<usize, usize>,
+    lines: usize,
     circles: usize,
     has_circle_holes: bool,
     arcs: usize,
@@ -63,6 +64,7 @@ impl PrimitiveBufferCounts {
             }
             Primitive::Arc { .. } => self.arcs += 1,
             Primitive::Thermal { .. } => self.thermals += 1,
+            Primitive::Line { .. } => self.lines += 1,
             Primitive::TriangleTemplateFlash { template, .. } => {
                 let key = std::rc::Rc::as_ptr(template) as usize;
                 *self
@@ -103,6 +105,7 @@ fn primitive_has_hole(primitive: &Primitive) -> bool {
         }
         Primitive::Arc { .. }
         | Primitive::Thermal { .. }
+        | Primitive::Line { .. }
         | Primitive::TriangleTemplateFlash { .. } => false,
     }
 }
@@ -122,6 +125,11 @@ struct PrimitiveOutputBuffers {
     triangle_templates: Vec<TriangleTemplateOutputBuffers>,
     triangle_template_indices: HashMap<usize, usize>,
     triangle_template_instance_counts: HashMap<usize, usize>,
+    lines_start_x: Vec<f32>,
+    lines_start_y: Vec<f32>,
+    lines_end_x: Vec<f32>,
+    lines_end_y: Vec<f32>,
+    lines_width: Vec<f32>,
     has_circle_holes: bool,
     circles_x: Vec<f32>,
     circles_y: Vec<f32>,
@@ -157,6 +165,11 @@ impl PrimitiveOutputBuffers {
             triangle_templates: Vec::new(),
             triangle_template_indices: HashMap::new(),
             triangle_template_instance_counts: counts.triangle_template_instance_counts.clone(),
+            lines_start_x: Vec::new(),
+            lines_start_y: Vec::new(),
+            lines_end_x: Vec::new(),
+            lines_end_y: Vec::new(),
+            lines_width: Vec::new(),
             has_circle_holes: counts.has_circle_holes,
             circles_x: Vec::new(),
             circles_y: Vec::new(),
@@ -215,6 +228,20 @@ impl PrimitiveOutputBuffers {
                     "Gerber layer is too large to render: not enough memory for triangle template index map",
                 )
             })?;
+
+        try_reserve_exact(
+            &mut buffers.lines_start_x,
+            counts.lines,
+            "line start X buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_start_y,
+            counts.lines,
+            "line start Y buffer",
+        )?;
+        try_reserve_exact(&mut buffers.lines_end_x, counts.lines, "line end X buffer")?;
+        try_reserve_exact(&mut buffers.lines_end_y, counts.lines, "line end Y buffer")?;
+        try_reserve_exact(&mut buffers.lines_width, counts.lines, "line width buffer")?;
 
         try_reserve_exact(&mut buffers.circles_x, counts.circles, "circle X buffer")?;
         try_reserve_exact(&mut buffers.circles_y, counts.circles, "circle Y buffer")?;
@@ -345,6 +372,20 @@ impl PrimitiveOutputBuffers {
                 self.arcs_sweep_angle.push(end_angle - start_angle);
                 self.arcs_thickness.push(thickness * TO_MM);
             }
+            Primitive::Line {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                width,
+                ..
+            } => {
+                self.lines_start_x.push(start_x * TO_MM);
+                self.lines_start_y.push(start_y * TO_MM);
+                self.lines_end_x.push(end_x * TO_MM);
+                self.lines_end_y.push(end_y * TO_MM);
+                self.lines_width.push(width * TO_MM);
+            }
             Primitive::Thermal {
                 x,
                 y,
@@ -434,6 +475,13 @@ impl PrimitiveOutputBuffers {
                 self.triangle_hole_radius,
             ),
             triangle_templates,
+            Lines::new(
+                self.lines_start_x,
+                self.lines_start_y,
+                self.lines_end_x,
+                self.lines_end_y,
+                self.lines_width,
+            ),
             Circles::new(
                 self.circles_x,
                 self.circles_y,
@@ -470,6 +518,7 @@ impl PrimitiveOutputBuffers {
                 .triangle_templates
                 .iter()
                 .any(|template| !template.vertices.is_empty() && !template.instance_x.is_empty())
+            || !self.lines_start_x.is_empty()
             || !self.circles_x.is_empty()
             || !self.arcs_x.is_empty()
             || !self.thermals_x.is_empty()
@@ -514,6 +563,18 @@ impl PrimitiveOutputBuffers {
                 min_y = min_y.min(template_min_y + y);
                 max_y = max_y.max(template_max_y + y);
             }
+        }
+
+        for i in 0..self.lines_start_x.len() {
+            let sx = self.lines_start_x[i];
+            let sy = self.lines_start_y[i];
+            let ex = self.lines_end_x[i];
+            let ey = self.lines_end_y[i];
+            let half_width = self.lines_width[i] * 0.5;
+            min_x = min_x.min(sx.min(ex) - half_width);
+            max_x = max_x.max(sx.max(ex) + half_width);
+            min_y = min_y.min(sy.min(ey) - half_width);
+            max_y = max_y.max(sy.max(ey) + half_width);
         }
 
         for i in 0..self.circles_x.len() {

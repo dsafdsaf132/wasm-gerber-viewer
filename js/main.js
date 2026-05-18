@@ -54,6 +54,7 @@ const ARC_TESSELLATION_QUALITY_LEVELS = {
   normal: 1,
   high: 2,
 };
+const MINIMUM_FEATURE_PIXEL_VALUES = new Set([0, 1, 2]);
 
 class ParseWorkerUnavailableError extends Error {
   constructor(message) {
@@ -512,6 +513,9 @@ export class GerberViewer {
     );
     this.arcTessellationQuality =
       this.viewerOptionsStore.get("arcTessellationQuality") ?? "normal";
+    this.minimumFeaturePixels = Number(
+      this.viewerOptionsStore.get("minimumFeaturePixels") ?? 0,
+    );
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -549,6 +553,7 @@ export class GerberViewer {
       getWasmProcessor: () => this.wasmProcessor,
       getLayers: () => this.layers,
       getParseOptions: () => this.getParseOptions(),
+      getRenderOptions: () => this.getRenderOptions(),
       getRenderState: (rect) => ({
         viewScaleX: this.getViewScaleX(),
         viewScaleY: this.getViewScaleY(),
@@ -642,6 +647,10 @@ export class GerberViewer {
 
     if (typeof processor?.set_arc_tessellation_quality === "function") {
       processor.set_arc_tessellation_quality(this.getArcTessellationQualityLevel());
+    }
+
+    if (typeof processor?.set_minimum_feature_pixels === "function") {
+      processor.set_minimum_feature_pixels(this.minimumFeaturePixels);
     }
   }
 
@@ -879,6 +888,14 @@ export class GerberViewer {
       });
     }
 
+    for (const input of this.getMinimumVisibilityInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setMinimumFeaturePixels(Number(input.value));
+        }
+      });
+    }
+
     this.topFilterInput.addEventListener("input", () => {
       this.updateLayerFilter("top", this.topFilterInput.value);
     });
@@ -1056,6 +1073,12 @@ export class GerberViewer {
     };
   }
 
+  getRenderOptions() {
+    return {
+      minimumFeaturePixels: this.minimumFeaturePixels,
+    };
+  }
+
   getArcTessellationQualityLevel() {
     return ARC_TESSELLATION_QUALITY_LEVELS[this.arcTessellationQuality] ?? 1;
   }
@@ -1068,6 +1091,14 @@ export class GerberViewer {
     ];
   }
 
+  getMinimumVisibilityInputs() {
+    return [
+      this.minimumVisibilityOffInput,
+      this.minimumVisibility1Input,
+      this.minimumVisibility2Input,
+    ];
+  }
+
   syncOptionControls() {
     this.regionArcExactInput.checked = this.preserveArcRegions;
     this.regionArcApproximateInput.checked = !this.preserveArcRegions;
@@ -1075,6 +1106,11 @@ export class GerberViewer {
     for (const input of this.getArcQualityInputs()) {
       input.checked = input.value === this.arcTessellationQuality;
       input.disabled = this.preserveArcRegions || this.isRendererBusy();
+    }
+
+    for (const input of this.getMinimumVisibilityInputs()) {
+      input.checked = Number(input.value) === this.minimumFeaturePixels;
+      input.disabled = this.isRendererBusy();
     }
   }
 
@@ -1183,6 +1219,46 @@ export class GerberViewer {
       );
       this.configureWasmProcessorOptions(this.wasmProcessor);
       this.showError(`Failed to apply arc quality option: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
+  setMinimumFeaturePixels(pixels) {
+    if (!MINIMUM_FEATURE_PIXEL_VALUES.has(pixels)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (pixels === this.minimumFeaturePixels) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previousPixels = this.minimumFeaturePixels;
+    this.minimumFeaturePixels = pixels;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set(
+      "minimumFeaturePixels",
+      this.minimumFeaturePixels,
+    );
+
+    try {
+      if (typeof this.wasmProcessor?.set_minimum_feature_pixels === "function") {
+        this.wasmProcessor.set_minimum_feature_pixels(this.minimumFeaturePixels);
+      }
+      this.render();
+    } catch (error) {
+      this.minimumFeaturePixels = previousPixels;
+      this.syncOptionControls();
+      this.viewerOptionsStore.set(
+        "minimumFeaturePixels",
+        this.minimumFeaturePixels,
+      );
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.showError(`Failed to apply minimum line width: ${getErrorMessage(error)}`);
     } finally {
       this.updateUiState();
     }
@@ -1349,6 +1425,9 @@ export class GerberViewer {
     this.regionArcApproximateInput.disabled = rendererBusy;
     for (const input of this.getArcQualityInputs()) {
       input.disabled = rendererBusy || this.preserveArcRegions;
+    }
+    for (const input of this.getMinimumVisibilityInputs()) {
+      input.disabled = rendererBusy;
     }
 
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;

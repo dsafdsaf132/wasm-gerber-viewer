@@ -35,6 +35,7 @@ export class ScreenshotExporter {
     getWasmProcessor,
     getLayers,
     getParseOptions,
+    getRenderOptions,
     getRenderState,
     isWebGlUnavailable,
     drawMeasurements,
@@ -58,6 +59,7 @@ export class ScreenshotExporter {
     this.getWasmProcessor = getWasmProcessor;
     this.getLayers = getLayers;
     this.getParseOptions = getParseOptions;
+    this.getRenderOptions = getRenderOptions;
     this.getRenderState = getRenderState;
     this.isWebGlUnavailable = isWebGlUnavailable;
     this.drawMeasurements = drawMeasurements;
@@ -345,6 +347,12 @@ export class ScreenshotExporter {
       Number(parseOptions.arcTessellationQuality ?? 1) !== 1
     ) {
       throw new Error("Arc tessellation quality requires an updated WASM module.");
+    }
+    const renderOptions = this.getRenderOptions?.() ?? {};
+    if (typeof processor.set_minimum_feature_pixels === "function") {
+      processor.set_minimum_feature_pixels(
+        Number(renderOptions.minimumFeaturePixels ?? 0),
+      );
     }
 
     const activeLayerIds = [];

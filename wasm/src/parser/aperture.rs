@@ -407,6 +407,7 @@ pub fn parse_aperture(
         Primitive::Triangle { exposure, .. } => *exposure < 0.5,
         Primitive::Arc { exposure, .. } => *exposure < 0.5,
         Primitive::Thermal { exposure, .. } => *exposure < 0.5,
+        Primitive::Line { exposure, .. } => *exposure < 0.5,
         Primitive::TriangleTemplateFlash { .. } => false,
     });
     aperture.triangle_template = build_triangle_template(&aperture.primitives);

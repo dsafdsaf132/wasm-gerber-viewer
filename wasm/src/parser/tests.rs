@@ -1379,7 +1379,31 @@ M02*",
     assert_eq!(layer.circles.x.len(), 2);
     assert!(has_circle_at(&layer.circles, 0.0, 0.0, 0.5));
     assert!(has_circle_at(&layer.circles, 1.0, 0.0, 0.5));
-    assert!(!layer.triangles.vertices.is_empty());
+    assert!(layer.triangles.vertices.is_empty());
+    assert_eq!(layer.lines.start_x, vec![0.0]);
+    assert_eq!(layer.lines.start_y, vec![0.0]);
+    assert_eq!(layer.lines.end_x, vec![1.0]);
+    assert_eq!(layer.lines.end_y, vec![0.0]);
+    assert_eq!(layer.lines.width, vec![1.0]);
+}
+
+#[test]
+fn zero_width_solid_circle_draw_does_not_create_line_body() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,0.0*%
+D10*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+M02*",
+    )
+    .expect("zero-width solid circle D01 should parse");
+    let layer = &layers[0];
+
+    assert!(layer.lines.start_x.is_empty());
+    assert!(layer.triangles.vertices.is_empty());
 }
 
 #[test]
@@ -1400,6 +1424,7 @@ M02*",
     assert_eq!(layer.circles.x.len(), 1);
     assert!(has_circle_at(&layer.circles, 0.0, 0.0, 0.5));
     assert!(layer.triangles.vertices.is_empty());
+    assert!(layer.lines.start_x.is_empty());
 }
 
 #[test]

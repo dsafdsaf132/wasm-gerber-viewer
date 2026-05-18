@@ -12,7 +12,7 @@ use shader::{
 };
 
 use crate::shape::{
-    Arcs, Boundary, Circles, GerberData, PathRegions, Thermals, TriangleTemplateInstances,
+    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
 };
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
@@ -39,6 +39,7 @@ pub struct Renderer {
     programs: ShaderPrograms,
     camera: Camera,
     quad_buffer: WebGlBuffer, // Shared quad buffer for all layers
+    minimum_feature_pixels: f32,
 }
 
 impl Renderer {
@@ -57,7 +58,27 @@ impl Renderer {
             programs,
             camera: Camera::new(),
             quad_buffer,
+            minimum_feature_pixels: 0.0,
         })
+    }
+
+    /// Configure a display-space minimum feature size in CSS/device pixels.
+    ///
+    /// This is applied in the WebGL shaders and only affects rendering. Parsed
+    /// geometry and layer bounds remain unchanged.
+    pub fn set_minimum_feature_pixels(&mut self, pixels: f32) {
+        let next_pixels = if pixels.is_finite() {
+            pixels.clamp(0.0, 8.0)
+        } else {
+            0.0
+        };
+
+        if (self.minimum_feature_pixels - next_pixels).abs() <= f32::EPSILON {
+            return;
+        }
+
+        self.minimum_feature_pixels = next_pixels;
+        self.mark_all_layers_dirty();
     }
 
     /// Add a new layer with parsed Gerber data
@@ -231,6 +252,7 @@ impl Renderer {
             (0..template_count)
                 .map(|_| TriangleTemplateInstances::new(Vec::new(), Vec::new(), Vec::new()))
                 .collect(),
+            Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Circles::new(
                 Vec::new(),
                 Vec::new(),
@@ -269,6 +291,7 @@ impl Renderer {
         self.populate_triangle_cache_from_payload(buffer_cache, sublayer)?;
         let template_count =
             self.populate_triangle_template_cache_from_payload(buffer_cache, sublayer)?;
+        self.populate_line_cache_from_payload(buffer_cache, sublayer)?;
         self.populate_circle_cache_from_payload(buffer_cache, sublayer)?;
         self.populate_arc_cache_from_payload(buffer_cache, sublayer)?;
         self.populate_thermal_cache_from_payload(buffer_cache, sublayer)?;
@@ -438,6 +461,85 @@ impl Renderer {
         }
 
         Ok(template_count)
+    }
+
+    fn populate_line_cache_from_payload(
+        &self,
+        buffer_cache: &mut BufferCache,
+        sublayer: &JsValue,
+    ) -> Result<(), JsValue> {
+        let lines = Self::js_property(sublayer, "lines")?;
+        let start_x = Self::js_f32_array(&lines, "startX")?;
+        if start_x.length() == 0 {
+            return Ok(());
+        }
+
+        let instance_count = Self::validate_instance_array("line instances", &start_x)?;
+        let start_y = Self::js_f32_array(&lines, "startY")?;
+        let end_x = Self::js_f32_array(&lines, "endX")?;
+        let end_y = Self::js_f32_array(&lines, "endY")?;
+        let width = Self::js_f32_array(&lines, "width")?;
+        Self::validate_js_array_len("line start_y", &start_y, instance_count as u32)?;
+        Self::validate_js_array_len("line end_x", &end_x, instance_count as u32)?;
+        Self::validate_js_array_len("line end_y", &end_y, instance_count as u32)?;
+        Self::validate_js_array_len("line width", &width, instance_count as u32)?;
+        Self::validate_js_finite_array("line start_x", &start_x)?;
+        Self::validate_js_finite_array("line start_y", &start_y)?;
+        Self::validate_js_finite_array("line end_x", &end_x)?;
+        Self::validate_js_finite_array("line end_y", &end_y)?;
+        Self::validate_js_non_negative_array("line width", &width)?;
+
+        let vao = self
+            .gl
+            .create_vertex_array()
+            .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+        self.gl.bind_vertex_array(Some(&vao));
+        buffer_cache.line_vao = Some(vao);
+        buffer_cache.line_instance_count = instance_count;
+        self.bind_quad_position(&self.programs.line)?;
+        buffer_cache.line_start_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &start_x,
+            &self.programs.line,
+            "start_x_instance",
+            1,
+            1,
+        )?);
+        buffer_cache.line_start_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &start_y,
+            &self.programs.line,
+            "start_y_instance",
+            1,
+            1,
+        )?);
+        buffer_cache.line_end_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &end_x,
+            &self.programs.line,
+            "end_x_instance",
+            1,
+            1,
+        )?);
+        buffer_cache.line_end_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &end_y,
+            &self.programs.line,
+            "end_y_instance",
+            1,
+            1,
+        )?);
+        buffer_cache.line_width_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            &self.gl,
+            &width,
+            &self.programs.line,
+            "width_instance",
+            1,
+            1,
+        )?);
+
+        self.gl.bind_vertex_array(None);
+        Ok(())
     }
 
     fn populate_circle_cache_from_payload(
@@ -1019,6 +1121,24 @@ impl Renderer {
         Ok(vertex_count as i32)
     }
 
+    fn set_view_feature_uniforms(
+        &self,
+        program: &ShaderProgram,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) {
+        if let Some(loc) = program.uniforms.get("viewport_size") {
+            self.gl.uniform2f(
+                Some(loc),
+                viewport_width.max(1) as f32,
+                viewport_height.max(1) as f32,
+            );
+        }
+        if let Some(loc) = program.uniforms.get("minimum_feature_pixels") {
+            self.gl.uniform1f(Some(loc), self.minimum_feature_pixels);
+        }
+    }
+
     fn validate_instance_array(label: &str, values: &Float32Array) -> Result<i32, JsValue> {
         if values.length() > i32::MAX as u32 {
             return Err(JsValue::from_str(&format!(
@@ -1105,6 +1225,7 @@ impl Renderer {
     fn validate_gerber_data(data: &GerberData, sublayer_idx: usize) -> Result<(), JsValue> {
         Self::validate_triangle_data(&data.triangles, sublayer_idx)?;
         Self::validate_triangle_template_data(&data.triangle_templates, sublayer_idx)?;
+        Self::validate_line_data(&data.lines, sublayer_idx)?;
         Self::validate_circle_data(&data.circles, sublayer_idx)?;
         Self::validate_arc_data(&data.arcs, sublayer_idx)?;
         Self::validate_thermal_data(&data.thermals, sublayer_idx)?;
@@ -1207,6 +1328,21 @@ impl Renderer {
             }
         }
 
+        Ok(())
+    }
+
+    fn validate_line_data(lines: &Lines, sublayer_idx: usize) -> Result<(), JsValue> {
+        let count = lines.start_x.len();
+        Self::validate_instance_count("line", sublayer_idx, count)?;
+        Self::validate_len("line start_y", sublayer_idx, lines.start_y.len(), count)?;
+        Self::validate_len("line end_x", sublayer_idx, lines.end_x.len(), count)?;
+        Self::validate_len("line end_y", sublayer_idx, lines.end_y.len(), count)?;
+        Self::validate_len("line width", sublayer_idx, lines.width.len(), count)?;
+        Self::validate_finite_slice("line start_x", &lines.start_x)?;
+        Self::validate_finite_slice("line start_y", &lines.start_y)?;
+        Self::validate_finite_slice("line end_x", &lines.end_x)?;
+        Self::validate_finite_slice("line end_y", &lines.end_y)?;
+        Self::validate_non_negative_slice("line width", &lines.width)?;
         Ok(())
     }
 
@@ -1514,6 +1650,13 @@ impl Renderer {
         (0..count).map(|_| BufferCache::default()).collect()
     }
 
+    fn mark_all_layers_dirty(&mut self) {
+        for layer in self.layers.iter_mut().flatten() {
+            layer.fbo_dirty = true;
+            layer.fbo_transform = None;
+        }
+    }
+
     fn delete_layer_gpu_resources(gl: &WebGl2RenderingContext, layer: LayerMetadata) {
         Self::delete_fbo(gl, layer.fbo);
 
@@ -1533,6 +1676,7 @@ impl Renderer {
     fn delete_shader_programs(gl: &WebGl2RenderingContext, programs: &ShaderPrograms) {
         gl.delete_program(Some(&programs.triangle.program));
         gl.delete_program(Some(&programs.triangle_template.program));
+        gl.delete_program(Some(&programs.line.program));
         gl.delete_program(Some(&programs.circle.program));
         gl.delete_program(Some(&programs.arc.program));
         gl.delete_program(Some(&programs.thermal.program));
@@ -1576,6 +1720,25 @@ impl Renderer {
             if let Some(buf) = template_cache.instance_y_buffer {
                 gl.delete_buffer(Some(&buf));
             }
+        }
+
+        if let Some(vao) = cache.line_vao {
+            gl.delete_vertex_array(Some(&vao));
+        }
+        if let Some(buf) = cache.line_start_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.line_start_y_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.line_end_x_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.line_end_y_buffer {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(buf) = cache.line_width_buffer {
+            gl.delete_buffer(Some(&buf));
         }
 
         if let Some(vao) = cache.circle_vao {
@@ -2225,6 +2388,118 @@ impl Renderer {
                 .draw_arrays_instanced(TRIANGLES, 0, vertex_count, instance_count);
             self.gl.bind_vertex_array(None);
         }
+
+        Ok(())
+    }
+
+    /// Draw instanced straight line bodies.
+    fn draw_instanced_lines(
+        &mut self,
+        transform: &[f32; 9],
+        color: &[f32; 4],
+        layer_id: usize,
+        sublayer_idx: usize,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<(), JsValue> {
+        let program = &self.programs.line;
+        self.gl.use_program(Some(&program.program));
+
+        let instance_count = {
+            let layer = self.layers[layer_id]
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("Layer not found"))?;
+
+            if layer.buffer_caches[sublayer_idx].line_vao.is_none() {
+                let lines = &layer.gerber_data[sublayer_idx].lines;
+                if lines.start_x.is_empty() {
+                    return Ok(());
+                }
+                let instance_count = lines.start_x.len() as i32;
+
+                let vao = self
+                    .gl
+                    .create_vertex_array()
+                    .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
+                self.gl.bind_vertex_array(Some(&vao));
+                self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
+                let position_loc = Self::shader_attribute(program, "position")?;
+                self.gl.enable_vertex_attrib_array(position_loc);
+                self.gl
+                    .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+
+                let start_x_buffer = Self::create_instance_buffer(
+                    &self.gl,
+                    &lines.start_x,
+                    program,
+                    "start_x_instance",
+                    1,
+                )?;
+                let start_y_buffer = Self::create_instance_buffer(
+                    &self.gl,
+                    &lines.start_y,
+                    program,
+                    "start_y_instance",
+                    1,
+                )?;
+                let end_x_buffer = Self::create_instance_buffer(
+                    &self.gl,
+                    &lines.end_x,
+                    program,
+                    "end_x_instance",
+                    1,
+                )?;
+                let end_y_buffer = Self::create_instance_buffer(
+                    &self.gl,
+                    &lines.end_y,
+                    program,
+                    "end_y_instance",
+                    1,
+                )?;
+                let width_buffer = Self::create_instance_buffer(
+                    &self.gl,
+                    &lines.width,
+                    program,
+                    "width_instance",
+                    1,
+                )?;
+
+                self.gl.bind_vertex_array(None);
+
+                let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
+                buffer_cache.line_vao = Some(vao);
+                buffer_cache.line_instance_count = instance_count;
+                buffer_cache.line_start_x_buffer = Some(start_x_buffer);
+                buffer_cache.line_start_y_buffer = Some(start_y_buffer);
+                buffer_cache.line_end_x_buffer = Some(end_x_buffer);
+                buffer_cache.line_end_y_buffer = Some(end_y_buffer);
+                buffer_cache.line_width_buffer = Some(width_buffer);
+                layer.gerber_data[sublayer_idx].lines.release_cpu_geometry();
+                layer.cpu_geometry_released = true;
+            }
+
+            layer.buffer_caches[sublayer_idx].line_instance_count
+        };
+        if instance_count == 0 {
+            return Ok(());
+        }
+
+        let layer = self.get_layer(layer_id)?;
+        let buffer_cache = &layer.buffer_caches[sublayer_idx];
+        self.gl.bind_vertex_array(buffer_cache.line_vao.as_ref());
+
+        if let Some(loc) = program.uniforms.get("transform") {
+            self.gl
+                .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
+        }
+        if let Some(loc) = program.uniforms.get("color") {
+            self.gl.uniform4fv_with_f32_array(Some(loc), color);
+        }
+        self.set_view_feature_uniforms(program, viewport_width, viewport_height);
+
+        self.gl
+            .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
+        self.gl.bind_vertex_array(None);
 
         Ok(())
     }
@@ -2929,6 +3204,8 @@ impl Renderer {
         &mut self,
         layer_id: usize,
         transform: &[f32; 9],
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), JsValue> {
         if layer_id >= self.layers.len() || self.layers[layer_id].is_none() {
             return Ok(());
@@ -2962,6 +3239,14 @@ impl Renderer {
                 &white_color,
                 layer_id,
                 sublayer_idx,
+            )?;
+            self.draw_instanced_lines(
+                transform,
+                &white_color,
+                layer_id,
+                sublayer_idx,
+                viewport_width,
+                viewport_height,
             )?;
             self.draw_instanced_circles(transform, &white_color, layer_id, sublayer_idx)?;
             self.draw_instanced_arcs(transform, &white_color, layer_id, sublayer_idx)?;
@@ -3096,7 +3381,7 @@ impl Renderer {
                 self.gl.clear(COLOR_BUFFER_BIT);
 
                 // Render layer geometry (with polarity blending handled internally)
-                self.render_layer_geometry(layer_idx, &transform)?;
+                self.render_layer_geometry(layer_idx, &transform, width, height)?;
 
                 if let Some(layer) = &mut self.layers[layer_idx] {
                     layer.fbo_dirty = false;

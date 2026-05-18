@@ -164,6 +164,66 @@ impl TriangleTemplateInstances {
     }
 }
 
+/// Instanced straight line body rendered between two round caps.
+pub struct Lines {
+    pub(crate) start_x: Vec<f32>,
+    pub(crate) start_y: Vec<f32>,
+    pub(crate) end_x: Vec<f32>,
+    pub(crate) end_y: Vec<f32>,
+    pub(crate) width: Vec<f32>,
+}
+
+impl Lines {
+    pub fn new(
+        start_x: Vec<f32>,
+        start_y: Vec<f32>,
+        end_x: Vec<f32>,
+        end_y: Vec<f32>,
+        width: Vec<f32>,
+    ) -> Lines {
+        Lines {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+        }
+    }
+
+    pub(crate) fn release_cpu_geometry(&mut self) {
+        self.start_x = Vec::new();
+        self.start_y = Vec::new();
+        self.end_x = Vec::new();
+        self.end_y = Vec::new();
+        self.width = Vec::new();
+    }
+
+    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
+        translate_components(&mut self.start_x, &mut self.start_y, dx, dy);
+        translate_components(&mut self.end_x, &mut self.end_y, dx, dy);
+    }
+
+    pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
+        let object = Object::new();
+        set_property(&object, "startX", &f32_array_to_js(&self.start_x))?;
+        set_property(&object, "startY", &f32_array_to_js(&self.start_y))?;
+        set_property(&object, "endX", &f32_array_to_js(&self.end_x))?;
+        set_property(&object, "endY", &f32_array_to_js(&self.end_y))?;
+        set_property(&object, "width", &f32_array_to_js(&self.width))?;
+        Ok(object.into())
+    }
+
+    pub(crate) fn from_js(value: &JsValue) -> Result<Lines, JsValue> {
+        Ok(Lines::new(
+            f32_array_from_js(value, "startX")?,
+            f32_array_from_js(value, "startY")?,
+            f32_array_from_js(value, "endX")?,
+            f32_array_from_js(value, "endY")?,
+            f32_array_from_js(value, "width")?,
+        ))
+    }
+}
+
 /// Circle primitive data structure
 pub struct Circles {
     pub(crate) x: Vec<f32>,
@@ -710,6 +770,7 @@ impl Boundary {
 pub struct GerberData {
     pub(crate) triangles: Triangles,
     pub(crate) triangle_templates: Vec<TriangleTemplateInstances>,
+    pub(crate) lines: Lines,
     pub(crate) circles: Circles,
     pub(crate) arcs: Arcs,
     pub(crate) thermals: Thermals,
@@ -722,6 +783,7 @@ impl GerberData {
     pub fn new(
         triangles: Triangles,
         triangle_templates: Vec<TriangleTemplateInstances>,
+        lines: Lines,
         circles: Circles,
         arcs: Arcs,
         thermals: Thermals,
@@ -732,6 +794,7 @@ impl GerberData {
         GerberData {
             triangles,
             triangle_templates,
+            lines,
             circles,
             arcs,
             thermals,
@@ -748,6 +811,7 @@ impl GerberData {
                 .triangle_templates
                 .iter()
                 .any(|template| !template.vertices.is_empty() && !template.instance_x.is_empty())
+            || !self.lines.start_x.is_empty()
             || !self.circles.x.is_empty()
             || !self.arcs.x.is_empty()
             || !self.thermals.x.is_empty()
@@ -759,6 +823,7 @@ impl GerberData {
         for template in &mut self.triangle_templates {
             template.translate(dx, dy);
         }
+        self.lines.translate(dx, dy);
         self.circles.translate(dx, dy);
         self.arcs.translate(dx, dy);
         self.thermals.translate(dx, dy);
@@ -775,6 +840,7 @@ impl GerberData {
 
         set_property(&object, "triangles", &self.triangles.to_js()?)?;
         set_property(&object, "triangleTemplates", &templates.into())?;
+        set_property(&object, "lines", &self.lines.to_js()?)?;
         set_property(&object, "circles", &self.circles.to_js()?)?;
         set_property(&object, "arcs", &self.arcs.to_js()?)?;
         set_property(&object, "thermals", &self.thermals.to_js()?)?;
@@ -794,6 +860,7 @@ impl GerberData {
         Ok(GerberData::new(
             Triangles::from_js(&get_property(value, "triangles")?)?,
             triangle_templates,
+            Lines::from_js(&get_property(value, "lines")?)?,
             Circles::from_js(&get_property(value, "circles")?)?,
             Arcs::from_js(&get_property(value, "arcs")?)?,
             Thermals::from_js(&get_property(value, "thermals")?)?,

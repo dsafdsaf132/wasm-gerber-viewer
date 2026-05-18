@@ -117,6 +117,7 @@ pub struct GerberProcessor {
     renderer: Option<Renderer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
+    minimum_feature_pixels: f32,
 }
 
 impl Default for GerberProcessor {
@@ -126,6 +127,7 @@ impl Default for GerberProcessor {
             renderer: None,
             preserve_arc_regions: true,
             arc_tessellation_quality: 1,
+            minimum_feature_pixels: 0.0,
         }
     }
 }
@@ -176,7 +178,9 @@ impl GerberProcessor {
     /// * `"init_done"` signal on success
     pub fn init(&mut self, gl: WebGl2RenderingContext) -> Result<String, JsValue> {
         // Create renderer with WebGL context (initially no layers)
-        self.renderer = Some(Renderer::new(gl.clone())?);
+        let mut renderer = Renderer::new(gl.clone())?;
+        renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        self.renderer = Some(renderer);
         self.gl = Some(gl);
         Ok("init_done".to_string())
     }
@@ -196,6 +200,23 @@ impl GerberProcessor {
         self.arc_tessellation_quality = arc_tessellation_quality.min(2);
     }
 
+    /// Configure minimum display size for tiny rendered features.
+    ///
+    /// `0.0` disables the adjustment. Current implementation applies to
+    /// triangle mesh bodies and circle flashes, which covers standard line
+    /// draws represented as two cap flashes plus two body triangles.
+    pub fn set_minimum_feature_pixels(&mut self, pixels: f32) {
+        self.minimum_feature_pixels = if pixels.is_finite() {
+            pixels.clamp(0.0, 8.0)
+        } else {
+            0.0
+        };
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        }
+    }
+
     /// Recreate WebGL-owned resources after browser context restoration.
     ///
     /// This can recreate GPU resources only while parsed geometry is still retained.
@@ -205,7 +226,9 @@ impl GerberProcessor {
         if let Some(renderer) = &mut self.renderer {
             renderer.restore_context(gl.clone())?;
         } else {
-            self.renderer = Some(Renderer::new(gl.clone())?);
+            let mut renderer = Renderer::new(gl.clone())?;
+            renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+            self.renderer = Some(renderer);
         }
 
         self.gl = Some(gl);

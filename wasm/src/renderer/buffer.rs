@@ -32,6 +32,15 @@ pub struct BufferCache {
     pub triangle_hole_radius_buffer: Option<WebGlBuffer>,
     pub triangle_template_caches: Vec<TriangleTemplateBufferCache>,
 
+    // Lines cache
+    pub line_vao: Option<WebGlVertexArrayObject>,
+    pub line_instance_count: i32,
+    pub line_start_x_buffer: Option<WebGlBuffer>,
+    pub line_start_y_buffer: Option<WebGlBuffer>,
+    pub line_end_x_buffer: Option<WebGlBuffer>,
+    pub line_end_y_buffer: Option<WebGlBuffer>,
+    pub line_width_buffer: Option<WebGlBuffer>,
+
     // Circles cache
     pub circle_vao: Option<WebGlVertexArrayObject>,
     pub circle_instance_count: i32,

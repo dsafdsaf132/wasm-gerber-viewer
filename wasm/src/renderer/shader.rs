@@ -58,6 +58,64 @@ void main() {
 }
 "#;
 
+pub const LINE_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
+in vec2 position;
+in float start_x_instance;
+in float start_y_instance;
+in float end_x_instance;
+in float end_y_instance;
+in float width_instance;
+uniform mat3 transform;
+uniform vec2 viewport_size;
+uniform float minimum_feature_pixels;
+
+vec2 clipToPixel(vec2 clipPosition) {
+    return clipPosition * viewport_size * 0.5;
+}
+
+vec2 pixelToClip(vec2 pixelPosition) {
+    return pixelPosition / max(viewport_size * 0.5, vec2(1.0));
+}
+
+void main() {
+    vec2 start = vec2(start_x_instance, start_y_instance);
+    vec2 end = vec2(end_x_instance, end_y_instance);
+    vec3 startClip = transform * vec3(start, 1.0);
+    vec3 endClip = transform * vec3(end, 1.0);
+    vec2 startPixels = clipToPixel(startClip.xy);
+    vec2 endPixels = clipToPixel(endClip.xy);
+
+    vec2 linePixels = endPixels - startPixels;
+    float lineLength = length(linePixels);
+    vec2 direction = lineLength > 0.000001 ? linePixels / lineLength : vec2(1.0, 0.0);
+    vec2 normal = vec2(-direction.y, direction.x);
+
+    vec2 lineWorld = end - start;
+    float worldLength = length(lineWorld);
+    vec2 worldNormal = worldLength > 0.000001
+        ? vec2(-lineWorld.y, lineWorld.x) / worldLength
+        : vec2(0.0, 1.0);
+    vec2 widthClip = mat2(transform) * worldNormal * width_instance;
+    float halfWidthPixels = length(widthClip * viewport_size * 0.5) * 0.5;
+    halfWidthPixels = max(halfWidthPixels, minimum_feature_pixels * 0.5);
+
+    float t = position.x * 0.5 + 0.5;
+    vec2 centerPixels = mix(startPixels, endPixels, t);
+    vec2 adjustedPixels = centerPixels + normal * position.y * halfWidthPixels;
+    gl_Position = vec4(pixelToClip(adjustedPixels), 0.0, 1.0);
+}
+"#;
+
+pub const LINE_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
+void main() {
+    fragColor = color;
+}
+"#;
+
 pub const TRIANGLE_TEMPLATE_VERTEX_SHADER: &str = r#"#version 300 es
 precision highp float;
 in vec2 position;
@@ -406,6 +464,7 @@ pub struct ShaderProgram {
 pub struct ShaderPrograms {
     pub triangle: ShaderProgram,
     pub triangle_template: ShaderProgram,
+    pub line: ShaderProgram,
     pub circle: ShaderProgram,
     pub arc: ShaderProgram,
     pub thermal: ShaderProgram,
@@ -436,6 +495,26 @@ impl ShaderPrograms {
             TRIANGLE_TEMPLATE_FRAGMENT_SHADER,
             &["position", "instance_x", "instance_y"],
             &["transform", "color"],
+        )?;
+
+        let line = compile_program(
+            gl,
+            LINE_VERTEX_SHADER,
+            LINE_FRAGMENT_SHADER,
+            &[
+                "position",
+                "start_x_instance",
+                "start_y_instance",
+                "end_x_instance",
+                "end_y_instance",
+                "width_instance",
+            ],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "minimum_feature_pixels",
+            ],
         )?;
 
         let circle = compile_program(
@@ -513,6 +592,7 @@ impl ShaderPrograms {
         Ok(ShaderPrograms {
             triangle,
             triangle_template,
+            line,
             circle,
             arc,
             thermal,
