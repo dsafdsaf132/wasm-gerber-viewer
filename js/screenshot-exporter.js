@@ -34,6 +34,7 @@ export class ScreenshotExporter {
     getWasmModule,
     getWasmProcessor,
     getLayers,
+    getParseOptions,
     getRenderState,
     isWebGlUnavailable,
     drawMeasurements,
@@ -56,6 +57,7 @@ export class ScreenshotExporter {
     this.getWasmModule = getWasmModule;
     this.getWasmProcessor = getWasmProcessor;
     this.getLayers = getLayers;
+    this.getParseOptions = getParseOptions;
     this.getRenderState = getRenderState;
     this.isWebGlUnavailable = isWebGlUnavailable;
     this.drawMeasurements = drawMeasurements;
@@ -326,6 +328,14 @@ export class ScreenshotExporter {
 
     const processor = new wasmModule.GerberProcessor();
     processor.init(gl);
+    const parseOptions = this.getParseOptions?.() ?? {};
+    if (typeof processor.set_preserve_arc_regions === "function") {
+      processor.set_preserve_arc_regions(
+        parseOptions.preserveArcRegions !== false,
+      );
+    } else if (parseOptions.preserveArcRegions === false) {
+      throw new Error("Region arc options require an updated WASM module.");
+    }
 
     const activeLayerIds = [];
     const colorData = [];

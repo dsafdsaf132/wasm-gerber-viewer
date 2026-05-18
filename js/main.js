@@ -35,6 +35,7 @@ import {
   worldToCanvasPoint as worldToCanvasCoordinate,
   zoomCameraAtCanvasPoint,
 } from "./viewport.js";
+import { ViewerOptionsStore } from "./viewer-options.js";
 
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
 const MAX_PARSE_WORKERS = 4;
@@ -250,7 +251,7 @@ class GerberParseWorkerPool {
     this.idleWorkers = [];
   }
 
-  parse(content, offset) {
+  parse(content, offset, options = {}) {
     if (this.isDisposed) {
       return Promise.reject(new Error("Parse worker pool has been disposed"));
     }
@@ -263,7 +264,7 @@ class GerberParseWorkerPool {
 
     const id = this.nextTaskId++;
     return new Promise((resolve, reject) => {
-      this.queue.push({ id, content, offset, resolve, reject });
+      this.queue.push({ id, content, offset, options, resolve, reject });
       this.pump();
     });
   }
@@ -278,6 +279,7 @@ class GerberParseWorkerPool {
           id: task.id,
           content: task.content,
           offset: task.offset,
+          preserveArcRegions: task.options.preserveArcRegions,
         });
       } catch (error) {
         this.activeTasks.delete(worker);
@@ -498,6 +500,10 @@ export class GerberViewer {
     this.measurements = [];
     this.measurementUnit = "mm";
     this.layerFilterStore = new LayerFilterStore();
+    this.viewerOptionsStore = new ViewerOptionsStore();
+    this.preserveArcRegions = Boolean(
+      this.viewerOptionsStore.get("preserveArcRegions"),
+    );
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -534,6 +540,7 @@ export class GerberViewer {
       getWasmModule: () => this.wasmModule,
       getWasmProcessor: () => this.wasmProcessor,
       getLayers: () => this.layers,
+      getParseOptions: () => this.getParseOptions(),
       getRenderState: (rect) => ({
         viewScaleX: this.getViewScaleX(),
         viewScaleY: this.getViewScaleY(),
@@ -577,6 +584,7 @@ export class GerberViewer {
     // Initial render
     this.updateEmptyStateHint();
     this.refreshIcons();
+    this.syncOptionControls();
     this.syncFilterInputs();
     this.updateUiState();
     this.updateRulerControls();
@@ -598,6 +606,15 @@ export class GerberViewer {
     this.gl = this.createWebGlContext();
     this.wasmProcessor = new this.wasmModule.GerberProcessor();
     this.wasmProcessor.init(this.gl);
+    this.configureWasmProcessorOptions(this.wasmProcessor);
+  }
+
+  configureWasmProcessorOptions(processor) {
+    if (typeof processor?.set_preserve_arc_regions === "function") {
+      processor.set_preserve_arc_regions(this.preserveArcRegions);
+    } else if (!this.preserveArcRegions) {
+      throw new Error("Region arc options require an updated WASM module");
+    }
   }
 
   resizeCanvas({ allowProcessorResize = false, preserveViewState = null } = {}) {
@@ -757,6 +774,18 @@ export class GerberViewer {
       const alpha = parseInt(e.target.value) / 100;
       this.alphaValue.textContent = `${e.target.value}%`;
       this.updateGlobalAlpha(alpha);
+    });
+
+    this.regionArcExactInput.addEventListener("change", () => {
+      if (this.regionArcExactInput.checked) {
+        void this.setRegionArcMode("exact");
+      }
+    });
+
+    this.regionArcApproximateInput.addEventListener("change", () => {
+      if (this.regionArcApproximateInput.checked) {
+        void this.setRegionArcMode("approximate");
+      }
     });
 
     this.topFilterInput.addEventListener("input", () => {
@@ -929,9 +958,136 @@ export class GerberViewer {
     this.syncFilterInputs();
   }
 
+  getParseOptions() {
+    return {
+      preserveArcRegions: this.preserveArcRegions,
+    };
+  }
+
+  syncOptionControls() {
+    this.regionArcExactInput.checked = this.preserveArcRegions;
+    this.regionArcApproximateInput.checked = !this.preserveArcRegions;
+  }
+
   syncFilterInputs() {
     this.topFilterInput.value = this.layerFilterStore.get("top");
     this.bottomFilterInput.value = this.layerFilterStore.get("bottom");
+  }
+
+  async setRegionArcMode(mode) {
+    const nextPreserveArcRegions = mode !== "approximate";
+    if (nextPreserveArcRegions === this.preserveArcRegions) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previousPreserveArcRegions = this.preserveArcRegions;
+    this.preserveArcRegions = nextPreserveArcRegions;
+    this.syncOptionControls();
+
+    try {
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.viewerOptionsStore.set(
+        "preserveArcRegions",
+        this.preserveArcRegions,
+      );
+      if (this.layers.length > 0) {
+        await this.rebuildLayersForParserOptions();
+      }
+      this.showNotification(
+        "Options updated",
+        "info",
+        NOTIFICATION_DURATION_MS,
+        (messageElement) => {
+          messageElement.textContent = "Region arc rendering mode was applied.";
+        },
+      );
+    } catch (error) {
+      this.preserveArcRegions = previousPreserveArcRegions;
+      this.syncOptionControls();
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.viewerOptionsStore.set(
+        "preserveArcRegions",
+        this.preserveArcRegions,
+      );
+      this.showError(`Failed to apply region arc option: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
+  async rebuildLayersForParserOptions() {
+    const layerSnapshot = this.layers.map((layer) => ({
+      id: layer.id,
+      name: layer.name,
+      visible: layer.visible,
+      color: layer.color ? [...layer.color] : null,
+      sourceContent: layer.sourceContent,
+      offset: { ...normalizeLayerOffset(layer.offset) },
+    }));
+
+    if (
+      layerSnapshot.some((layer) => typeof layer.sourceContent !== "string")
+    ) {
+      throw new Error("Reload files before changing parser options.");
+    }
+
+    const viewState = this.captureCanvasViewState();
+    this.showLoadingModal({
+      title: "Applying options",
+      stage: "Parsing",
+      current: 0,
+      total: layerSnapshot.length,
+    });
+
+    try {
+      this.disposeWasmProcessor();
+      this.layers = [];
+      this.createWebGlProcessor();
+      this.resizeCanvas({
+        allowProcessorResize: true,
+        preserveViewState: viewState,
+      });
+
+      for (const [index, layer] of layerSnapshot.entries()) {
+        this.updateLoadingModal({
+          title: "Applying options",
+          stage: "Parsing",
+          fileName: layer.name,
+          current: index,
+          total: layerSnapshot.length,
+        });
+
+        try {
+          await this.addLayer(layer.name, layer.sourceContent, {
+            id: layer.id,
+            visible: layer.visible,
+            color: layer.color,
+            sourceContent: layer.sourceContent,
+            offset: layer.offset,
+            skipFatalRecovery: true,
+          });
+        } catch (error) {
+          this.handleLayerLoadError(layer.name, error);
+        }
+
+        this.updateLoadingModal({
+          stage: "Loaded",
+          fileName: layer.name,
+          current: index + 1,
+          total: layerSnapshot.length,
+        });
+      }
+
+      this.restoreCanvasViewState(viewState);
+      this.renderLayerList();
+      this.render();
+    } finally {
+      this.hideLoadingModal();
+    }
   }
 
   updateLayerFilter(kind, value) {
@@ -981,6 +1137,8 @@ export class GerberViewer {
     this.fileInput.disabled = rendererBusy;
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
+    this.regionArcExactInput.disabled = rendererBusy;
+    this.regionArcApproximateInput.disabled = rendererBusy;
 
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;
     this.diagnosticsCount.textContent = String(this.diagnostics.count);
@@ -1838,12 +1996,28 @@ export class GerberViewer {
 
   async parseLayerContent(content, offset, parseWorkerPool) {
     const normalizedOffset = normalizeLayerOffset(offset);
+    const parseOptions = this.getParseOptions();
 
     if (parseWorkerPool) {
-      return parseWorkerPool.parse(content, normalizedOffset);
+      return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
     }
 
-    if (typeof this.wasmModule?.parse_gerber_layer !== "function") {
+    if (
+      typeof this.wasmModule?.parse_gerber_layer_with_options === "function"
+    ) {
+      this.reserveWasmInputCapacity(content);
+      return this.wasmModule.parse_gerber_layer_with_options(
+        content,
+        normalizedOffset.x,
+        normalizedOffset.y,
+        parseOptions.preserveArcRegions,
+      );
+    }
+
+    if (
+      !parseOptions.preserveArcRegions ||
+      typeof this.wasmModule?.parse_gerber_layer !== "function"
+    ) {
       throw new Error("Parallel parsing requires an updated WASM module");
     }
 

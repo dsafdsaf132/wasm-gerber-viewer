@@ -1,5 +1,5 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
-use super::{format_count, parse_gerber};
+use super::{format_count, parse_gerber, parse_gerber_with_options};
 use crate::shape::GerberData;
 use std::collections::HashMap;
 
@@ -361,6 +361,28 @@ M02*",
     assert_approx_eq(layer.boundary.max_x, 1.0);
     assert_approx_eq(layer.boundary.min_y, 0.0);
     assert_approx_eq(layer.boundary.max_y, 1.0);
+}
+
+#[test]
+fn region_arc_can_be_flattened_for_legacy_triangles() {
+    let layers = parse_gerber_with_options(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+        false,
+    )
+    .expect("flattened region arc should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].path_regions.region_count(), 0);
+    assert!(!layers[0].triangles.vertices.is_empty());
 }
 
 #[test]

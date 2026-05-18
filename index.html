@@ -172,7 +172,7 @@
           </footer>
         </section>
 
-        <aside class="side-panel" id="drawer" aria-label="Layer and diagnostics panel">
+        <aside class="side-panel" id="drawer" aria-label="Layer, options, and diagnostics panel">
           <div class="resize-handle" id="resize-handle" aria-label="Resize panel"></div>
 
           <nav class="panel-tabs" aria-label="Panel sections">
@@ -180,9 +180,9 @@
               <i data-lucide="layers"></i>
               <span>Layers</span>
             </button>
-            <button type="button" class="panel-tab" data-panel-tab="filter">
-              <i data-lucide="list-filter"></i>
-              <span>Filter</span>
+            <button type="button" class="panel-tab" data-panel-tab="options">
+              <i data-lucide="sliders-horizontal"></i>
+              <span>Options</span>
             </button>
             <button type="button" class="panel-tab" data-panel-tab="diagnostics">
               <i data-lucide="circle-alert"></i>
@@ -229,57 +229,98 @@
               </div>
             </section>
 
-            <section class="panel-section" data-panel="filter">
-              <div class="filter-form">
-                <div class="filter-actions">
-                  <button class="chip-button" id="filter-save-btn" type="button" title="Save">
-                    <i data-lucide="save"></i>
-                    <span>Save</span>
-                  </button>
-                  <button
-                    class="chip-button"
-                    id="filter-default-btn"
-                    type="button"
-                    title="Default"
-                  >
-                    <i data-lucide="rotate-ccw"></i>
-                    <span>Default</span>
-                  </button>
-                  <button
-                    class="chip-button"
-                    id="filter-restore-btn"
-                    type="button"
-                    title="Restore"
-                  >
-                    <i data-lucide="history"></i>
-                    <span>Restore</span>
-                  </button>
-                </div>
-                <label class="filter-field" for="top-filter-input">
-                  <span>Top</span>
-                  <textarea
-                    id="top-filter-input"
-                    rows="7"
-                    autocomplete="off"
-                    spellcheck="false"
-                    wrap="soft"
-                  ></textarea>
-                </label>
-                <label class="filter-field" for="bottom-filter-input">
-                  <span>Bottom</span>
-                  <textarea
-                    id="bottom-filter-input"
-                    rows="7"
-                    autocomplete="off"
-                    spellcheck="false"
-                    wrap="soft"
-                  ></textarea>
-                </label>
-                <p class="filter-note">
-                  <span>Use spaces, commas, or new lines.</span>
-                  <span>Prefix with # for case-sensitive matching.</span>
-                  <span>Example: top #BOT</span>
-                </p>
+            <section class="panel-section" data-panel="options">
+              <div class="options-form">
+                <section class="options-section">
+                  <div class="options-section-heading">
+                    <strong>Rendering</strong>
+                  </div>
+                  <div class="option-outline">
+                    <div class="option-row">
+                      <span>Region Arcs</span>
+                      <div class="segmented-control" role="radiogroup" aria-label="Region arc rendering mode">
+                        <label>
+                          <input
+                            type="radio"
+                            id="region-arc-exact"
+                            name="region-arc-mode"
+                            value="exact"
+                          />
+                          <span>Exact</span>
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            id="region-arc-approximate"
+                            name="region-arc-mode"
+                            value="approximate"
+                          />
+                          <span>Approx</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div class="option-note">
+                      <span>Exact: Preserve arcs for WebGL rendering.</span>
+                      <span>Approx: Tessellate arcs into contour points.</span>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="options-section filter-form">
+                  <div class="options-section-heading">
+                    <strong>Layer Filters</strong>
+                    <span>Top / Bottom matching</span>
+                  </div>
+                  <div class="filter-actions">
+                    <button class="chip-button" id="filter-save-btn" type="button" title="Save">
+                      <i data-lucide="save"></i>
+                      <span>Save</span>
+                    </button>
+                    <button
+                      class="chip-button"
+                      id="filter-default-btn"
+                      type="button"
+                      title="Default"
+                    >
+                      <i data-lucide="rotate-ccw"></i>
+                      <span>Default</span>
+                    </button>
+                    <button
+                      class="chip-button"
+                      id="filter-restore-btn"
+                      type="button"
+                      title="Restore"
+                    >
+                      <i data-lucide="history"></i>
+                      <span>Restore</span>
+                    </button>
+                  </div>
+                  <label class="filter-field" for="top-filter-input">
+                    <span>Top</span>
+                    <textarea
+                      id="top-filter-input"
+                      rows="7"
+                      autocomplete="off"
+                      spellcheck="false"
+                      wrap="soft"
+                    ></textarea>
+                  </label>
+                  <label class="filter-field" for="bottom-filter-input">
+                    <span>Bottom</span>
+                    <textarea
+                      id="bottom-filter-input"
+                      rows="7"
+                      autocomplete="off"
+                      spellcheck="false"
+                      wrap="soft"
+                    ></textarea>
+                  </label>
+                  <p class="filter-note">
+                    <span>Use spaces, commas, or new lines.</span>
+                    <span>Prefix with # for case-sensitive matching.</span>
+                    <span>Example: top #BOT</span>
+                  </p>
+                </section>
               </div>
             </section>
 

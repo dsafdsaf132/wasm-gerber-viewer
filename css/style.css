@@ -822,6 +822,7 @@ button {
   color: #fecaca;
 }
 
+.options-section,
 .filter-form,
 .notification,
 .diagnostic-list li {
@@ -1098,8 +1099,134 @@ button {
   min-width: 82px;
 }
 
+.options-form {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.options-section,
 .filter-form {
   padding: 12px;
+}
+
+.options-section {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.options-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.options-section-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.options-section-heading span,
+.option-row > span,
+.option-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.option-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.5fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.option-row > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.option-outline {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0f1724;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.segmented-control label {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.segmented-control input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented-control span {
+  height: 28px;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.segmented-control input:checked + span {
+  border-color: rgba(94, 234, 212, 0.52);
+  background: rgba(20, 49, 58, 0.86);
+  color: var(--text);
+}
+
+.segmented-control input:disabled + span {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.option-note {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.option-note span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnostic-list {
@@ -1327,10 +1454,12 @@ button {
     padding: 5px 10px;
   }
 
+  .options-section,
   .filter-form {
     padding: 8px;
   }
 
+  .options-form,
   .filter-form {
     gap: 8px;
   }

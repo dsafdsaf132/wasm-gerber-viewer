@@ -89,6 +89,11 @@ export function getViewerElements(documentRef = document) {
     cursorReadout: requireElement(documentRef, "cursor-readout"),
     boundsReadout: requireElement(documentRef, "bounds-readout"),
     diagnosticsCount: requireElement(documentRef, "diagnostics-count"),
+    regionArcExactInput: requireElement(documentRef, "region-arc-exact"),
+    regionArcApproximateInput: requireElement(
+      documentRef,
+      "region-arc-approximate",
+    ),
     topFilterInput: requireElement(documentRef, "top-filter-input"),
     bottomFilterInput: requireElement(documentRef, "bottom-filter-input"),
     filterSaveBtn: requireElement(documentRef, "filter-save-btn"),

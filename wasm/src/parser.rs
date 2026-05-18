@@ -681,6 +681,7 @@ pub struct GerberParser {
     pub apertures: HashMap<String, Aperture>,
     pub macros: HashMap<String, ApertureMacro>,
     pub current_state: ParserState,
+    pub preserve_arc_regions: bool,
     // Store primitive batches in object-stream polarity order.
     pub polarity_layers: Vec<PolarityLayer>,
     pub current_primitives: Vec<Primitive>, // Accumulating primitives for current polarity
@@ -689,12 +690,12 @@ pub struct GerberParser {
 }
 
 impl GerberParser {
-    /// Create new parser instance
-    pub fn new() -> Self {
+    pub fn with_preserve_arc_regions(preserve_arc_regions: bool) -> Self {
         GerberParser {
             apertures: HashMap::new(),
             macros: HashMap::new(),
             current_state: ParserState::default(),
+            preserve_arc_regions,
             polarity_layers: Vec::new(),
             current_primitives: Vec::new(),
             current_path_regions: PathRegions::empty(),
@@ -730,6 +731,7 @@ impl GerberParser {
                     &mut self.current_primitives,
                     &mut self.current_path_regions,
                     &mut self.polarity_layers,
+                    self.preserve_arc_regions,
                 )?;
             } else if line_ref.starts_with("G04") {
                 // Comment line, skip
@@ -748,7 +750,7 @@ impl GerberParser {
                     &mut self.region_contours,
                     &mut self.current_path_regions,
                     &mut self.polarity_layers,
-                    true,
+                    self.preserve_arc_regions,
                 )
                 .map_err(|message| JsValue::from_str(&message))?;
             }
@@ -840,6 +842,7 @@ fn parse_command(
     current_primitives: &mut Vec<Primitive>,
     current_path_regions: &mut PathRegions,
     polarity_layers: &mut Vec<PolarityLayer>,
+    preserve_arc_regions: bool,
 ) -> Result<(), JsValue> {
     let line = if !line_ref.ends_with('%') {
         let mut buffer = String::new();
@@ -902,6 +905,7 @@ fn parse_command(
             current_primitives,
             current_path_regions,
             polarity_layers,
+            preserve_arc_regions,
         )?;
     } else if line.starts_with("%LM") {
         // Layer mirroring: %LMN*, %LMX*, %LMY*, %LMXY*
@@ -973,6 +977,7 @@ fn parse_aperture_block(
     current_primitives: &mut Vec<Primitive>,
     current_path_regions: &mut PathRegions,
     polarity_layers: &mut Vec<PolarityLayer>,
+    preserve_arc_regions: bool,
 ) -> Result<(), JsValue> {
     let Some(block_code) = parse_aperture_block_code(line) else {
         return Ok(());
@@ -1015,6 +1020,7 @@ fn parse_aperture_block(
                 &mut block_primitives,
                 &mut block_path_regions,
                 &mut block_layers,
+                preserve_arc_regions,
             )?;
             if let Some(enclosing_state) = nested_block_state {
                 *state = enclosing_state;
@@ -1034,7 +1040,7 @@ fn parse_aperture_block(
                 &mut block_region_contours,
                 &mut block_path_regions,
                 &mut block_layers,
-                true,
+                preserve_arc_regions,
             )
             .map_err(|message| JsValue::from_str(&message))?;
         }
@@ -1057,7 +1063,14 @@ fn parse_aperture_block(
 }
 
 pub fn parse_gerber(data: &str) -> Result<Vec<GerberData>, JsValue> {
-    let mut parser = GerberParser::new();
+    parse_gerber_with_options(data, true)
+}
+
+pub fn parse_gerber_with_options(
+    data: &str,
+    preserve_arc_regions: bool,
+) -> Result<Vec<GerberData>, JsValue> {
+    let mut parser = GerberParser::with_preserve_arc_regions(preserve_arc_regions);
     parser.parse(data)
 }
 

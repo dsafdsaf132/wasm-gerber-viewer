@@ -107,7 +107,11 @@ function collectTransferables(value, transferables = [], seen = new Set()) {
 }
 
 self.addEventListener("message", async (event) => {
-  const { id, offset = {} } = event.data ?? {};
+  const {
+    id,
+    offset = {},
+    preserveArcRegions = true,
+  } = event.data ?? {};
   let content = event.data?.content;
   let beforeBytes = null;
 
@@ -118,11 +122,28 @@ self.addEventListener("message", async (event) => {
     }
     beforeBytes = getWorkerWasmMemoryBytes();
     reserveWasmInputCapacity(wasmModule, content);
-    const parsedLayer = wasmModule.parse_gerber_layer(
-      content,
-      Number(offset.x ?? 0),
-      Number(offset.y ?? 0),
-    );
+    const parseLayer =
+      typeof wasmModule.parse_gerber_layer_with_options === "function"
+        ? () =>
+            wasmModule.parse_gerber_layer_with_options(
+              content,
+              Number(offset.x ?? 0),
+              Number(offset.y ?? 0),
+              Boolean(preserveArcRegions),
+            )
+        : () => {
+            if (!preserveArcRegions) {
+              throw new Error(
+                "Parse worker requires an updated WASM module for region arc options",
+              );
+            }
+            return wasmModule.parse_gerber_layer(
+              content,
+              Number(offset.x ?? 0),
+              Number(offset.y ?? 0),
+            );
+          };
+    const parsedLayer = parseLayer();
     const transferables = collectTransferables(parsedLayer);
     self.postMessage(
       {
