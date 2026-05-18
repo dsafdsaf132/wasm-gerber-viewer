@@ -49,6 +49,11 @@ const PARSE_MEMORY_ESTIMATE_MULTIPLIER = 16;
 const PARSE_MEMORY_HEADROOM_RATIO = 0.5;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
+const ARC_TESSELLATION_QUALITY_LEVELS = {
+  low: 0,
+  normal: 1,
+  high: 2,
+};
 
 class ParseWorkerUnavailableError extends Error {
   constructor(message) {
@@ -280,6 +285,7 @@ class GerberParseWorkerPool {
           content: task.content,
           offset: task.offset,
           preserveArcRegions: task.options.preserveArcRegions,
+          arcTessellationQuality: task.options.arcTessellationQuality,
         });
       } catch (error) {
         this.activeTasks.delete(worker);
@@ -504,6 +510,8 @@ export class GerberViewer {
     this.preserveArcRegions = Boolean(
       this.viewerOptionsStore.get("preserveArcRegions"),
     );
+    this.arcTessellationQuality =
+      this.viewerOptionsStore.get("arcTessellationQuality") ?? "normal";
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -612,8 +620,27 @@ export class GerberViewer {
   configureWasmProcessorOptions(processor) {
     if (typeof processor?.set_preserve_arc_regions === "function") {
       processor.set_preserve_arc_regions(this.preserveArcRegions);
-    } else if (!this.preserveArcRegions) {
+    }
+
+    if (typeof processor?.set_arc_tessellation_quality === "function") {
+      processor.set_arc_tessellation_quality(this.getArcTessellationQualityLevel());
+    }
+  }
+
+  ensureParserOptionsSupported() {
+    if (
+      !this.preserveArcRegions &&
+      typeof this.wasmProcessor?.set_preserve_arc_regions !== "function"
+    ) {
       throw new Error("Region arc options require an updated WASM module");
+    }
+
+    if (
+      !this.preserveArcRegions &&
+      this.arcTessellationQuality !== "normal" &&
+      typeof this.wasmProcessor?.set_arc_tessellation_quality !== "function"
+    ) {
+      throw new Error("Arc tessellation quality requires an updated WASM module");
     }
   }
 
@@ -788,6 +815,14 @@ export class GerberViewer {
       }
     });
 
+    for (const input of this.getArcQualityInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          void this.setArcTessellationQuality(input.value);
+        }
+      });
+    }
+
     this.topFilterInput.addEventListener("input", () => {
       this.updateLayerFilter("top", this.topFilterInput.value);
     });
@@ -961,12 +996,30 @@ export class GerberViewer {
   getParseOptions() {
     return {
       preserveArcRegions: this.preserveArcRegions,
+      arcTessellationQuality: this.getArcTessellationQualityLevel(),
     };
+  }
+
+  getArcTessellationQualityLevel() {
+    return ARC_TESSELLATION_QUALITY_LEVELS[this.arcTessellationQuality] ?? 1;
+  }
+
+  getArcQualityInputs() {
+    return [
+      this.arcQualityLowInput,
+      this.arcQualityNormalInput,
+      this.arcQualityHighInput,
+    ];
   }
 
   syncOptionControls() {
     this.regionArcExactInput.checked = this.preserveArcRegions;
     this.regionArcApproximateInput.checked = !this.preserveArcRegions;
+
+    for (const input of this.getArcQualityInputs()) {
+      input.checked = input.value === this.arcTessellationQuality;
+      input.disabled = this.preserveArcRegions || this.isRendererBusy();
+    }
   }
 
   syncFilterInputs() {
@@ -987,15 +1040,17 @@ export class GerberViewer {
     const previousPreserveArcRegions = this.preserveArcRegions;
     this.preserveArcRegions = nextPreserveArcRegions;
     this.syncOptionControls();
+    this.viewerOptionsStore.set(
+      "preserveArcRegions",
+      this.preserveArcRegions,
+    );
 
     try {
-      this.configureWasmProcessorOptions(this.wasmProcessor);
-      this.viewerOptionsStore.set(
-        "preserveArcRegions",
-        this.preserveArcRegions,
-      );
       if (this.layers.length > 0) {
+        this.ensureParserOptionsSupported();
         await this.rebuildLayersForParserOptions();
+      } else {
+        this.configureWasmProcessorOptions(this.wasmProcessor);
       }
       this.showNotification(
         "Options updated",
@@ -1008,12 +1063,62 @@ export class GerberViewer {
     } catch (error) {
       this.preserveArcRegions = previousPreserveArcRegions;
       this.syncOptionControls();
-      this.configureWasmProcessorOptions(this.wasmProcessor);
       this.viewerOptionsStore.set(
         "preserveArcRegions",
         this.preserveArcRegions,
       );
+      this.configureWasmProcessorOptions(this.wasmProcessor);
       this.showError(`Failed to apply region arc option: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
+  async setArcTessellationQuality(quality) {
+    if (!(quality in ARC_TESSELLATION_QUALITY_LEVELS)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (quality === this.arcTessellationQuality) {
+      return;
+    }
+    if (this.preserveArcRegions || this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previousQuality = this.arcTessellationQuality;
+    this.arcTessellationQuality = quality;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set(
+      "arcTessellationQuality",
+      this.arcTessellationQuality,
+    );
+
+    try {
+      if (this.layers.length > 0) {
+        this.ensureParserOptionsSupported();
+        await this.rebuildLayersForParserOptions();
+      } else {
+        this.configureWasmProcessorOptions(this.wasmProcessor);
+      }
+      this.showNotification(
+        "Options updated",
+        "info",
+        NOTIFICATION_DURATION_MS,
+        (messageElement) => {
+          messageElement.textContent = "Arc tessellation quality was applied.";
+        },
+      );
+    } catch (error) {
+      this.arcTessellationQuality = previousQuality;
+      this.syncOptionControls();
+      this.viewerOptionsStore.set(
+        "arcTessellationQuality",
+        this.arcTessellationQuality,
+      );
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.showError(`Failed to apply arc quality option: ${getErrorMessage(error)}`);
     } finally {
       this.updateUiState();
     }
@@ -1139,6 +1244,9 @@ export class GerberViewer {
     this.emptyUploadBtn.disabled = rendererBusy;
     this.regionArcExactInput.disabled = rendererBusy;
     this.regionArcApproximateInput.disabled = rendererBusy;
+    for (const input of this.getArcQualityInputs()) {
+      input.disabled = rendererBusy || this.preserveArcRegions;
+    }
 
     this.visibleLayerCount.textContent = `${visibleLayers} / ${totalLayers}`;
     this.diagnosticsCount.textContent = String(this.diagnostics.count);
@@ -2002,15 +2110,22 @@ export class GerberViewer {
       return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
     }
 
-    if (
-      typeof this.wasmModule?.parse_gerber_layer_with_options === "function"
-    ) {
+    const parseWithOptions = this.wasmModule?.parse_gerber_layer_with_options;
+    if (typeof parseWithOptions === "function") {
+      if (
+        parseWithOptions.length < 5 &&
+        !parseOptions.preserveArcRegions &&
+        parseOptions.arcTessellationQuality !== 1
+      ) {
+        throw new Error("Arc tessellation quality requires an updated WASM module");
+      }
       this.reserveWasmInputCapacity(content);
-      return this.wasmModule.parse_gerber_layer_with_options(
+      return parseWithOptions(
         content,
         normalizedOffset.x,
         normalizedOffset.y,
         parseOptions.preserveArcRegions,
+        parseOptions.arcTessellationQuality,
       );
     }
 
@@ -2488,6 +2603,7 @@ export class GerberViewer {
       }
 
       // add layer to WASM processor and get layer ID
+      this.ensureParserOptionsSupported();
       this.reserveWasmInputCapacity(content);
       const offset = normalizeLayerOffset(options.offset);
       if (

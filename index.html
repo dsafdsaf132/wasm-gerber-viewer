@@ -260,8 +260,40 @@
                       </div>
                     </div>
                     <div class="option-note">
-                      <span>Exact: Preserve arcs for WebGL rendering.</span>
-                      <span>Approx: Tessellate arcs into contour points.</span>
+                      <span>Exact (Slow): Exact arc rendering.</span>
+                      <span>Approx (Fast): Faster approximate arcs.</span>
+                    </div>
+                    <div class="option-row">
+                      <span>Approx Arc Quality</span>
+                      <div class="segmented-control three-up" role="radiogroup" aria-label="Arc tessellation quality">
+                        <label>
+                          <input
+                            type="radio"
+                            id="arc-quality-low"
+                            name="arc-quality"
+                            value="low"
+                          />
+                          <span>Low</span>
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            id="arc-quality-normal"
+                            name="arc-quality"
+                            value="normal"
+                          />
+                          <span>Normal</span>
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            id="arc-quality-high"
+                            name="arc-quality"
+                            value="high"
+                          />
+                          <span>High</span>
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </section>

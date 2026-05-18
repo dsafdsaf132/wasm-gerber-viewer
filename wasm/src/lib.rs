@@ -50,6 +50,7 @@ fn parse_layer_data(
     offset_x: f32,
     offset_y: f32,
     preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
 ) -> Result<Vec<GerberData>, JsValue> {
     if !offset_x.is_finite() || !offset_y.is_finite() {
         return Err(JsValue::from_str("Layer offset must be finite"));
@@ -58,7 +59,7 @@ fn parse_layer_data(
     let mut gerber_data_layers = if preserve_arc_regions {
         parse_gerber(content)?
     } else {
-        parse_gerber_with_options(content, preserve_arc_regions)?
+        parse_gerber_with_options(content, preserve_arc_regions, arc_tessellation_quality)?
     };
 
     if offset_x != 0.0 || offset_y != 0.0 {
@@ -87,7 +88,7 @@ pub fn parse_gerber_layer(
     offset_x: f32,
     offset_y: f32,
 ) -> Result<JsValue, JsValue> {
-    let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y, true)?;
+    let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y, true, 1)?;
     gerber_data_layers_to_js(&gerber_data_layers)
 }
 
@@ -97,8 +98,15 @@ pub fn parse_gerber_layer_with_options(
     offset_x: f32,
     offset_y: f32,
     preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
 ) -> Result<JsValue, JsValue> {
-    let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y, preserve_arc_regions)?;
+    let gerber_data_layers = parse_layer_data(
+        &content,
+        offset_x,
+        offset_y,
+        preserve_arc_regions,
+        arc_tessellation_quality,
+    )?;
     gerber_data_layers_to_js(&gerber_data_layers)
 }
 
@@ -108,6 +116,7 @@ pub struct GerberProcessor {
     gl: Option<WebGl2RenderingContext>,
     renderer: Option<Renderer>,
     preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
 }
 
 impl Default for GerberProcessor {
@@ -116,6 +125,7 @@ impl Default for GerberProcessor {
             gl: None,
             renderer: None,
             preserve_arc_regions: true,
+            arc_tessellation_quality: 1,
         }
     }
 }
@@ -179,6 +189,13 @@ impl GerberProcessor {
         self.preserve_arc_regions = preserve_arc_regions;
     }
 
+    /// Configure arc tessellation quality for legacy approximated region arcs.
+    ///
+    /// `0` = low, `1` = normal, `2` = high.
+    pub fn set_arc_tessellation_quality(&mut self, arc_tessellation_quality: u32) {
+        self.arc_tessellation_quality = arc_tessellation_quality.min(2);
+    }
+
     /// Recreate WebGL-owned resources after browser context restoration.
     ///
     /// This can recreate GPU resources only while parsed geometry is still retained.
@@ -203,7 +220,13 @@ impl GerberProcessor {
     /// # Returns
     /// * Layer ID (u32) for tracking this layer
     pub fn add_layer(&mut self, content: String) -> Result<u32, JsValue> {
-        let gerber_data_layers = parse_layer_data(&content, 0.0, 0.0, self.preserve_arc_regions)?;
+        let gerber_data_layers = parse_layer_data(
+            &content,
+            0.0,
+            0.0,
+            self.preserve_arc_regions,
+            self.arc_tessellation_quality,
+        )?;
         self.add_parsed_layers(gerber_data_layers)
     }
 
@@ -222,8 +245,13 @@ impl GerberProcessor {
         offset_x: f32,
         offset_y: f32,
     ) -> Result<u32, JsValue> {
-        let gerber_data_layers =
-            parse_layer_data(&content, offset_x, offset_y, self.preserve_arc_regions)?;
+        let gerber_data_layers = parse_layer_data(
+            &content,
+            offset_x,
+            offset_y,
+            self.preserve_arc_regions,
+            self.arc_tessellation_quality,
+        )?;
         self.add_parsed_layers(gerber_data_layers)
     }
 

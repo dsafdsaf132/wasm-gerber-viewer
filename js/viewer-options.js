@@ -1,6 +1,9 @@
 const DEFAULT_VIEWER_OPTIONS = {
   preserveArcRegions: true,
+  arcTessellationQuality: "normal",
 };
+
+const ARC_TESSELLATION_QUALITIES = new Set(["low", "normal", "high"]);
 
 function createMemoryStorage() {
   const values = new Map();
@@ -46,6 +49,11 @@ export class ViewerOptionsStore {
           typeof stored.preserveArcRegions === "boolean"
             ? stored.preserveArcRegions
             : DEFAULT_VIEWER_OPTIONS.preserveArcRegions,
+        arcTessellationQuality: ARC_TESSELLATION_QUALITIES.has(
+          stored.arcTessellationQuality,
+        )
+          ? stored.arcTessellationQuality
+          : DEFAULT_VIEWER_OPTIONS.arcTessellationQuality,
       };
     } catch {
       return this.getDefaults();

@@ -1175,6 +1175,10 @@ button {
   overflow: hidden;
 }
 
+.segmented-control.three-up {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .segmented-control label {
   min-width: 0;
   overflow: hidden;

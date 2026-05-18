@@ -377,12 +377,36 @@ X-010000Y000000I-010000J000000D01*
 G37*
 M02*",
         false,
+        1,
     )
     .expect("flattened region arc should parse");
 
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].path_regions.region_count(), 0);
     assert!(!layers[0].triangles.vertices.is_empty());
+}
+
+#[test]
+fn region_arc_flattening_quality_controls_tessellation_density() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*";
+    let low_layers = parse_gerber_with_options(data, false, 0)
+        .expect("low quality flattened region arc should parse");
+    let high_layers = parse_gerber_with_options(data, false, 2)
+        .expect("high quality flattened region arc should parse");
+
+    assert!(
+        high_layers[0].triangles.vertices.len() > low_layers[0].triangles.vertices.len(),
+        "high quality should produce more tessellated triangle vertices than low quality"
+    );
 }
 
 #[test]

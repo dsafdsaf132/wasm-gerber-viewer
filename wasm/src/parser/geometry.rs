@@ -1515,6 +1515,7 @@ pub fn region_contours_to_point_slices(
 
 pub fn flatten_region_contours(
     region_contours: &[RegionContour],
+    arc_tessellation_quality: u32,
 ) -> Result<Vec<Vec<[f32; 2]>>, String> {
     let mut contours = Vec::new();
     try_reserve_values(&mut contours, region_contours.len(), "region contours")?;
@@ -1552,7 +1553,8 @@ pub fn flatten_region_contours(
                         points.push(start);
                     }
 
-                    let max_angle_step = std::f32::consts::PI / 36.0;
+                    let max_angle_step =
+                        region_arc_tessellation_max_angle_step(arc_tessellation_quality);
                     let segment_count =
                         ((sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
                     try_reserve_values(&mut points, segment_count, "region arc points")?;
@@ -1573,6 +1575,14 @@ pub fn flatten_region_contours(
     }
 
     Ok(contours)
+}
+
+fn region_arc_tessellation_max_angle_step(quality: u32) -> f32 {
+    match quality {
+        0 => std::f32::consts::PI / 18.0,
+        2 => std::f32::consts::PI / 72.0,
+        _ => std::f32::consts::PI / 36.0,
+    }
 }
 
 pub fn build_path_regions(
@@ -2007,6 +2017,7 @@ pub fn parse_graphic_command(
     path_regions: &mut PathRegions,
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
 ) -> Result<(), String> {
     let clean_line = line.trim_end_matches('*');
 
@@ -2062,7 +2073,10 @@ pub fn parse_graphic_command(
                         let flattened_contours;
                         let mut contour_iter: Box<dyn Iterator<Item = &[[f32; 2]]> + '_> =
                             if region_contours_have_arcs(region_contours) {
-                                flattened_contours = flatten_region_contours(region_contours)?;
+                                flattened_contours = flatten_region_contours(
+                                    region_contours,
+                                    arc_tessellation_quality,
+                                )?;
                                 Box::new(flattened_contours.iter().map(Vec::as_slice))
                             } else {
                                 Box::new(region_contours_to_point_slices(region_contours))

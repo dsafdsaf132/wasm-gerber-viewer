@@ -336,6 +336,16 @@ export class ScreenshotExporter {
     } else if (parseOptions.preserveArcRegions === false) {
       throw new Error("Region arc options require an updated WASM module.");
     }
+    if (typeof processor.set_arc_tessellation_quality === "function") {
+      processor.set_arc_tessellation_quality(
+        Number(parseOptions.arcTessellationQuality ?? 1),
+      );
+    } else if (
+      parseOptions.preserveArcRegions === false &&
+      Number(parseOptions.arcTessellationQuality ?? 1) !== 1
+    ) {
+      throw new Error("Arc tessellation quality requires an updated WASM module.");
+    }
 
     const activeLayerIds = [];
     const colorData = [];

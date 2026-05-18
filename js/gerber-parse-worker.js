@@ -111,6 +111,7 @@ self.addEventListener("message", async (event) => {
     id,
     offset = {},
     preserveArcRegions = true,
+    arcTessellationQuality = 1,
   } = event.data ?? {};
   let content = event.data?.content;
   let beforeBytes = null;
@@ -122,15 +123,30 @@ self.addEventListener("message", async (event) => {
     }
     beforeBytes = getWorkerWasmMemoryBytes();
     reserveWasmInputCapacity(wasmModule, content);
+    const normalizedQuality = Number(arcTessellationQuality ?? 1);
+    const supportsArcQuality =
+      typeof wasmModule.parse_gerber_layer_with_options === "function" &&
+      wasmModule.parse_gerber_layer_with_options.length >= 5;
     const parseLayer =
       typeof wasmModule.parse_gerber_layer_with_options === "function"
-        ? () =>
-            wasmModule.parse_gerber_layer_with_options(
+        ? () => {
+            if (
+              !supportsArcQuality &&
+              !preserveArcRegions &&
+              normalizedQuality !== 1
+            ) {
+              throw new Error(
+                "Parse worker requires an updated WASM module for arc tessellation quality",
+              );
+            }
+            return wasmModule.parse_gerber_layer_with_options(
               content,
               Number(offset.x ?? 0),
               Number(offset.y ?? 0),
               Boolean(preserveArcRegions),
-            )
+              normalizedQuality,
+            );
+          }
         : () => {
             if (!preserveArcRegions) {
               throw new Error(
