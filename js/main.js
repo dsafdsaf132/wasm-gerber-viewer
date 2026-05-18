@@ -617,6 +617,23 @@ export class GerberViewer {
     this.configureWasmProcessorOptions(this.wasmProcessor);
   }
 
+  createStagedWasmProcessor() {
+    if (!this.gl || this.isWebGlContextLost) {
+      throw new Error("WebGL renderer is not available");
+    }
+
+    const processor = new this.wasmModule.GerberProcessor();
+    try {
+      processor.init(this.gl);
+      this.configureWasmProcessorOptions(processor);
+      processor.resize();
+      return processor;
+    } catch (error) {
+      this.disposeWasmProcessorInstance(processor, "staged processor");
+      throw error;
+    }
+  }
+
   configureWasmProcessorOptions(processor) {
     if (typeof processor?.set_preserve_arc_regions === "function") {
       processor.set_preserve_arc_regions(this.preserveArcRegions);
@@ -1185,38 +1202,56 @@ export class GerberViewer {
         }
       }
 
-      this.disposeWasmProcessor();
-      this.layers = [];
-      this.createWebGlProcessor();
-      this.resizeCanvas({
-        allowProcessorResize: true,
-        preserveViewState: viewState,
-      });
+      let stagedProcessor = null;
+      const stagedLayers = [];
+      const nextLayerDomId = this.nextLayerDomId;
+      const nextColorIndex = this.nextColorIndex;
+      try {
+        stagedProcessor = this.createStagedWasmProcessor();
 
-      for (const [index, layer] of parsedLayers.entries()) {
-        this.updateLoadingModal({
-          title: "Applying options",
-          stage: "Loading",
-          fileName: layer.name,
-          current: index,
-          total: parsedLayers.length,
-        });
+        for (const [index, layer] of parsedLayers.entries()) {
+          this.updateLoadingModal({
+            title: "Applying options",
+            stage: "Loading",
+            fileName: layer.name,
+            current: index,
+            total: parsedLayers.length,
+          });
 
-        await this.addParsedLayer(layer.name, layer.parsedLayer, {
-          id: layer.id,
-          visible: layer.visible,
-          color: layer.color,
-          sourceContent: layer.sourceContent,
-          offset: layer.offset,
-          skipFatalRecovery: true,
-        });
+          const layerRecord = await this.createParsedLayerRecord(
+            layer.name,
+            layer.parsedLayer,
+            {
+              id: layer.id,
+              visible: layer.visible,
+              color: layer.color,
+              sourceContent: layer.sourceContent,
+              offset: layer.offset,
+              skipFatalRecovery: true,
+            },
+            stagedProcessor,
+          );
+          this.prepareLayerMetadata(layerRecord);
+          stagedLayers.push(layerRecord);
 
-        this.updateLoadingModal({
-          stage: "Loaded",
-          fileName: layer.name,
-          current: index + 1,
-          total: parsedLayers.length,
-        });
+          this.updateLoadingModal({
+            stage: "Loaded",
+            fileName: layer.name,
+            current: index + 1,
+            total: parsedLayers.length,
+          });
+        }
+
+        const previousProcessor = this.wasmProcessor;
+        this.wasmProcessor = stagedProcessor;
+        stagedProcessor = null;
+        this.layers = stagedLayers;
+        this.disposeWasmProcessorInstance(previousProcessor, "previous processor");
+      } catch (error) {
+        this.nextLayerDomId = nextLayerDomId;
+        this.nextColorIndex = nextColorIndex;
+        this.disposeWasmProcessorInstance(stagedProcessor, "staged processor");
+        throw error;
       }
 
       this.restoreCanvasViewState(viewState);
@@ -2468,12 +2503,16 @@ export class GerberViewer {
 
     const processor = this.wasmProcessor;
     this.wasmProcessor = null;
+    this.disposeWasmProcessorInstance(processor, "processor");
+  }
 
+  disposeWasmProcessorInstance(processor, label = "processor") {
+    if (!processor) return;
     if (typeof processor.free === "function") {
       try {
         processor.free();
       } catch (error) {
-        console.warn("[WASM] Failed to dispose processor after fatal error:", error);
+        console.warn(`[WASM] Failed to dispose ${label}:`, error);
       }
     }
   }
@@ -2573,12 +2612,20 @@ export class GerberViewer {
     this.notifications.hide();
   }
 
-  createLayerMetadata(name, layerId, options = {}) {
+  createLayerMetadata(
+    name,
+    layerId,
+    options = {},
+    processor = this.wasmProcessor,
+  ) {
     if (layerId === undefined || layerId === null) {
       throw new Error("Failed to get layer ID from WASM processor");
     }
+    if (!processor) {
+      throw new Error("WebGL renderer is not available");
+    }
 
-    const bounds = this.wasmProcessor.get_layer_boundary(layerId);
+    const bounds = processor.get_layer_boundary(layerId);
     return {
       id: options.id ?? null,
       layerId: layerId,
@@ -2678,24 +2725,29 @@ export class GerberViewer {
     return this.commitLayerMetadata(layer);
   }
 
-  async createParsedLayerRecord(name, parsedLayer, options = {}) {
+  async createParsedLayerRecord(
+    name,
+    parsedLayer,
+    options = {},
+    processor = this.wasmProcessor,
+  ) {
     try {
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
       }
-      if (!this.wasmProcessor || this.isWebGlContextLost) {
+      if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
 
       let layerId;
-      if (typeof this.wasmProcessor.add_render_payload === "function") {
-        layerId = this.wasmProcessor.add_render_payload(parsedLayer);
-      } else if (typeof this.wasmProcessor.add_parsed_layer === "function") {
-        layerId = this.wasmProcessor.add_parsed_layer(parsedLayer);
+      if (typeof processor.add_render_payload === "function") {
+        layerId = processor.add_render_payload(parsedLayer);
+      } else if (typeof processor.add_parsed_layer === "function") {
+        layerId = processor.add_parsed_layer(parsedLayer);
       } else {
         throw new Error("Parsed layer rendering requires an updated WASM module");
       }
-      return this.createLayerMetadata(name, layerId, options);
+      return this.createLayerMetadata(name, layerId, options, processor);
     } catch (error) {
       if (isNoGeometryError(getErrorMessage(error))) {
         console.warn(`[Layer] Skipped layer ${name}:`, error);
