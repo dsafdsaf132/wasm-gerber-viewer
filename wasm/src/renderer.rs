@@ -1677,6 +1677,7 @@ impl Renderer {
         gl.delete_program(Some(&programs.triangle_template.program));
         gl.delete_program(Some(&programs.line.program));
         gl.delete_program(Some(&programs.circle.program));
+        gl.delete_program(Some(&programs.circle_holed.program));
         gl.delete_program(Some(&programs.arc.program));
         gl.delete_program(Some(&programs.thermal.program));
         gl.delete_program(Some(&programs.texture.program));
@@ -2507,9 +2508,6 @@ impl Renderer {
         layer_id: usize,
         sublayer_idx: usize,
     ) -> Result<(), JsValue> {
-        let program = &self.programs.circle;
-        self.gl.use_program(Some(&program.program));
-
         let instance_count = {
             let layer = self.layers[layer_id]
                 .as_mut()
@@ -2521,6 +2519,13 @@ impl Renderer {
                     return Ok(());
                 }
                 let instance_count = circles.x.len() as i32;
+                let has_holes = !circles.hole_radius.is_empty();
+                let program = if has_holes {
+                    &self.programs.circle_holed
+                } else {
+                    &self.programs.circle
+                };
+                self.gl.use_program(Some(&program.program));
 
                 // Create VAO
                 let vao = self
@@ -2557,16 +2562,7 @@ impl Renderer {
                     "radius_instance",
                     1,
                 )?;
-                if circles.hole_radius.is_empty() {
-                    Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
-                    Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
-                    Self::use_constant_vertex_attrib_1f(
-                        &self.gl,
-                        program,
-                        "hole_radius_instance",
-                        0.0,
-                    )?;
-                } else {
+                if has_holes {
                     let hole_x_buffer = Self::create_instance_buffer(
                         &self.gl,
                         &circles.hole_x,
@@ -2620,14 +2616,15 @@ impl Renderer {
         // Re-get immutable reference for rendering
         let layer = self.get_layer(layer_id)?;
         let buffer_cache = &layer.buffer_caches[sublayer_idx];
+        let program = if buffer_cache.circle_hole_radius_buffer.is_some() {
+            &self.programs.circle_holed
+        } else {
+            &self.programs.circle
+        };
+        self.gl.use_program(Some(&program.program));
 
         // Bind cached VAO for this sublayer
         self.gl.bind_vertex_array(buffer_cache.circle_vao.as_ref());
-        if buffer_cache.circle_hole_radius_buffer.is_none() {
-            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
-            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
-            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_radius_instance", 0.0)?;
-        }
 
         // Set uniforms (only these change per frame)
         if let Some(loc) = program.uniforms.get("transform") {

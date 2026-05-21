@@ -144,6 +144,35 @@ in vec2 position;
 in float center_x_instance;
 in float center_y_instance;
 in float radius_instance;
+uniform mat3 transform;
+out highp vec2 vPosition;
+void main() {
+    vec2 center = vec2(center_x_instance, center_y_instance);
+    vec2 scaledPos = position * radius_instance + center;
+    vec3 transformed = transform * vec3(scaledPos, 1.0);
+    gl_Position = vec4(transformed.xy, 0.0, 1.0);
+    vPosition = position;
+}
+"#;
+
+pub const CIRCLE_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+in highp vec2 vPosition;
+uniform lowp vec4 color;
+out lowp vec4 fragColor;
+void main() {
+    float dist = dot(vPosition, vPosition);
+    if (dist > 1.0) discard;
+    fragColor = color;
+}
+"#;
+
+pub const CIRCLE_HOLED_VERTEX_SHADER: &str = r#"#version 300 es
+precision highp float;
+in vec2 position;
+in float center_x_instance;
+in float center_y_instance;
+in float radius_instance;
 in float hole_x_instance;
 in float hole_y_instance;
 in float hole_radius_instance;
@@ -163,7 +192,7 @@ void main() {
 }
 "#;
 
-pub const CIRCLE_FRAGMENT_SHADER: &str = r#"#version 300 es
+pub const CIRCLE_HOLED_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 in highp vec2 vPosition;
 in highp vec2 vHoleCenter;
@@ -492,6 +521,7 @@ pub struct ShaderPrograms {
     pub triangle_template: ShaderProgram,
     pub line: ShaderProgram,
     pub circle: ShaderProgram,
+    pub circle_holed: ShaderProgram,
     pub arc: ShaderProgram,
     pub thermal: ShaderProgram,
     pub texture: ShaderProgram,
@@ -547,6 +577,19 @@ impl ShaderPrograms {
             gl,
             CIRCLE_VERTEX_SHADER,
             CIRCLE_FRAGMENT_SHADER,
+            &[
+                "position",
+                "center_x_instance",
+                "center_y_instance",
+                "radius_instance",
+            ],
+            &["transform", "color"],
+        )?;
+
+        let circle_holed = compile_program(
+            gl,
+            CIRCLE_HOLED_VERTEX_SHADER,
+            CIRCLE_HOLED_FRAGMENT_SHADER,
             &[
                 "position",
                 "center_x_instance",
@@ -625,6 +668,7 @@ impl ShaderPrograms {
             triangle_template,
             line,
             circle,
+            circle_holed,
             arc,
             thermal,
             texture,
