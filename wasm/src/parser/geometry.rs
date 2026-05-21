@@ -2020,7 +2020,7 @@ fn push_sector_quad(
     Ok(())
 }
 
-fn arc_curve_bounds(
+pub(crate) fn arc_curve_bounds(
     center: [f32; 2],
     radius: f32,
     start_angle: f32,

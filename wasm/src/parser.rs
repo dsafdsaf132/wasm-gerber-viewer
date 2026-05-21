@@ -14,7 +14,7 @@ use state::{
     parse_format_spec, parse_if, parse_lm, parse_lp, parse_lr, parse_ls, parse_mo, parse_sr,
 };
 
-use self::geometry::{parse_graphic_command, Primitive, RegionContour};
+use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive, RegionContour};
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -688,11 +688,17 @@ impl PrimitiveOutputBuffers {
             let y = self.arcs_y[i];
             let r = self.arcs_radius[i];
             let t = self.arcs_thickness[i];
-            let outer = r + t / 2.0;
-            min_x = min_x.min(x - outer);
-            max_x = max_x.max(x + outer);
-            min_y = min_y.min(y - outer);
-            max_y = max_y.max(y + outer);
+            let half_width = t * 0.5;
+            let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = arc_curve_bounds(
+                [x, y],
+                r,
+                self.arcs_start_angle[i],
+                self.arcs_sweep_angle[i],
+            );
+            min_x = min_x.min(arc_min_x - half_width);
+            max_x = max_x.max(arc_max_x + half_width);
+            min_y = min_y.min(arc_min_y - half_width);
+            max_y = max_y.max(arc_max_y + half_width);
         }
 
         for i in 0..self.thermals_x.len() {

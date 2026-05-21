@@ -1387,6 +1387,29 @@ M02*",
 }
 
 #[test]
+fn arc_boundary_uses_sweep_not_full_circle() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+G03*
+G75*
+X1000000Y0000000D02*
+X0000000Y1000000I-1000000J0000000D01*
+M02*",
+    )
+    .expect("arc should parse");
+    let boundary = &layers[0].boundary;
+
+    assert_approx_eq(boundary.min_x, -0.5);
+    assert_approx_eq(boundary.max_x, 1.5);
+    assert_approx_eq(boundary.min_y, -0.5);
+    assert_approx_eq(boundary.max_y, 1.5);
+}
+
+#[test]
 fn full_circle_arc_preserves_equal_start_end_with_center_offset() {
     let layers = parse_gerber(
         "\
