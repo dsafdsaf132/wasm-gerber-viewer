@@ -1078,16 +1078,15 @@ fn flash_aperture_no_sr(
         try_reserve_primitives(primitives, result_primitives.len(), "aperture flash")?;
         primitives.extend(result_primitives);
     } else {
-        if let Some(template) = &aperture.triangle_template {
-            if layer_scale == 1.0 && !mirror_x && !mirror_y && layer_rotation == 0.0 {
-                try_reserve_primitives(primitives, 1, "aperture triangle template flash")?;
-                primitives.push(Primitive::TriangleTemplateFlash {
-                    template: Rc::clone(template),
-                    x,
-                    y,
-                });
-                return Ok(());
-            }
+        if let Some(template) = aperture.triangle_template_for_transform(
+            layer_scale,
+            mirror_x,
+            mirror_y,
+            layer_rotation,
+        ) {
+            try_reserve_primitives(primitives, 1, "aperture triangle template flash")?;
+            primitives.push(Primitive::TriangleTemplateFlash { template, x, y });
+            return Ok(());
         }
 
         // Direct primitive cloning

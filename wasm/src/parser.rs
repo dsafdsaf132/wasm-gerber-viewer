@@ -177,8 +177,10 @@ fn primitive_is_renderable(primitive: &Primitive) -> bool {
             finite_point(*x, *y)
                 && has_positive_extent(*outer_diameter)
                 && inner_diameter.is_finite()
+                && *inner_diameter >= 0.0
                 && *inner_diameter < *outer_diameter
                 && gap_thickness.is_finite()
+                && *gap_thickness >= 0.0
                 && rotation.is_finite()
         }
         Primitive::Line {

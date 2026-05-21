@@ -116,12 +116,27 @@ impl Aperture {
     }
 }
 
+fn triangle_vertices_are_renderable(vertices: &[[f32; 2]; 3]) -> bool {
+    if !vertices
+        .iter()
+        .all(|point| point[0].is_finite() && point[1].is_finite())
+    {
+        return false;
+    }
+
+    let area2 = (vertices[1][0] - vertices[0][0]) * (vertices[2][1] - vertices[0][1])
+        - (vertices[2][0] - vertices[0][0]) * (vertices[1][1] - vertices[0][1]);
+    area2.is_finite() && area2.abs() > f32::EPSILON * f32::EPSILON
+}
+
 fn build_triangle_template(primitives: &[Primitive]) -> Option<Rc<Vec<f32>>> {
     if primitives.is_empty() {
         return None;
     }
 
-    let mut vertices = Vec::with_capacity(primitives.len() * 6);
+    let vertex_capacity = primitives.len().checked_mul(6)?;
+    let mut vertices = Vec::new();
+    vertices.try_reserve(vertex_capacity).ok()?;
     for primitive in primitives {
         match primitive {
             Primitive::Triangle {
@@ -129,7 +144,10 @@ fn build_triangle_template(primitives: &[Primitive]) -> Option<Rc<Vec<f32>>> {
                 exposure,
                 hole_radius,
                 ..
-            } if *exposure >= 0.5 && *hole_radius == 0.0 => {
+            } if *exposure >= 0.5
+                && *hole_radius == 0.0
+                && triangle_vertices_are_renderable(triangle) =>
+            {
                 for vertex in triangle {
                     vertices.push(vertex[0]);
                     vertices.push(vertex[1]);
