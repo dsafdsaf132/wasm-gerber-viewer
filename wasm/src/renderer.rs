@@ -17,7 +17,7 @@ use crate::shape::{
 };
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
 use wasm_bindgen::{prelude::*, JsCast};
-use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlTexture};
+use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlTexture};
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
 pub struct LayerMetadata {
@@ -34,6 +34,7 @@ pub struct LayerMetadata {
 /// WebGL renderer for Gerber graphics with multi-layer support
 pub struct Renderer {
     gl: WebGl2RenderingContext,
+    explicit_size: Option<(u32, u32)>,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
     layer_count: usize,                 // Active layer count
     programs: ShaderPrograms,
@@ -45,6 +46,23 @@ pub struct Renderer {
 impl Renderer {
     /// Create a new renderer with WebGL context (no layers initially)
     pub fn new(gl: WebGl2RenderingContext) -> Result<Renderer, JsValue> {
+        Self::new_with_size(gl, None)
+    }
+
+    /// Create a renderer with an explicit framebuffer size.
+    pub fn new_headless(
+        gl: WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+    ) -> Result<Renderer, JsValue> {
+        Self::validate_framebuffer_size(width, height)?;
+        Self::new_with_size(gl, Some((width, height)))
+    }
+
+    fn new_with_size(
+        gl: WebGl2RenderingContext,
+        explicit_size: Option<(u32, u32)>,
+    ) -> Result<Renderer, JsValue> {
         // Compile shader programs
         let programs = ShaderPrograms::new(&gl)?;
 
@@ -53,6 +71,7 @@ impl Renderer {
 
         Ok(Renderer {
             gl,
+            explicit_size,
             layers: Vec::new(),
             layer_count: 0,
             programs,
@@ -60,6 +79,13 @@ impl Renderer {
             quad_buffer,
             minimum_feature_pixels: 0.0,
         })
+    }
+
+    /// Update explicit framebuffer dimensions used by headless renderers.
+    pub fn set_framebuffer_size(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
+        Self::validate_framebuffer_size(width, height)?;
+        self.explicit_size = Some((width, height));
+        Ok(())
     }
 
     /// Configure a display-space minimum feature size in CSS/device pixels.
@@ -2083,7 +2109,23 @@ impl Renderer {
 
     /// Get canvas dimensions
     fn get_canvas_size(&self) -> Result<(u32, u32), JsValue> {
+        if let Some(size) = self.explicit_size {
+            return Ok(size);
+        }
         Self::get_canvas_size_from_gl(&self.gl)
+    }
+
+    fn validate_framebuffer_size(width: u32, height: u32) -> Result<(), JsValue> {
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Framebuffer size must be non-zero"));
+        }
+
+        let max_i32 = i32::MAX as u32;
+        if width > max_i32 || height > max_i32 {
+            return Err(JsValue::from_str("Framebuffer size is too large"));
+        }
+
+        Ok(())
     }
 
     /// Get layer reference with error handling
@@ -3478,6 +3520,79 @@ impl Renderer {
         self.render_with_transform(active_layer_ids, color_data, alpha, transform, true)
     }
 
+    /// Render to an offscreen framebuffer and return bottom-up RGBA pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_pixels_with_clear(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+        clear_canvas: bool,
+    ) -> Result<Vec<u8>, JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
+        }
+
+        let transform = self.camera.get_transform_matrix(width, height);
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let pixel_count = Self::checked_u32_to_usize("render output width", width)?
+            .checked_mul(Self::checked_u32_to_usize("render output height", height)?)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| JsValue::from_str("Render output size exceeds platform limits"))?;
+        let mut pixels = Self::reserved_vec("render output pixels", pixel_count)?;
+        pixels.resize(pixel_count, 0);
+
+        let output_fbo = Self::create_fbo(&self.gl, width, height, false)?;
+        let result = (|| {
+            self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+            self.composite_layers_to_target(
+                active_layer_ids,
+                color_data,
+                alpha,
+                clear_canvas,
+                Some(&output_fbo.framebuffer),
+            )?;
+            self.gl
+                .read_pixels_with_opt_u8_array(
+                    0,
+                    0,
+                    width_i32,
+                    height_i32,
+                    WebGl2RenderingContext::RGBA,
+                    WebGl2RenderingContext::UNSIGNED_BYTE,
+                    Some(&mut pixels),
+                )
+                .map_err(|error| {
+                    if error.is_string() {
+                        error
+                    } else {
+                        JsValue::from_str("Failed to read rendered pixels")
+                    }
+                })?;
+            Ok(pixels)
+        })();
+
+        Self::delete_fbo(&self.gl, output_fbo);
+        result
+    }
+
     fn render_with_transform(
         &mut self,
         active_layer_ids: &[u32],
@@ -3490,10 +3605,26 @@ impl Renderer {
         if width == 0 || height == 0 {
             return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
         }
+
+        // STEP 1: Render active layer geometry to FBOs only when geometry/camera state changed.
+        self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+
+        // STEP 2: Composite FBOs to canvas
+        self.composite_layers(active_layer_ids, color_data, alpha, clear_canvas)?;
+
+        Ok(())
+    }
+
+    fn render_layer_fbos(
+        &mut self,
+        active_layer_ids: &[u32],
+        transform: [f32; 9],
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
 
-        // STEP 1: Render active layer geometry to FBOs only when geometry/camera state changed.
         for &layer_id in active_layer_ids {
             let layer_idx = layer_id as usize;
             let should_redraw = {
@@ -3524,9 +3655,6 @@ impl Renderer {
                 }
             }
         }
-
-        // STEP 2: Composite FBOs to canvas
-        self.composite_layers(active_layer_ids, color_data, alpha, clear_canvas)?;
 
         Ok(())
     }
@@ -3594,14 +3722,25 @@ impl Renderer {
         alpha: f32,
         clear_canvas: bool,
     ) -> Result<(), JsValue> {
+        self.composite_layers_to_target(active_layer_ids, color_data, alpha, clear_canvas, None)
+    }
+
+    fn composite_layers_to_target(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        alpha: f32,
+        clear_canvas: bool,
+        target_framebuffer: Option<&WebGlFramebuffer>,
+    ) -> Result<(), JsValue> {
         // Get canvas dimensions
         let (width, height) = self.get_canvas_size()?;
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
 
-        // Bind canvas framebuffer
+        // Bind output framebuffer
         self.gl
-            .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+            .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, target_framebuffer);
         self.gl.viewport(0, 0, width_i32, height_i32);
 
         if clear_canvas {
@@ -3680,6 +3819,15 @@ impl Renderer {
     /// Resize framebuffers when canvas size changes
     pub fn resize(&mut self) -> Result<(), JsValue> {
         let (width, height) = self.get_canvas_size()?;
+        self.resize_to(width, height)
+    }
+
+    /// Resize framebuffers to explicit dimensions.
+    pub fn resize_to(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
+        Self::validate_framebuffer_size(width, height)?;
+        if self.explicit_size.is_some() {
+            self.explicit_size = Some((width, height));
+        }
 
         // Recreate FBO for each active layer
         for layer in self.layers.iter_mut().flatten() {
@@ -3711,7 +3859,10 @@ impl Renderer {
 
         let programs = ShaderPrograms::new(&gl)?;
         let quad_buffer = Self::create_quad_buffer(&gl)?;
-        let (width, height) = Self::get_canvas_size_from_gl(&gl)?;
+        let (width, height) = match self.explicit_size {
+            Some(size) => size,
+            None => Self::get_canvas_size_from_gl(&gl)?,
+        };
         let mut new_fbos = Self::reserved_vec("restored framebuffers", self.layers.len())?;
 
         for layer in &self.layers {
