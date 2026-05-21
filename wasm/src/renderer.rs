@@ -2152,6 +2152,15 @@ impl Renderer {
         Ok(())
     }
 
+    fn color_data_stride(active_layer_ids: &[u32], color_data: &[f32]) -> usize {
+        let rgba_len = active_layer_ids.len().saturating_mul(4);
+        if color_data.len() >= rgba_len {
+            4
+        } else {
+            3
+        }
+    }
+
     /// Draw a specific FBO texture to the current framebuffer
     fn draw_fbo_texture(&self, texture: &WebGlTexture, color: &[f32; 4]) -> Result<(), JsValue> {
         let program = &self.programs.texture;
@@ -3382,7 +3391,41 @@ impl Renderer {
         // Get transform matrix
         let transform = self.camera.get_transform_matrix(width, height);
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform)
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true)
+    }
+
+    /// Render geometry and optionally preserve the existing canvas contents.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_clear(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+        clear_canvas: bool,
+    ) -> Result<(), JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
+        }
+
+        let transform = self.camera.get_transform_matrix(width, height);
+
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform, clear_canvas)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3432,7 +3475,7 @@ impl Renderer {
             tile_height,
         );
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform)
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true)
     }
 
     fn render_with_transform(
@@ -3441,6 +3484,7 @@ impl Renderer {
         color_data: &[f32],
         alpha: f32,
         transform: [f32; 9],
+        clear_canvas: bool,
     ) -> Result<(), JsValue> {
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
@@ -3482,7 +3526,7 @@ impl Renderer {
         }
 
         // STEP 2: Composite FBOs to canvas
-        self.composite_layers(active_layer_ids, color_data, alpha)?;
+        self.composite_layers(active_layer_ids, color_data, alpha, clear_canvas)?;
 
         Ok(())
     }
@@ -3548,6 +3592,7 @@ impl Renderer {
         active_layer_ids: &[u32],
         color_data: &[f32],
         alpha: f32,
+        clear_canvas: bool,
     ) -> Result<(), JsValue> {
         // Get canvas dimensions
         let (width, height) = self.get_canvas_size()?;
@@ -3559,9 +3604,10 @@ impl Renderer {
             .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
         self.gl.viewport(0, 0, width_i32, height_i32);
 
-        // Clear canvas
-        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
-        self.gl.clear(COLOR_BUFFER_BIT);
+        if clear_canvas {
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            self.gl.clear(COLOR_BUFFER_BIT);
+        }
 
         // Setup additive blending for layer compositing (lighter blend mode)
         self.gl.enable(BLEND);
@@ -3569,18 +3615,23 @@ impl Renderer {
         self.gl.blend_equation(FUNC_ADD);
 
         // Render each active layer's FBO to canvas with its color/alpha
+        let color_stride = Self::color_data_stride(active_layer_ids, color_data);
         for (color_index, &layer_id) in active_layer_ids.iter().enumerate() {
             let layer_idx = layer_id as usize;
 
             if let Some(layer) = &self.layers[layer_idx] {
-                // Get RGB color from array (3 floats per layer)
-                let color_offset = color_index * 3;
+                let color_offset = color_index * color_stride;
                 if color_offset + 2 < color_data.len() {
+                    let layer_alpha = if color_stride == 4 {
+                        color_data[color_offset + 3] * alpha
+                    } else {
+                        alpha
+                    };
                     let color = [
                         color_data[color_offset],
                         color_data[color_offset + 1],
                         color_data[color_offset + 2],
-                        alpha, // Use provided alpha
+                        layer_alpha,
                     ];
                     self.draw_fbo_texture(&layer.fbo.texture, &color)?;
                 }

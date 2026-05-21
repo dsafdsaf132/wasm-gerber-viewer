@@ -1,0 +1,37 @@
+{
+  "name": "wasm-gerber-renderer",
+  "version": "0.1.0",
+  "description": "Canvas/WebGL2 Gerber renderer powered by wasm-gerber-viewer",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "wasm/**/*"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../wasm --target web --out-dir ../packages/gerber-renderer/wasm --release",
+    "check": "node --check index.js"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dsafdsaf132/wasm-gerber-viewer.git",
+    "directory": "packages/gerber-renderer"
+  },
+  "keywords": [
+    "gerber",
+    "rs-274x",
+    "webgl",
+    "wasm",
+    "pcb"
+  ],
+  "sideEffects": false
+}
