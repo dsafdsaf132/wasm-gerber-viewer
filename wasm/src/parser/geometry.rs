@@ -1291,6 +1291,30 @@ pub fn flash_aperture(
             return Ok(());
         }
 
+        if let Some(template) = aperture.triangle_template_for_transform(
+            state.layer_scale,
+            state.mirror_x,
+            state.mirror_y,
+            state.layer_rotation,
+        ) {
+            let repeat_count = checked_primitive_count(
+                state.sr_x as usize,
+                state.sr_y as usize,
+                "aperture triangle template flash step repeat",
+            )?;
+            try_reserve_primitives(primitives, repeat_count, "aperture triangle template flash")?;
+            for sy in 0..state.sr_y {
+                for sx in 0..state.sr_x {
+                    primitives.push(Primitive::TriangleTemplateFlash {
+                        template: Rc::clone(&template),
+                        x: x + sx as f32 * state.sr_i,
+                        y: y + sy as f32 * state.sr_j,
+                    });
+                }
+            }
+            return Ok(());
+        }
+
         // Step and Repeat iteration
         for sy in 0..state.sr_y {
             for sx in 0..state.sr_x {

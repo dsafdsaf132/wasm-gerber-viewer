@@ -2,8 +2,17 @@ use super::aperture_macro::ApertureMacro;
 use super::geometry::{scale_primitive, Primitive};
 use super::state::Polarity;
 use super::PolarityLayer;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TriangleTemplateTransformKey {
+    layer_scale: u32,
+    mirror_x: bool,
+    mirror_y: bool,
+    layer_rotation: u32,
+}
 
 /// Aperture definition (Circle, Rectangle, Obround, Polygon, or Macro reference)
 #[derive(Clone, Debug)]
@@ -13,6 +22,7 @@ pub struct Aperture {
     pub has_negative: bool,         // true if primitives contain exposure=0
     pub block_layers: Option<Vec<PolarityLayer>>,
     pub triangle_template: Option<Rc<Vec<f32>>>,
+    triangle_template_cache: RefCell<HashMap<TriangleTemplateTransformKey, Rc<Vec<f32>>>>,
     pub is_solid_circle: bool,
 }
 
@@ -24,6 +34,7 @@ impl Aperture {
             has_negative: false,
             block_layers: None,
             triangle_template: None,
+            triangle_template_cache: RefCell::new(HashMap::new()),
             is_solid_circle: false,
         }
     }
@@ -39,8 +50,69 @@ impl Aperture {
             has_negative,
             block_layers: Some(block_layers),
             triangle_template: None,
+            triangle_template_cache: RefCell::new(HashMap::new()),
             is_solid_circle: false,
         }
+    }
+
+    pub(crate) fn triangle_template_for_transform(
+        &self,
+        layer_scale: f32,
+        mirror_x: bool,
+        mirror_y: bool,
+        layer_rotation: f32,
+    ) -> Option<Rc<Vec<f32>>> {
+        let template = self.triangle_template.as_ref()?;
+        if !layer_scale.is_finite() || layer_scale.abs() <= f32::EPSILON {
+            return None;
+        }
+
+        if layer_scale == 1.0 && !mirror_x && !mirror_y && layer_rotation == 0.0 {
+            return Some(Rc::clone(template));
+        }
+
+        let key = TriangleTemplateTransformKey {
+            layer_scale: layer_scale.to_bits(),
+            mirror_x,
+            mirror_y,
+            layer_rotation: layer_rotation.to_bits(),
+        };
+        if let Some(cached_template) = self.triangle_template_cache.borrow().get(&key) {
+            return Some(Rc::clone(cached_template));
+        }
+
+        let cos_r = layer_rotation.cos();
+        let sin_r = layer_rotation.sin();
+        let mut vertices = Vec::new();
+        if vertices.try_reserve(template.len()).is_err() {
+            return None;
+        }
+
+        for point in template.chunks_exact(2) {
+            let mut x = point[0] * layer_scale;
+            let mut y = point[1] * layer_scale;
+            if mirror_x {
+                x = -x;
+            }
+            if mirror_y {
+                y = -y;
+            }
+            vertices.push(x * cos_r - y * sin_r);
+            vertices.push(x * sin_r + y * cos_r);
+        }
+
+        if mirror_x ^ mirror_y {
+            for triangle in vertices.chunks_exact_mut(6) {
+                triangle.swap(2, 4);
+                triangle.swap(3, 5);
+            }
+        }
+
+        let transformed_template = Rc::new(vertices);
+        self.triangle_template_cache
+            .borrow_mut()
+            .insert(key, Rc::clone(&transformed_template));
+        Some(transformed_template)
     }
 }
 

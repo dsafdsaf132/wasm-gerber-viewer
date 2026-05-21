@@ -1080,6 +1080,30 @@ M02*";
 }
 
 #[test]
+fn transformed_triangle_aperture_flashes_use_template_instances() {
+    let data = "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10R,1.0X0.5*%
+%LR45.0*%
+D10*
+X000000Y000000D03*
+X2000000Y000000D03*
+M02*";
+
+    let layers = parse_gerber(data).expect("rotated rectangle flashes should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert!(layers[0].triangles.vertices.is_empty());
+    assert_eq!(layers[0].triangle_templates.len(), 1);
+    assert_eq!(layers[0].triangle_templates[0].vertices.len(), 12);
+    assert_eq!(layers[0].triangle_templates[0].instance_x.len(), 2);
+    assert_eq!(layers[0].triangle_templates[0].instance_y.len(), 2);
+    assert_approx_eq(layers[0].triangle_templates[0].instance_x[0], 0.0);
+    assert_approx_eq(layers[0].triangle_templates[0].instance_x[1], 2.0);
+}
+
+#[test]
 fn aperture_block_flashes_stored_graphics_at_operation_coordinate() {
     let data = "\
 %FSLAX24Y24*%
