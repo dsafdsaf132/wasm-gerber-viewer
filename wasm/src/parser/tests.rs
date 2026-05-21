@@ -1400,10 +1400,8 @@ X1000000Y0000000D01*
 M02*",
     )
     .expect("zero-width solid circle D01 should parse");
-    let layer = &layers[0];
 
-    assert!(layer.lines.start_x.is_empty());
-    assert!(layer.triangles.vertices.is_empty());
+    assert!(layers.is_empty());
 }
 
 #[test]

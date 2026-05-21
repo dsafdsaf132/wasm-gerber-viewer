@@ -53,6 +53,10 @@ struct PrimitiveBufferCounts {
 
 impl PrimitiveBufferCounts {
     fn include(&mut self, primitive: &Primitive) {
+        if !primitive_is_renderable(primitive) {
+            return;
+        }
+
         match primitive {
             Primitive::Triangle { hole_radius, .. } => {
                 self.triangles += 1;
@@ -107,6 +111,92 @@ fn primitive_has_hole(primitive: &Primitive) -> bool {
         | Primitive::Thermal { .. }
         | Primitive::Line { .. }
         | Primitive::TriangleTemplateFlash { .. } => false,
+    }
+}
+
+const GEOMETRY_EPSILON: f32 = 1.0e-6;
+
+fn finite_point(x: f32, y: f32) -> bool {
+    x.is_finite() && y.is_finite()
+}
+
+fn has_positive_extent(value: f32) -> bool {
+    value.is_finite() && value > GEOMETRY_EPSILON
+}
+
+fn points_are_distinct(start_x: f32, start_y: f32, end_x: f32, end_y: f32) -> bool {
+    let dx = end_x - start_x;
+    let dy = end_y - start_y;
+    dx.is_finite() && dy.is_finite() && dx * dx + dy * dy > GEOMETRY_EPSILON * GEOMETRY_EPSILON
+}
+
+fn triangle_has_area(vertices: &[[f32; 2]; 3]) -> bool {
+    if !vertices
+        .iter()
+        .all(|point| finite_point(point[0], point[1]))
+    {
+        return false;
+    }
+
+    let area2 = (vertices[1][0] - vertices[0][0]) * (vertices[2][1] - vertices[0][1])
+        - (vertices[2][0] - vertices[0][0]) * (vertices[1][1] - vertices[0][1]);
+    area2.is_finite() && area2.abs() > GEOMETRY_EPSILON * GEOMETRY_EPSILON
+}
+
+fn primitive_is_renderable(primitive: &Primitive) -> bool {
+    match primitive {
+        Primitive::Triangle { vertices, .. } => triangle_has_area(vertices),
+        Primitive::Circle { x, y, radius, .. } => {
+            finite_point(*x, *y) && has_positive_extent(*radius)
+        }
+        Primitive::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            ..
+        } => {
+            finite_point(*x, *y)
+                && has_positive_extent(*radius)
+                && has_positive_extent(*thickness)
+                && start_angle.is_finite()
+                && end_angle.is_finite()
+                && (*end_angle - *start_angle).abs() > GEOMETRY_EPSILON
+        }
+        Primitive::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            ..
+        } => {
+            finite_point(*x, *y)
+                && has_positive_extent(*outer_diameter)
+                && inner_diameter.is_finite()
+                && *inner_diameter < *outer_diameter
+                && gap_thickness.is_finite()
+                && rotation.is_finite()
+        }
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            ..
+        } => {
+            finite_point(*start_x, *start_y)
+                && finite_point(*end_x, *end_y)
+                && has_positive_extent(*width)
+                && points_are_distinct(*start_x, *start_y, *end_x, *end_y)
+        }
+        Primitive::TriangleTemplateFlash { template, x, y } => {
+            finite_point(*x, *y) && template.len() >= 6 && template.len().is_multiple_of(6)
+        }
     }
 }
 
@@ -314,6 +404,10 @@ impl PrimitiveOutputBuffers {
     }
 
     fn push_primitive(&mut self, primitive: Primitive) -> Result<(), JsValue> {
+        if !primitive_is_renderable(&primitive) {
+            return Ok(());
+        }
+
         // Unit conversion: aperture.rs already converts to mm using unit_multiplier.
         const TO_MM: f32 = 1.0;
 
