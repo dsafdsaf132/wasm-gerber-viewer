@@ -577,7 +577,6 @@ impl GerberProcessor {
     /// Resize framebuffers to explicit dimensions.
     pub fn resize_to(&mut self, width: u32, height: u32) -> Result<String, JsValue> {
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_framebuffer_size(width, height)?;
             renderer.resize_to(width, height)?;
             Ok("resize_done".to_string())
         } else {

@@ -322,7 +322,12 @@ class FrameState {
 
 async function loadWasmModule(rendererOptions) {
   if (rendererOptions.wasmModule) {
-    return { wasmModule: rendererOptions.wasmModule, wasmModuleUrl: null };
+    return {
+      wasmModule: rendererOptions.wasmModule,
+      wasmModuleUrl: rendererOptions.wasmModuleUrl
+        ? toUrl(rendererOptions.wasmModuleUrl)
+        : null,
+    };
   }
 
   const wasmModuleUrls = rendererOptions.wasmModuleUrl
@@ -361,7 +366,13 @@ async function initializeWasmModule(wasmModule, wasmModuleUrl, rendererOptions) 
     ? toUrl(rendererOptions.wasmBinaryUrl)
     : wasmModuleUrl
       ? new URL("wasm_gerber_processor_bg.wasm", wasmModuleUrl)
-      : new URL("./wasm/wasm_gerber_processor_bg.wasm", import.meta.url);
+      : null;
+
+  if (!wasmBinaryUrl) {
+    await wasmModule.default();
+    return;
+  }
+
   const bytes = await readBinaryUrl(wasmBinaryUrl);
   await wasmModule.default({ module_or_path: bytes });
 }
