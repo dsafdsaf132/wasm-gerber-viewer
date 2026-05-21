@@ -68,6 +68,8 @@ wasm-gerber-viewer/
 │   ├── screenshot-exporter.js         # Screenshot export
 │   ├── source-loader.js               # Local, archive, and URL loading
 │   └── viewport.js                    # Camera and viewport math
+├── packages/
+│   └── gerber-renderer/               # npm package and Node CLI
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
 │   ├── pkg/                           # Generated wasm-pack output

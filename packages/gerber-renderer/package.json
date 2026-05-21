@@ -16,7 +16,14 @@
     }
   },
   "bin": {
-    "gerber-renderer": "./bin/gerber-renderer.js"
+    "gerber-renderer": "bin/gerber-renderer.js"
+  },
+  "homepage": "https://github.com/dsafdsaf132/wasm-gerber-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/dsafdsaf132/wasm-gerber-viewer/issues"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "files": [
     "bin",
@@ -24,6 +31,8 @@
     "index.d.ts",
     "node.js",
     "node.d.ts",
+    "README.md",
+    "LICENSE",
     "wasm/**/*"
   ],
   "scripts": {
@@ -32,20 +41,14 @@
     "clean:wasm": "node scripts/clean-wasm.mjs",
     "prepack": "npm run build:wasm && npm run stage:wasm",
     "postpack": "npm run clean:wasm",
-    "check": "node --check index.js && node --check node.js && node --check bin/gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs"
-  },
-  "peerDependencies": {
-    "node-gles-webgl2": "^0.1.0"
-  },
-  "peerDependenciesMeta": {
-    "node-gles-webgl2": {
-      "optional": true
-    }
+    "prepublishOnly": "npm run check",
+    "check": "node --check index.js && node --check node.js && node --check bin/gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs",
+    "verify:publish": "npm run check && npm pack --dry-run"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dsafdsaf132/wasm-gerber-viewer.git",
+    "url": "git+https://github.com/dsafdsaf132/wasm-gerber-viewer.git",
     "directory": "packages/gerber-renderer"
   },
   "keywords": [
