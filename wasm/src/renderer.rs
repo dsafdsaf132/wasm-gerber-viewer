@@ -1037,8 +1037,7 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create path sector buffer"))?;
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        self.gl
-            .buffer_data_with_array_buffer_view(ARRAY_BUFFER, data, STATIC_DRAW);
+        Self::upload_float_array_to_bound_buffer(&self.gl, data);
 
         let stride = 7 * 4;
         self.enable_path_sector_attribute("position", 2, stride, 0)?;
@@ -1075,7 +1074,7 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, data, STATIC_DRAW);
+        Self::upload_float_array_to_bound_buffer(gl, data);
         let loc = match Self::shader_attribute(program, attr_name) {
             Ok(loc) => loc,
             Err(error) => {
@@ -1965,11 +1964,7 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        // Avoid JS memory copy.
-        unsafe {
-            let array = Float32Array::view(data);
-            gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
-        }
+        Self::upload_f32_slice_to_bound_buffer(gl, data);
         let loc = program.attributes.get(attr_name).ok_or_else(|| {
             JsValue::from_str(&format!("Missing shader attribute: {}", attr_name))
         })?;
@@ -2003,13 +1998,22 @@ impl Renderer {
 
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
 
-        // Avoid JS memory copy.
-        unsafe {
-            let array = Float32Array::view(&vertices);
-            gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
-        }
+        Self::upload_f32_slice_to_bound_buffer(gl, &vertices);
 
         Ok(buffer)
+    }
+
+    fn upload_float_array_to_bound_buffer(gl: &WebGl2RenderingContext, data: &Float32Array) {
+        gl.buffer_data_with_f64(ARRAY_BUFFER, data.byte_length() as f64, STATIC_DRAW);
+        gl.buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
+    }
+
+    fn upload_f32_slice_to_bound_buffer(gl: &WebGl2RenderingContext, data: &[f32]) {
+        // Avoid JS memory copy.
+        unsafe {
+            let array = Float32Array::view(data);
+            Self::upload_float_array_to_bound_buffer(gl, &array);
+        }
     }
 
     fn get_canvas_size_from_gl(gl: &WebGl2RenderingContext) -> Result<(u32, u32), JsValue> {
@@ -2160,12 +2164,7 @@ impl Renderer {
                     .create_buffer()
                     .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
-                // Avoid JS memory copy.
-                unsafe {
-                    let array = Float32Array::view(&triangles.vertices);
-                    self.gl
-                        .buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
-                }
+                Self::upload_f32_slice_to_bound_buffer(&self.gl, &triangles.vertices);
 
                 // Set up attributes
                 let position_loc = Self::shader_attribute(program, "position")?;
@@ -2320,15 +2319,7 @@ impl Renderer {
                         .create_buffer()
                         .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
                     self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
-                    // Avoid JS memory copy.
-                    unsafe {
-                        let array = Float32Array::view(&template.vertices);
-                        self.gl.buffer_data_with_array_buffer_view(
-                            ARRAY_BUFFER,
-                            &array,
-                            STATIC_DRAW,
-                        );
-                    }
+                    Self::upload_f32_slice_to_bound_buffer(&self.gl, &template.vertices);
 
                     let position_loc = Self::shader_attribute(program, "position")?;
                     self.gl.enable_vertex_attrib_array(position_loc);
@@ -3107,11 +3098,7 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        // Avoid JS memory copy.
-        unsafe {
-            let array = Float32Array::view(data);
-            gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
-        }
+        Self::upload_f32_slice_to_bound_buffer(gl, data);
         let loc = Self::shader_attribute(program, attr_name)?;
         gl.enable_vertex_attrib_array(loc);
         gl.vertex_attrib_pointer_with_i32(loc, components, FLOAT, false, 0, 0);
@@ -3127,11 +3114,7 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create path sector buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        // Avoid JS memory copy.
-        unsafe {
-            let array = Float32Array::view(data);
-            gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, STATIC_DRAW);
-        }
+        Self::upload_f32_slice_to_bound_buffer(gl, data);
 
         let stride = 7 * 4;
         Self::enable_interleaved_attribute(gl, program, "position", 2, stride, 0)?;
