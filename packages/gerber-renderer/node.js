@@ -23,6 +23,14 @@ const DEFAULT_COLORS = [
 const DEFAULT_WIDTH = 1200;
 const DEFAULT_HEIGHT = 800;
 const DEFAULT_BACKGROUND = null;
+const REQUIRED_WEBGL2_METHODS = [
+  "createVertexArray",
+  "bindVertexArray",
+  "deleteVertexArray",
+  "drawArraysInstanced",
+  "vertexAttribDivisor",
+  "readPixels",
+];
 
 export async function createNodeGerberRenderer(rendererOptions = {}) {
   return NodeGerberRenderer.create(rendererOptions);
@@ -164,7 +172,10 @@ export class NodeGerberRenderer {
   }
 
   getContext(width, height) {
-    if (this.gl) return this.gl;
+    if (this.gl) {
+      validateWebGl2Context(this.gl);
+      return this.gl;
+    }
 
     this.gl = createNodeGlesContext(
       width,
@@ -396,8 +407,7 @@ function createNodeGlesContext(width, height, rendererOptions, contextAttributes
 
   throw new Error(
     `${moduleName} failed to create a compatible WebGL2 context. ` +
-      "The installed GLES module must expose createVertexArray(), " +
-      "drawArraysInstanced(), and vertexAttribDivisor().",
+      `The installed GLES module must expose ${REQUIRED_WEBGL2_METHODS.join(", ")}.`,
     { cause: errors[0] },
   );
 }
@@ -431,16 +441,12 @@ function loadNodeGlesModule(rendererOptions) {
 }
 
 function validateWebGl2Context(gl) {
-  const requiredMethods = [
-    "createVertexArray",
-    "drawArraysInstanced",
-    "vertexAttribDivisor",
-    "readPixels",
-  ];
-  const missing = requiredMethods.filter((name) => typeof gl[name] !== "function");
+  const missing = REQUIRED_WEBGL2_METHODS.filter(
+    (name) => typeof gl[name] !== "function",
+  );
   if (missing.length > 0) {
     throw new Error(
-      `node-gles returned a context without required WebGL2 methods: ${missing.join(", ")}`,
+      `GLES context is missing required WebGL2 methods: ${missing.join(", ")}`,
     );
   }
 }
@@ -474,10 +480,16 @@ function addLayerToProcessor(processor, content, offsetX, offsetY) {
 }
 
 function normalizeFrameOptions(frameOptions) {
+  if (frameOptions.clear === false) {
+    throw new Error(
+      "clear:false is not supported by Node rendering because each frame renders to a fresh output buffer.",
+    );
+  }
+
   return {
     width: positiveIntegerOrDefault(frameOptions.width, DEFAULT_WIDTH),
     height: positiveIntegerOrDefault(frameOptions.height, DEFAULT_HEIGHT),
-    clear: frameOptions.clear !== false,
+    clear: true,
     background:
       "background" in frameOptions ? frameOptions.background : DEFAULT_BACKGROUND,
     fit: frameOptions.fit !== false,

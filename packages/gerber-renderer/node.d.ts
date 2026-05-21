@@ -44,7 +44,7 @@ export type NodeRendererOptions = {
 export type NodeFrameOptions = {
   width?: number;
   height?: number;
-  clear?: boolean;
+  clear?: true;
   background?: null | string | RGBAColor;
   fit?: boolean;
   padding?: number;

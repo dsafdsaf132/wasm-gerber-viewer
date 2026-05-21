@@ -46,7 +46,10 @@ export async function renderGerberToPng(
 ) {
   const renderer = await createGerberRenderer(
     canvas,
-    frameOptions.rendererOptions || {},
+    {
+      releaseContext: false,
+      ...(frameOptions.rendererOptions || {}),
+    },
   );
 
   try {
