@@ -451,6 +451,7 @@ export class GerberViewer {
     this.isInitialUrlLoading = Boolean(getInitialSourceUrl());
     this.isLoadingLayers = false;
     this.loadingWorkspaceStatus = "Loading files";
+    this.pendingRenderFrame = null;
 
     // Layers
     this.layers = [];
@@ -604,7 +605,7 @@ export class GerberViewer {
     this.updateRulerControls();
     this.updateMeasurementUnitControl();
     this.updateViewFlipControls();
-    this.render();
+    this.requestRender();
     this.loadInitialUrlSource();
   }
 
@@ -732,7 +733,7 @@ export class GerberViewer {
       }
     }
 
-    this.render();
+    this.requestRender();
   }
 
   setupEventListeners() {
@@ -1026,7 +1027,7 @@ export class GerberViewer {
     } finally {
       this.isRestoringWebGlContext = false;
       this.updateUiState();
-      this.render();
+      this.requestRender();
     }
   }
 
@@ -1249,7 +1250,7 @@ export class GerberViewer {
       if (typeof this.wasmProcessor?.set_minimum_feature_pixels === "function") {
         this.wasmProcessor.set_minimum_feature_pixels(this.minimumFeaturePixels);
       }
-      this.render();
+      this.requestRender();
     } catch (error) {
       this.minimumFeaturePixels = previousPixels;
       this.syncOptionControls();
@@ -1368,7 +1369,7 @@ export class GerberViewer {
 
       this.restoreCanvasViewState(viewState);
       this.renderLayerList();
-      this.render();
+      this.requestRender();
     } finally {
       this.hideLoadingModal();
     }
@@ -1620,7 +1621,7 @@ export class GerberViewer {
       this.camera.offsetY = 2 * viewportCenter.y - this.camera.offsetY;
     }
 
-    this.render();
+    this.requestRender();
     this.updateViewFlipControls();
   }
 
@@ -1882,7 +1883,7 @@ export class GerberViewer {
 
       if (loadedCount > 0) {
         this.renderLayerList();
-        this.render();
+        this.requestRender();
         this.fitView();
         this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
       }
@@ -1939,7 +1940,7 @@ export class GerberViewer {
 
           if (loadedCount > 0) {
             this.renderLayerList();
-            this.render();
+            this.requestRender();
             this.fitView();
             this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
           }
@@ -2701,7 +2702,7 @@ export class GerberViewer {
       this.nextColorIndex = nextColorIndex;
       this.restoreCanvasViewState(viewState);
       this.renderLayerList();
-      this.render();
+      this.requestRender();
     } finally {
       this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       this.isRecoveringWasmProcessor = false;
@@ -2878,6 +2879,17 @@ export class GerberViewer {
     }
   }
 
+  requestRender() {
+    if (this.pendingRenderFrame !== null) {
+      return;
+    }
+
+    this.pendingRenderFrame = requestAnimationFrame(() => {
+      this.pendingRenderFrame = null;
+      this.render();
+    });
+  }
+
   render() {
     if (
       !this.wasmProcessor ||
@@ -2962,7 +2974,7 @@ export class GerberViewer {
     this.camera.offsetY =
       fitView.targetY - fitView.centerY * this.getViewScaleY();
 
-    this.render();
+    this.requestRender();
     this.updateUiState();
   }
 
@@ -3039,7 +3051,7 @@ export class GerberViewer {
       maxZoom: this.maxZoom,
     });
     if (didZoom) {
-      this.render();
+      this.requestRender();
     }
   }
 
@@ -3150,7 +3162,7 @@ export class GerberViewer {
       camera: this.camera,
     });
 
-    this.render();
+    this.requestRender();
   }
 
   // Touch event handlers
@@ -3240,7 +3252,7 @@ export class GerberViewer {
       });
 
       this.lastTouchCenter = currentCenter;
-      this.render();
+      this.requestRender();
     } else if (this.touches.length === 1) {
       if (this.isRulerActive) {
         return;
@@ -3262,7 +3274,7 @@ export class GerberViewer {
       });
 
       this.lastTouchCenter = currentPos;
-      this.render();
+      this.requestRender();
     }
   }
 
@@ -3385,14 +3397,14 @@ export class GerberViewer {
     const b = parseInt(hexColor.substr(5, 2), 16) / 255;
 
     layer.color = [r, g, b];
-    this.render();
+    this.requestRender();
     this.updateUiState();
   }
 
   updateGlobalAlpha(alpha) {
     this.globalAlpha = alpha;
     // Re-render with new alpha
-    this.render();
+    this.requestRender();
   }
 
   deleteLayer(layerId) {
@@ -3418,7 +3430,7 @@ export class GerberViewer {
     }
 
     this.renderLayerList();
-    this.render();
+    this.requestRender();
     this.updateUiState();
   }
 
@@ -3434,7 +3446,7 @@ export class GerberViewer {
       this.nextLayerDomId = 0;
       this.fitViewZoom = null;
       this.renderLayerList();
-      this.render();
+      this.requestRender();
       this.updateUiState();
     } catch (error) {
       console.error("[Layer] Failed to clear all layers:", error);
@@ -3447,7 +3459,7 @@ export class GerberViewer {
       layer.visible = true;
     });
     this.renderLayerList();
-    this.render();
+    this.requestRender();
     this.updateUiState();
   }
 
@@ -3456,7 +3468,7 @@ export class GerberViewer {
       layer.visible = this.layerFilterStore.matches(layer, kind);
     });
     this.renderLayerList();
-    this.render();
+    this.requestRender();
     this.updateUiState();
   }
 
@@ -3465,7 +3477,7 @@ export class GerberViewer {
       layer.visible = false;
     });
     this.renderLayerList();
-    this.render();
+    this.requestRender();
     this.updateUiState();
   }
 
@@ -3533,7 +3545,7 @@ export class GerberViewer {
       const [layer] = this.layers.splice(fromIndex, 1);
       this.layers.splice(toIndex, 0, layer);
       this.renderLayerList();
-      this.render();
+      this.requestRender();
       this.updateUiState();
     }
 
@@ -3584,12 +3596,12 @@ export class GerberViewer {
       onColorChange: (layerId, color) => this.updateLayerColor(layerId, color),
       onVisibilityChange: (layer, visible) => {
         layer.visible = visible;
-        this.render();
+        this.requestRender();
         this.updateUiState();
       },
       onToggleVisibility: (layer) => {
         layer.visible = !layer.visible;
-        this.render();
+        this.requestRender();
         this.updateUiState();
       },
       onDelete: (layerId) => this.deleteLayer(layerId),
