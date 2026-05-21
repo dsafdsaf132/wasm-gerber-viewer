@@ -1,7 +1,7 @@
-const DEFAULT_WASM_MODULE_URL = new URL(
-  "./wasm/wasm_gerber_processor.js",
-  import.meta.url,
-);
+const DEFAULT_WASM_MODULE_URLS = [
+  new URL("./wasm/wasm_gerber_processor.js", import.meta.url),
+  new URL("../../wasm/pkg/wasm_gerber_processor.js", import.meta.url),
+];
 
 const DEFAULT_COLORS = [
   [1.0, 0.0, 0.0],
@@ -360,17 +360,25 @@ async function loadWasmModule(rendererOptions) {
     return rendererOptions.wasmModule;
   }
 
-  const wasmModuleUrl =
-    rendererOptions.wasmModuleUrl || DEFAULT_WASM_MODULE_URL.href;
-  try {
-    return await import(String(wasmModuleUrl));
-  } catch (error) {
-    throw new Error(
-      `Failed to load wasm-gerber renderer module from ${wasmModuleUrl}. ` +
-        "Run npm run build:wasm before using the package.",
-      { cause: error },
-    );
+  const wasmModuleUrls = rendererOptions.wasmModuleUrl
+    ? [rendererOptions.wasmModuleUrl]
+    : DEFAULT_WASM_MODULE_URLS;
+  const errors = [];
+
+  for (const wasmModuleUrl of wasmModuleUrls) {
+    try {
+      return await import(String(wasmModuleUrl));
+    } catch (error) {
+      errors.push({ wasmModuleUrl, error });
+    }
   }
+
+  const attemptedUrls = wasmModuleUrls.map(String).join(", ");
+  throw new Error(
+    `Failed to load wasm-gerber renderer module from ${attemptedUrls}. ` +
+      "Run npm run build:wasm before using the package.",
+    { cause: errors[0]?.error },
+  );
 }
 
 function applyProcessorOptions(processor, frameOptions) {

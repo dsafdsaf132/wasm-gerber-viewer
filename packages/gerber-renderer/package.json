@@ -17,8 +17,12 @@
     "wasm/**/*"
   ],
   "scripts": {
-    "build:wasm": "wasm-pack build ../../wasm --target web --out-dir ../packages/gerber-renderer/wasm --release",
-    "check": "node --check index.js"
+    "build:wasm": "wasm-pack build ../../wasm --target web --out-dir pkg --release",
+    "stage:wasm": "node scripts/stage-wasm.mjs",
+    "clean:wasm": "node scripts/clean-wasm.mjs",
+    "prepack": "npm run build:wasm && npm run stage:wasm",
+    "postpack": "npm run clean:wasm",
+    "check": "node --check index.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs"
   },
   "license": "MIT",
   "repository": {

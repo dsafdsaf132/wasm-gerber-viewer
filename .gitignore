@@ -28,6 +28,7 @@ Thumbs.db
 wasm_gerber_processor/target/
 wasm/target
 wasm/pkg/
+packages/gerber-renderer/wasm/
 
 # Large demo files are stored in Vercel Blob.
 demo/performance-test-arc-region-*.gbr
