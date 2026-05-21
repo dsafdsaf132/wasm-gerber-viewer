@@ -35,7 +35,7 @@
     "check": "node --check index.js && node --check node.js && node --check bin/gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs"
   },
   "peerDependencies": {
-    "node-gles-webgl2": "*"
+    "node-gles-webgl2": "^0.1.0"
   },
   "peerDependenciesMeta": {
     "node-gles-webgl2": {
