@@ -563,6 +563,13 @@ impl Renderer {
         Self::validate_js_finite_array("circle x", &x)?;
         Self::validate_js_finite_array("circle y", &y)?;
         Self::validate_js_non_negative_array("circle radius", &radius)?;
+        let hole_radius = Self::js_f32_array(&circles, "holeRadius")?;
+        let has_holes = hole_radius.length() > 0;
+        let program = if has_holes {
+            &self.programs.circle_holed
+        } else {
+            &self.programs.circle
+        };
 
         let vao = self
             .gl
@@ -571,11 +578,11 @@ impl Renderer {
         self.gl.bind_vertex_array(Some(&vao));
         buffer_cache.circle_vao = Some(vao);
         buffer_cache.circle_instance_count = instance_count;
-        self.bind_quad_position(&self.programs.circle)?;
+        self.bind_quad_position(program)?;
         let center_x_buffer = Self::create_attrib_buffer_from_js_array(
             &self.gl,
             &x,
-            &self.programs.circle,
+            program,
             "center_x_instance",
             1,
             1,
@@ -584,7 +591,7 @@ impl Renderer {
         let center_y_buffer = Self::create_attrib_buffer_from_js_array(
             &self.gl,
             &y,
-            &self.programs.circle,
+            program,
             "center_y_instance",
             1,
             1,
@@ -593,34 +600,14 @@ impl Renderer {
         let radius_buffer = Self::create_attrib_buffer_from_js_array(
             &self.gl,
             &radius,
-            &self.programs.circle,
+            program,
             "radius_instance",
             1,
             1,
         )?;
         buffer_cache.circle_radius_buffer = Some(radius_buffer);
 
-        let hole_radius = Self::js_f32_array(&circles, "holeRadius")?;
-        if hole_radius.length() == 0 {
-            Self::use_constant_vertex_attrib_1f(
-                &self.gl,
-                &self.programs.circle,
-                "hole_x_instance",
-                0.0,
-            )?;
-            Self::use_constant_vertex_attrib_1f(
-                &self.gl,
-                &self.programs.circle,
-                "hole_y_instance",
-                0.0,
-            )?;
-            Self::use_constant_vertex_attrib_1f(
-                &self.gl,
-                &self.programs.circle,
-                "hole_radius_instance",
-                0.0,
-            )?;
-        } else {
+        if has_holes {
             let hole_x = Self::js_f32_array(&circles, "holeX")?;
             let hole_y = Self::js_f32_array(&circles, "holeY")?;
             Self::validate_js_array_len("circle hole_x", &hole_x, instance_count as u32)?;
@@ -632,7 +619,7 @@ impl Renderer {
             buffer_cache.circle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &hole_x,
-                &self.programs.circle,
+                program,
                 "hole_x_instance",
                 1,
                 1,
@@ -640,7 +627,7 @@ impl Renderer {
             buffer_cache.circle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
                 &self.gl,
                 &hole_y,
-                &self.programs.circle,
+                program,
                 "hole_y_instance",
                 1,
                 1,
@@ -649,7 +636,7 @@ impl Renderer {
                 Some(Self::create_attrib_buffer_from_js_array(
                     &self.gl,
                     &hole_radius,
-                    &self.programs.circle,
+                    program,
                     "hole_radius_instance",
                     1,
                     1,
