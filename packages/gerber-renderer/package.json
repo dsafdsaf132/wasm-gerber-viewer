@@ -34,9 +34,6 @@
     "postpack": "npm run clean:wasm",
     "check": "node --check index.js && node --check node.js && node --check bin/gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs"
   },
-  "optionalDependencies": {
-    "node-gles": "^0.0.17"
-  },
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -34,6 +34,8 @@ export type NodeRendererOptions = {
   wasmModuleUrl?: string | URL;
   wasmBinaryUrl?: string | URL;
   wasmInitInput?: unknown;
+  glesModule?: unknown;
+  glesModuleName?: string;
   gl?: unknown;
   contextAttributes?: Record<string, unknown>;
   releaseContext?: boolean;

@@ -169,6 +169,7 @@ export class NodeGerberRenderer {
     this.gl = createNodeGlesContext(
       width,
       height,
+      this.rendererOptions,
       this.rendererOptions.contextAttributes || {},
     );
     return this.gl;
@@ -366,31 +367,20 @@ async function readBinaryUrl(url) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-function createNodeGlesContext(width, height, contextAttributes) {
-  let nodeGles;
-  try {
-    nodeGles = require("node-gles");
-  } catch (error) {
-    throw new Error(
-      "node-gles is required for Node CLI rendering. Install it with `npm install node-gles`.",
-      { cause: error },
-    );
-  }
+function createNodeGlesContext(width, height, rendererOptions, contextAttributes) {
+  const { moduleName, module: nodeGles } = loadNodeGlesModule(rendererOptions);
 
   const createContext =
     nodeGles.binding?.createWebGLRenderingContext ||
     nodeGles.createWebGLRenderingContext;
   if (typeof createContext !== "function") {
-    throw new Error("node-gles does not expose createWebGLRenderingContext().");
+    throw new Error(`${moduleName} does not expose createWebGLRenderingContext().`);
   }
 
   const attempts = [
-    [width, height, contextAttributes],
-    [width, height],
     [{ width, height, ...contextAttributes }],
-    [contextAttributes],
-    [],
   ];
+  const errors = [];
 
   for (const args of attempts) {
     try {
@@ -399,12 +389,45 @@ function createNodeGlesContext(width, height, contextAttributes) {
         validateWebGl2Context(gl);
         return gl;
       }
-    } catch (_error) {
-      // Try the next node-gles signature.
+    } catch (error) {
+      errors.push(error);
     }
   }
 
-  throw new Error("node-gles failed to create a WebGL2 context.");
+  throw new Error(
+    `${moduleName} failed to create a compatible WebGL2 context. ` +
+      "The installed GLES module must expose createVertexArray(), " +
+      "drawArraysInstanced(), and vertexAttribDivisor().",
+    { cause: errors[0] },
+  );
+}
+
+function loadNodeGlesModule(rendererOptions) {
+  if (rendererOptions.glesModule) {
+    return { moduleName: "custom GLES module", module: rendererOptions.glesModule };
+  }
+
+  const moduleNames = [
+    rendererOptions.glesModuleName,
+    process.env.GERBER_RENDERER_GLES_MODULE,
+    "node-gles-webgl2",
+    "node-gles",
+  ].filter(Boolean);
+  const errors = [];
+
+  for (const moduleName of moduleNames) {
+    try {
+      return { moduleName, module: require(moduleName) };
+    } catch (error) {
+      errors.push({ moduleName, error });
+    }
+  }
+
+  throw new Error(
+    "A WebGL2-capable GLES module is required for Node CLI rendering. " +
+      "Install node-gles-webgl2 or pass rendererOptions.glesModule.",
+    { cause: errors[0]?.error },
+  );
 }
 
 function validateWebGl2Context(gl) {
