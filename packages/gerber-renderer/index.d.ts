@@ -45,6 +45,16 @@ export type FrameOptions = {
   minimumFeaturePixels?: number;
   globalAlpha?: number;
   rendererOptions?: RendererOptions;
+  onLayerError?: (failure: LayerFailure) => void;
+  layerErrorMode?: LayerErrorMode;
+};
+
+export type LayerErrorMode = "skip" | "throw";
+
+export type LayerFailure = {
+  layer: GerberLayer;
+  name: string;
+  error: unknown;
 };
 
 export type LayerOptions = {
@@ -87,6 +97,11 @@ export declare class GerberRenderer {
   ): Promise<void>;
 
   renderLayer(layer: GerberLayer, layerOptions?: LayerOptions): Promise<number>;
+
+  renderLayers(
+    layers: GerberLayer | GerberLayer[] | FileList,
+    options?: Pick<FrameOptions, "onLayerError" | "layerErrorMode">,
+  ): Promise<{ renderedCount: number; failures: LayerFailure[] }>;
 
   exportPng(exportOptions?: ExportOptions): Promise<Blob>;
 

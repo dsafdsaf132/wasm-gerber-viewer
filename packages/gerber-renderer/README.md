@@ -6,7 +6,7 @@ The package provides:
 
 - Browser canvas rendering from Gerber source strings, `File`, `Blob`, `ArrayBuffer`, or `Uint8Array` inputs
 - Node.js PNG rendering through a headless WebGL2 context
-- A `gerber-renderer` CLI for rendering Gerber files to PNG
+- A `gerber-renderer` CLI for rendering Gerber files or `.tar.gz`/`.tgz` archives to PNG
 - Bundled `wasm-bindgen` output generated during packaging
 
 The browser entrypoint uses the caller's WebGL2 canvas. The Node.js entrypoint
@@ -62,10 +62,16 @@ import { createGerberRenderer } from "wasm-gerber-renderer";
 const renderer = await createGerberRenderer(canvas);
 
 await renderer.withFrame({ width: 1200, height: 800, padding: 24 }, async () => {
-  await renderer.renderLayer(topCopper, { color: [1, 0, 0] });
-  await renderer.renderLayer(bottomCopper, { color: [0, 0.7, 1], alpha: 0.8 });
+  await renderer.renderLayers([
+    { source: topCopper, color: [1, 0, 0] },
+    { source: bottomCopper, color: [0, 0.7, 1], alpha: 0.8 },
+  ]);
 });
 ```
+
+Batch helpers render as many valid layers as possible by default. If one layer
+fails to parse, the remaining layers are still rendered. Use `onLayerError` to
+inspect skipped layers, or set `layerErrorMode: "throw"` for strict behavior.
 
 ## Type Reference
 
@@ -139,11 +145,12 @@ rendering from the filesystem.
 
 | API | Description |
 | --- | --- |
-| `renderGerberToCanvas(canvas, layers, frameOptions)` | One-shot render into an existing WebGL2-capable canvas. `layers` may be a single `GerberLayer`, an array of layers, or a `FileList`. |
-| `renderGerberToPng(canvas, layers, frameOptions, exportOptions)` | Renders through a browser canvas and returns a PNG `Blob`. `layers` accepts the same values as `renderGerberToCanvas`. |
+| `renderGerberToCanvas(canvas, layers, frameOptions)` | One-shot batch render into an existing WebGL2-capable canvas. `layers` may be a single `GerberLayer`, an array of layers, or a `FileList`. Failed layers are skipped by default. |
+| `renderGerberToPng(canvas, layers, frameOptions, exportOptions)` | One-shot batch render through a browser canvas and returns a PNG `Blob`. `layers` accepts the same values as `renderGerberToCanvas`. Failed layers are skipped by default. |
 | `createGerberRenderer(canvas, rendererOptions)` | Creates a reusable renderer for rendering multiple frames or layers without reloading the WASM module every time. |
 | `renderer.withFrame(frameOptions, callback)` | Starts a render frame, applies canvas/view options, runs the sync or async callback, and presents the rendered layers after the callback resolves. |
-| `renderer.renderLayer(layer, layerOptions)` | Adds one `GerberLayer` to the active frame and resolves to the numeric layer ID. Must be called inside `withFrame()`. |
+| `renderer.renderLayer(layer, layerOptions)` | Adds one `GerberLayer` to the active frame and resolves to the numeric layer ID. Must be called inside `withFrame()`. This strict single-layer API rejects on failure. |
+| `renderer.renderLayers(layers, options)` | Adds multiple layers to the active frame and resolves to `{ renderedCount, failures }`. By default, failed layers are skipped and reported through `onLayerError`; set `layerErrorMode: "throw"` for strict behavior. |
 | `renderer.exportPng(exportOptions)` | Exports the last rendered browser frame as a PNG `Blob`. |
 | `renderer.dispose()` | Releases the WebGL context when the renderer is no longer needed. |
 
@@ -165,6 +172,10 @@ await renderGerberToPngFile(
     height: 800,
     background: "#05070c",
     padding: 24,
+    onLayerError: ({ name, error }) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Skipped ${name}: ${message}`);
+    },
   },
 );
 ```
@@ -174,14 +185,20 @@ await renderGerberToPngFile(
 | API | Description |
 | --- | --- |
 | `createNodeGerberRenderer(rendererOptions)` | Creates a reusable headless renderer backed by a native WebGL2/GLES context. |
-| `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)` | One-shot render that resolves to PNG bytes as a `Uint8Array`. `layers` may be a single `GerberNodeLayer` or an array. |
-| `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)` | One-shot render that writes PNG bytes to `outputPath`. Parent directories must already exist. |
+| `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)` | One-shot batch render that resolves to PNG bytes as a `Uint8Array`. `layers` may be a single `GerberNodeLayer` or an array. Failed layers are skipped by default. |
+| `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)` | One-shot batch render that writes PNG bytes to `outputPath`. Parent directories must already exist. Failed layers are skipped by default. |
 | `fileLayer(path, options)` | Creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, and `offsetY`. |
 | `packageRoot()` | Returns the installed package directory path. |
 | `renderer.withFrame(frameOptions, callback)` | Starts a headless render frame, runs the sync or async callback, and stores the rendered pixels after the callback resolves. |
-| `renderer.renderLayer(layer, layerOptions)` | Adds one `GerberNodeLayer` to the active frame and resolves to the numeric layer ID. Must be called inside `withFrame()`. |
+| `renderer.renderLayer(layer, layerOptions)` | Adds one `GerberNodeLayer` to the active frame and resolves to the numeric layer ID. Must be called inside `withFrame()`. This strict single-layer API rejects on failure. |
+| `renderer.renderLayers(layers, options)` | Adds multiple layers to the active frame and resolves to `{ renderedCount, failures }`. By default, failed layers are skipped and reported through `onLayerError`; set `layerErrorMode: "throw"` for strict behavior. |
 | `renderer.exportPng(exportOptions)` | Exports the last rendered Node frame as PNG bytes. |
 | `renderer.dispose()` | Releases the GLES context when the renderer is no longer needed. |
+
+Batch APIs (`renderGerberToCanvas`, `renderGerberToPng`,
+`renderGerberToPngBuffer`, `renderGerberToPngFile`, and `renderLayers`) render
+all valid layers they can load. If every layer fails, the operation rejects with
+the first layer error.
 
 ## API Options
 
@@ -200,6 +217,8 @@ await renderGerberToPngFile(
 | `arcTessellationQuality` | `1` | Arc approximation quality: `0` low, `1` normal, `2` high. |
 | `minimumFeaturePixels` | `1` | Minimum rendered line/arc width in screen pixels. |
 | `globalAlpha` | `0.7` | Global opacity multiplier applied to rendered layers. |
+| `layerErrorMode` | `"skip"` | Batch layer loading behavior for one-shot helpers and `renderLayers()`. `"skip"` renders remaining valid layers; `"throw"` rejects on the first failed layer. |
+| `onLayerError` | `undefined` | Callback invoked for each skipped layer in `"skip"` mode: `{ layer, name, error }`. |
 | `rendererOptions` | `{}` | Browser one-shot helpers only. Passed through when creating the renderer. |
 
 `layerOptions` control a single layer:
@@ -255,11 +274,21 @@ gerber-renderer top.gbr bottom.gbr \
   --minimum-feature-pixels 1
 ```
 
+Archive example:
+
+```bash
+gerber-renderer board-gerbers.tar.gz \
+  --output board.png \
+  --width 1600 \
+  --height 1000 \
+  --background '#05070c'
+```
+
 CLI options:
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `<input.gbr...>` | Required | One or more Gerber input files. Multiple files are rendered as separate layers in argument order. |
+| `<input...>` | Required | One or more Gerber files or `.tar.gz`/`.tgz` archives. Multiple files are rendered as separate layers in argument order. Regular archive entries are expanded in archive order; non-Gerber entries are skipped by the renderer. |
 | `-o, --output <path>` | Required | PNG output path. Parent directories must already exist. |
 | `--width <px>` | `1200` | Output canvas width in pixels. Must be a positive integer. |
 | `--height <px>` | `800` | Output canvas height in pixels. Must be a positive integer. |
@@ -274,6 +303,10 @@ CLI options:
 
 `--arc-quality` is used only with `--approx-region-arcs`. Quality values are
 `0` for low, `1` for normal, and `2` for high.
+
+When multiple input files are provided, the CLI skips failed layers, prints a
+warning for each skipped file, and renders the remaining layers. If every input
+fails, the command exits with an error.
 
 ## License
 

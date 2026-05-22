@@ -58,6 +58,16 @@ export type NodeFrameOptions = {
   arcTessellationQuality?: 0 | 1 | 2;
   minimumFeaturePixels?: number;
   globalAlpha?: number;
+  onLayerError?: (failure: NodeLayerFailure) => void;
+  layerErrorMode?: LayerErrorMode;
+};
+
+export type LayerErrorMode = "skip" | "throw";
+
+export type NodeLayerFailure = {
+  layer: GerberNodeLayer;
+  name: string;
+  error: unknown;
 };
 
 export type NodeLayerOptions = {
@@ -107,6 +117,11 @@ export declare class NodeGerberRenderer {
     layer: GerberNodeLayer,
     layerOptions?: NodeLayerOptions,
   ): Promise<number>;
+
+  renderLayers(
+    layers: GerberNodeLayer | GerberNodeLayer[],
+    options?: Pick<NodeFrameOptions, "onLayerError" | "layerErrorMode">,
+  ): Promise<{ renderedCount: number; failures: NodeLayerFailure[] }>;
 
   exportPng(exportOptions?: NodeExportOptions): Promise<Uint8Array>;
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { fileLayer, renderGerberToPngFile } from "../node.js";
 
 const USAGE = `Usage:
-  gerber-renderer <input.gbr...> -o <output.png> [options]
+  gerber-renderer <input.gbr|input.tar.gz...> -o <output.png> [options]
 
 Options:
   -o, --output <path>              PNG output path
@@ -19,6 +21,8 @@ Options:
   -h, --help                       Show this help
 `;
 
+const TAR_GZ_EXTENSIONS = [".tar.gz", ".tgz"];
+
 async function main() {
   const { inputs, output, frameOptions } = parseArgs(process.argv.slice(2));
   if (inputs.length === 0 || !output) {
@@ -27,9 +31,20 @@ async function main() {
     return;
   }
 
-  const layers = inputs.map((path) => fileLayer(path, { name: basename(path) }));
+  const layers = await collectInputLayers(inputs);
+  if (layers.length === 0) {
+    throw new Error("No Gerber layers found in input files.");
+  }
+
+  const skippedLayers = [];
+  frameOptions.onLayerError = ({ name, error }) => {
+    skippedLayers.push(name);
+    process.stderr.write(`Skipped ${name}: ${errorMessage(error)}\n`);
+  };
   await renderGerberToPngFile(output, layers, frameOptions);
-  process.stdout.write(`Rendered ${inputs.length} layer(s) to ${output}\n`);
+  process.stdout.write(
+    `Rendered ${layers.length - skippedLayers.length}/${layers.length} layer(s) to ${output}\n`,
+  );
 }
 
 function parseArgs(args) {
@@ -105,7 +120,140 @@ function readNumber(args, index, option) {
   return value;
 }
 
+async function collectInputLayers(inputs) {
+  const layers = [];
+
+  for (const input of inputs) {
+    if (isTarGzPath(input)) {
+      const archiveLayers = await readTarGzLayers(input);
+      if (archiveLayers.length === 0) {
+        process.stderr.write(`Skipped ${input}: no regular files found in archive\n`);
+      }
+      layers.push(...archiveLayers);
+    } else {
+      layers.push(fileLayer(input, { name: basename(input) }));
+    }
+  }
+
+  return layers;
+}
+
+async function readTarGzLayers(path) {
+  const archive = gunzipSync(await readFile(path));
+  const layers = [];
+  let offset = 0;
+  let nextLongName = null;
+  let nextPaxHeaders = null;
+
+  while (offset + 512 <= archive.length) {
+    const header = archive.subarray(offset, offset + 512);
+    if (isZeroBlock(header)) break;
+
+    const size = readTarOctal(header, 124, 12);
+    const typeFlag = String.fromCharCode(header[156] || 0);
+    const name = nextLongName || nextPaxHeaders?.path || readTarPath(header);
+    nextLongName = null;
+    nextPaxHeaders = null;
+
+    offset += 512;
+    const data = archive.subarray(offset, offset + size);
+    offset += Math.ceil(size / 512) * 512;
+
+    if (typeFlag === "L") {
+      nextLongName = trimNulls(data.toString("utf8"));
+      continue;
+    }
+    if (typeFlag === "x") {
+      nextPaxHeaders = readPaxHeaders(data);
+      continue;
+    }
+    if (typeFlag === "g" || (typeFlag !== "0" && typeFlag !== "\0")) {
+      continue;
+    }
+
+    const entryPath = normalizeArchivePath(name);
+    if (entryPath && !isArchiveMetadataPath(entryPath)) {
+      layers.push({
+        source: data.toString("utf8"),
+        name: `${basename(path)}:${entryPath}`,
+      });
+    }
+  }
+
+  return layers;
+}
+
+function isTarGzPath(path) {
+  const lowerPath = path.toLowerCase();
+  return TAR_GZ_EXTENSIONS.some((extension) => lowerPath.endsWith(extension));
+}
+
+function isArchiveMetadataPath(path) {
+  const normalizedPath = normalizeArchivePath(path);
+  const fileName = normalizedPath.split("/").pop() ?? normalizedPath;
+  return normalizedPath.startsWith("__MACOSX/") || fileName.startsWith("._");
+}
+
+function readTarPath(header) {
+  const name = readTarString(header, 0, 100);
+  const prefix = readTarString(header, 345, 155);
+  return prefix ? `${prefix}/${name}` : name;
+}
+
+function readTarString(buffer, start, length) {
+  return trimNulls(buffer.subarray(start, start + length).toString("utf8"));
+}
+
+function readTarOctal(buffer, start, length) {
+  const value = readTarString(buffer, start, length).trim();
+  return value ? Number.parseInt(value, 8) : 0;
+}
+
+function readPaxHeaders(data) {
+  const headers = {};
+  let offset = 0;
+
+  while (offset < data.length) {
+    const spaceIndex = data.indexOf(0x20, offset);
+    if (spaceIndex < 0) break;
+
+    const recordLength = Number.parseInt(
+      data.subarray(offset, spaceIndex).toString("ascii"),
+      10,
+    );
+    if (!Number.isFinite(recordLength) || recordLength <= 0) break;
+
+    const record = data
+      .subarray(spaceIndex + 1, offset + recordLength - 1)
+      .toString("utf8");
+    const equalsIndex = record.indexOf("=");
+    if (equalsIndex > 0) {
+      headers[record.slice(0, equalsIndex)] = record.slice(equalsIndex + 1);
+    }
+    offset += recordLength;
+  }
+
+  return headers;
+}
+
+function normalizeArchivePath(path) {
+  return path.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function trimNulls(value) {
+  const nullIndex = value.indexOf("\0");
+  return nullIndex >= 0 ? value.slice(0, nullIndex) : value;
+}
+
+function isZeroBlock(buffer) {
+  return buffer.every((byte) => byte === 0);
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${errorMessage(error)}\n`);
   process.exitCode = 1;
 });

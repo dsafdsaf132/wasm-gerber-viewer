@@ -32,9 +32,7 @@ export async function renderGerberToCanvas(
 
   try {
     await renderer.withFrame(frameOptions, async () => {
-      for (const layer of normalizeLayerList(layers)) {
-        await renderer.renderLayer(layer);
-      }
+      await renderer.renderLayers(layers, frameOptions);
     });
   } finally {
     renderer.dispose();
@@ -57,9 +55,7 @@ export async function renderGerberToPng(
 
   try {
     await renderer.withFrame(frameOptions, async () => {
-      for (const layer of normalizeLayerList(layers)) {
-        await renderer.renderLayer(layer);
-      }
+      await renderer.renderLayers(layers, frameOptions);
     });
     return await renderer.exportPng({
       background: frameOptions.background,
@@ -129,6 +125,15 @@ export class GerberRenderer {
     const layerRecord = await this.createLayerRecord(layer, layerOptions);
     this.frame.addLayer(layerRecord);
     return layerRecord.layerId;
+  }
+
+  async renderLayers(layers, options = {}) {
+    this.assertUsable();
+    if (!this.frame) {
+      throw new Error("renderLayers must be called inside withFrame().");
+    }
+
+    return renderLayersBestEffort(this, normalizeLayerList(layers), options);
   }
 
   async exportPng(exportOptions = {}) {
@@ -449,6 +454,42 @@ function normalizeLayerList(layers) {
   return Array.isArray(layers) ? layers : [layers];
 }
 
+async function renderLayersBestEffort(renderer, layers, options = {}) {
+  const layerErrorMode = options.layerErrorMode || "skip";
+  if (layerErrorMode !== "skip" && layerErrorMode !== "throw") {
+    throw new TypeError("layerErrorMode must be 'skip' or 'throw'.");
+  }
+
+  const failures = [];
+  let renderedCount = 0;
+
+  for (const layer of layers) {
+    try {
+      await renderer.renderLayer(layer);
+      renderedCount += 1;
+    } catch (error) {
+      const failure = {
+        layer,
+        name: getLayerFailureName(layer),
+        error,
+      };
+      failures.push(failure);
+      if (typeof options.onLayerError === "function") {
+        options.onLayerError(failure);
+      }
+      if (layerErrorMode === "throw") {
+        throw error;
+      }
+    }
+  }
+
+  if (renderedCount === 0 && failures.length > 0) {
+    throw failures[0].error;
+  }
+
+  return { renderedCount, failures };
+}
+
 function normalizeLayer(layer, layerOptions = {}) {
   if (isLayerConfig(layer)) {
     const { source, ...inlineOptions } = layer;
@@ -503,6 +544,18 @@ function getSourceName(source) {
     return String(source.name);
   }
   return "";
+}
+
+function getLayerFailureName(layer) {
+  if (layer && typeof layer === "object") {
+    if ("name" in layer && layer.name) {
+      return String(layer.name);
+    }
+    if ("source" in layer) {
+      return getSourceName(layer.source);
+    }
+  }
+  return getSourceName(layer) || "Layer";
 }
 
 function isBlob(value) {

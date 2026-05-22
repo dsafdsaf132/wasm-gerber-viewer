@@ -1,8 +1,6 @@
 name: Publish npm Package
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -16,11 +14,11 @@ permissions:
   packages: write
 
 concurrency:
-  group: npm-publish-${{ github.event.release.tag_name || inputs.tag }}
+  group: npm-publish-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   publish-npmjs:
@@ -30,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag }}
 
       - name: Setup Node.js for npmjs
         uses: actions/setup-node@v4
@@ -59,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag }}
 
       - name: Setup Node.js for GitHub Packages
         uses: actions/setup-node@v4
