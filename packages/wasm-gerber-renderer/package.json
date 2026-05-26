@@ -1,6 +1,6 @@
 {
   "name": "wasm-gerber-renderer",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "Browser and Node WebGL2 Gerber renderer powered by wasm-gerber-viewer",
   "type": "module",
   "main": "./index.js",
