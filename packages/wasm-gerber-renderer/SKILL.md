@@ -32,7 +32,7 @@ npm install -g wasm-gerber-renderer node-gles-webgl2
 Render one Gerber file:
 
 ```bash
-gerber-renderer board.gbr -o board.png --width 1600 --height 1000
+gerber-renderer board.gbr --width 1600 --height 1000
 ```
 
 Render multiple layers together:
@@ -50,12 +50,13 @@ gerber-renderer top.gbr bottom.gbr mask.gbr \
 Render an archive:
 
 ```bash
-gerber-renderer board-gerbers.tar.gz -o board.png --width 1600 --height 1000
+gerber-renderer board-gerbers.tar.gz --width 1600 --height 1000
 ```
 
 Useful CLI options:
 
 - `--width <px>` and `--height <px>` set PNG size.
+- `--output <path>` sets the PNG output path and is required for multiple inputs.
 - `--background <color>` accepts hex or `rgb()`/`rgba()`; omit for transparent output.
 - `--padding <px>` adds fit-to-view padding.
 - `--alpha <0-1>` sets global layer opacity.
@@ -66,6 +67,8 @@ Useful CLI options:
 - `--skill` prints package usage notes for AI agents.
 
 The CLI renders valid layers and skips invalid inputs such as non-Gerber files in archives. If every layer fails, it exits with an error.
+
+If a single input omits `--output`, generic Gerber extensions such as `.gbr`, `.ger`, `.art`, `.gdo`, and `.pho` are replaced with `.png`; layer-specific or unknown extensions keep the full filename and append `.png`.
 
 ## Node.js PNG
 

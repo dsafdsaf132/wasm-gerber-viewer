@@ -5,10 +5,10 @@ import { gunzipSync } from "node:zlib";
 import { fileLayer, renderGerberToPngFile } from "../node.js";
 
 const USAGE = `Usage:
-  gerber-renderer <input.gbr|input.tar.gz...> -o <output.png> [options]
+  gerber-renderer <input.gbr|input.tar.gz...> [options]
 
 Options:
-  -o, --output <path>              PNG output path
+  -o, --output <path>              PNG output path (required for multiple inputs)
   --width <px>                     Output width (default: 1200)
   --height <px>                    Output height (default: 800)
   --padding <px>                   Fit padding in pixels (default: 0)
@@ -25,6 +25,7 @@ AI guide: run \`gerber-renderer --skill\` for usage notes.
 `;
 
 const TAR_GZ_EXTENSIONS = [".tar.gz", ".tgz"];
+const GENERIC_GERBER_EXTENSIONS = [".art", ".gbr", ".gdo", ".ger", ".pho"];
 const SKILL_URL = new URL("../SKILL.md", import.meta.url);
 
 async function main() {
@@ -36,11 +37,13 @@ async function main() {
     return;
   }
 
-  if (inputs.length === 0 || !output) {
+  if (inputs.length === 0) {
     process.stderr.write(USAGE);
     process.exitCode = 1;
     return;
   }
+
+  const outputPath = output || inferOutputPath(inputs);
 
   const layers = await collectInputLayers(inputs);
   if (layers.length === 0) {
@@ -52,9 +55,9 @@ async function main() {
     skippedLayers.push(name);
     process.stderr.write(`Skipped ${name}: ${errorMessage(error)}\n`);
   };
-  await renderGerberToPngFile(output, layers, frameOptions);
+  await renderGerberToPngFile(outputPath, layers, frameOptions);
   process.stdout.write(
-    `Rendered ${layers.length - skippedLayers.length}/${layers.length} layer(s) to ${output}\n`,
+    `Rendered ${layers.length - skippedLayers.length}/${layers.length} layer(s) to ${outputPath}\n`,
   );
 }
 
@@ -100,6 +103,33 @@ function parseArgs(args) {
   }
 
   return { inputs, output, frameOptions, showSkill };
+}
+
+function inferOutputPath(inputs) {
+  if (inputs.length !== 1) {
+    throw new Error("Multiple inputs require --output.");
+  }
+
+  const input = inputs[0];
+  const lowerInput = input.toLowerCase();
+  const archiveExtension = TAR_GZ_EXTENSIONS.find((extension) =>
+    lowerInput.endsWith(extension),
+  );
+  if (archiveExtension) {
+    return `${input.slice(0, -archiveExtension.length)}.png`;
+  }
+
+  const dotIndex = input.lastIndexOf(".");
+  if (dotIndex < 0) {
+    return `${input}.png`;
+  }
+
+  const extension = input.slice(dotIndex).toLowerCase();
+  if (GENERIC_GERBER_EXTENSIONS.includes(extension)) {
+    return `${input.slice(0, dotIndex)}.png`;
+  }
+
+  return `${input}.png`;
 }
 
 function readOptionValue(args, index, option) {

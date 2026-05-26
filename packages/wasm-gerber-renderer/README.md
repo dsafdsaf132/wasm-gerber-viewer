@@ -12,6 +12,18 @@ The package provides:
 The browser entrypoint uses the caller's WebGL2 canvas. The Node.js entrypoint
 uses the same WASM/WebGL renderer, but needs a native WebGL2 context provider.
 
+## Contents
+
+- [Install](#install)
+- [Browser Usage](#browser-usage)
+- [Type Reference](#type-reference)
+- [Browser API](#browser-api)
+- [Node.js Usage](#nodejs-usage)
+- [Node.js API](#nodejs-api)
+- [API Options](#api-options)
+- [CLI](#cli)
+- [License](#license)
+
 ## Install
 
 Browser users:
@@ -143,16 +155,14 @@ rendering from the filesystem.
 
 ## Browser API
 
-| API | Description |
-| --- | --- |
-| `renderGerberToCanvas(canvas, layers, frameOptions)` | One-shot batch render into an existing WebGL2-capable canvas. `layers` may be a single `GerberLayer`, an array of layers, or a `FileList`. Failed layers are skipped by default. |
-| `renderGerberToPng(canvas, layers, frameOptions, exportOptions)` | One-shot batch render through a browser canvas and returns a PNG `Blob`. `layers` accepts the same values as `renderGerberToCanvas`. Failed layers are skipped by default. |
-| `createGerberRenderer(canvas, rendererOptions)` | Creates a reusable renderer for rendering multiple frames or layers without reloading the WASM module every time. |
-| `renderer.withFrame(frameOptions, callback)` | Starts a render frame, applies canvas/view options, runs the sync or async callback, and presents the rendered layers after the callback resolves. |
-| `renderer.renderLayer(layer, layerOptions)` | Adds one `GerberLayer` to the active frame and resolves to the numeric layer ID. Must be called inside `withFrame()`. This strict single-layer API rejects on failure. |
-| `renderer.renderLayers(layers, options)` | Adds multiple layers to the active frame and resolves to `{ renderedCount, failures }`. By default, failed layers are skipped and reported through `onLayerError`; set `layerErrorMode: "throw"` for strict behavior. |
-| `renderer.exportPng(exportOptions)` | Exports the last rendered browser frame as a PNG `Blob`. |
-| `renderer.dispose()` | Releases the WebGL context when the renderer is no longer needed. |
+- `renderGerberToCanvas(canvas, layers, frameOptions)`: one-shot batch render into an existing WebGL2-capable canvas. `layers` may be a single `GerberLayer`, an array, or a `FileList`. Failed layers are skipped by default.
+- `renderGerberToPng(canvas, layers, frameOptions, exportOptions)`: one-shot browser render that returns a PNG `Blob`.
+- `createGerberRenderer(canvas, rendererOptions)`: creates a reusable renderer for multiple frames or layers.
+- `renderer.withFrame(frameOptions, callback)`: starts a frame, applies canvas/view options, runs the callback, and presents rendered layers after it resolves.
+- `renderer.renderLayer(layer, layerOptions)`: adds one layer to the active frame and returns its numeric layer ID. Must be called inside `withFrame()`. This strict API rejects on failure.
+- `renderer.renderLayers(layers, options)`: adds multiple layers and returns `{ renderedCount, failures }`. Failed layers are skipped by default; use `layerErrorMode: "throw"` for strict behavior.
+- `renderer.exportPng(exportOptions)`: exports the last browser frame as a PNG `Blob`.
+- `renderer.dispose()`: releases the WebGL context.
 
 ## Node.js Usage
 
@@ -182,18 +192,16 @@ await renderGerberToPngFile(
 
 ## Node.js API
 
-| API | Description |
-| --- | --- |
-| `createNodeGerberRenderer(rendererOptions)` | Creates a reusable headless renderer backed by a native WebGL2/GLES context. |
-| `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)` | One-shot batch render that resolves to PNG bytes as a `Uint8Array`. `layers` may be a single `GerberNodeLayer` or an array. Failed layers are skipped by default. |
-| `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)` | One-shot batch render that writes PNG bytes to `outputPath`. Parent directories must already exist. Failed layers are skipped by default. |
-| `fileLayer(path, options)` | Creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, and `offsetY`. |
-| `packageRoot()` | Returns the installed package directory path. |
-| `renderer.withFrame(frameOptions, callback)` | Starts a headless render frame, runs the sync or async callback, and stores the rendered pixels after the callback resolves. |
-| `renderer.renderLayer(layer, layerOptions)` | Adds one `GerberNodeLayer` to the active frame and resolves to the numeric layer ID. Must be called inside `withFrame()`. This strict single-layer API rejects on failure. |
-| `renderer.renderLayers(layers, options)` | Adds multiple layers to the active frame and resolves to `{ renderedCount, failures }`. By default, failed layers are skipped and reported through `onLayerError`; set `layerErrorMode: "throw"` for strict behavior. |
-| `renderer.exportPng(exportOptions)` | Exports the last rendered Node frame as PNG bytes. |
-| `renderer.dispose()` | Releases the GLES context when the renderer is no longer needed. |
+- `createNodeGerberRenderer(rendererOptions)`: creates a reusable headless renderer backed by a native WebGL2/GLES context.
+- `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that returns PNG bytes as a `Uint8Array`.
+- `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG bytes to `outputPath`. Parent directories must already exist.
+- `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, and `offsetY`.
+- `packageRoot()`: returns the installed package directory path.
+- `renderer.withFrame(frameOptions, callback)`: starts a headless render frame and stores rendered pixels after the callback resolves.
+- `renderer.renderLayer(layer, layerOptions)`: adds one layer to the active frame and returns its numeric layer ID. Must be called inside `withFrame()`. This strict API rejects on failure.
+- `renderer.renderLayers(layers, options)`: adds multiple layers and returns `{ renderedCount, failures }`. Failed layers are skipped by default; use `layerErrorMode: "throw"` for strict behavior.
+- `renderer.exportPng(exportOptions)`: exports the last Node frame as PNG bytes.
+- `renderer.dispose()`: releases the GLES context.
 
 Batch APIs (`renderGerberToCanvas`, `renderGerberToPng`,
 `renderGerberToPngBuffer`, `renderGerberToPngFile`, and `renderLayers`) render
@@ -204,61 +212,53 @@ the first layer error.
 
 `frameOptions` control the output frame and renderer behavior:
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `width` | Browser canvas width, Node: `1200` | Output width in pixels. |
-| `height` | Browser canvas height, Node: `800` | Output height in pixels. |
-| `clear` | `true` | Clears the frame before rendering. Node always renders to a fresh buffer and does not support `false`. |
-| `background` | `null` | Background color. Use `null` for transparent output, a browser CSS color string, a Node hex/`rgb()`/`rgba()` string, or `[r, g, b, a]`. |
-| `fit` | `true` | Fits all loaded layer bounds into the output frame. |
-| `padding` | `0` | Pixel padding applied when `fit` is enabled. |
-| `view` | `null` | Manual view override: `{ zoomX, zoomY, offsetX, offsetY }`. When provided, it takes precedence over `fit`. |
-| `preserveArcRegions` | `true` | Keeps region arcs for exact arc-region rendering. Set `false` to approximate region arcs. |
-| `arcTessellationQuality` | `1` | Arc approximation quality: `0` low, `1` normal, `2` high. |
-| `minimumFeaturePixels` | `1` | Minimum rendered line/arc width in screen pixels. |
-| `globalAlpha` | `0.7` | Global opacity multiplier applied to rendered layers. |
-| `layerErrorMode` | `"skip"` | Batch layer loading behavior for one-shot helpers and `renderLayers()`. `"skip"` renders remaining valid layers; `"throw"` rejects on the first failed layer. |
-| `onLayerError` | `undefined` | Callback invoked for each skipped layer in `"skip"` mode: `{ layer, name, error }`. |
-| `rendererOptions` | `{}` | Browser one-shot helpers only. Passed through when creating the renderer. |
+- `width`: output width in pixels. Defaults to the browser canvas width or `1200` in Node.
+- `height`: output height in pixels. Defaults to the browser canvas height or `800` in Node.
+- `clear`: clears the frame before rendering. Defaults to `true`; Node always renders to a fresh buffer.
+- `background`: output background. Defaults to `null` for transparent output. Accepts CSS color strings or `[r, g, b, a]`.
+- `fit`: fits all loaded layer bounds into the output frame. Defaults to `true`.
+- `padding`: pixel padding applied when `fit` is enabled. Defaults to `0`.
+- `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`; takes precedence over `fit`.
+- `preserveArcRegions`: keeps exact region arcs. Defaults to `true`; set `false` to approximate region arcs.
+- `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
+- `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
+- `globalAlpha`: opacity multiplier applied to rendered layers. Defaults to `0.7`.
+- `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
+- `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
+- `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
 
 `layerOptions` control a single layer:
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `color` | Automatic color cycle | Layer color. Browser accepts `[r, g, b]`; Node accepts `[r, g, b]`, hex strings, or `rgb()`/`rgba()` strings. |
-| `alpha` | `1` | Per-layer opacity before `globalAlpha` is applied. |
-| `offsetX` | `0` | X offset applied while loading the layer geometry. |
-| `offsetY` | `0` | Y offset applied while loading the layer geometry. |
-| `name` | Source name or `Layer <id>` | Layer display name when using layer config objects such as `{ source, name }` or `{ path, name }`. |
+- `color`: layer color. Browser accepts `[r, g, b]`; Node also accepts hex and `rgb()`/`rgba()` strings. Defaults to an automatic color cycle.
+- `alpha`: per-layer opacity before `globalAlpha` is applied. Defaults to `1`.
+- `offsetX`: X offset applied while loading geometry. Defaults to `0`.
+- `offsetY`: Y offset applied while loading geometry. Defaults to `0`.
+- `name`: layer display name for config objects such as `{ source, name }` or `{ path, name }`.
 
 `exportOptions` control PNG export:
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `type` | `image/png` | Browser-only export MIME type. Node always writes PNG. |
-| `quality` | Browser default | Browser-only encoder quality passed to `canvas.toBlob`. |
-| `background` | Last frame background | Export background override. Use `null` to keep transparency. |
+- `type`: browser-only export MIME type. Defaults to `image/png`; Node always writes PNG.
+- `quality`: browser-only encoder quality passed to `canvas.toBlob`.
+- `background`: export background override. Use `null` to keep transparency. Defaults to the last frame background.
 
 `rendererOptions` control renderer creation:
 
-| Option | Applies to | Default | Description |
-| --- | --- | --- | --- |
-| `wasmModule` | Browser, Node | Bundled module | Preloaded WASM JS module. Most users do not need this. |
-| `wasmModuleUrl` | Browser, Node | Bundled module URL | URL used to import the WASM JS module. |
-| `wasmBinaryUrl` | Node | Bundled `.wasm` URL | Binary URL used when initializing the WASM module in Node.js. |
-| `wasmInitInput` | Browser, Node | `undefined` | Custom value passed to the WASM module initializer. |
-| `contextAttributes` | Browser, Node | Package defaults | WebGL context attributes. |
-| `releaseContext` | Browser, Node | `true` | Releases the WebGL/GLES context on `dispose()` when supported. |
-| `glesModule` | Node | Auto-loaded | Custom GLES module object. Normal CLI usage uses `node-gles-webgl2`. |
-| `glesModuleName` | Node | `node-gles-webgl2` fallback list | Module name to load for the GLES runtime. |
-| `gl` | Node | Auto-created | Pre-created WebGL2-compatible context. |
+- `wasmModule`: preloaded WASM JS module. Most users do not need this.
+- `wasmModuleUrl`: URL used to import the WASM JS module.
+- `wasmBinaryUrl`: Node-only `.wasm` binary URL.
+- `wasmInitInput`: custom value passed to the WASM module initializer.
+- `contextAttributes`: WebGL context attributes.
+- `releaseContext`: releases the WebGL/GLES context on `dispose()` when supported. Defaults to `true`.
+- `glesModule`: Node-only custom GLES module object. Normal CLI usage uses `node-gles-webgl2`.
+- `glesModuleName`: Node-only module name to load for the GLES runtime.
+- `gl`: Node-only pre-created WebGL2-compatible context.
 
 ## CLI
 
 After global installation, run the CLI directly:
 
 ```bash
-gerber-renderer board.gbr -o board.png --width 1200 --height 800 --background '#05070c'
+gerber-renderer board.gbr --width 1200 --height 800 --background '#05070c'
 ```
 
 More complete example:
@@ -278,7 +278,6 @@ Archive example:
 
 ```bash
 gerber-renderer board-gerbers.tar.gz \
-  --output board.png \
   --width 1600 \
   --height 1000 \
   --background '#05070c'
@@ -286,21 +285,19 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI options:
 
-| Option | Default | Description |
-| --- | --- | --- |
-| `<input...>` | Required | One or more Gerber files or `.tar.gz`/`.tgz` archives. Multiple files are rendered as separate layers in argument order. Regular archive entries are expanded in archive order; non-Gerber entries are skipped by the renderer. |
-| `-o, --output <path>` | Required | PNG output path. Parent directories must already exist. |
-| `--width <px>` | `1200` | Output canvas width in pixels. Must be a positive integer. |
-| `--height <px>` | `800` | Output canvas height in pixels. Must be a positive integer. |
-| `--padding <px>` | `0` | Extra screen-space padding used by fit-to-view. |
-| `--background <color>` | Transparent | Hex or `rgb()`/`rgba()` background color, such as `#05070c` or `rgba(0,0,0,0)`. |
-| `--alpha <0-1>` | `0.7` | Global layer opacity applied while rendering. |
-| `--minimum-feature-pixels <px>` | `1` | Minimum rendered line/arc width in screen pixels, useful for keeping very thin features visible. |
-| `--approx-region-arcs` | Disabled | Converts region arcs to line segments before rendering instead of using the exact arc-region renderer. |
-| `--arc-quality <0\|1\|2>` | `1` | Arc tessellation quality: `0` low, `1` normal, `2` high. Mainly relevant with `--approx-region-arcs`. |
-| `--no-fit` | Disabled | Disables fit-to-view and renders with the renderer's identity view. |
-| `--skill` | - | Prints package usage notes for AI agents. |
-| `-h, --help` | - | Prints CLI usage and exits. |
+- `<input...>`: one or more Gerber files or `.tar.gz`/`.tgz` archives. Multiple files render as layers in argument order.
+- `-o, --output <path>`: PNG output path. Required for multiple inputs. Parent directories must already exist.
+- `--width <px>`: output width. Defaults to `1200`.
+- `--height <px>`: output height. Defaults to `800`.
+- `--padding <px>`: fit-to-view padding. Defaults to `0`.
+- `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
+- `--alpha <0-1>`: global layer opacity. Defaults to `0.7`.
+- `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
+- `--approx-region-arcs`: converts region arcs to line segments before rendering.
+- `--arc-quality <0|1|2>`: approximate arc quality. Defaults to `1`.
+- `--no-fit`: disables fit-to-view.
+- `--skill`: prints package usage notes for AI agents.
+- `-h, --help`: prints CLI usage and exits.
 
 `--arc-quality` is used only with `--approx-region-arcs`. Quality values are
 `0` for low, `1` for normal, and `2` for high.
@@ -308,6 +305,11 @@ CLI options:
 When multiple input files are provided, the CLI skips failed layers, prints a
 warning for each skipped file, and renders the remaining layers. If every input
 fails, the command exits with an error.
+
+When one input is provided and `--output` is omitted, the CLI writes next to the
+input. Generic Gerber extensions such as `.gbr`, `.ger`, `.art`, `.gdo`, and
+`.pho` are replaced with `.png`; layer-specific or unknown extensions keep the
+full filename and append `.png`.
 
 ## License
 
