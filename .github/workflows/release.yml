@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "npm version to publish, for example 0.1.4 or v0.1.4"
+        description: "npm version to publish, for example 0.1.7 or v0.1.7"
         required: true
         type: string
 
@@ -59,8 +59,8 @@ jobs:
           version="${INPUT_VERSION#v}"
           tag="v${version}"
 
-          if ! node -e 'const version = process.argv[1]; if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) process.exit(1)' "$version"; then
-            echo "::error::Invalid semver version: ${INPUT_VERSION}"
+          if ! node -e 'const version = process.argv[1]; if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) process.exit(1)' "$version"; then
+            echo "::error::Invalid version: ${INPUT_VERSION}. Use x.y.z, for example 0.1.7 or v0.1.7"
             exit 1
           fi
 
