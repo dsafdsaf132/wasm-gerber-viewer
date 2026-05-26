@@ -102,12 +102,11 @@ export class GerberRenderer {
     this.prepareCanvas(normalizedFrameOptions);
 
     const processor = new this.wasmModule.GerberProcessor();
-    processor.init(this.getContext());
-    applyProcessorOptions(processor, normalizedFrameOptions);
-
-    this.frame = new FrameState(processor, normalizedFrameOptions);
-
     try {
+      processor.init(this.getContext());
+      applyProcessorOptions(processor, normalizedFrameOptions);
+
+      this.frame = new FrameState(processor, normalizedFrameOptions);
       await callback();
       this.renderFrame();
     } finally {
@@ -316,6 +315,11 @@ export class GerberRenderer {
       processor.clear();
     } catch (_error) {
       // The canvas result is already rendered; cleanup failures should not hide it.
+    }
+    try {
+      processor.free?.();
+    } catch (_error) {
+      // The context may already be unrecoverable; cleanup is best-effort.
     }
   }
 

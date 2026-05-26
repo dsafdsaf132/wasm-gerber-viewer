@@ -104,21 +104,20 @@ export class NodeGerberRenderer {
       normalizedFrameOptions.height,
     );
     const processor = new this.wasmModule.GerberProcessor();
-    if (typeof processor.init_with_size !== "function") {
-      throw new Error("Headless rendering requires an updated WASM module.");
-    }
-    processor.init_with_size(
-      gl,
-      normalizedFrameOptions.width,
-      normalizedFrameOptions.height,
-    );
-    applyProcessorOptions(processor, normalizedFrameOptions);
-
-    this.frame = new FrameState(processor, normalizedFrameOptions);
-    this.lastFrame = null;
-    this.lastPixels = null;
-
     try {
+      if (typeof processor.init_with_size !== "function") {
+        throw new Error("Headless rendering requires an updated WASM module.");
+      }
+      processor.init_with_size(
+        gl,
+        normalizedFrameOptions.width,
+        normalizedFrameOptions.height,
+      );
+      applyProcessorOptions(processor, normalizedFrameOptions);
+
+      this.frame = new FrameState(processor, normalizedFrameOptions);
+      this.lastFrame = null;
+      this.lastPixels = null;
       await callback();
       this.renderFrameToPixels();
     } finally {
@@ -280,6 +279,11 @@ export class NodeGerberRenderer {
       processor.clear();
     } catch (_error) {
       // The pixel result is already copied; cleanup failures should not hide it.
+    }
+    try {
+      processor.free?.();
+    } catch (_error) {
+      // The context may already be unrecoverable; cleanup is best-effort.
     }
   }
 
