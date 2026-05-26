@@ -1,5 +1,5 @@
 name: Publish
-run-name: Publish ${{ inputs.version }}
+run-name: Publish ${{ startsWith(inputs.version, 'v') && inputs.version || format('v{0}', inputs.version) }}
 
 on:
   workflow_dispatch:
