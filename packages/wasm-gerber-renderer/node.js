@@ -258,7 +258,7 @@ export class NodeGerberRenderer {
     return {
       layerId,
       name: prepared.name || `Layer ${layerId}`,
-      content: null,
+      content: prepared.content,
       parsedLayer: prepared.parsedLayer,
       offsetX: prepared.offsetX,
       offsetY: prepared.offsetY,
@@ -291,6 +291,7 @@ export class NodeGerberRenderer {
       [NODE_PREPARED_LAYER]: true,
       name: options.name || sourceName || "Layer",
       sourceName,
+      content: supportsParsedLayerReuse(this.wasmModule) ? null : content,
       parsedLayer: parsed.payload,
       bounds: parsed.bounds,
       offsetX,
@@ -583,7 +584,7 @@ function parseLayerPayload(wasmModule, content, offsetX, offsetY, frameOptions) 
       arcTessellationQuality,
     );
   } else {
-    if (!preserveArcRegions || arcTessellationQuality !== 1) {
+    if (!preserveArcRegions) {
       throw new Error("Gerber parse options require an updated WASM module.");
     }
     payload = parseDefault(content, offsetX, offsetY);
@@ -1127,6 +1128,12 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     layerCount,
     pngChannels,
   );
+  if (!renderer.rendererOptions.gl) {
+    renderer.releaseContext();
+  }
+  const renderGl = renderer.rendererOptions.gl
+    ? gl
+    : renderer.createExportContext(width, tileHeight);
   const rowStride = getPngRowStride(width, pngChannels);
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
@@ -1153,7 +1160,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     const renderContext = createProcessorForPlan(
       renderer,
       plan,
-      gl,
+      renderGl,
       width,
       tileHeight,
     );
@@ -1180,14 +1187,14 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
           plan.view.offsetY,
           1,
         );
-        gl.finish?.();
-        gl.readPixels(
+        renderGl.finish?.();
+        renderGl.readPixels(
           0,
           readY,
           width,
           currentTileHeight,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
+          renderGl.RGBA,
+          renderGl.UNSIGNED_BYTE,
           tilePixels,
         );
         await writeTileRows(
@@ -1278,15 +1285,21 @@ function createProcessorForPlan(renderer, plan, gl, width, height) {
 
 function addPlanLayerToProcessor(processor, layer) {
   if (layer.parsedLayer) {
-    if (typeof processor.add_parsed_layer !== "function") {
+    if (typeof processor.add_parsed_layer === "function") {
+      return processor.add_parsed_layer(layer.parsedLayer);
+    }
+    if (typeof layer.content !== "string") {
       throw new Error("Parsed layer reuse requires an updated WASM renderer.");
     }
-    return processor.add_parsed_layer(layer.parsedLayer);
   }
   if (typeof layer.content !== "string") {
     throw new Error("Layer content is unavailable for rendering.");
   }
   return addLayerToProcessor(processor, layer.content, layer.offsetX, layer.offsetY);
+}
+
+function supportsParsedLayerReuse(wasmModule) {
+  return typeof wasmModule.GerberProcessor?.prototype?.add_parsed_layer === "function";
 }
 
 function resizeRenderTarget(processor, gl, width, height) {
