@@ -1033,6 +1033,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
         const renderTileY =
           currentTileHeight === tileHeight ? tileY : Math.max(0, height - tileHeight);
         const sourceRowOffset = tileY - renderTileY;
+        const readY = tileHeight - sourceRowOffset - currentTileHeight;
         renderContext.processor.render_tile(
           renderContext.activeLayerIds,
           renderContext.colorData,
@@ -1051,9 +1052,9 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
         gl.finish?.();
         gl.readPixels(
           0,
-          0,
+          readY,
           width,
-          tileHeight,
+          currentTileHeight,
           gl.RGBA,
           gl.UNSIGNED_BYTE,
           tilePixels,
@@ -1062,9 +1063,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
           writeRow,
           tilePixels,
           width,
-          tileHeight,
           currentTileHeight,
-          sourceRowOffset,
           rowStride,
           background,
         );
@@ -1237,10 +1236,7 @@ async function writeBlankPngRows(writeRow, width, height, tileHeight, background
   }
   for (let y = 0; y < height; y += tileHeight) {
     const currentTileHeight = Math.min(tileHeight, height - y);
-    for (let row = 0; row < currentTileHeight; row += 1) {
-      const start = row * rowStride;
-      await writeRow(band.subarray(start, start + rowStride));
-    }
+    await writeRow(band.subarray(0, currentTileHeight * rowStride));
   }
 }
 
@@ -1248,25 +1244,23 @@ async function writeTileRows(
   writeRow,
   tilePixels,
   width,
-  tileHeight,
   rowCount,
-  sourceRowOffset,
   rowStride,
   background,
 ) {
-  const row = Buffer.allocUnsafe(rowStride);
+  const band = Buffer.allocUnsafe(rowStride * rowCount);
   const sourceRowBytes = width * 4;
   for (let y = 0; y < rowCount; y += 1) {
-    row[0] = 0;
-    const sourceRow = sourceRowOffset + y;
-    const sourceStart = (tileHeight - 1 - sourceRow) * sourceRowBytes;
+    const rowStart = y * rowStride;
+    band[rowStart] = 0;
+    const sourceStart = (rowCount - 1 - y) * sourceRowBytes;
     if (background) {
-      writeOpaqueBackgroundRow(row, 1, tilePixels, sourceStart, sourceRowBytes, background);
+      writeOpaqueBackgroundRow(band, rowStart + 1, tilePixels, sourceStart, sourceRowBytes, background);
     } else {
-      copyPremultipliedRowToPng(row, 1, tilePixels, sourceStart, sourceRowBytes);
+      copyPremultipliedRowToPng(band, rowStart + 1, tilePixels, sourceStart, sourceRowBytes);
     }
-    await writeRow(row);
   }
+  await writeRow(band);
 }
 
 function writeOpaqueBackgroundRow(
@@ -1292,6 +1286,17 @@ function writeOpaqueBackgroundRow(
   const bgR = background[0];
   const bgG = background[1];
   const bgB = background[2];
+  if (bgR === 0 && bgG === 0 && bgB === 0) {
+    for (let offset = 0; offset < byteLength; offset += 4) {
+      const target = outputOffset + offset;
+      output[target] = source[sourceOffset + offset];
+      output[target + 1] = source[sourceOffset + offset + 1];
+      output[target + 2] = source[sourceOffset + offset + 2];
+      output[target + 3] = 255;
+    }
+    return;
+  }
+
   for (let offset = 0; offset < byteLength; offset += 4) {
     const srcA = source[sourceOffset + offset + 3];
     const inverseA = 255 - srcA;
