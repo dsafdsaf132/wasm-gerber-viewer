@@ -45,6 +45,7 @@ const REQUIRED_WEBGL2_METHODS = [
   "vertexAttribDivisor",
   "readPixels",
 ];
+const NODE_PREPARED_LAYER = Symbol("wasm-gerber-renderer.nodePreparedLayer");
 
 export async function createNodeGerberRenderer(rendererOptions = {}) {
   return NodeGerberRenderer.create(rendererOptions);
@@ -142,6 +143,16 @@ export class NodeGerberRenderer {
     return renderLayersBestEffort(this, normalizeLayerList(layers), options);
   }
 
+  async loadLayer(layer, layerOptions = {}) {
+    this.assertUsable();
+    return this.createPreparedLayer(layer, layerOptions);
+  }
+
+  async loadLayers(layers, options = {}) {
+    this.assertUsable();
+    return loadLayersBestEffort(this, normalizeLayerList(layers), options);
+  }
+
   async exportPng(exportOptions = {}) {
     this.assertUsable();
     if (!this.lastFrame || !this.lastRenderPlan) {
@@ -231,34 +242,61 @@ export class NodeGerberRenderer {
   }
 
   async createLayerRecord(layer, layerOptions) {
+    const prepared = isPreparedNodeLayer(layer)
+      ? mergePreparedLayerOptions(layer, layerOptions)
+      : await this.createPreparedLayer(layer, {
+          ...this.frame.options,
+          ...layerOptions,
+        });
+    const layerId = this.frame.layers.length;
+    const color =
+      prepared.color == null
+        ? this.frame.nextColor()
+        : normalizeColor(prepared.color, this.frame.options.colors[0]);
+
+    return {
+      layerId,
+      name: prepared.name || `Layer ${layerId}`,
+      content: null,
+      parsedLayer: prepared.parsedLayer,
+      offsetX: prepared.offsetX,
+      offsetY: prepared.offsetY,
+      bounds: prepared.bounds,
+      color,
+      alpha: prepared.alpha,
+    };
+  }
+
+  async createPreparedLayer(layer, layerOptions = {}) {
+    if (isPreparedNodeLayer(layer)) {
+      return mergePreparedLayerOptions(layer, layerOptions);
+    }
+
     const { source, options } = normalizeLayer(layer, layerOptions);
     const content = await sourceToText(source);
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
+    const parseOptions = normalizeParseOptions(options);
     const parsed = parseLayerPayload(
       this.wasmModule,
       content,
       offsetX,
       offsetY,
-      this.frame.options,
+      parseOptions,
     );
-    const layerId = this.frame.layers.length;
-    const color =
-      options.color == null
-        ? this.frame.nextColor()
-        : normalizeColor(options.color, this.frame.options.colors[0]);
-    const alpha = optionalAlpha(options.alpha);
+    const sourceName = getSourceName(source);
 
     return {
-      layerId,
-      name: options.name || getSourceName(source) || `Layer ${layerId}`,
-      content: null,
+      [NODE_PREPARED_LAYER]: true,
+      name: options.name || sourceName || "Layer",
+      sourceName,
       parsedLayer: parsed.payload,
+      bounds: parsed.bounds,
       offsetX,
       offsetY,
-      bounds: parsed.bounds,
-      color,
-      alpha,
+      color: options.color,
+      alpha: optionalAlpha(options.alpha),
+      parseOptions,
     };
   }
 
@@ -558,6 +596,7 @@ function normalizeFrameOptions(frameOptions) {
     );
   }
 
+  const parseOptions = normalizeParseOptions(frameOptions);
   return {
     width: positiveIntegerOrDefault(frameOptions.width, DEFAULT_WIDTH),
     height: positiveIntegerOrDefault(frameOptions.height, DEFAULT_HEIGHT),
@@ -567,11 +606,8 @@ function normalizeFrameOptions(frameOptions) {
     fit: frameOptions.fit !== false,
     padding: numberOrDefault(frameOptions.padding, 0),
     view: frameOptions.view || null,
-    preserveArcRegions: frameOptions.preserveArcRegions !== false,
-    arcTessellationQuality: numberOrDefault(
-      frameOptions.arcTessellationQuality,
-      DEFAULT_ARC_TESSELLATION_QUALITY,
-    ),
+    preserveArcRegions: parseOptions.preserveArcRegions,
+    arcTessellationQuality: parseOptions.arcTessellationQuality,
     minimumFeaturePixels: numberOrDefault(
       frameOptions.minimumFeaturePixels,
       DEFAULT_MINIMUM_FEATURE_PIXELS,
@@ -598,6 +634,16 @@ function normalizeFrameOptions(frameOptions) {
     ),
     strategy: normalizeExportStrategy(frameOptions.strategy),
     colors: DEFAULT_COLORS.map((color) => [...color]),
+  };
+}
+
+function normalizeParseOptions(options = {}) {
+  return {
+    preserveArcRegions: options.preserveArcRegions !== false,
+    arcTessellationQuality: numberOrDefault(
+      options.arcTessellationQuality,
+      DEFAULT_ARC_TESSELLATION_QUALITY,
+    ),
   };
 }
 
@@ -644,6 +690,46 @@ async function renderLayersBestEffort(renderer, layers, options = {}) {
   return { renderedCount, failures };
 }
 
+async function loadLayersBestEffort(renderer, layers, options = {}) {
+  const layerErrorMode = options.layerErrorMode || "skip";
+  if (layerErrorMode !== "skip" && layerErrorMode !== "throw") {
+    throw new TypeError("layerErrorMode must be 'skip' or 'throw'.");
+  }
+
+  const { layerErrorMode: _mode, onLayerError, ...layerOptions } = options;
+  const failures = [];
+  const preparedLayers = [];
+
+  for (const layer of layers) {
+    try {
+      preparedLayers.push(await renderer.loadLayer(layer, layerOptions));
+    } catch (error) {
+      const failure = {
+        layer,
+        name: getLayerFailureName(layer),
+        error,
+      };
+      failures.push(failure);
+      if (typeof onLayerError === "function") {
+        onLayerError(failure);
+      }
+      if (layerErrorMode === "throw") {
+        throw error;
+      }
+    }
+  }
+
+  if (preparedLayers.length === 0 && failures.length > 0) {
+    throw failures[0].error;
+  }
+
+  return {
+    layers: preparedLayers,
+    loadedCount: preparedLayers.length,
+    failures,
+  };
+}
+
 function normalizeLayer(layer, layerOptions = {}) {
   if (isPathLayerConfig(layer)) {
     const { path, ...inlineOptions } = layer;
@@ -686,6 +772,37 @@ function isLayerConfig(value) {
     !isBlob(value) &&
     !isArrayBufferLike(value)
   );
+}
+
+function isPreparedNodeLayer(value) {
+  return Boolean(value?.[NODE_PREPARED_LAYER]);
+}
+
+function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
+  const offsetX = numberOrDefault(preparedLayer.offsetX, 0);
+  const offsetY = numberOrDefault(preparedLayer.offsetY, 0);
+  if (
+    ("offsetX" in layerOptions && numberOrDefault(layerOptions.offsetX, 0) !== offsetX) ||
+    ("offsetY" in layerOptions && numberOrDefault(layerOptions.offsetY, 0) !== offsetY)
+  ) {
+    throw new Error("Prepared layer offsets are fixed. Load the layer again to change offsets.");
+  }
+
+  return {
+    ...preparedLayer,
+    name:
+      "name" in layerOptions && layerOptions.name != null
+        ? String(layerOptions.name)
+        : preparedLayer.name,
+    color:
+      "color" in layerOptions
+        ? layerOptions.color
+        : preparedLayer.color,
+    alpha:
+      "alpha" in layerOptions
+        ? optionalAlpha(layerOptions.alpha)
+        : preparedLayer.alpha,
+  };
 }
 
 async function sourceToText(source) {

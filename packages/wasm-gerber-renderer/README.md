@@ -197,11 +197,43 @@ await renderGerberToPngFile(
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG bytes to `outputPath`. Parent directories must already exist.
 - `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, and `offsetY`.
 - `packageRoot()`: returns the installed package directory path.
+- `renderer.loadLayer(layer, layerOptions)`: parses a Node layer once and returns a prepared layer that can be reused across frames.
+- `renderer.loadLayers(layers, options)`: parses multiple layers and returns `{ layers, loadedCount, failures }`. Failed layers are skipped by default.
 - `renderer.withFrame(frameOptions, callback)`: starts a headless render frame and stores rendered pixels after the callback resolves.
 - `renderer.renderLayer(layer, layerOptions)`: adds one layer to the active frame and returns its numeric layer ID. Must be called inside `withFrame()`. This strict API rejects on failure.
 - `renderer.renderLayers(layers, options)`: adds multiple layers and returns `{ renderedCount, failures }`. Failed layers are skipped by default; use `layerErrorMode: "throw"` for strict behavior.
 - `renderer.exportPng(exportOptions)`: exports the last Node frame as PNG bytes.
 - `renderer.dispose()`: releases the GLES context.
+
+Use prepared layers when rendering the same Gerber inputs more than once:
+
+```js
+const renderer = await createNodeGerberRenderer();
+
+try {
+  const prepared = await renderer.loadLayers([
+    fileLayer("top.gbr", { color: "#ff4040" }),
+    fileLayer("bottom.gbr", { color: "#40ff40" }),
+  ]);
+
+  await renderer.withFrame({ width: 1920, height: 1080, background: "#000" }, async () => {
+    await renderer.renderLayers(prepared.layers);
+  });
+  const preview = await renderer.exportPng();
+
+  await renderer.withFrame({ width: 3840, height: 2160, background: "#000" }, async () => {
+    await renderer.renderLayers(prepared.layers);
+  });
+  const highRes = await renderer.exportPng();
+} finally {
+  renderer.dispose();
+}
+```
+
+Prepared layer geometry is parsed with the `offsetX`, `offsetY`,
+`preserveArcRegions`, and `arcTessellationQuality` values used at load time.
+Load the layer again to change those options. Per-frame color and alpha can be
+overridden in `renderLayer(preparedLayer, layerOptions)`.
 
 Batch APIs (`renderGerberToCanvas`, `renderGerberToPng`,
 `renderGerberToPngBuffer`, `renderGerberToPngFile`, and `renderLayers`) render
