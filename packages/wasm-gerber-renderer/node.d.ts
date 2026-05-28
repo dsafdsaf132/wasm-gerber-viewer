@@ -123,7 +123,7 @@ export type NodePngWritable = {
   write(
     chunk: Uint8Array,
     callback?: (error?: Error | null) => void,
-  ): boolean | void;
+  ): boolean | void | Promise<void>;
 };
 
 export declare function createNodeGerberRenderer(

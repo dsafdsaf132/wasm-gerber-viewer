@@ -99,8 +99,9 @@ await renderGerberToPngFile(
 );
 ```
 
-`renderGerberToPngFile()` streams PNG bytes directly to the output file. Use
-`renderGerberToPngBuffer()` only when the whole PNG must be kept in memory.
+`renderGerberToPngFile()` streams PNG bytes to a temporary file and replaces
+the output after success. Use `renderGerberToPngBuffer()` only when the whole
+PNG must be kept in memory.
 
 For PNG bytes instead of a file:
 
@@ -161,8 +162,8 @@ const blob = await renderGerberToPng(canvas, file, {
 ```
 
 For browser file streaming, pass a `WritableStream` to `renderer.exportPngStream()`
-or `renderGerberToPngStream()`. This requires `CompressionStream` support and
-avoids building a PNG `Blob`.
+or `renderGerberToPngStream()`. This requires `CompressionStream` support,
+closes the stream after `IEND`, and avoids building a PNG `Blob`.
 
 ## Reusable Renderer
 

@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { execFile as execFileCallback } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, rename, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { freemem } from "node:os";
 import { basename, dirname, resolve } from "node:path";
@@ -222,12 +222,14 @@ export class NodeGerberRenderer {
 
   async exportPngFile(outputPath, exportOptions = {}) {
     this.assertRenderedFrameAvailable();
-    const stream = createWriteStream(outputPath);
+    const tempPath = createTempOutputPath(outputPath);
+    const stream = createWriteStream(tempPath, { flags: "wx" });
     const done = finished(stream);
     try {
       await this.exportPngStream(stream, exportOptions);
       stream.end();
       await done;
+      await rename(tempPath, outputPath);
     } catch (error) {
       stream.destroy(error);
       try {
@@ -235,6 +237,7 @@ export class NodeGerberRenderer {
       } catch (_streamError) {
         // Preserve the original rendering error.
       }
+      await rm(tempPath, { force: true });
       throw error;
     }
   }
@@ -1137,6 +1140,10 @@ async function writeFullFramePixelRows(
 
 function writeNodeWritable(writable, chunk) {
   const buffer = Buffer.from(chunk);
+  if (!isNodeWritableStream(writable)) {
+    return Promise.resolve(writable.write(buffer));
+  }
+
   return new Promise((resolve, reject) => {
     const onError = (error) => {
       cleanup();
@@ -1164,6 +1171,16 @@ function writeNodeWritable(writable, chunk) {
       reject(error);
     }
   });
+}
+
+function isNodeWritableStream(writable) {
+  return typeof writable.once === "function";
+}
+
+function createTempOutputPath(outputPath) {
+  const resolvedPath = resolve(outputPath);
+  const suffix = `${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  return resolve(dirname(resolvedPath), `.${basename(resolvedPath)}.${suffix}.tmp`);
 }
 
 function estimateFullFrameBytes(width, height, safetyFactor) {

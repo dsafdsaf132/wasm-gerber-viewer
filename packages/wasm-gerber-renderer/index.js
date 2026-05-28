@@ -441,6 +441,7 @@ async function streamCanvasToPng(canvas, gl, writable, background, exportOptions
       );
     });
     await sink.write(pngChunk("IEND", new Uint8Array(0)));
+    await sink.close();
   } finally {
     sink.release();
   }
@@ -481,12 +482,14 @@ function createWebWritablePngSink(writable) {
     const writer = writable.getWriter();
     return {
       write: (chunk) => writer.write(chunk),
+      close: () => writer.close(),
       release: () => writer.releaseLock(),
     };
   }
   if (writable && typeof writable.write === "function") {
     return {
       write: (chunk) => writable.write(chunk),
+      close: () => writable.close?.(),
       release: () => {},
     };
   }
