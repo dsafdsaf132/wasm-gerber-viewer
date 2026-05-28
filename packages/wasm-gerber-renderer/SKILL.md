@@ -64,6 +64,8 @@ Useful CLI options:
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
 - `--approx-region-arcs` uses faster approximate region arcs.
 - `--arc-quality <0|1|2>` controls approximate arc quality.
+- `--flip-x` mirrors the output horizontally.
+- `--flip-y` mirrors the output vertically.
 - `--no-fit` disables automatic fit-to-view.
 - `--skill` prints package usage notes for AI agents.
 
@@ -255,6 +257,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 - `background`: `null` for transparent output or a color string/RGBA array.
 - `fit`: defaults to `true`.
 - `padding`: fit-to-view padding in pixels.
+- `flipX`, `flipY`: mirror the output around the frame center.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`.
 - `globalAlpha`: opacity multiplier for all layers.
 - `minimumFeaturePixels`: minimum visible line/arc width.

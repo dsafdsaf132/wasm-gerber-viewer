@@ -68,6 +68,8 @@ export type NodeFrameOptions = {
   background?: null | string | RGBAColor;
   fit?: boolean;
   padding?: number;
+  flipX?: boolean;
+  flipY?: boolean;
   view?: {
     zoomX: number;
     zoomY: number;

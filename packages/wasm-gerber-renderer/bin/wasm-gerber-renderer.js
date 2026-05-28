@@ -18,6 +18,8 @@ Options:
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --approx-region-arcs             Approximate region arcs before rendering (default: false)
   --arc-quality <0|1|2>            Approx arc quality: low, normal, high (default: 1)
+  --flip-x                         Mirror the output horizontally
+  --flip-y                         Mirror the output vertically
   --no-fit                         Use identity view instead of fit view (default: fit enabled)
   --skill                          Print AI usage notes
   -h, --help                       Show this help
@@ -96,6 +98,10 @@ function parseArgs(args) {
       frameOptions.preserveArcRegions = false;
     } else if (arg === "--arc-quality") {
       frameOptions.arcTessellationQuality = readNonNegativeInteger(args, ++index, arg);
+    } else if (arg === "--flip-x") {
+      frameOptions.flipX = true;
+    } else if (arg === "--flip-y") {
+      frameOptions.flipY = true;
     } else if (arg === "--no-fit") {
       frameOptions.fit = false;
     } else if (arg.startsWith("-")) {

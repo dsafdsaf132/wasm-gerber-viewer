@@ -6,29 +6,38 @@ import { freemem } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createDeflate, deflateSync } from "node:zlib";
+import {
+  DEFAULT_ARC_TESSELLATION_QUALITY,
+  FrameState,
+  addLayerToProcessor,
+  applyProcessorOptions,
+  boundaryToPlainObject,
+  clamp01,
+  createBaseFrameOptions,
+  getSourceName,
+  loadLayersBestEffort,
+  loadWasmJsModule,
+  mergeBounds,
+  normalizeColor,
+  normalizeLayer,
+  normalizeLayerList,
+  normalizeParseOptions,
+  numberOrDefault,
+  optionalAlpha,
+  parseColor,
+  positiveIntegerOrDefault,
+  positiveNumberOrDefault,
+  renderLayersBestEffort,
+  resolveFrameView,
+  resolveLayerAlpha,
+  sourceToText,
+  toByte,
+} from "./shared.js";
 
 const require = createRequire(import.meta.url);
 
-const DEFAULT_WASM_MODULE_URLS = [
-  new URL("./wasm/wasm_gerber_processor.js", import.meta.url),
-  new URL("../../wasm/pkg/wasm_gerber_processor.js", import.meta.url),
-];
-
-const DEFAULT_COLORS = [
-  [1.0, 0.0, 0.0],
-  [0.0, 1.0, 0.0],
-  [0.0, 0.0, 1.0],
-  [1.0, 0.0, 1.0],
-  [1.0, 1.0, 0.0],
-  [0.0, 1.0, 1.0],
-];
-
 const DEFAULT_WIDTH = 1200;
 const DEFAULT_HEIGHT = 800;
-const DEFAULT_BACKGROUND = null;
-const DEFAULT_GLOBAL_ALPHA = 0.7;
-const DEFAULT_MINIMUM_FEATURE_PIXELS = 1;
-const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
 const RGBA_BYTES_PER_PIXEL = 4;
 const DEFAULT_MAX_STREAM_BAND_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_FULL_FRAME_BYTES = 512 * 1024 * 1024;
@@ -114,7 +123,7 @@ export class NodeGerberRenderer {
 
     const normalizedFrameOptions = normalizeFrameOptions(frameOptions);
     try {
-      this.frame = new FrameState(normalizedFrameOptions);
+      this.frame = new NodeFrameState(normalizedFrameOptions);
       this.lastFrame = null;
       this.lastRenderPlan = null;
       await callback();
@@ -253,7 +262,9 @@ export class NodeGerberRenderer {
     const color =
       prepared.color == null
         ? this.frame.nextColor()
-        : normalizeColor(prepared.color, this.frame.options.colors[0]);
+        : normalizeColor(prepared.color, this.frame.options.colors[0], {
+            allowString: true,
+          });
 
     return {
       layerId,
@@ -273,8 +284,15 @@ export class NodeGerberRenderer {
       return mergePreparedLayerOptions(layer, layerOptions);
     }
 
-    const { source, options } = normalizeLayer(layer, layerOptions);
-    const content = await sourceToText(source);
+    const { source, options } = normalizeLayer(layer, layerOptions, {
+      allowPathConfig: true,
+    });
+    const content = await sourceToText(source, {
+      fileUrlToPath: fileURLToPath,
+      readPathText: (path) => readFile(path, "utf8"),
+      sourceDescription:
+        "a string, File, Blob, ArrayBuffer, Uint8Array, URL, or path config",
+    });
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
     const parseOptions = normalizeParseOptions(options);
@@ -315,7 +333,8 @@ export class NodeGerberRenderer {
     }
 
     const view = resolveFrameView(
-      frame,
+      frame.options,
+      frame.bounds,
       frame.options.width,
       frame.options.height,
     );
@@ -330,45 +349,7 @@ export class NodeGerberRenderer {
   }
 }
 
-class FrameState {
-  constructor(options) {
-    this.options = options;
-    this.layers = [];
-    this.bounds = null;
-    this.nextColorIndex = 0;
-  }
-
-  addLayer(layer) {
-    this.layers.push(layer);
-    this.bounds = mergeBounds(this.bounds, layer.bounds);
-  }
-
-  nextColor() {
-    const color = this.options.colors[
-      this.nextColorIndex % this.options.colors.length
-    ];
-    this.nextColorIndex += 1;
-    return [...color];
-  }
-
-  toResult(view) {
-    const globalAlpha = clamp01(numberOrDefault(this.options.globalAlpha, 1));
-    return {
-      width: this.options.width,
-      height: this.options.height,
-      background: this.options.background,
-      bounds: this.bounds,
-      view,
-      layers: this.layers.map((layer) => ({
-        id: layer.layerId,
-        name: layer.name,
-        bounds: layer.bounds,
-        color: layer.color,
-        alpha: resolveLayerAlpha(layer.alpha, globalAlpha),
-      })),
-    };
-  }
-
+class NodeFrameState extends FrameState {
   toRenderPlan(view) {
     const globalAlpha = clamp01(numberOrDefault(this.options.globalAlpha, 1));
     return {
@@ -399,37 +380,10 @@ class FrameState {
 }
 
 async function loadWasmModule(rendererOptions) {
-  if (rendererOptions.wasmModule) {
-    return {
-      wasmModule: rendererOptions.wasmModule,
-      wasmModuleUrl: rendererOptions.wasmModuleUrl
-        ? toUrl(rendererOptions.wasmModuleUrl)
-        : null,
-    };
-  }
-
-  const wasmModuleUrls = rendererOptions.wasmModuleUrl
-    ? [toUrl(rendererOptions.wasmModuleUrl)]
-    : DEFAULT_WASM_MODULE_URLS;
-  const errors = [];
-
-  for (const wasmModuleUrl of wasmModuleUrls) {
-    try {
-      return {
-        wasmModule: await import(String(wasmModuleUrl)),
-        wasmModuleUrl,
-      };
-    } catch (error) {
-      errors.push({ wasmModuleUrl, error });
-    }
-  }
-
-  const attemptedUrls = wasmModuleUrls.map(String).join(", ");
-  throw new Error(
-    `Failed to load wasm-gerber renderer module from ${attemptedUrls}. ` +
-      "Run npm run build:wasm before using the Node renderer.",
-    { cause: errors[0]?.error },
-  );
+  return loadWasmJsModule(rendererOptions, {
+    normalizeUrl: toUrl,
+    hint: "Run npm run build:wasm before using the Node renderer.",
+  });
 }
 
 async function initializeWasmModule(wasmModule, wasmModuleUrl, rendererOptions) {
@@ -540,34 +494,6 @@ function validateWebGl2Context(gl) {
   }
 }
 
-function applyProcessorOptions(processor, frameOptions) {
-  if (typeof processor.set_preserve_arc_regions === "function") {
-    processor.set_preserve_arc_regions(frameOptions.preserveArcRegions !== false);
-  }
-  if (
-    typeof processor.set_arc_tessellation_quality === "function" &&
-    frameOptions.arcTessellationQuality != null
-  ) {
-    processor.set_arc_tessellation_quality(frameOptions.arcTessellationQuality);
-  }
-  if (
-    typeof processor.set_minimum_feature_pixels === "function" &&
-    frameOptions.minimumFeaturePixels != null
-  ) {
-    processor.set_minimum_feature_pixels(frameOptions.minimumFeaturePixels);
-  }
-}
-
-function addLayerToProcessor(processor, content, offsetX, offsetY) {
-  if (offsetX !== 0 || offsetY !== 0) {
-    if (typeof processor.add_layer_with_offset !== "function") {
-      throw new Error("Layer offsets require an updated WASM renderer.");
-    }
-    return processor.add_layer_with_offset(content, offsetX, offsetY);
-  }
-  return processor.add_layer(content);
-}
-
 function parseLayerPayload(wasmModule, content, offsetX, offsetY, frameOptions) {
   const parseWithOptions = wasmModule.parse_gerber_layer_with_options;
   const parseDefault = wasmModule.parse_gerber_layer;
@@ -611,23 +537,11 @@ function normalizeFrameOptions(frameOptions) {
     );
   }
 
-  const parseOptions = normalizeParseOptions(frameOptions);
   return {
     width: positiveIntegerOrDefault(frameOptions.width, DEFAULT_WIDTH),
     height: positiveIntegerOrDefault(frameOptions.height, DEFAULT_HEIGHT),
     clear: true,
-    background:
-      "background" in frameOptions ? frameOptions.background : DEFAULT_BACKGROUND,
-    fit: frameOptions.fit !== false,
-    padding: numberOrDefault(frameOptions.padding, 0),
-    view: frameOptions.view || null,
-    preserveArcRegions: parseOptions.preserveArcRegions,
-    arcTessellationQuality: parseOptions.arcTessellationQuality,
-    minimumFeaturePixels: numberOrDefault(
-      frameOptions.minimumFeaturePixels,
-      DEFAULT_MINIMUM_FEATURE_PIXELS,
-    ),
-    globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
+    ...createBaseFrameOptions(frameOptions),
     maxBandBytes: positiveIntegerOrDefault(
       frameOptions.maxBandBytes,
       DEFAULT_MAX_STREAM_BAND_BYTES,
@@ -648,145 +562,7 @@ function normalizeFrameOptions(frameOptions) {
       DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR,
     ),
     strategy: normalizeExportStrategy(frameOptions.strategy),
-    colors: DEFAULT_COLORS.map((color) => [...color]),
   };
-}
-
-function normalizeParseOptions(options = {}) {
-  return {
-    preserveArcRegions: options.preserveArcRegions !== false,
-    arcTessellationQuality: numberOrDefault(
-      options.arcTessellationQuality,
-      DEFAULT_ARC_TESSELLATION_QUALITY,
-    ),
-  };
-}
-
-function normalizeLayerList(layers) {
-  if (layers == null) {
-    return [];
-  }
-  return Array.isArray(layers) ? layers : [layers];
-}
-
-async function renderLayersBestEffort(renderer, layers, options = {}) {
-  const layerErrorMode = options.layerErrorMode || "skip";
-  if (layerErrorMode !== "skip" && layerErrorMode !== "throw") {
-    throw new TypeError("layerErrorMode must be 'skip' or 'throw'.");
-  }
-
-  const failures = [];
-  let renderedCount = 0;
-
-  for (const layer of layers) {
-    try {
-      await renderer.renderLayer(layer);
-      renderedCount += 1;
-    } catch (error) {
-      const failure = {
-        layer,
-        name: getLayerFailureName(layer),
-        error,
-      };
-      failures.push(failure);
-      if (typeof options.onLayerError === "function") {
-        options.onLayerError(failure);
-      }
-      if (layerErrorMode === "throw") {
-        throw error;
-      }
-    }
-  }
-
-  if (renderedCount === 0 && failures.length > 0) {
-    throw failures[0].error;
-  }
-
-  return { renderedCount, failures };
-}
-
-async function loadLayersBestEffort(renderer, layers, options = {}) {
-  const layerErrorMode = options.layerErrorMode || "skip";
-  if (layerErrorMode !== "skip" && layerErrorMode !== "throw") {
-    throw new TypeError("layerErrorMode must be 'skip' or 'throw'.");
-  }
-
-  const { layerErrorMode: _mode, onLayerError, ...layerOptions } = options;
-  const failures = [];
-  const preparedLayers = [];
-
-  for (const layer of layers) {
-    try {
-      preparedLayers.push(await renderer.loadLayer(layer, layerOptions));
-    } catch (error) {
-      const failure = {
-        layer,
-        name: getLayerFailureName(layer),
-        error,
-      };
-      failures.push(failure);
-      if (typeof onLayerError === "function") {
-        onLayerError(failure);
-      }
-      if (layerErrorMode === "throw") {
-        throw error;
-      }
-    }
-  }
-
-  if (preparedLayers.length === 0 && failures.length > 0) {
-    throw failures[0].error;
-  }
-
-  return {
-    layers: preparedLayers,
-    loadedCount: preparedLayers.length,
-    failures,
-  };
-}
-
-function normalizeLayer(layer, layerOptions = {}) {
-  if (isPathLayerConfig(layer)) {
-    const { path, ...inlineOptions } = layer;
-    return {
-      source: { path },
-      options: { ...inlineOptions, ...layerOptions },
-    };
-  }
-  if (isLayerConfig(layer)) {
-    const { source, ...inlineOptions } = layer;
-    if (source == null) {
-      throw new TypeError("Layer config requires a source.");
-    }
-    return {
-      source,
-      options: { ...inlineOptions, ...layerOptions },
-    };
-  }
-
-  return {
-    source: layer,
-    options: { ...layerOptions },
-  };
-}
-
-function isPathLayerConfig(value) {
-  return (
-    value &&
-    typeof value === "object" &&
-    "path" in value &&
-    !("source" in value)
-  );
-}
-
-function isLayerConfig(value) {
-  return (
-    value &&
-    typeof value === "object" &&
-    "source" in value &&
-    !isBlob(value) &&
-    !isArrayBufferLike(value)
-  );
 }
 
 function isPreparedNodeLayer(value) {
@@ -818,231 +594,6 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
         ? optionalAlpha(layerOptions.alpha)
         : preparedLayer.alpha,
   };
-}
-
-async function sourceToText(source) {
-  if (typeof source === "string") {
-    return source;
-  }
-  if (source instanceof URL) {
-    return readFile(fileURLToPath(source), "utf8");
-  }
-  if (source && typeof source === "object" && "path" in source) {
-    return readFile(String(source.path), "utf8");
-  }
-  if (isBlob(source)) {
-    return source.text();
-  }
-  if (source instanceof ArrayBuffer) {
-    return new TextDecoder().decode(source);
-  }
-  if (ArrayBuffer.isView(source)) {
-    return new TextDecoder().decode(
-      source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength),
-    );
-  }
-
-  throw new TypeError(
-    "Layer source must be a string, File, Blob, ArrayBuffer, Uint8Array, URL, or path config.",
-  );
-}
-
-function getSourceName(source) {
-  if (source && typeof source === "object" && "name" in source) {
-    return String(source.name);
-  }
-  if (source && typeof source === "object" && "path" in source) {
-    return basename(String(source.path));
-  }
-  if (source instanceof URL && source.protocol === "file:") {
-    return basename(fileURLToPath(source));
-  }
-  return "";
-}
-
-function getLayerFailureName(layer) {
-  if (layer && typeof layer === "object") {
-    if ("name" in layer && layer.name) {
-      return String(layer.name);
-    }
-    if ("path" in layer) {
-      return basename(String(layer.path));
-    }
-    if ("source" in layer) {
-      return getSourceName(layer.source);
-    }
-  }
-  return getSourceName(layer) || "Layer";
-}
-
-function isBlob(value) {
-  return typeof Blob !== "undefined" && value instanceof Blob;
-}
-
-function isArrayBufferLike(value) {
-  return value instanceof ArrayBuffer || ArrayBuffer.isView(value);
-}
-
-function resolveFrameView(frame, width, height) {
-  if (frame.options.view) {
-    return {
-      zoomX: finiteOrThrow(frame.options.view.zoomX, "view.zoomX"),
-      zoomY: finiteOrThrow(frame.options.view.zoomY, "view.zoomY"),
-      offsetX: finiteOrThrow(frame.options.view.offsetX, "view.offsetX"),
-      offsetY: finiteOrThrow(frame.options.view.offsetY, "view.offsetY"),
-    };
-  }
-
-  if (frame.options.fit === false) {
-    return { zoomX: 1, zoomY: 1, offsetX: 0, offsetY: 0 };
-  }
-
-  if (!frame.bounds) {
-    throw new Error("Cannot fit an empty Gerber frame.");
-  }
-
-  return calculateFitView(frame.bounds, width, height, frame.options.padding);
-}
-
-function calculateFitView(bounds, width, height, padding) {
-  const minX = Number(bounds.minX);
-  const maxX = Number(bounds.maxX);
-  const minY = Number(bounds.minY);
-  const maxY = Number(bounds.maxY);
-  if (![minX, maxX, minY, maxY].every(Number.isFinite)) {
-    throw new Error("Cannot fit Gerber layer because bounds are invalid.");
-  }
-
-  const boundsWidth = Math.max(0, maxX - minX);
-  const boundsHeight = Math.max(0, maxY - minY);
-  const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2;
-  const aspect = width / height;
-  const viewWidth = aspect > 1 ? 2 * aspect : 2;
-  const viewHeight = aspect > 1 ? 2 : 2 / aspect;
-  const usableWidth = viewWidth * Math.max(1, width - padding * 2) / width;
-  const usableHeight = viewHeight * Math.max(1, height - padding * 2) / height;
-
-  let zoom = 2;
-  if (boundsWidth > 0 && boundsHeight > 0) {
-    zoom = Math.min(usableWidth / boundsWidth, usableHeight / boundsHeight);
-  } else if (boundsWidth > 0) {
-    zoom = usableWidth / boundsWidth;
-  } else if (boundsHeight > 0) {
-    zoom = usableHeight / boundsHeight;
-  }
-
-  return {
-    zoomX: zoom,
-    zoomY: zoom,
-    offsetX: -centerX * zoom,
-    offsetY: -centerY * zoom,
-  };
-}
-
-function boundaryToPlainObject(boundary) {
-  return {
-    minX: readBoundaryNumber(boundary, "min_x", "minX"),
-    maxX: readBoundaryNumber(boundary, "max_x", "maxX"),
-    minY: readBoundaryNumber(boundary, "min_y", "minY"),
-    maxY: readBoundaryNumber(boundary, "max_y", "maxY"),
-  };
-}
-
-function readBoundaryNumber(boundary, snakeName, camelName) {
-  const value = boundary[snakeName] ?? boundary[camelName];
-  return Number(typeof value === "function" ? value.call(boundary) : value);
-}
-
-function mergeBounds(first, second) {
-  if (!second) return first;
-  if (!first) return { ...second };
-  return {
-    minX: Math.min(first.minX, second.minX),
-    maxX: Math.max(first.maxX, second.maxX),
-    minY: Math.min(first.minY, second.minY),
-    maxY: Math.max(first.maxY, second.maxY),
-  };
-}
-
-function normalizeColor(color, fallback = DEFAULT_COLORS[0]) {
-  const input = color == null ? fallback : color;
-  if (typeof input === "string") {
-    return parseColor(input).slice(0, 3).map((value) => value / 255);
-  }
-  if (!input || (!Array.isArray(input) && !ArrayBuffer.isView(input))) {
-    return fallback == null ? null : [...fallback];
-  }
-  if (input.length < 3) {
-    return fallback == null ? null : [...fallback];
-  }
-  const fallbackColor = fallback || DEFAULT_COLORS[0];
-  return [
-    clamp01(numberOrDefault(input[0], fallbackColor[0])),
-    clamp01(numberOrDefault(input[1], fallbackColor[1])),
-    clamp01(numberOrDefault(input[2], fallbackColor[2])),
-  ];
-}
-
-function parseColor(color, allowAlpha = false) {
-  if (Array.isArray(color) || ArrayBuffer.isView(color)) {
-    if (color.length < 3) {
-      throw new TypeError("Color arrays must have at least three channels.");
-    }
-    return [
-      Math.round(clamp01(color[0]) * 255),
-      Math.round(clamp01(color[1]) * 255),
-      Math.round(clamp01(color[2]) * 255),
-      Math.round(clamp01(color.length >= 4 ? color[3] : 1) * 255),
-    ];
-  }
-
-  if (typeof color !== "string") {
-    throw new TypeError("Color must be a CSS hex/rgb string or RGBA array.");
-  }
-
-  const hex = color.trim().match(/^#([0-9a-f]{3,8})$/i);
-  if (hex) {
-    const value = hex[1];
-    if (value.length === 3 || value.length === 4) {
-      return [
-        parseInt(value[0] + value[0], 16),
-        parseInt(value[1] + value[1], 16),
-        parseInt(value[2] + value[2], 16),
-        value.length === 4 && allowAlpha ? parseInt(value[3] + value[3], 16) : 255,
-      ];
-    }
-    if (value.length === 6 || value.length === 8) {
-      return [
-        parseInt(value.slice(0, 2), 16),
-        parseInt(value.slice(2, 4), 16),
-        parseInt(value.slice(4, 6), 16),
-        value.length === 8 && allowAlpha ? parseInt(value.slice(6, 8), 16) : 255,
-      ];
-    }
-  }
-
-  const rgb = color
-    .trim()
-    .match(/^rgba?\(([^,]+),([^,]+),([^,]+)(?:,([^,]+))?\)$/i);
-  if (rgb) {
-    return [
-      parseCssChannel(rgb[1]),
-      parseCssChannel(rgb[2]),
-      parseCssChannel(rgb[3]),
-      rgb[4] && allowAlpha ? Math.round(clamp01(Number(rgb[4])) * 255) : 255,
-    ];
-  }
-
-  throw new TypeError(`Unsupported color format: ${color}`);
-}
-
-function parseCssChannel(value) {
-  const trimmed = value.trim();
-  if (trimmed.endsWith("%")) {
-    return Math.round(clamp01(Number(trimmed.slice(0, -1)) / 100) * 255);
-  }
-  return Math.min(255, Math.max(0, Math.round(Number(trimmed))));
 }
 
 async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
@@ -1605,10 +1156,6 @@ function compositePremultipliedRowBackground(
   }
 }
 
-function toByte(value) {
-  return Math.min(255, Math.max(0, Math.round(value)));
-}
-
 function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
   const pngColorType = getPngColorType(background);
   const pngChannels = getPngChannelCount(pngColorType);
@@ -1931,36 +1478,6 @@ function formatByteCount(bytes) {
   return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-function positiveIntegerOrDefault(value, fallback) {
-  const number = Number(value);
-  if (Number.isFinite(number) && number > 0) {
-    return Math.max(1, Math.round(number));
-  }
-  return Math.max(1, Math.round(Number(fallback) || 1));
-}
-
-function positiveNumberOrDefault(value, fallback) {
-  const number = Number(value);
-  if (Number.isFinite(number) && number > 0) {
-    return number;
-  }
-  const fallbackNumber = Number(fallback);
-  return Number.isFinite(fallbackNumber) && fallbackNumber > 0 ? fallbackNumber : 1;
-}
-
-function numberOrDefault(value, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-function optionalAlpha(value) {
-  return value == null ? null : clamp01(value);
-}
-
-function resolveLayerAlpha(layerAlpha, globalAlpha) {
-  return layerAlpha == null ? globalAlpha : layerAlpha;
-}
-
 function normalizeExportStrategy(value) {
   if (value == null) return "auto";
   const strategy = String(value);
@@ -1968,18 +1485,6 @@ function normalizeExportStrategy(value) {
     return strategy;
   }
   throw new TypeError("strategy must be 'auto', 'full-frame', or 'stream'.");
-}
-
-function finiteOrThrow(value, name) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    throw new TypeError(`${name} must be finite.`);
-  }
-  return number;
-}
-
-function clamp01(value) {
-  return Math.min(1, Math.max(0, numberOrDefault(value, 0)));
 }
 
 function toUrl(value) {

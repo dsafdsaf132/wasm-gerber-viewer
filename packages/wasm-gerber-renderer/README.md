@@ -250,6 +250,8 @@ the first layer error.
 - `background`: output background. Defaults to `null` for transparent output. Accepts CSS color strings or `[r, g, b, a]`.
 - `fit`: fits all loaded layer bounds into the output frame. Defaults to `true`.
 - `padding`: pixel padding applied when `fit` is enabled. Defaults to `0`.
+- `flipX`: mirrors the output horizontally around the frame center. Defaults to `false`.
+- `flipY`: mirrors the output vertically around the frame center. Defaults to `false`.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`; takes precedence over `fit`.
 - `preserveArcRegions`: keeps exact region arcs. Defaults to `true`; set `false` to approximate region arcs.
 - `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
@@ -328,6 +330,8 @@ CLI options:
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
 - `--approx-region-arcs`: converts region arcs to line segments before rendering.
 - `--arc-quality <0|1|2>`: approximate arc quality. Defaults to `1`.
+- `--flip-x`: mirrors the output horizontally.
+- `--flip-y`: mirrors the output vertically.
 - `--no-fit`: disables fit-to-view.
 - `--skill`: prints [package usage notes](SKILL.md) for AI agents.
 - `-h, --help`: prints CLI usage and exits.

@@ -31,6 +31,7 @@
     "index.d.ts",
     "node.js",
     "node.d.ts",
+    "shared.js",
     "README.md",
     "SKILL.md",
     "LICENSE",
@@ -43,7 +44,7 @@
     "prepack": "npm run build:wasm && npm run stage:wasm",
     "postpack": "npm run clean:wasm",
     "prepublishOnly": "npm run check",
-    "check": "node --check index.js && node --check node.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs",
+    "check": "node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs",
     "verify:publish": "npm run check && npm pack --dry-run"
   },
   "license": "MIT",
