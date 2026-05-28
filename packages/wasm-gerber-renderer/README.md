@@ -222,7 +222,7 @@ the first layer error.
 - `preserveArcRegions`: keeps exact region arcs. Defaults to `true`; set `false` to approximate region arcs.
 - `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
 - `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
-- `globalAlpha`: opacity multiplier applied to rendered layers. Defaults to `0.7`.
+- `globalAlpha`: opacity for layers without an explicit layer `alpha`. Defaults to `0.7`.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
 - `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
@@ -230,7 +230,7 @@ the first layer error.
 `layerOptions` control a single layer:
 
 - `color`: layer color. Browser accepts `[r, g, b]`; Node also accepts hex and `rgb()`/`rgba()` strings. Defaults to an automatic color cycle.
-- `alpha`: per-layer opacity before `globalAlpha` is applied. Defaults to `1`.
+- `alpha`: per-layer opacity. When set, it overrides `globalAlpha` for that layer.
 - `offsetX`: X offset applied while loading geometry. Defaults to `0`.
 - `offsetY`: Y offset applied while loading geometry. Defaults to `0`.
 - `name`: layer display name for config objects such as `{ source, name }` or `{ path, name }`.

@@ -197,7 +197,7 @@ export class GerberRenderer {
       options.color == null
         ? this.frame.nextColor()
         : normalizeColor(options.color, this.frame.options.colors[0]);
-    const alpha = clamp01(numberOrDefault(options.alpha, 1));
+    const alpha = optionalAlpha(options.alpha);
 
     return {
       layerId,
@@ -234,7 +234,7 @@ export class GerberRenderer {
           layer.color[0],
           layer.color[1],
           layer.color[2],
-          layer.alpha,
+          resolveLayerAlpha(layer.alpha, globalAlpha),
         ]),
       );
       frame.processor.render_with_clear(
@@ -244,14 +244,14 @@ export class GerberRenderer {
         view.zoomY,
         view.offsetX,
         view.offsetY,
-        globalAlpha,
+        1,
         clear,
       );
     } else {
       if (!clear) {
         throw new Error("clear:false requires an updated WASM renderer.");
       }
-      if (frame.layers.some((layer) => layer.alpha !== 1)) {
+      if (frame.layers.some((layer) => layer.alpha != null)) {
         throw new Error("Layer alpha requires an updated WASM renderer.");
       }
       const colorData = new Float32Array(
@@ -353,6 +353,7 @@ class FrameState {
   }
 
   toResult(view) {
+    const globalAlpha = clamp01(numberOrDefault(this.options.globalAlpha, 1));
     return {
       width: this.options.width,
       height: this.options.height,
@@ -364,7 +365,7 @@ class FrameState {
         name: layer.name,
         bounds: layer.bounds,
         color: layer.color,
-        alpha: layer.alpha,
+        alpha: resolveLayerAlpha(layer.alpha, globalAlpha),
       })),
     };
   }
@@ -736,6 +737,14 @@ function positiveIntegerOrDefault(value, fallback) {
 function numberOrDefault(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function optionalAlpha(value) {
+  return value == null ? null : clamp01(value);
+}
+
+function resolveLayerAlpha(layerAlpha, globalAlpha) {
+  return layerAlpha == null ? globalAlpha : layerAlpha;
 }
 
 function finiteOrThrow(value, name) {

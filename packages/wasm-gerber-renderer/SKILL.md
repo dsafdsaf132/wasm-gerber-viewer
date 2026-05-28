@@ -199,7 +199,7 @@ Layer options:
 
 - `name`
 - `color`
-- `alpha`
+- `alpha` overrides frame/global alpha for that layer
 - `offsetX`
 - `offsetY`
 

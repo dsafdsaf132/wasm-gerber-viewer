@@ -247,7 +247,7 @@ export class NodeGerberRenderer {
       options.color == null
         ? this.frame.nextColor()
         : normalizeColor(options.color, this.frame.options.colors[0]);
-    const alpha = clamp01(numberOrDefault(options.alpha, 1));
+    const alpha = optionalAlpha(options.alpha);
 
     return {
       layerId,
@@ -312,6 +312,7 @@ class FrameState {
   }
 
   toResult(view) {
+    const globalAlpha = clamp01(numberOrDefault(this.options.globalAlpha, 1));
     return {
       width: this.options.width,
       height: this.options.height,
@@ -323,7 +324,7 @@ class FrameState {
         name: layer.name,
         bounds: layer.bounds,
         color: layer.color,
-        alpha: layer.alpha,
+        alpha: resolveLayerAlpha(layer.alpha, globalAlpha),
       })),
     };
   }
@@ -1029,30 +1030,30 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     try {
       for (let tileY = 0; tileY < height; tileY += tileHeight) {
         const currentTileHeight = Math.min(tileHeight, height - tileY);
-        if (currentTileHeight !== tileHeight) {
-          resizeRenderTarget(renderContext.processor, gl, width, currentTileHeight);
-        }
+        const renderTileY =
+          currentTileHeight === tileHeight ? tileY : Math.max(0, height - tileHeight);
+        const sourceRowOffset = tileY - renderTileY;
         renderContext.processor.render_tile(
           renderContext.activeLayerIds,
           renderContext.colorData,
           width,
           height,
           0,
-          tileY,
+          renderTileY,
           width,
-          currentTileHeight,
+          tileHeight,
           plan.view.zoomX,
           plan.view.zoomY,
           plan.view.offsetX,
           plan.view.offsetY,
-          plan.globalAlpha,
+          1,
         );
         gl.finish?.();
         gl.readPixels(
           0,
           0,
           width,
-          currentTileHeight,
+          tileHeight,
           gl.RGBA,
           gl.UNSIGNED_BYTE,
           tilePixels,
@@ -1061,7 +1062,9 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
           writeRow,
           tilePixels,
           width,
+          tileHeight,
           currentTileHeight,
+          sourceRowOffset,
           rowStride,
           background,
         );
@@ -1105,7 +1108,7 @@ function renderPlanToFullFramePngBuffer(
           plan.view.zoomY,
           plan.view.offsetX,
           plan.view.offsetY,
-          plan.globalAlpha,
+          1,
           true,
         );
     return bottomUpRgbaToPngBuffer(Buffer.from(pixels), width, height, background);
@@ -1132,7 +1135,7 @@ function createProcessorForPlan(renderer, plan, gl, width, height) {
       colorData[offset] = layer.color[0];
       colorData[offset + 1] = layer.color[1];
       colorData[offset + 2] = layer.color[2];
-      colorData[offset + 3] = layer.alpha;
+      colorData[offset + 3] = resolveLayerAlpha(layer.alpha, plan.globalAlpha);
     }
 
     return { processor, activeLayerIds, colorData };
@@ -1246,30 +1249,57 @@ async function writeTileRows(
   tilePixels,
   width,
   tileHeight,
+  rowCount,
+  sourceRowOffset,
   rowStride,
   background,
 ) {
   const row = Buffer.allocUnsafe(rowStride);
   const sourceRowBytes = width * 4;
-  for (let y = 0; y < tileHeight; y += 1) {
+  for (let y = 0; y < rowCount; y += 1) {
     row[0] = 0;
-    const sourceStart = (tileHeight - 1 - y) * sourceRowBytes;
+    const sourceRow = sourceRowOffset + y;
+    const sourceStart = (tileHeight - 1 - sourceRow) * sourceRowBytes;
     if (background) {
-      compositeRowBackground(
-        row,
-        1,
-        tilePixels,
-        sourceStart,
-        sourceRowBytes,
-        background,
-      );
+      writeOpaqueBackgroundRow(row, 1, tilePixels, sourceStart, sourceRowBytes, background);
     } else {
-      row.set(
-        tilePixels.subarray(sourceStart, sourceStart + sourceRowBytes),
-        1,
-      );
+      copyPremultipliedRowToPng(row, 1, tilePixels, sourceStart, sourceRowBytes);
     }
     await writeRow(row);
+  }
+}
+
+function writeOpaqueBackgroundRow(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+  background,
+) {
+  if (background[3] !== 255) {
+    compositePremultipliedRowBackground(
+      output,
+      outputOffset,
+      source,
+      sourceOffset,
+      byteLength,
+      background,
+    );
+    return;
+  }
+
+  const bgR = background[0];
+  const bgG = background[1];
+  const bgB = background[2];
+  for (let offset = 0; offset < byteLength; offset += 4) {
+    const srcA = source[sourceOffset + offset + 3];
+    const inverseA = 255 - srcA;
+    const target = outputOffset + offset;
+    output[target] = source[sourceOffset + offset] + Math.round((bgR * inverseA) / 255);
+    output[target + 1] = source[sourceOffset + offset + 1] + Math.round((bgG * inverseA) / 255);
+    output[target + 2] = source[sourceOffset + offset + 2] + Math.round((bgB * inverseA) / 255);
+    output[target + 3] = 255;
   }
 }
 
@@ -1287,7 +1317,35 @@ function fillBandBackground(band, width, height, rowStride, background) {
   }
 }
 
-function compositeRowBackground(
+function copyPremultipliedRowToPng(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+) {
+  for (let offset = 0; offset < byteLength; offset += 4) {
+    const srcA = source[sourceOffset + offset + 3];
+    const target = outputOffset + offset;
+    output[target + 3] = srcA;
+    if (srcA === 0) {
+      output[target] = 0;
+      output[target + 1] = 0;
+      output[target + 2] = 0;
+    } else if (srcA === 255) {
+      output[target] = source[sourceOffset + offset];
+      output[target + 1] = source[sourceOffset + offset + 1];
+      output[target + 2] = source[sourceOffset + offset + 2];
+    } else {
+      const scale = 255 / srcA;
+      output[target] = toByte(source[sourceOffset + offset] * scale);
+      output[target + 1] = toByte(source[sourceOffset + offset + 1] * scale);
+      output[target + 2] = toByte(source[sourceOffset + offset + 2] * scale);
+    }
+  }
+}
+
+function compositePremultipliedRowBackground(
   output,
   outputOffset,
   source,
@@ -1297,9 +1355,9 @@ function compositeRowBackground(
 ) {
   const bgA = background[3] / 255;
   for (let offset = 0; offset < byteLength; offset += 4) {
-    const srcR = source[sourceOffset + offset];
-    const srcG = source[sourceOffset + offset + 1];
-    const srcB = source[sourceOffset + offset + 2];
+    const srcR = source[sourceOffset + offset] / 255;
+    const srcG = source[sourceOffset + offset + 1] / 255;
+    const srcB = source[sourceOffset + offset + 2] / 255;
     const srcAByte = source[sourceOffset + offset + 3];
     const srcA = srcAByte / 255;
     const outA = srcA + bgA * (1 - srcA);
@@ -1311,11 +1369,21 @@ function compositeRowBackground(
       output[target + 3] = 0;
       continue;
     }
-    output[target] = Math.round((srcR * srcA + background[0] * bgA * (1 - srcA)) / outA);
-    output[target + 1] = Math.round((srcG * srcA + background[1] * bgA * (1 - srcA)) / outA);
-    output[target + 2] = Math.round((srcB * srcA + background[2] * bgA * (1 - srcA)) / outA);
-    output[target + 3] = Math.round(outA * 255);
+    output[target] = toByte(
+      ((srcR + (background[0] / 255) * bgA * (1 - srcA)) / outA) * 255,
+    );
+    output[target + 1] = toByte(
+      ((srcG + (background[1] / 255) * bgA * (1 - srcA)) / outA) * 255,
+    );
+    output[target + 2] = toByte(
+      ((srcB + (background[2] / 255) * bgA * (1 - srcA)) / outA) * 255,
+    );
+    output[target + 3] = toByte(outA * 255);
   }
+}
+
+function toByte(value) {
+  return Math.min(255, Math.max(0, Math.round(value)));
 }
 
 function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
@@ -1327,16 +1395,9 @@ function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
     const sourceStart = (height - 1 - y) * rowBytes;
     raw[rawOffset] = 0;
     if (background) {
-      compositeRowBackground(
-        raw,
-        rawOffset + 1,
-        rgba,
-        sourceStart,
-        rowBytes,
-        background,
-      );
+      writeOpaqueBackgroundRow(raw, rawOffset + 1, rgba, sourceStart, rowBytes, background);
     } else {
-      rgba.copy(raw, rawOffset + 1, sourceStart, sourceStart + rowBytes);
+      copyPremultipliedRowToPng(raw, rawOffset + 1, rgba, sourceStart, rowBytes);
     }
   }
 
@@ -1620,6 +1681,14 @@ function positiveNumberOrDefault(value, fallback) {
 function numberOrDefault(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function optionalAlpha(value) {
+  return value == null ? null : clamp01(value);
+}
+
+function resolveLayerAlpha(layerAlpha, globalAlpha) {
+  return layerAlpha == null ? globalAlpha : layerAlpha;
 }
 
 function normalizeExportStrategy(value) {
