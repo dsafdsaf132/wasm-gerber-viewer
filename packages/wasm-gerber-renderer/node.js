@@ -584,7 +584,10 @@ function parseLayerPayload(wasmModule, content, offsetX, offsetY, frameOptions) 
       arcTessellationQuality,
     );
   } else {
-    if (!preserveArcRegions) {
+    if (
+      !preserveArcRegions ||
+      arcTessellationQuality !== DEFAULT_ARC_TESSELLATION_QUALITY
+    ) {
       throw new Error("Gerber parse options require an updated WASM module.");
     }
     payload = parseDefault(content, offsetX, offsetY);
@@ -1079,6 +1082,40 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     height,
     getFullFrameRenderTargetCount(layerCount),
   );
+  const rowStride = getPngRowStride(width, pngChannels);
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = pngColorType;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+
+  if (plan.layers.length === 0 || !plan.view) {
+    const blankTileHeight = getBlankStreamTileHeight(
+      width,
+      height,
+      maxBandBytes,
+      pngChannels,
+    );
+    const deflatedChunks = await deflatePngRows(async (writeRow) => {
+      await writeBlankPngRows(
+        writeRow,
+        width,
+        height,
+        blankTileHeight,
+        background,
+        pngChannels,
+      );
+    });
+    return Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      pngChunk("IHDR", header),
+      ...deflatedChunks.map((chunk) => pngChunk("IDAT", chunk)),
+      pngChunk("IEND", Buffer.alloc(0)),
+    ]);
+  }
 
   const shouldTryFullFrame =
     strategy === "full-frame" ||
@@ -1134,29 +1171,8 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
   const renderGl = renderer.rendererOptions.gl
     ? gl
     : renderer.createExportContext(width, tileHeight);
-  const rowStride = getPngRowStride(width, pngChannels);
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = pngColorType;
-  header[10] = 0;
-  header[11] = 0;
-  header[12] = 0;
 
   const deflatedChunks = await deflatePngRows(async (writeRow) => {
-    if (plan.layers.length === 0 || !plan.view) {
-      await writeBlankPngRows(
-        writeRow,
-        width,
-        height,
-        tileHeight,
-        background,
-        pngChannels,
-      );
-      return;
-    }
-
     const renderContext = createProcessorForPlan(
       renderer,
       plan,
@@ -1845,13 +1861,31 @@ function getStreamTileHeight(
   return Math.max(1, Math.floor(tileHeight));
 }
 
+function getBlankStreamTileHeight(width, height, maxBandBytes, pngChannels) {
+  const rowStride = getPngRowStride(width, pngChannels);
+  const tileHeight = Math.min(height, Math.floor(maxBandBytes / rowStride));
+  if (!Number.isFinite(tileHeight) || tileHeight < 1) {
+    throw new Error(
+      `PNG export rows exceed the ${formatByteCount(maxBandBytes)} stream band limit at ${width}px wide.`,
+    );
+  }
+  return Math.max(1, Math.floor(tileHeight));
+}
+
 function getMaxRenderDimension(gl) {
-  const maxRenderbufferSize =
-    typeof gl.getParameter === "function"
-      ? Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE))
-      : Number.POSITIVE_INFINITY;
-  return Number.isFinite(maxRenderbufferSize) && maxRenderbufferSize > 0
-    ? maxRenderbufferSize
+  return Math.min(
+    getGlNumericParameter(gl, gl.MAX_RENDERBUFFER_SIZE),
+    getGlNumericParameter(gl, gl.MAX_TEXTURE_SIZE),
+  );
+}
+
+function getGlNumericParameter(gl, parameter) {
+  if (parameter == null || typeof gl.getParameter !== "function") {
+    return Number.POSITIVE_INFINITY;
+  }
+  const value = Number(gl.getParameter(parameter));
+  return Number.isFinite(value) && value > 0
+    ? value
     : Number.POSITIVE_INFINITY;
 }
 
