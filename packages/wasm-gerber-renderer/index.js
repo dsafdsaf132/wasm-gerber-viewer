@@ -419,7 +419,7 @@ async function streamCanvasToPng(canvas, gl, writable, background, exportOptions
 
   const width = positiveIntegerOrDefault(canvas.width, 1);
   const height = positiveIntegerOrDefault(canvas.height, 1);
-  const normalizedBackground = background == null ? null : parseColor(background, true);
+  const normalizedBackground = parseExportBackground(background);
   const pngColorType = getPngColorType(normalizedBackground);
   const pngChannels = getPngChannelCount(pngColorType);
   const rowStride = getPngRowStride(width, pngChannels);
@@ -444,6 +444,36 @@ async function streamCanvasToPng(canvas, gl, writable, background, exportOptions
   } finally {
     sink.release();
   }
+}
+
+function parseExportBackground(background) {
+  if (background == null) return null;
+  try {
+    return parseColor(background, true);
+  } catch (error) {
+    if (typeof background !== "string") {
+      throw error;
+    }
+    const resolved = resolveCssColor(background);
+    if (!resolved) {
+      throw error;
+    }
+    return parseColor(resolved, true);
+  }
+}
+
+function resolveCssColor(color) {
+  const canvas = createOutputCanvas(1, 1);
+  const context = canvas?.getContext("2d");
+  if (!context) return null;
+
+  context.fillStyle = "#010203";
+  context.fillStyle = color;
+  const first = context.fillStyle;
+  context.fillStyle = "#040506";
+  context.fillStyle = color;
+  const second = context.fillStyle;
+  return first === "#010203" && second === "#040506" ? null : first;
 }
 
 function createWebWritablePngSink(writable) {

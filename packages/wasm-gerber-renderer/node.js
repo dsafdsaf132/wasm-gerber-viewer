@@ -193,10 +193,7 @@ export class NodeGerberRenderer {
   }
 
   async exportPng(exportOptions = {}) {
-    this.assertUsable();
-    if (!this.lastFrame || !this.lastRenderPlan) {
-      throw new Error("No rendered frame is available for export.");
-    }
+    this.assertRenderedFrameAvailable();
 
     const background =
       "background" in exportOptions
@@ -210,10 +207,7 @@ export class NodeGerberRenderer {
   }
 
   async exportPngStream(writable, exportOptions = {}) {
-    this.assertUsable();
-    if (!this.lastFrame || !this.lastRenderPlan) {
-      throw new Error("No rendered frame is available for export.");
-    }
+    this.assertRenderedFrameAvailable();
 
     const background =
       "background" in exportOptions
@@ -227,6 +221,7 @@ export class NodeGerberRenderer {
   }
 
   async exportPngFile(outputPath, exportOptions = {}) {
+    this.assertRenderedFrameAvailable();
     const stream = createWriteStream(outputPath);
     const done = finished(stream);
     try {
@@ -409,6 +404,13 @@ export class NodeGerberRenderer {
   assertUsable() {
     if (this.disposed) {
       throw new Error("NodeGerberRenderer has been disposed.");
+    }
+  }
+
+  assertRenderedFrameAvailable() {
+    this.assertUsable();
+    if (!this.lastFrame || !this.lastRenderPlan) {
+      throw new Error("No rendered frame is available for export.");
     }
   }
 }
@@ -1043,38 +1045,67 @@ async function writePngDocument(sink, width, height, colorType, writeRows) {
 
 async function deflatePngRowsToSink(sink, writeRows) {
   const deflate = createDeflate();
-  let writeChain = Promise.resolve();
   let writeError = null;
+  let pendingWrites = 0;
+  let resolvePendingWrites = null;
+  let rejectWriteError = null;
+  const writeErrorSignal = new Promise((_, reject) => {
+    rejectWriteError = reject;
+  });
+  writeErrorSignal.catch(() => {});
   const done = new Promise((resolve, reject) => {
     deflate.once("end", resolve);
     deflate.once("error", reject);
   });
   deflate.on("data", (chunk) => {
     const idat = pngChunk("IDAT", Buffer.from(chunk));
-    writeChain = writeChain
-      .then(() => sink.write(idat))
+    deflate.pause();
+    pendingWrites += 1;
+    Promise.resolve(sink.write(idat))
       .catch((error) => {
         writeError = error;
-        throw error;
+        rejectWriteError(error);
+        deflate.destroy(error);
+      })
+      .finally(() => {
+        pendingWrites -= 1;
+        if (pendingWrites === 0 && resolvePendingWrites) {
+          resolvePendingWrites();
+          resolvePendingWrites = null;
+        }
+        if (!writeError) {
+          deflate.resume();
+        }
       });
-    writeChain.catch(() => {});
   });
 
   try {
     await writeRows(async (row) => {
       if (writeError) throw writeError;
       if (!deflate.write(Buffer.from(row))) {
-        await Promise.race([once(deflate, "drain"), done]);
+        await Promise.race([once(deflate, "drain"), done, writeErrorSignal]);
       }
       if (writeError) throw writeError;
     });
     deflate.end();
-    await done;
-    await writeChain;
+    await Promise.race([done, writeErrorSignal]);
+    await waitForPendingPngWrites(() => pendingWrites, (resolve) => {
+      resolvePendingWrites = resolve;
+    });
+    if (writeError) throw writeError;
   } catch (error) {
     deflate.destroy();
-    throw error;
+    throw writeError || error;
   }
+}
+
+function waitForPendingPngWrites(getPendingWrites, setResolvePendingWrites) {
+  if (getPendingWrites() === 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    setResolvePendingWrites(resolve);
+  });
 }
 
 async function writeFullFramePixelRows(
