@@ -119,6 +119,13 @@ export type NodeExportOptions = {
   strategy?: PngRenderStrategy;
 };
 
+export type NodePngWritable = {
+  write(
+    chunk: Uint8Array,
+    callback?: (error?: Error | null) => void,
+  ): boolean | void;
+};
+
 export declare function createNodeGerberRenderer(
   rendererOptions?: NodeRendererOptions,
 ): Promise<NodeGerberRenderer>;
@@ -132,6 +139,14 @@ export declare function renderGerberToPngBuffer(
 
 export declare function renderGerberToPngFile(
   outputPath: string,
+  layers: GerberNodeLayer | GerberNodeLayer[],
+  frameOptions?: NodeFrameOptions,
+  exportOptions?: NodeExportOptions,
+  rendererOptions?: NodeRendererOptions,
+): Promise<void>;
+
+export declare function renderGerberToPngStream(
+  writable: NodePngWritable,
   layers: GerberNodeLayer | GerberNodeLayer[],
   frameOptions?: NodeFrameOptions,
   exportOptions?: NodeExportOptions,
@@ -177,6 +192,13 @@ export declare class NodeGerberRenderer {
   }>;
 
   exportPng(exportOptions?: NodeExportOptions): Promise<Uint8Array>;
+
+  exportPngStream(
+    writable: NodePngWritable,
+    exportOptions?: NodeExportOptions,
+  ): Promise<void>;
+
+  exportPngFile(outputPath: string, exportOptions?: NodeExportOptions): Promise<void>;
 
   dispose(): void;
 }

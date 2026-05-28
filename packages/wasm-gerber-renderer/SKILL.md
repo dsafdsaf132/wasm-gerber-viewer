@@ -99,6 +99,9 @@ await renderGerberToPngFile(
 );
 ```
 
+`renderGerberToPngFile()` streams PNG bytes directly to the output file. Use
+`renderGerberToPngBuffer()` only when the whole PNG must be kept in memory.
+
 For PNG bytes instead of a file:
 
 ```js
@@ -156,6 +159,10 @@ const blob = await renderGerberToPng(canvas, file, {
   padding: 32,
 });
 ```
+
+For browser file streaming, pass a `WritableStream` to `renderer.exportPngStream()`
+or `renderGerberToPngStream()`. This requires `CompressionStream` support and
+avoids building a PNG `Blob`.
 
 ## Reusable Renderer
 
@@ -244,6 +251,7 @@ Batch APIs skip failed layers by default and continue rendering valid layers:
 - `renderGerberToPng`
 - `renderGerberToPngBuffer`
 - `renderGerberToPngFile`
+- `renderGerberToPngStream`
 - `renderer.renderLayers`
 - `renderer.loadLayers`
 

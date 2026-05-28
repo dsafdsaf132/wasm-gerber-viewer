@@ -1,19 +1,26 @@
 import { once } from "node:events";
 import { execFile as execFileCallback } from "node:child_process";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { freemem } from "node:os";
 import { basename, dirname, resolve } from "node:path";
+import { finished } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createDeflate, deflateSync } from "node:zlib";
+import { createDeflate } from "node:zlib";
 import {
   DEFAULT_ARC_TESSELLATION_QUALITY,
   FrameState,
+  PNG_SIGNATURE,
   addLayerToProcessor,
   applyProcessorOptions,
   boundaryToPlainObject,
   clamp01,
   createBaseFrameOptions,
+  createPngHeader,
+  getPngChannelCount,
+  getPngColorType,
+  getPngRowStride,
   getSourceName,
   loadLayersBestEffort,
   loadWasmJsModule,
@@ -31,7 +38,9 @@ import {
   resolveFrameView,
   resolveLayerAlpha,
   sourceToText,
-  toByte,
+  pngChunk,
+  writeBlankPngRows,
+  writePixelRowsToPngRows,
 } from "./shared.js";
 
 const require = createRequire(import.meta.url);
@@ -85,13 +94,33 @@ export async function renderGerberToPngFile(
   exportOptions = {},
   rendererOptions = {},
 ) {
-  const png = await renderGerberToPngBuffer(
-    layers,
-    frameOptions,
-    exportOptions,
-    rendererOptions,
-  );
-  await writeFile(outputPath, png);
+  const renderer = await createNodeGerberRenderer(rendererOptions);
+  try {
+    await renderer.withFrame(frameOptions, async () => {
+      await renderer.renderLayers(layers, frameOptions);
+    });
+    await renderer.exportPngFile(outputPath, exportOptions);
+  } finally {
+    renderer.dispose();
+  }
+}
+
+export async function renderGerberToPngStream(
+  writable,
+  layers,
+  frameOptions = {},
+  exportOptions = {},
+  rendererOptions = {},
+) {
+  const renderer = await createNodeGerberRenderer(rendererOptions);
+  try {
+    await renderer.withFrame(frameOptions, async () => {
+      await renderer.renderLayers(layers, frameOptions);
+    });
+    await renderer.exportPngStream(writable, exportOptions);
+  } finally {
+    renderer.dispose();
+  }
 }
 
 export class NodeGerberRenderer {
@@ -178,6 +207,41 @@ export class NodeGerberRenderer {
       ...exportOptions,
       background,
     });
+  }
+
+  async exportPngStream(writable, exportOptions = {}) {
+    this.assertUsable();
+    if (!this.lastFrame || !this.lastRenderPlan) {
+      throw new Error("No rendered frame is available for export.");
+    }
+
+    const background =
+      "background" in exportOptions
+        ? exportOptions.background
+        : this.lastFrame.background;
+
+    await renderPlanToPngWritable(this, this.lastRenderPlan, {
+      ...exportOptions,
+      background,
+    }, writable);
+  }
+
+  async exportPngFile(outputPath, exportOptions = {}) {
+    const stream = createWriteStream(outputPath);
+    const done = finished(stream);
+    try {
+      await this.exportPngStream(stream, exportOptions);
+      stream.end();
+      await done;
+    } catch (error) {
+      stream.destroy(error);
+      try {
+        await done;
+      } catch (_streamError) {
+        // Preserve the original rendering error.
+      }
+      throw error;
+    }
   }
 
   dispose() {
@@ -597,6 +661,24 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
 }
 
 async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
+  const sink = new BufferPngSink();
+  await renderPlanToPngSink(renderer, plan, exportOptions, sink);
+  return sink.toBuffer();
+}
+
+async function renderPlanToPngWritable(renderer, plan, exportOptions, writable) {
+  if (!writable || typeof writable.write !== "function") {
+    throw new TypeError("A Node writable stream is required.");
+  }
+  await renderPlanToPngSink(
+    renderer,
+    plan,
+    exportOptions,
+    new NodeWritablePngSink(writable),
+  );
+}
+
+async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
   const width = positiveIntegerOrDefault(plan.width, DEFAULT_WIDTH);
   const height = positiveIntegerOrDefault(plan.height, DEFAULT_HEIGHT);
   const strategy = normalizeExportStrategy(exportOptions.strategy || plan.strategy);
@@ -633,15 +715,6 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     height,
     getFullFrameRenderTargetCount(layerCount),
   );
-  const rowStride = getPngRowStride(width, pngChannels);
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = pngColorType;
-  header[10] = 0;
-  header[11] = 0;
-  header[12] = 0;
 
   if (plan.layers.length === 0 || !plan.view) {
     const blankTileHeight = getBlankStreamTileHeight(
@@ -650,7 +723,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
       maxBandBytes,
       pngChannels,
     );
-    const deflatedChunks = await deflatePngRows(async (writeRow) => {
+    await writePngDocument(sink, width, height, pngColorType, async (writeRow) => {
       await writeBlankPngRows(
         writeRow,
         width,
@@ -660,12 +733,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
         pngChannels,
       );
     });
-    return Buffer.concat([
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      pngChunk("IHDR", header),
-      ...deflatedChunks.map((chunk) => pngChunk("IDAT", chunk)),
-      pngChunk("IEND", Buffer.alloc(0)),
-    ]);
+    return;
   }
 
   const shouldTryFullFrame =
@@ -681,14 +749,22 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
       height,
     );
     try {
-      return renderPlanToFullFramePngBuffer(
+      await renderPlanToFullFramePngSink(
         renderer,
         plan,
+        sink,
         width,
         height,
         background,
+        pngColorType,
+        pngChannels,
+        maxBandBytes,
       );
+      return;
     } catch (error) {
+      if (error instanceof PngSinkWriteError) {
+        throw error.cause || error;
+      }
       if (strategy === "full-frame") {
         throw error;
       }
@@ -722,8 +798,9 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
   const renderGl = renderer.rendererOptions.gl
     ? gl
     : renderer.createExportContext(width, tileHeight);
+  const rowStride = getPngRowStride(width, pngChannels);
 
-  const deflatedChunks = await deflatePngRows(async (writeRow) => {
+  await writePngDocument(sink, width, height, pngColorType, async (writeRow) => {
     const renderContext = createProcessorForPlan(
       renderer,
       plan,
@@ -764,7 +841,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
           renderGl.UNSIGNED_BYTE,
           tilePixels,
         );
-        await writeTileRows(
+        await writePixelRowsToPngRows(
           writeRow,
           tilePixels,
           width,
@@ -778,21 +855,18 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
       disposeProcessor(renderContext.processor);
     }
   });
-
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk("IHDR", header),
-    ...deflatedChunks.map((chunk) => pngChunk("IDAT", chunk)),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]);
 }
 
-function renderPlanToFullFramePngBuffer(
+async function renderPlanToFullFramePngSink(
   renderer,
   plan,
+  sink,
   width,
   height,
   background,
+  pngColorType,
+  pngChannels,
+  maxBandBytes,
 ) {
   const gl = renderer.createExportContext(width, height);
   const maxDimension = getMaxRenderDimension(gl);
@@ -816,7 +890,17 @@ function renderPlanToFullFramePngBuffer(
           1,
           true,
         );
-    return bottomUpRgbaToPngBuffer(Buffer.from(pixels), width, height, background);
+    await writePngDocument(sink, width, height, pngColorType, async (writeRow) => {
+      await writeFullFramePixelRows(
+        writeRow,
+        pixels,
+        width,
+        height,
+        background,
+        pngChannels,
+        maxBandBytes,
+      );
+    });
   } finally {
     disposeProcessor(renderContext.processor);
   }
@@ -914,310 +998,141 @@ function disposeProcessor(processor) {
   }
 }
 
-async function deflatePngRows(writeRows) {
+class BufferPngSink {
+  constructor() {
+    this.chunks = [];
+  }
+
+  async write(chunk) {
+    this.chunks.push(Buffer.from(chunk));
+  }
+
+  toBuffer() {
+    return Buffer.concat(this.chunks);
+  }
+}
+
+class NodeWritablePngSink {
+  constructor(writable) {
+    this.writable = writable;
+  }
+
+  async write(chunk) {
+    try {
+      await writeNodeWritable(this.writable, chunk);
+    } catch (error) {
+      throw new PngSinkWriteError(error);
+    }
+  }
+}
+
+class PngSinkWriteError extends Error {
+  constructor(cause) {
+    super(`PNG stream write failed: ${cause?.message || cause}`);
+    this.name = "PngSinkWriteError";
+    this.cause = cause;
+  }
+}
+
+async function writePngDocument(sink, width, height, colorType, writeRows) {
+  await sink.write(PNG_SIGNATURE);
+  await sink.write(pngChunk("IHDR", createPngHeader(width, height, colorType)));
+  await deflatePngRowsToSink(sink, writeRows);
+  await sink.write(pngChunk("IEND", new Uint8Array(0)));
+}
+
+async function deflatePngRowsToSink(sink, writeRows) {
   const deflate = createDeflate();
-  const chunks = [];
+  let writeChain = Promise.resolve();
+  let writeError = null;
   const done = new Promise((resolve, reject) => {
     deflate.once("end", resolve);
     deflate.once("error", reject);
   });
   deflate.on("data", (chunk) => {
-    chunks.push(Buffer.from(chunk));
+    const idat = pngChunk("IDAT", Buffer.from(chunk));
+    writeChain = writeChain
+      .then(() => sink.write(idat))
+      .catch((error) => {
+        writeError = error;
+        throw error;
+      });
+    writeChain.catch(() => {});
   });
 
   try {
     await writeRows(async (row) => {
+      if (writeError) throw writeError;
       if (!deflate.write(Buffer.from(row))) {
         await Promise.race([once(deflate, "drain"), done]);
       }
+      if (writeError) throw writeError;
     });
     deflate.end();
     await done;
+    await writeChain;
   } catch (error) {
     deflate.destroy();
     throw error;
   }
-  return chunks;
 }
 
-async function writeBlankPngRows(
+async function writeFullFramePixelRows(
   writeRow,
+  pixels,
   width,
   height,
-  tileHeight,
   background,
   channels,
+  maxBandBytes,
 ) {
   const rowStride = getPngRowStride(width, channels);
-  const band = Buffer.alloc(rowStride * tileHeight);
-  if (background) {
-    fillBandBackground(band, width, tileHeight, rowStride, background, channels);
-  }
-  for (let y = 0; y < height; y += tileHeight) {
-    const currentTileHeight = Math.min(tileHeight, height - y);
-    await writeRow(band.subarray(0, currentTileHeight * rowStride));
-  }
-}
-
-async function writeTileRows(
-  writeRow,
-  tilePixels,
-  width,
-  rowCount,
-  rowStride,
-  background,
-  channels,
-) {
-  const band = Buffer.allocUnsafe(rowStride * rowCount);
-  const sourceRowBytes = width * 4;
-  for (let y = 0; y < rowCount; y += 1) {
-    const rowStart = y * rowStride;
-    band[rowStart] = 0;
-    const sourceStart = (rowCount - 1 - y) * sourceRowBytes;
-    if (background) {
-      if (channels === 3) {
-        writeOpaqueBackgroundRgbRow(
-          band,
-          rowStart + 1,
-          tilePixels,
-          sourceStart,
-          sourceRowBytes,
-          background,
-        );
-      } else {
-        writeOpaqueBackgroundRgbaRow(
-          band,
-          rowStart + 1,
-          tilePixels,
-          sourceStart,
-          sourceRowBytes,
-          background,
-        );
-      }
-    } else {
-      copyPremultipliedRowToPng(band, rowStart + 1, tilePixels, sourceStart, sourceRowBytes);
-    }
-  }
-  await writeRow(band);
-}
-
-function writeOpaqueBackgroundRgbaRow(
-  output,
-  outputOffset,
-  source,
-  sourceOffset,
-  byteLength,
-  background,
-) {
-  if (background[3] !== 255) {
-    compositePremultipliedRowBackground(
-      output,
-      outputOffset,
-      source,
-      sourceOffset,
-      byteLength,
+  const rowsPerBand = getBlankStreamTileHeight(width, height, maxBandBytes, channels);
+  const sourceRowBytes = width * RGBA_BYTES_PER_PIXEL;
+  for (let topY = 0; topY < height; topY += rowsPerBand) {
+    const rowCount = Math.min(rowsPerBand, height - topY);
+    const sourceStart = (height - topY - rowCount) * sourceRowBytes;
+    await writePixelRowsToPngRows(
+      writeRow,
+      pixels.subarray(sourceStart, sourceStart + rowCount * sourceRowBytes),
+      width,
+      rowCount,
+      rowStride,
       background,
+      channels,
     );
-    return;
-  }
-
-  const bgR = background[0];
-  const bgG = background[1];
-  const bgB = background[2];
-  if (bgR === 0 && bgG === 0 && bgB === 0) {
-    for (let offset = 0; offset < byteLength; offset += 4) {
-      const target = outputOffset + offset;
-      output[target] = source[sourceOffset + offset];
-      output[target + 1] = source[sourceOffset + offset + 1];
-      output[target + 2] = source[sourceOffset + offset + 2];
-      output[target + 3] = 255;
-    }
-    return;
-  }
-
-  for (let offset = 0; offset < byteLength; offset += 4) {
-    const srcA = source[sourceOffset + offset + 3];
-    const inverseA = 255 - srcA;
-    const target = outputOffset + offset;
-    output[target] = source[sourceOffset + offset] + Math.round((bgR * inverseA) / 255);
-    output[target + 1] = source[sourceOffset + offset + 1] + Math.round((bgG * inverseA) / 255);
-    output[target + 2] = source[sourceOffset + offset + 2] + Math.round((bgB * inverseA) / 255);
-    output[target + 3] = 255;
   }
 }
 
-function writeOpaqueBackgroundRgbRow(
-  output,
-  outputOffset,
-  source,
-  sourceOffset,
-  byteLength,
-  background,
-) {
-  const bgR = background[0];
-  const bgG = background[1];
-  const bgB = background[2];
-  if (bgR === 0 && bgG === 0 && bgB === 0) {
-    for (let offset = 0, target = outputOffset; offset < byteLength; offset += 4, target += 3) {
-      output[target] = source[sourceOffset + offset];
-      output[target + 1] = source[sourceOffset + offset + 1];
-      output[target + 2] = source[sourceOffset + offset + 2];
-    }
-    return;
-  }
-
-  for (let offset = 0, target = outputOffset; offset < byteLength; offset += 4, target += 3) {
-    const srcA = source[sourceOffset + offset + 3];
-    const inverseA = 255 - srcA;
-    output[target] = source[sourceOffset + offset] + Math.round((bgR * inverseA) / 255);
-    output[target + 1] = source[sourceOffset + offset + 1] + Math.round((bgG * inverseA) / 255);
-    output[target + 2] = source[sourceOffset + offset + 2] + Math.round((bgB * inverseA) / 255);
-  }
-}
-
-function fillBandBackground(band, width, height, rowStride, background, channels) {
-  for (let y = 0; y < height; y += 1) {
-    const rowStart = y * rowStride;
-    band[rowStart] = 0;
-    for (let x = 0; x < width; x += 1) {
-      const offset = rowStart + 1 + x * channels;
-      band[offset] = background[0];
-      band[offset + 1] = background[1];
-      band[offset + 2] = background[2];
-      if (channels === 4) {
-        band[offset + 3] = background[3];
+function writeNodeWritable(writable, chunk) {
+  const buffer = Buffer.from(chunk);
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      if (typeof writable.off === "function") {
+        writable.off("error", onError);
       }
+    };
+    if (typeof writable.once === "function") {
+      writable.once("error", onError);
     }
-  }
-}
-
-function copyPremultipliedRowToPng(
-  output,
-  outputOffset,
-  source,
-  sourceOffset,
-  byteLength,
-) {
-  for (let offset = 0; offset < byteLength; offset += 4) {
-    const srcA = source[sourceOffset + offset + 3];
-    const target = outputOffset + offset;
-    output[target + 3] = srcA;
-    if (srcA === 0) {
-      output[target] = 0;
-      output[target + 1] = 0;
-      output[target + 2] = 0;
-    } else if (srcA === 255) {
-      output[target] = source[sourceOffset + offset];
-      output[target + 1] = source[sourceOffset + offset + 1];
-      output[target + 2] = source[sourceOffset + offset + 2];
-    } else {
-      const scale = 255 / srcA;
-      output[target] = toByte(source[sourceOffset + offset] * scale);
-      output[target + 1] = toByte(source[sourceOffset + offset + 1] * scale);
-      output[target + 2] = toByte(source[sourceOffset + offset + 2] * scale);
+    try {
+      writable.write(buffer, (error) => {
+        cleanup();
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    } catch (error) {
+      cleanup();
+      reject(error);
     }
-  }
-}
-
-function compositePremultipliedRowBackground(
-  output,
-  outputOffset,
-  source,
-  sourceOffset,
-  byteLength,
-  background,
-) {
-  const bgA = background[3] / 255;
-  for (let offset = 0; offset < byteLength; offset += 4) {
-    const srcR = source[sourceOffset + offset] / 255;
-    const srcG = source[sourceOffset + offset + 1] / 255;
-    const srcB = source[sourceOffset + offset + 2] / 255;
-    const srcAByte = source[sourceOffset + offset + 3];
-    const srcA = srcAByte / 255;
-    const outA = srcA + bgA * (1 - srcA);
-    const target = outputOffset + offset;
-    if (outA <= 0) {
-      output[target] = 0;
-      output[target + 1] = 0;
-      output[target + 2] = 0;
-      output[target + 3] = 0;
-      continue;
-    }
-    output[target] = toByte(
-      ((srcR + (background[0] / 255) * bgA * (1 - srcA)) / outA) * 255,
-    );
-    output[target + 1] = toByte(
-      ((srcG + (background[1] / 255) * bgA * (1 - srcA)) / outA) * 255,
-    );
-    output[target + 2] = toByte(
-      ((srcB + (background[2] / 255) * bgA * (1 - srcA)) / outA) * 255,
-    );
-    output[target + 3] = toByte(outA * 255);
-  }
-}
-
-function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
-  const pngColorType = getPngColorType(background);
-  const pngChannels = getPngChannelCount(pngColorType);
-  const rowBytes = width * 4;
-  const rowStride = getPngRowStride(width, pngChannels);
-  const raw = Buffer.allocUnsafe(rowStride * height);
-  for (let y = 0; y < height; y += 1) {
-    const rawOffset = y * rowStride;
-    const sourceStart = (height - 1 - y) * rowBytes;
-    raw[rawOffset] = 0;
-    if (background) {
-      if (pngChannels === 3) {
-        writeOpaqueBackgroundRgbRow(
-          raw,
-          rawOffset + 1,
-          rgba,
-          sourceStart,
-          rowBytes,
-          background,
-        );
-      } else {
-        writeOpaqueBackgroundRgbaRow(
-          raw,
-          rawOffset + 1,
-          rgba,
-          sourceStart,
-          rowBytes,
-          background,
-        );
-      }
-    } else {
-      copyPremultipliedRowToPng(raw, rawOffset + 1, rgba, sourceStart, rowBytes);
-    }
-  }
-
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(width, 0);
-  header.writeUInt32BE(height, 4);
-  header[8] = 8;
-  header[9] = pngColorType;
-  header[10] = 0;
-  header[11] = 0;
-  header[12] = 0;
-
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk("IHDR", header),
-    pngChunk("IDAT", deflateSync(raw)),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
-function getPngColorType(background) {
-  return background && background[3] === 255 ? 2 : 6;
-}
-
-function getPngChannelCount(colorType) {
-  return colorType === 2 ? 3 : RGBA_BYTES_PER_PIXEL;
-}
-
-function getPngRowStride(width, channels = RGBA_BYTES_PER_PIXEL) {
-  return 1 + width * channels;
+  });
 }
 
 function estimateFullFrameBytes(width, height, safetyFactor) {
@@ -1434,37 +1349,6 @@ function getGlNumericParameter(gl, parameter) {
   return Number.isFinite(value) && value > 0
     ? value
     : Number.POSITIVE_INFINITY;
-}
-
-function pngChunk(type, data) {
-  const typeBuffer = Buffer.from(type, "ascii");
-  const chunk = Buffer.allocUnsafe(12 + data.length);
-  chunk.writeUInt32BE(data.length, 0);
-  typeBuffer.copy(chunk, 4);
-  data.copy(chunk, 8);
-  chunk.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 8 + data.length);
-  return chunk;
-}
-
-let crcTable = null;
-
-function crc32(buffer) {
-  if (!crcTable) {
-    crcTable = new Uint32Array(256);
-    for (let n = 0; n < 256; n += 1) {
-      let c = n;
-      for (let k = 0; k < 8; k += 1) {
-        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-      }
-      crcTable[n] = c >>> 0;
-    }
-  }
-
-  let c = 0xffffffff;
-  for (const byte of buffer) {
-    c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
-  }
-  return (c ^ 0xffffffff) >>> 0;
 }
 
 function formatByteCount(bytes) {

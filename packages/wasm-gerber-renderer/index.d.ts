@@ -70,6 +70,7 @@ export type ExportOptions = {
   type?: "image/png" | string;
   quality?: number;
   background?: null | string | RGBAColor;
+  maxBandBytes?: number;
 };
 
 export type GerberCanvas = HTMLCanvasElement;
@@ -92,6 +93,14 @@ export declare function renderGerberToPng(
   exportOptions?: ExportOptions,
 ): Promise<Blob>;
 
+export declare function renderGerberToPngStream(
+  canvas: GerberCanvas,
+  writable: WritableStream<Uint8Array> | { write(chunk: Uint8Array): Promise<void> | void },
+  layers: GerberLayer | GerberLayer[] | FileList,
+  frameOptions?: FrameOptions,
+  exportOptions?: ExportOptions,
+): Promise<void>;
+
 export declare class GerberRenderer {
   withFrame(
     frameOptions: FrameOptions,
@@ -106,6 +115,11 @@ export declare class GerberRenderer {
   ): Promise<{ renderedCount: number; failures: LayerFailure[] }>;
 
   exportPng(exportOptions?: ExportOptions): Promise<Blob>;
+
+  exportPngStream(
+    writable: WritableStream<Uint8Array> | { write(chunk: Uint8Array): Promise<void> | void },
+    exportOptions?: ExportOptions,
+  ): Promise<void>;
 
   dispose(): void;
 }

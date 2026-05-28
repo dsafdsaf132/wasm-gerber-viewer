@@ -5,7 +5,7 @@ WebGL2 Gerber renderer powered by the `wasm-gerber-viewer` Rust/WASM parser and 
 The package provides:
 
 - Browser canvas rendering from Gerber source strings, `File`, `Blob`, `ArrayBuffer`, or `Uint8Array` inputs
-- Node.js PNG rendering through a headless WebGL2 context
+- Node.js PNG rendering through a headless WebGL2 context, including direct file/stream output
 - A `gerber-renderer` CLI for rendering Gerber files or `.tar.gz`/`.tgz` archives to PNG
 - Bundled `wasm-bindgen` output generated during packaging
 
@@ -157,11 +157,13 @@ rendering from the filesystem.
 
 - `renderGerberToCanvas(canvas, layers, frameOptions)`: one-shot batch render into an existing WebGL2-capable canvas. `layers` may be a single `GerberLayer`, an array, or a `FileList`. Failed layers are skipped by default.
 - `renderGerberToPng(canvas, layers, frameOptions, exportOptions)`: one-shot browser render that returns a PNG `Blob`.
+- `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`: one-shot browser render that writes PNG chunks to a `WritableStream`. Requires browser `CompressionStream` support.
 - `createGerberRenderer(canvas, rendererOptions)`: creates a reusable renderer for multiple frames or layers.
 - `renderer.withFrame(frameOptions, callback)`: starts a frame, applies canvas/view options, runs the callback, and presents rendered layers after it resolves.
 - `renderer.renderLayer(layer, layerOptions)`: adds one layer to the active frame and returns its numeric layer ID. Must be called inside `withFrame()`. This strict API rejects on failure.
 - `renderer.renderLayers(layers, options)`: adds multiple layers and returns `{ renderedCount, failures }`. Failed layers are skipped by default; use `layerErrorMode: "throw"` for strict behavior.
 - `renderer.exportPng(exportOptions)`: exports the last browser frame as a PNG `Blob`.
+- `renderer.exportPngStream(writable, exportOptions)`: exports the last browser frame to a `WritableStream` without assembling a `Blob`.
 - `renderer.dispose()`: releases the WebGL context.
 
 ## Node.js Usage
@@ -194,7 +196,8 @@ await renderGerberToPngFile(
 
 - `createNodeGerberRenderer(rendererOptions)`: creates a reusable headless renderer backed by a native WebGL2/GLES context.
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that returns PNG bytes as a `Uint8Array`.
-- `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG bytes to `outputPath`. Parent directories must already exist.
+- `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that streams PNG bytes to `outputPath`. Parent directories must already exist.
+- `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG chunks to a Node writable stream.
 - `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, and `offsetY`.
 - `packageRoot()`: returns the installed package directory path.
 - `renderer.loadLayer(layer, layerOptions)`: parses a Node layer once and returns a prepared layer that can be reused across frames.
@@ -202,7 +205,9 @@ await renderGerberToPngFile(
 - `renderer.withFrame(frameOptions, callback)`: starts a headless render frame and stores rendered pixels after the callback resolves.
 - `renderer.renderLayer(layer, layerOptions)`: adds one layer to the active frame and returns its numeric layer ID. Must be called inside `withFrame()`. This strict API rejects on failure.
 - `renderer.renderLayers(layers, options)`: adds multiple layers and returns `{ renderedCount, failures }`. Failed layers are skipped by default; use `layerErrorMode: "throw"` for strict behavior.
-- `renderer.exportPng(exportOptions)`: exports the last Node frame as PNG bytes.
+- `renderer.exportPng(exportOptions)`: exports the last Node frame as PNG bytes in memory.
+- `renderer.exportPngStream(writable, exportOptions)`: exports the last Node frame to a writable stream.
+- `renderer.exportPngFile(outputPath, exportOptions)`: exports the last Node frame directly to a file.
 - `renderer.dispose()`: releases the GLES context.
 
 Use prepared layers when rendering the same Gerber inputs more than once:
@@ -236,9 +241,9 @@ Load the layer again to change those options. Per-frame color and alpha can be
 overridden in `renderLayer(preparedLayer, layerOptions)`.
 
 Batch APIs (`renderGerberToCanvas`, `renderGerberToPng`,
-`renderGerberToPngBuffer`, `renderGerberToPngFile`, and `renderLayers`) render
-all valid layers they can load. If every layer fails, the operation rejects with
-the first layer error.
+`renderGerberToPngStream`, `renderGerberToPngBuffer`,
+`renderGerberToPngFile`, and `renderLayers`) render all valid layers they can
+load. If every layer fails, the operation rejects with the first layer error.
 
 ## API Options
 
@@ -274,6 +279,7 @@ the first layer error.
 - `type`: browser-only export MIME type. Defaults to `image/png`; Node always writes PNG.
 - `quality`: browser-only encoder quality passed to `canvas.toBlob`.
 - `background`: export background override. Use `null` to keep transparency. Defaults to the last frame background.
+- `maxBandBytes`: approximate row-buffer budget for streamed PNG export. Node also uses it for high-resolution tiled rendering.
 
 `rendererOptions` control renderer creation:
 

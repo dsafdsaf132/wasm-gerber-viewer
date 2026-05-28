@@ -488,6 +488,299 @@ export function toByte(value) {
   return Math.min(255, Math.max(0, Math.round(value)));
 }
 
+export const PNG_SIGNATURE = new Uint8Array([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+
+export function createPngHeader(width, height, colorType) {
+  const header = new Uint8Array(13);
+  writeUint32(header, 0, width);
+  writeUint32(header, 4, height);
+  header[8] = 8;
+  header[9] = colorType;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+  return header;
+}
+
+export function pngChunk(type, data) {
+  const typeBuffer = asciiBytes(type);
+  const payload = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const chunk = new Uint8Array(12 + payload.length);
+  writeUint32(chunk, 0, payload.length);
+  chunk.set(typeBuffer, 4);
+  chunk.set(payload, 8);
+  writeUint32(chunk, 8 + payload.length, crc32Bytes(typeBuffer, payload));
+  return chunk;
+}
+
+export function getPngColorType(background) {
+  return background && background[3] === 255 ? 2 : 6;
+}
+
+export function getPngChannelCount(colorType) {
+  return colorType === 2 ? 3 : 4;
+}
+
+export function getPngRowStride(width, channels = 4) {
+  return 1 + width * channels;
+}
+
+export async function writeBlankPngRows(
+  writeRow,
+  width,
+  height,
+  tileHeight,
+  background,
+  channels,
+) {
+  const rowStride = getPngRowStride(width, channels);
+  const band = new Uint8Array(rowStride * tileHeight);
+  if (background) {
+    fillBandBackground(band, width, tileHeight, rowStride, background, channels);
+  }
+  for (let y = 0; y < height; y += tileHeight) {
+    const currentTileHeight = Math.min(tileHeight, height - y);
+    await writeRow(band.subarray(0, currentTileHeight * rowStride));
+  }
+}
+
+export async function writePixelRowsToPngRows(
+  writeRow,
+  pixels,
+  width,
+  rowCount,
+  rowStride,
+  background,
+  channels,
+) {
+  const band = new Uint8Array(rowStride * rowCount);
+  const sourceRowBytes = width * 4;
+  for (let y = 0; y < rowCount; y += 1) {
+    const rowStart = y * rowStride;
+    band[rowStart] = 0;
+    const sourceStart = (rowCount - 1 - y) * sourceRowBytes;
+    if (background) {
+      if (channels === 3) {
+        writeOpaqueBackgroundRgbRow(
+          band,
+          rowStart + 1,
+          pixels,
+          sourceStart,
+          sourceRowBytes,
+          background,
+        );
+      } else {
+        writeOpaqueBackgroundRgbaRow(
+          band,
+          rowStart + 1,
+          pixels,
+          sourceStart,
+          sourceRowBytes,
+          background,
+        );
+      }
+    } else {
+      copyPremultipliedRowToPng(band, rowStart + 1, pixels, sourceStart, sourceRowBytes);
+    }
+  }
+  await writeRow(band);
+}
+
+export function fillBandBackground(band, width, height, rowStride, background, channels) {
+  for (let y = 0; y < height; y += 1) {
+    const rowStart = y * rowStride;
+    band[rowStart] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const offset = rowStart + 1 + x * channels;
+      band[offset] = background[0];
+      band[offset + 1] = background[1];
+      band[offset + 2] = background[2];
+      if (channels === 4) {
+        band[offset + 3] = background[3];
+      }
+    }
+  }
+}
+
+export function writeOpaqueBackgroundRgbaRow(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+  background,
+) {
+  if (background[3] !== 255) {
+    compositePremultipliedRowBackground(
+      output,
+      outputOffset,
+      source,
+      sourceOffset,
+      byteLength,
+      background,
+    );
+    return;
+  }
+
+  const bgR = background[0];
+  const bgG = background[1];
+  const bgB = background[2];
+  if (bgR === 0 && bgG === 0 && bgB === 0) {
+    for (let offset = 0; offset < byteLength; offset += 4) {
+      const target = outputOffset + offset;
+      output[target] = source[sourceOffset + offset];
+      output[target + 1] = source[sourceOffset + offset + 1];
+      output[target + 2] = source[sourceOffset + offset + 2];
+      output[target + 3] = 255;
+    }
+    return;
+  }
+
+  for (let offset = 0; offset < byteLength; offset += 4) {
+    const srcA = source[sourceOffset + offset + 3];
+    const inverseA = 255 - srcA;
+    const target = outputOffset + offset;
+    output[target] = source[sourceOffset + offset] + Math.round((bgR * inverseA) / 255);
+    output[target + 1] = source[sourceOffset + offset + 1] + Math.round((bgG * inverseA) / 255);
+    output[target + 2] = source[sourceOffset + offset + 2] + Math.round((bgB * inverseA) / 255);
+    output[target + 3] = 255;
+  }
+}
+
+export function writeOpaqueBackgroundRgbRow(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+  background,
+) {
+  const bgR = background[0];
+  const bgG = background[1];
+  const bgB = background[2];
+  if (bgR === 0 && bgG === 0 && bgB === 0) {
+    for (let offset = 0, target = outputOffset; offset < byteLength; offset += 4, target += 3) {
+      output[target] = source[sourceOffset + offset];
+      output[target + 1] = source[sourceOffset + offset + 1];
+      output[target + 2] = source[sourceOffset + offset + 2];
+    }
+    return;
+  }
+
+  for (let offset = 0, target = outputOffset; offset < byteLength; offset += 4, target += 3) {
+    const srcA = source[sourceOffset + offset + 3];
+    const inverseA = 255 - srcA;
+    output[target] = source[sourceOffset + offset] + Math.round((bgR * inverseA) / 255);
+    output[target + 1] = source[sourceOffset + offset + 1] + Math.round((bgG * inverseA) / 255);
+    output[target + 2] = source[sourceOffset + offset + 2] + Math.round((bgB * inverseA) / 255);
+  }
+}
+
+export function copyPremultipliedRowToPng(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+) {
+  for (let offset = 0; offset < byteLength; offset += 4) {
+    const srcA = source[sourceOffset + offset + 3];
+    const target = outputOffset + offset;
+    output[target + 3] = srcA;
+    if (srcA === 0) {
+      output[target] = 0;
+      output[target + 1] = 0;
+      output[target + 2] = 0;
+    } else if (srcA === 255) {
+      output[target] = source[sourceOffset + offset];
+      output[target + 1] = source[sourceOffset + offset + 1];
+      output[target + 2] = source[sourceOffset + offset + 2];
+    } else {
+      const scale = 255 / srcA;
+      output[target] = toByte(source[sourceOffset + offset] * scale);
+      output[target + 1] = toByte(source[sourceOffset + offset + 1] * scale);
+      output[target + 2] = toByte(source[sourceOffset + offset + 2] * scale);
+    }
+  }
+}
+
+export function compositePremultipliedRowBackground(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+  background,
+) {
+  const bgA = background[3] / 255;
+  for (let offset = 0; offset < byteLength; offset += 4) {
+    const srcR = source[sourceOffset + offset] / 255;
+    const srcG = source[sourceOffset + offset + 1] / 255;
+    const srcB = source[sourceOffset + offset + 2] / 255;
+    const srcAByte = source[sourceOffset + offset + 3];
+    const srcA = srcAByte / 255;
+    const outA = srcA + bgA * (1 - srcA);
+    const target = outputOffset + offset;
+    if (outA <= 0) {
+      output[target] = 0;
+      output[target + 1] = 0;
+      output[target + 2] = 0;
+      output[target + 3] = 0;
+      continue;
+    }
+    output[target] = toByte(
+      ((srcR + (background[0] / 255) * bgA * (1 - srcA)) / outA) * 255,
+    );
+    output[target + 1] = toByte(
+      ((srcG + (background[1] / 255) * bgA * (1 - srcA)) / outA) * 255,
+    );
+    output[target + 2] = toByte(
+      ((srcB + (background[2] / 255) * bgA * (1 - srcA)) / outA) * 255,
+    );
+    output[target + 3] = toByte(outA * 255);
+  }
+}
+
+function writeUint32(output, offset, value) {
+  output[offset] = (value >>> 24) & 0xff;
+  output[offset + 1] = (value >>> 16) & 0xff;
+  output[offset + 2] = (value >>> 8) & 0xff;
+  output[offset + 3] = value & 0xff;
+}
+
+function asciiBytes(value) {
+  const bytes = new Uint8Array(value.length);
+  for (let index = 0; index < value.length; index += 1) {
+    bytes[index] = value.charCodeAt(index) & 0x7f;
+  }
+  return bytes;
+}
+
+let crcTable = null;
+
+function crc32Bytes(first, second) {
+  if (!crcTable) {
+    crcTable = new Uint32Array(256);
+    for (let n = 0; n < 256; n += 1) {
+      let c = n;
+      for (let k = 0; k < 8; k += 1) {
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      }
+      crcTable[n] = c >>> 0;
+    }
+  }
+
+  let c = 0xffffffff;
+  for (const bytes of [first, second]) {
+    for (const byte of bytes) {
+      c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    }
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 export function toUrl(value) {
   return value instanceof URL ? value : new URL(String(value), import.meta.url);
 }

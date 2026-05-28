@@ -1,11 +1,16 @@
 import {
   DEFAULT_BACKGROUND,
   FrameState,
+  PNG_SIGNATURE,
   addLayerToProcessor,
   applyProcessorOptions,
   boundaryToPlainObject,
   clamp01,
   createBaseFrameOptions,
+  createPngHeader,
+  getPngChannelCount,
+  getPngColorType,
+  getPngRowStride,
   getSourceName,
   loadWasmJsModule,
   normalizeColor,
@@ -13,12 +18,17 @@ import {
   normalizeLayerList,
   numberOrDefault,
   optionalAlpha,
+  parseColor,
   positiveIntegerOrDefault,
   renderLayersBestEffort,
   resolveFrameView,
   resolveLayerAlpha,
   sourceToText,
+  pngChunk,
+  writePixelRowsToPngRows,
 } from "./shared.js";
+
+const DEFAULT_STREAM_EXPORT_BAND_BYTES = 128 * 1024 * 1024;
 
 export async function createGerberRenderer(canvas, rendererOptions = {}) {
   return GerberRenderer.create(canvas, rendererOptions);
@@ -62,6 +72,34 @@ export async function renderGerberToPng(
       await renderer.renderLayers(layers, frameOptions);
     });
     return await renderer.exportPng({
+      background: frameOptions.background,
+      ...exportOptions,
+    });
+  } finally {
+    renderer.dispose();
+  }
+}
+
+export async function renderGerberToPngStream(
+  canvas,
+  writable,
+  layers,
+  frameOptions = {},
+  exportOptions = {},
+) {
+  const renderer = await createGerberRenderer(
+    canvas,
+    {
+      releaseContext: false,
+      ...(frameOptions.rendererOptions || {}),
+    },
+  );
+
+  try {
+    await renderer.withFrame(frameOptions, async () => {
+      await renderer.renderLayers(layers, frameOptions);
+    });
+    await renderer.exportPngStream(writable, {
       background: frameOptions.background,
       ...exportOptions,
     });
@@ -166,6 +204,27 @@ export class GerberRenderer {
     context.fillRect(0, 0, output.width, output.height);
     context.drawImage(this.canvas, 0, 0);
     return canvasToBlob(output, type, quality);
+  }
+
+  async exportPngStream(writable, exportOptions = {}) {
+    this.assertUsable();
+    const type = exportOptions.type || "image/png";
+    if (type !== "image/png") {
+      throw new TypeError("Streaming export only supports image/png.");
+    }
+
+    const background =
+      "background" in exportOptions
+        ? exportOptions.background
+        : (this.lastFrame?.background ?? DEFAULT_BACKGROUND);
+
+    await streamCanvasToPng(
+      this.canvas,
+      this.getContext(),
+      writable,
+      background,
+      exportOptions,
+    );
   }
 
   dispose() {
@@ -351,6 +410,159 @@ function normalizeFrameOptions(frameOptions) {
     clear: frameOptions.clear !== false,
     ...createBaseFrameOptions(frameOptions),
   };
+}
+
+async function streamCanvasToPng(canvas, gl, writable, background, exportOptions) {
+  if (typeof CompressionStream !== "function") {
+    throw new Error("Streaming PNG export requires CompressionStream support.");
+  }
+
+  const width = positiveIntegerOrDefault(canvas.width, 1);
+  const height = positiveIntegerOrDefault(canvas.height, 1);
+  const normalizedBackground = background == null ? null : parseColor(background, true);
+  const pngColorType = getPngColorType(normalizedBackground);
+  const pngChannels = getPngChannelCount(pngColorType);
+  const rowStride = getPngRowStride(width, pngChannels);
+  const sink = createWebWritablePngSink(writable);
+
+  try {
+    await sink.write(PNG_SIGNATURE);
+    await sink.write(pngChunk("IHDR", createPngHeader(width, height, pngColorType)));
+    await deflatePngRowsToWebSink(sink, async (writeRow) => {
+      await writeCanvasPixelRows(
+        writeRow,
+        gl,
+        width,
+        height,
+        rowStride,
+        normalizedBackground,
+        pngChannels,
+        exportOptions.maxBandBytes,
+      );
+    });
+    await sink.write(pngChunk("IEND", new Uint8Array(0)));
+  } finally {
+    sink.release();
+  }
+}
+
+function createWebWritablePngSink(writable) {
+  if (writable && typeof writable.getWriter === "function") {
+    const writer = writable.getWriter();
+    return {
+      write: (chunk) => writer.write(chunk),
+      release: () => writer.releaseLock(),
+    };
+  }
+  if (writable && typeof writable.write === "function") {
+    return {
+      write: (chunk) => writable.write(chunk),
+      release: () => {},
+    };
+  }
+  throw new TypeError("A WritableStream or FileSystemWritableFileStream is required.");
+}
+
+async function deflatePngRowsToWebSink(sink, writeRows) {
+  const compression = new CompressionStream("deflate");
+  const reader = compression.readable.getReader();
+  const writer = compression.writable.getWriter();
+  let pumpError = null;
+  const pump = (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await sink.write(pngChunk("IDAT", value));
+    }
+  })().catch((error) => {
+    pumpError = error;
+    throw error;
+  });
+  pump.catch(() => {});
+
+  try {
+    await writeRows(async (row) => {
+      if (pumpError) throw pumpError;
+      await writer.write(row.slice());
+      if (pumpError) throw pumpError;
+    });
+    await writer.close();
+    await pump;
+  } catch (error) {
+    try {
+      await writer.abort(error);
+    } catch (_abortError) {
+      // Preserve the original error.
+    }
+    try {
+      await reader.cancel(error);
+    } catch (_cancelError) {
+      // Preserve the original error.
+    }
+    try {
+      await pump;
+    } catch (_pumpError) {
+      // Preserve the original error.
+    }
+    throw error;
+  } finally {
+    writer.releaseLock();
+    reader.releaseLock();
+  }
+}
+
+async function writeCanvasPixelRows(
+  writeRow,
+  gl,
+  width,
+  height,
+  rowStride,
+  background,
+  pngChannels,
+  maxBandBytes,
+) {
+  const rowBytes = width * 4;
+  const rowsPerBand = getCanvasStreamBandRows(
+    width,
+    height,
+    rowStride,
+    maxBandBytes,
+  );
+  const pixels = new Uint8Array(rowBytes * rowsPerBand);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.finish?.();
+  for (let topY = 0; topY < height; topY += rowsPerBand) {
+    const rowCount = Math.min(rowsPerBand, height - topY);
+    const readY = height - topY - rowCount;
+    gl.readPixels(
+      0,
+      readY,
+      width,
+      rowCount,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      pixels,
+    );
+    await writePixelRowsToPngRows(
+      writeRow,
+      pixels.subarray(0, rowBytes * rowCount),
+      width,
+      rowCount,
+      rowStride,
+      background,
+      pngChannels,
+    );
+  }
+}
+
+function getCanvasStreamBandRows(width, height, rowStride, maxBandBytes) {
+  const budget = positiveIntegerOrDefault(
+    maxBandBytes,
+    DEFAULT_STREAM_EXPORT_BAND_BYTES,
+  );
+  const perRowBytes = width * 4 + rowStride;
+  return Math.max(1, Math.min(height, Math.floor(budget / perRowBytes)));
 }
 
 function normalizeCssColor(color) {
