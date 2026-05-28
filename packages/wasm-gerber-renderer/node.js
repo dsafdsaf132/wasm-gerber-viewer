@@ -36,6 +36,7 @@ const DEFAULT_MAX_RENDER_TARGET_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR = 2;
 const MIN_RENDER_TARGET_BYTES = 64 * 1024 * 1024;
 const MEMORY_PROBE_TIMEOUT_MS = 750;
+const PROBE_RENDER_TARGET_SIZE = 1;
 const GL_RGBA8 = 0x8058;
 const REQUIRED_WEBGL2_METHODS = [
   "createVertexArray",
@@ -569,15 +570,25 @@ function addLayerToProcessor(processor, content, offsetX, offsetY) {
 function parseLayerPayload(wasmModule, content, offsetX, offsetY, frameOptions) {
   const parseWithOptions = wasmModule.parse_gerber_layer_with_options;
   const parseDefault = wasmModule.parse_gerber_layer;
-  const payload = typeof parseWithOptions === "function"
-    ? parseWithOptions(
-        content,
-        offsetX,
-        offsetY,
-        frameOptions.preserveArcRegions !== false,
-        Number(frameOptions.arcTessellationQuality ?? 1),
-      )
-    : parseDefault(content, offsetX, offsetY);
+  const preserveArcRegions = frameOptions.preserveArcRegions !== false;
+  const arcTessellationQuality = Number(frameOptions.arcTessellationQuality ?? 1);
+  let payload;
+
+  if (typeof parseWithOptions === "function") {
+    payload = parseWithOptions(
+      content,
+      offsetX,
+      offsetY,
+      preserveArcRegions,
+      arcTessellationQuality,
+    );
+  } else {
+    if (!preserveArcRegions || arcTessellationQuality !== 1) {
+      throw new Error("Gerber parse options require an updated WASM module.");
+    }
+    payload = parseDefault(content, offsetX, offsetY);
+  }
+
   const sublayers = Array.from(payload?.sublayers ?? []);
   let bounds = null;
   for (const sublayer of sublayers) {
@@ -1097,15 +1108,8 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
   }
 
   const gl = renderer.createExportContext(
-    width,
-    getStreamTileHeight(
-      width,
-      height,
-      maxBandBytes,
-      maxRenderTargetBytes,
-      Number.POSITIVE_INFINITY,
-      layerCount,
-    ),
+    PROBE_RENDER_TARGET_SIZE,
+    PROBE_RENDER_TARGET_SIZE,
   );
   const maxDimension = getMaxRenderDimension(gl);
   if (width > maxDimension) {
