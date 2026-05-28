@@ -193,8 +193,7 @@ export class NodeGerberRenderer {
     }
 
     if (this.gl) {
-      this.staleGlContexts.push(this.gl);
-      this.gl = null;
+      this.releaseContext();
     }
     this.gl = createNodeGlesContext(
       width,
@@ -1214,7 +1213,7 @@ async function deflatePngRows(writeRows) {
 
   try {
     await writeRows(async (row) => {
-      if (!deflate.write(row)) {
+      if (!deflate.write(Buffer.from(row))) {
         await Promise.race([once(deflate, "drain"), done]);
       }
     });
