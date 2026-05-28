@@ -1,8 +1,11 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { execFile as execFileCallback } from "node:child_process";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { freemem } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { deflateSync } from "node:zlib";
+import { createDeflate, deflateSync } from "node:zlib";
 
 const require = createRequire(import.meta.url);
 
@@ -26,6 +29,14 @@ const DEFAULT_BACKGROUND = null;
 const DEFAULT_GLOBAL_ALPHA = 0.7;
 const DEFAULT_MINIMUM_FEATURE_PIXELS = 1;
 const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
+const RGBA_BYTES_PER_PIXEL = 4;
+const DEFAULT_MAX_STREAM_BAND_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MAX_FULL_FRAME_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MAX_RENDER_TARGET_BYTES = 2 * 1024 * 1024 * 1024;
+const DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR = 2;
+const MIN_RENDER_TARGET_BYTES = 64 * 1024 * 1024;
+const MEMORY_PROBE_TIMEOUT_MS = 750;
+const GL_RGBA8 = 0x8058;
 const REQUIRED_WEBGL2_METHODS = [
   "createVertexArray",
   "bindVertexArray",
@@ -50,7 +61,7 @@ export async function renderGerberToPngBuffer(
     await renderer.withFrame(frameOptions, async () => {
       await renderer.renderLayers(layers, frameOptions);
     });
-    return renderer.exportPng(exportOptions);
+    return await renderer.exportPng(exportOptions);
   } finally {
     renderer.dispose();
   }
@@ -83,9 +94,10 @@ export class NodeGerberRenderer {
     this.rendererOptions = { ...rendererOptions };
     this.wasmModule = wasmModule;
     this.gl = rendererOptions.gl || null;
+    this.staleGlContexts = [];
     this.frame = null;
     this.lastFrame = null;
-    this.lastPixels = null;
+    this.lastRenderPlan = null;
     this.disposed = false;
   }
 
@@ -99,29 +111,13 @@ export class NodeGerberRenderer {
     }
 
     const normalizedFrameOptions = normalizeFrameOptions(frameOptions);
-    const gl = this.getContext(
-      normalizedFrameOptions.width,
-      normalizedFrameOptions.height,
-    );
-    const processor = new this.wasmModule.GerberProcessor();
     try {
-      if (typeof processor.init_with_size !== "function") {
-        throw new Error("Headless rendering requires an updated WASM module.");
-      }
-      processor.init_with_size(
-        gl,
-        normalizedFrameOptions.width,
-        normalizedFrameOptions.height,
-      );
-      applyProcessorOptions(processor, normalizedFrameOptions);
-
-      this.frame = new FrameState(processor, normalizedFrameOptions);
+      this.frame = new FrameState(normalizedFrameOptions);
       this.lastFrame = null;
-      this.lastPixels = null;
+      this.lastRenderPlan = null;
       await callback();
-      this.renderFrameToPixels();
+      this.prepareFrameExport();
     } finally {
-      this.disposeFrameProcessor(processor);
       this.frame = null;
     }
   }
@@ -148,7 +144,7 @@ export class NodeGerberRenderer {
 
   async exportPng(exportOptions = {}) {
     this.assertUsable();
-    if (!this.lastFrame || !this.lastPixels) {
+    if (!this.lastFrame || !this.lastRenderPlan) {
       throw new Error("No rendered frame is available for export.");
     }
 
@@ -156,12 +152,11 @@ export class NodeGerberRenderer {
       "background" in exportOptions
         ? exportOptions.background
         : this.lastFrame.background;
-    const pixels =
-      background == null
-        ? this.lastPixels
-        : compositeBackground(this.lastPixels, parseColor(background, true));
 
-    return rgbaToPngBuffer(pixels, this.lastFrame.width, this.lastFrame.height);
+    return renderPlanToPngBuffer(this, this.lastRenderPlan, {
+      ...exportOptions,
+      background,
+    });
   }
 
   dispose() {
@@ -169,15 +164,12 @@ export class NodeGerberRenderer {
     this.disposed = true;
     this.frame = null;
     this.lastFrame = null;
-    this.lastPixels = null;
+    this.lastRenderPlan = null;
 
     if (this.rendererOptions.releaseContext !== false && this.gl) {
-      try {
-        this.gl.getExtension("WEBGL_lose_context")?.loseContext();
-      } catch (_error) {
-        // Best-effort cleanup.
-      }
+      this.releaseContext();
     }
+    this.releaseStaleContexts();
   }
 
   getContext(width, height) {
@@ -195,20 +187,63 @@ export class NodeGerberRenderer {
     return this.gl;
   }
 
+  createExportContext(width, height) {
+    if (this.rendererOptions.gl) {
+      return this.getContext(width, height);
+    }
+
+    if (this.gl) {
+      this.staleGlContexts.push(this.gl);
+      this.gl = null;
+    }
+    this.gl = createNodeGlesContext(
+      width,
+      height,
+      this.rendererOptions,
+      this.rendererOptions.contextAttributes || {},
+    );
+    return this.gl;
+  }
+
+  releaseContext() {
+    if (!this.gl) return;
+    try {
+      this.gl.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch (_error) {
+      // Best-effort cleanup.
+    }
+    this.gl = null;
+  }
+
+  releaseStaleContexts() {
+    for (const gl of this.staleGlContexts.splice(0)) {
+      try {
+        gl.getExtension("WEBGL_lose_context")?.loseContext();
+      } catch (_error) {
+        // Best-effort cleanup.
+      }
+    }
+  }
+
+  releaseInternalContexts() {
+    if (this.rendererOptions.gl) return;
+    this.releaseContext();
+    this.releaseStaleContexts();
+  }
+
   async createLayerRecord(layer, layerOptions) {
     const { source, options } = normalizeLayer(layer, layerOptions);
     const content = await sourceToText(source);
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
-    const layerId = addLayerToProcessor(
-      this.frame.processor,
+    const parsed = parseLayerPayload(
+      this.wasmModule,
       content,
       offsetX,
       offsetY,
+      this.frame.options,
     );
-    const bounds = boundaryToPlainObject(
-      this.frame.processor.get_layer_boundary(layerId),
-    );
+    const layerId = this.frame.layers.length;
     const color =
       options.color == null
         ? this.frame.nextColor()
@@ -218,22 +253,25 @@ export class NodeGerberRenderer {
     return {
       layerId,
       name: options.name || getSourceName(source) || `Layer ${layerId}`,
-      bounds,
+      content: null,
+      parsedLayer: parsed.payload,
+      offsetX,
+      offsetY,
+      bounds: parsed.bounds,
       color,
       alpha,
     };
   }
 
-  renderFrameToPixels() {
+  prepareFrameExport() {
     const frame = this.frame;
     if (!frame) {
       throw new Error("No active frame to render.");
     }
 
     if (frame.layers.length === 0) {
-      const pixelCount = frame.options.width * frame.options.height * 4;
-      this.lastPixels = Buffer.alloc(pixelCount);
       this.lastFrame = frame.toResult(null);
+      this.lastRenderPlan = frame.toRenderPlan(null);
       return;
     }
 
@@ -242,49 +280,8 @@ export class NodeGerberRenderer {
       frame.options.width,
       frame.options.height,
     );
-    const activeLayerIds = new Uint32Array(
-      frame.layers.map((layer) => layer.layerId),
-    );
-    const colorData = new Float32Array(frame.layers.length * 4);
-    for (const [index, layer] of frame.layers.entries()) {
-      const offset = index * 4;
-      colorData[offset] = layer.color[0];
-      colorData[offset + 1] = layer.color[1];
-      colorData[offset + 2] = layer.color[2];
-      colorData[offset + 3] = layer.alpha;
-    }
-
-    const globalAlpha = clamp01(numberOrDefault(frame.options.globalAlpha, 1));
-    const pixels = frame.processor.render_pixels_with_clear(
-      activeLayerIds,
-      colorData,
-      view.zoomX,
-      view.zoomY,
-      view.offsetX,
-      view.offsetY,
-      globalAlpha,
-      frame.options.clear !== false,
-    );
-
-    this.lastPixels = flipRgbaRows(
-      Buffer.from(pixels),
-      frame.options.width,
-      frame.options.height,
-    );
     this.lastFrame = frame.toResult(view);
-  }
-
-  disposeFrameProcessor(processor) {
-    try {
-      processor.clear();
-    } catch (_error) {
-      // The pixel result is already copied; cleanup failures should not hide it.
-    }
-    try {
-      processor.free?.();
-    } catch (_error) {
-      // The context may already be unrecoverable; cleanup is best-effort.
-    }
+    this.lastRenderPlan = frame.toRenderPlan(view);
   }
 
   assertUsable() {
@@ -295,8 +292,7 @@ export class NodeGerberRenderer {
 }
 
 class FrameState {
-  constructor(processor, options) {
-    this.processor = processor;
+  constructor(options) {
     this.options = options;
     this.layers = [];
     this.bounds = null;
@@ -327,6 +323,34 @@ class FrameState {
         id: layer.layerId,
         name: layer.name,
         bounds: layer.bounds,
+        color: layer.color,
+        alpha: layer.alpha,
+      })),
+    };
+  }
+
+  toRenderPlan(view) {
+    const globalAlpha = clamp01(numberOrDefault(this.options.globalAlpha, 1));
+    return {
+      width: this.options.width,
+      height: this.options.height,
+      background: this.options.background,
+      bounds: this.bounds,
+      view,
+      globalAlpha,
+      maxBandBytes: this.options.maxBandBytes,
+      preserveArcRegions: this.options.preserveArcRegions,
+      arcTessellationQuality: this.options.arcTessellationQuality,
+      minimumFeaturePixels: this.options.minimumFeaturePixels,
+      maxFullFrameBytes: this.options.maxFullFrameBytes,
+      maxRenderTargetBytes: this.options.maxRenderTargetBytes,
+      framebufferMemorySafetyFactor: this.options.framebufferMemorySafetyFactor,
+      strategy: this.options.strategy,
+      layers: this.layers.map((layer) => ({
+        content: layer.content,
+        parsedLayer: layer.parsedLayer,
+        offsetX: layer.offsetX,
+        offsetY: layer.offsetY,
         color: layer.color,
         alpha: layer.alpha,
       })),
@@ -504,6 +528,29 @@ function addLayerToProcessor(processor, content, offsetX, offsetY) {
   return processor.add_layer(content);
 }
 
+function parseLayerPayload(wasmModule, content, offsetX, offsetY, frameOptions) {
+  const parseWithOptions = wasmModule.parse_gerber_layer_with_options;
+  const parseDefault = wasmModule.parse_gerber_layer;
+  const payload = typeof parseWithOptions === "function"
+    ? parseWithOptions(
+        content,
+        offsetX,
+        offsetY,
+        frameOptions.preserveArcRegions !== false,
+        Number(frameOptions.arcTessellationQuality ?? 1),
+      )
+    : parseDefault(content, offsetX, offsetY);
+  const sublayers = Array.from(payload?.sublayers ?? []);
+  let bounds = null;
+  for (const sublayer of sublayers) {
+    bounds = mergeBounds(bounds, boundaryToPlainObject(sublayer.boundary));
+  }
+  if (!bounds) {
+    throw new Error("File does not contain valid Gerber data (no geometry found)");
+  }
+  return { payload, bounds };
+}
+
 function normalizeFrameOptions(frameOptions) {
   if (frameOptions.clear === false) {
     throw new Error(
@@ -530,6 +577,26 @@ function normalizeFrameOptions(frameOptions) {
       DEFAULT_MINIMUM_FEATURE_PIXELS,
     ),
     globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
+    maxBandBytes: positiveIntegerOrDefault(
+      frameOptions.maxBandBytes,
+      DEFAULT_MAX_STREAM_BAND_BYTES,
+    ),
+    maxFullFrameBytes: positiveIntegerOrDefault(
+      frameOptions.maxFullFrameBytes,
+      DEFAULT_MAX_FULL_FRAME_BYTES,
+    ),
+    maxRenderTargetBytes:
+      frameOptions.maxRenderTargetBytes == null
+        ? null
+        : positiveIntegerOrDefault(
+            frameOptions.maxRenderTargetBytes,
+            DEFAULT_MAX_RENDER_TARGET_BYTES,
+          ),
+    framebufferMemorySafetyFactor: positiveNumberOrDefault(
+      frameOptions.framebufferMemorySafetyFactor,
+      DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR,
+    ),
+    strategy: normalizeExportStrategy(frameOptions.strategy),
     colors: DEFAULT_COLORS.map((color) => [...color]),
   };
 }
@@ -846,52 +913,432 @@ function parseCssChannel(value) {
   return Math.min(255, Math.max(0, Math.round(Number(trimmed))));
 }
 
-function compositeBackground(pixels, background) {
-  const output = Buffer.from(pixels);
-  const bgA = background[3] / 255;
-  for (let index = 0; index < output.length; index += 4) {
-    const srcA = output[index + 3] / 255;
-    const outA = srcA + bgA * (1 - srcA);
-    if (outA <= 0) {
-      output[index] = 0;
-      output[index + 1] = 0;
-      output[index + 2] = 0;
-      output[index + 3] = 0;
-      continue;
+async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
+  const width = positiveIntegerOrDefault(plan.width, DEFAULT_WIDTH);
+  const height = positiveIntegerOrDefault(plan.height, DEFAULT_HEIGHT);
+  const strategy = normalizeExportStrategy(exportOptions.strategy || plan.strategy);
+  const background =
+    exportOptions.background == null
+      ? null
+      : parseColor(exportOptions.background, true);
+  const maxBandBytes = positiveIntegerOrDefault(
+    exportOptions.maxBandBytes,
+    plan.maxBandBytes || DEFAULT_MAX_STREAM_BAND_BYTES,
+  );
+  const maxFullFrameBytes = positiveIntegerOrDefault(
+    exportOptions.maxFullFrameBytes,
+    plan.maxFullFrameBytes || DEFAULT_MAX_FULL_FRAME_BYTES,
+  );
+  const maxRenderTargetBytes = await resolveMaxRenderTargetBytes(
+    exportOptions,
+    plan,
+  );
+  const framebufferMemorySafetyFactor = positiveNumberOrDefault(
+    exportOptions.framebufferMemorySafetyFactor,
+    plan.framebufferMemorySafetyFactor || DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR,
+  );
+  const layerCount = Math.max(1, plan.layers.length);
+  const fullFrameEstimate = estimateFullFrameBytes(
+    width,
+    height,
+    framebufferMemorySafetyFactor,
+  );
+  const fullFrameRenderTargetEstimate = estimateRenderTargetBytes(
+    width,
+    height,
+    getFullFrameRenderTargetCount(layerCount),
+  );
+
+  const shouldTryFullFrame =
+    strategy === "full-frame" ||
+    (strategy === "auto" &&
+      fullFrameEstimate <= maxFullFrameBytes &&
+      fullFrameRenderTargetEstimate <= maxRenderTargetBytes);
+  if (shouldTryFullFrame) {
+    assertRenderTargetBudget(
+      fullFrameRenderTargetEstimate,
+      maxRenderTargetBytes,
+      width,
+      height,
+    );
+    try {
+      return renderPlanToFullFramePngBuffer(
+        renderer,
+        plan,
+        width,
+        height,
+        background,
+      );
+    } catch (error) {
+      if (strategy === "full-frame") {
+        throw error;
+      }
+      renderer.releaseInternalContexts();
+    }
+  }
+
+  const gl = renderer.createExportContext(
+    width,
+    getStreamTileHeight(
+      width,
+      height,
+      maxBandBytes,
+      maxRenderTargetBytes,
+      Number.POSITIVE_INFINITY,
+      layerCount,
+    ),
+  );
+  const maxDimension = getMaxRenderDimension(gl);
+  if (width > maxDimension) {
+    throw new Error(
+      `PNG export width ${width}px exceeds this renderer's ${maxDimension}px render limit.`,
+    );
+  }
+
+  const tileHeight = getStreamTileHeight(
+    width,
+    height,
+    maxBandBytes,
+    maxRenderTargetBytes,
+    maxDimension,
+    layerCount,
+  );
+  const rowStride = getPngRowStride(width);
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+
+  const deflatedChunks = await deflatePngRows(async (writeRow) => {
+    if (plan.layers.length === 0 || !plan.view) {
+      await writeBlankPngRows(writeRow, width, height, tileHeight, background);
+      return;
     }
 
-    output[index] = Math.round(
-      (output[index] * srcA + background[0] * bgA * (1 - srcA)) / outA,
+    const renderContext = createProcessorForPlan(
+      renderer,
+      plan,
+      gl,
+      width,
+      tileHeight,
     );
-    output[index + 1] = Math.round(
-      (output[index + 1] * srcA + background[1] * bgA * (1 - srcA)) / outA,
-    );
-    output[index + 2] = Math.round(
-      (output[index + 2] * srcA + background[2] * bgA * (1 - srcA)) / outA,
-    );
-    output[index + 3] = Math.round(outA * 255);
-  }
-  return output;
+    const tilePixels = new Uint8Array(width * tileHeight * 4);
+    try {
+      for (let tileY = 0; tileY < height; tileY += tileHeight) {
+        const currentTileHeight = Math.min(tileHeight, height - tileY);
+        if (currentTileHeight !== tileHeight) {
+          resizeRenderTarget(renderContext.processor, gl, width, currentTileHeight);
+        }
+        renderContext.processor.render_tile(
+          renderContext.activeLayerIds,
+          renderContext.colorData,
+          width,
+          height,
+          0,
+          tileY,
+          width,
+          currentTileHeight,
+          plan.view.zoomX,
+          plan.view.zoomY,
+          plan.view.offsetX,
+          plan.view.offsetY,
+          plan.globalAlpha,
+        );
+        gl.finish?.();
+        gl.readPixels(
+          0,
+          0,
+          width,
+          currentTileHeight,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          tilePixels,
+        );
+        await writeTileRows(
+          writeRow,
+          tilePixels,
+          width,
+          currentTileHeight,
+          rowStride,
+          background,
+        );
+      }
+    } finally {
+      disposeProcessor(renderContext.processor);
+    }
+  });
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    ...deflatedChunks.map((chunk) => pngChunk("IDAT", chunk)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
 }
 
-function flipRgbaRows(pixels, width, height) {
-  const rowSize = width * 4;
-  const output = Buffer.allocUnsafe(pixels.length);
-  for (let y = 0; y < height; y += 1) {
-    const sourceStart = (height - 1 - y) * rowSize;
-    const targetStart = y * rowSize;
-    pixels.copy(output, targetStart, sourceStart, sourceStart + rowSize);
+function renderPlanToFullFramePngBuffer(
+  renderer,
+  plan,
+  width,
+  height,
+  background,
+) {
+  const gl = renderer.createExportContext(width, height);
+  const maxDimension = getMaxRenderDimension(gl);
+  if (width > maxDimension || height > maxDimension) {
+    throw new Error(
+      `PNG export size ${width}x${height}px exceeds this renderer's ${maxDimension}px render limit.`,
+    );
   }
-  return output;
+
+  const renderContext = createProcessorForPlan(renderer, plan, gl, width, height);
+  try {
+    const pixels = plan.layers.length === 0 || !plan.view
+      ? new Uint8Array(width * height * 4)
+      : renderContext.processor.render_pixels_with_clear(
+          renderContext.activeLayerIds,
+          renderContext.colorData,
+          plan.view.zoomX,
+          plan.view.zoomY,
+          plan.view.offsetX,
+          plan.view.offsetY,
+          plan.globalAlpha,
+          true,
+        );
+    return bottomUpRgbaToPngBuffer(Buffer.from(pixels), width, height, background);
+  } finally {
+    disposeProcessor(renderContext.processor);
+  }
 }
 
-function rgbaToPngBuffer(rgba, width, height) {
-  const rowSize = width * 4;
-  const raw = Buffer.allocUnsafe((rowSize + 1) * height);
+function createProcessorForPlan(renderer, plan, gl, width, height) {
+  resizeDrawingBuffer(gl, width, height);
+  const processor = new renderer.wasmModule.GerberProcessor();
+  try {
+    if (typeof processor.init_with_size !== "function") {
+      throw new Error("Streaming PNG export requires an updated WASM module.");
+    }
+    processor.init_with_size(gl, width, height);
+    applyProcessorOptions(processor, plan);
+
+    const activeLayerIds = new Uint32Array(plan.layers.length);
+    const colorData = new Float32Array(plan.layers.length * 4);
+    for (const [index, layer] of plan.layers.entries()) {
+      activeLayerIds[index] = addPlanLayerToProcessor(processor, layer);
+      const offset = index * 4;
+      colorData[offset] = layer.color[0];
+      colorData[offset + 1] = layer.color[1];
+      colorData[offset + 2] = layer.color[2];
+      colorData[offset + 3] = layer.alpha;
+    }
+
+    return { processor, activeLayerIds, colorData };
+  } catch (error) {
+    disposeProcessor(processor);
+    throw error;
+  }
+}
+
+function addPlanLayerToProcessor(processor, layer) {
+  if (layer.parsedLayer) {
+    if (typeof processor.add_parsed_layer !== "function") {
+      throw new Error("Parsed layer reuse requires an updated WASM renderer.");
+    }
+    return processor.add_parsed_layer(layer.parsedLayer);
+  }
+  if (typeof layer.content !== "string") {
+    throw new Error("Layer content is unavailable for rendering.");
+  }
+  return addLayerToProcessor(processor, layer.content, layer.offsetX, layer.offsetY);
+}
+
+function resizeRenderTarget(processor, gl, width, height) {
+  const didResize = resizeDrawingBuffer(gl, width, height);
+  if (!didResize) return;
+  if (typeof processor.resize_to !== "function") {
+    throw new Error("Streaming PNG export requires renderer resize support.");
+  }
+  processor.resize_to(width, height);
+}
+
+function resizeDrawingBuffer(gl, width, height) {
+  if (gl.drawingBufferWidth === width && gl.drawingBufferHeight === height) {
+    return false;
+  }
+  if (typeof gl.drawingBufferStorage === "function") {
+    gl.drawingBufferStorage(gl.RGBA8 || GL_RGBA8, width, height);
+    return true;
+  }
+  const canvas = gl.canvas;
+  if (canvas && "width" in canvas && "height" in canvas) {
+    if (canvas.width === width && canvas.height === height) {
+      return false;
+    }
+    canvas.width = width;
+    canvas.height = height;
+    return true;
+  }
+  if (gl.drawingBufferWidth !== width || gl.drawingBufferHeight !== height) {
+    throw new Error("The WebGL context cannot be resized for streaming PNG export.");
+  }
+  return false;
+}
+
+function disposeProcessor(processor) {
+  try {
+    processor.clear();
+  } catch (_error) {
+    // Best-effort cleanup.
+  }
+  try {
+    processor.free?.();
+  } catch (_error) {
+    // Best-effort cleanup.
+  }
+}
+
+async function deflatePngRows(writeRows) {
+  const deflate = createDeflate();
+  const chunks = [];
+  const done = new Promise((resolve, reject) => {
+    deflate.once("end", resolve);
+    deflate.once("error", reject);
+  });
+  deflate.on("data", (chunk) => {
+    chunks.push(Buffer.from(chunk));
+  });
+
+  try {
+    await writeRows(async (row) => {
+      if (!deflate.write(row)) {
+        await Promise.race([once(deflate, "drain"), done]);
+      }
+    });
+    deflate.end();
+    await done;
+  } catch (error) {
+    deflate.destroy();
+    throw error;
+  }
+  return chunks;
+}
+
+async function writeBlankPngRows(writeRow, width, height, tileHeight, background) {
+  const rowStride = getPngRowStride(width);
+  const band = Buffer.alloc(rowStride * tileHeight);
+  if (background) {
+    fillBandBackground(band, width, tileHeight, rowStride, background);
+  }
+  for (let y = 0; y < height; y += tileHeight) {
+    const currentTileHeight = Math.min(tileHeight, height - y);
+    for (let row = 0; row < currentTileHeight; row += 1) {
+      const start = row * rowStride;
+      await writeRow(band.subarray(start, start + rowStride));
+    }
+  }
+}
+
+async function writeTileRows(
+  writeRow,
+  tilePixels,
+  width,
+  tileHeight,
+  rowStride,
+  background,
+) {
+  const row = Buffer.allocUnsafe(rowStride);
+  const sourceRowBytes = width * 4;
+  for (let y = 0; y < tileHeight; y += 1) {
+    row[0] = 0;
+    const sourceStart = (tileHeight - 1 - y) * sourceRowBytes;
+    if (background) {
+      compositeRowBackground(
+        row,
+        1,
+        tilePixels,
+        sourceStart,
+        sourceRowBytes,
+        background,
+      );
+    } else {
+      row.set(
+        tilePixels.subarray(sourceStart, sourceStart + sourceRowBytes),
+        1,
+      );
+    }
+    await writeRow(row);
+  }
+}
+
+function fillBandBackground(band, width, height, rowStride, background) {
   for (let y = 0; y < height; y += 1) {
-    const rawOffset = y * (rowSize + 1);
+    const rowStart = y * rowStride;
+    band[rowStart] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const offset = rowStart + 1 + x * 4;
+      band[offset] = background[0];
+      band[offset + 1] = background[1];
+      band[offset + 2] = background[2];
+      band[offset + 3] = background[3];
+    }
+  }
+}
+
+function compositeRowBackground(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+  background,
+) {
+  const bgA = background[3] / 255;
+  for (let offset = 0; offset < byteLength; offset += 4) {
+    const srcR = source[sourceOffset + offset];
+    const srcG = source[sourceOffset + offset + 1];
+    const srcB = source[sourceOffset + offset + 2];
+    const srcAByte = source[sourceOffset + offset + 3];
+    const srcA = srcAByte / 255;
+    const outA = srcA + bgA * (1 - srcA);
+    const target = outputOffset + offset;
+    if (outA <= 0) {
+      output[target] = 0;
+      output[target + 1] = 0;
+      output[target + 2] = 0;
+      output[target + 3] = 0;
+      continue;
+    }
+    output[target] = Math.round((srcR * srcA + background[0] * bgA * (1 - srcA)) / outA);
+    output[target + 1] = Math.round((srcG * srcA + background[1] * bgA * (1 - srcA)) / outA);
+    output[target + 2] = Math.round((srcB * srcA + background[2] * bgA * (1 - srcA)) / outA);
+    output[target + 3] = Math.round(outA * 255);
+  }
+}
+
+function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
+  const rowBytes = width * 4;
+  const rowStride = getPngRowStride(width);
+  const raw = Buffer.allocUnsafe(rowStride * height);
+  for (let y = 0; y < height; y += 1) {
+    const rawOffset = y * rowStride;
+    const sourceStart = (height - 1 - y) * rowBytes;
     raw[rawOffset] = 0;
-    rgba.copy(raw, rawOffset + 1, y * rowSize, (y + 1) * rowSize);
+    if (background) {
+      compositeRowBackground(
+        raw,
+        rawOffset + 1,
+        rgba,
+        sourceStart,
+        rowBytes,
+        background,
+      );
+    } else {
+      rgba.copy(raw, rawOffset + 1, sourceStart, sourceStart + rowBytes);
+    }
   }
 
   const header = Buffer.alloc(13);
@@ -909,6 +1356,207 @@ function rgbaToPngBuffer(rgba, width, height) {
     pngChunk("IDAT", deflateSync(raw)),
     pngChunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+function getPngRowStride(width) {
+  return 1 + width * RGBA_BYTES_PER_PIXEL;
+}
+
+function estimateFullFrameBytes(width, height, safetyFactor) {
+  const pixelBytes = width * height * RGBA_BYTES_PER_PIXEL;
+  return pixelBytes * safetyFactor;
+}
+
+async function resolveMaxRenderTargetBytes(exportOptions, plan) {
+  if (exportOptions.maxRenderTargetBytes != null) {
+    return positiveIntegerOrDefault(
+      exportOptions.maxRenderTargetBytes,
+      DEFAULT_MAX_RENDER_TARGET_BYTES,
+    );
+  }
+
+  if (plan.maxRenderTargetBytes != null) {
+    return positiveIntegerOrDefault(
+      plan.maxRenderTargetBytes,
+      DEFAULT_MAX_RENDER_TARGET_BYTES,
+    );
+  }
+
+  return probeRenderTargetBudgetBytes();
+}
+
+async function probeRenderTargetBudgetBytes() {
+  const limits = [DEFAULT_MAX_RENDER_TARGET_BYTES];
+  const freeRamBytes = Number(freemem());
+  if (Number.isFinite(freeRamBytes) && freeRamBytes > 0) {
+    limits.push(Math.floor(freeRamBytes * 0.5));
+  }
+
+  const freeVramBytes = await probeFreeVramBytes();
+  if (Number.isFinite(freeVramBytes) && freeVramBytes > 0) {
+    limits.push(Math.floor(freeVramBytes * 0.75));
+  }
+
+  return Math.max(MIN_RENDER_TARGET_BYTES, Math.min(...limits));
+}
+
+async function probeFreeVramBytes() {
+  const probes = [
+    probeNvidiaFreeVramBytes(),
+    probeLinuxDrmFreeVramBytes(),
+    probeRocmFreeVramBytes(),
+  ];
+  const results = await Promise.allSettled(probes);
+  const values = results
+    .filter((result) => result.status === "fulfilled")
+    .map((result) => result.value)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return values.length > 0 ? Math.max(...values) : null;
+}
+
+async function probeNvidiaFreeVramBytes() {
+  const stdout = await execFileText("nvidia-smi", [
+    "--query-gpu=memory.free",
+    "--format=csv,noheader,nounits",
+  ]);
+  const values = stdout
+    .split(/\r?\n/)
+    .map((line) => Number(line.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((mib) => mib * 1024 * 1024);
+  return values.length > 0 ? Math.max(...values) : null;
+}
+
+async function probeLinuxDrmFreeVramBytes() {
+  const entries = await readdir("/sys/class/drm", { withFileTypes: true });
+  const values = await Promise.all(
+    entries
+      .filter((entry) => entry.isDirectory() && /^card\d+$/.test(entry.name))
+      .map(async (entry) => {
+        const base = `/sys/class/drm/${entry.name}/device`;
+        const [total, used] = await Promise.all([
+          readIntegerFile(`${base}/mem_info_vram_total`),
+          readIntegerFile(`${base}/mem_info_vram_used`),
+        ]);
+        if (total == null || used == null || total <= used) return null;
+        return total - used;
+      }),
+  );
+  const finiteValues = values.filter((value) => Number.isFinite(value) && value > 0);
+  return finiteValues.length > 0 ? Math.max(...finiteValues) : null;
+}
+
+async function probeRocmFreeVramBytes() {
+  const stdout = await execFileText("rocm-smi", ["--showmeminfo", "vram"]);
+  const freeValues = [];
+  const usedValues = [];
+  const totalValues = [];
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const value = Number(line.match(/(-?\d+)\s*$/)?.[1]);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    if (/free/i.test(line)) {
+      freeValues.push(value);
+    } else if (/used/i.test(line)) {
+      usedValues.push(value);
+    } else if (/total/i.test(line)) {
+      totalValues.push(value);
+    }
+  }
+
+  if (freeValues.length > 0) {
+    return Math.max(...freeValues);
+  }
+  const computed = totalValues
+    .map((total, index) => {
+      const used = usedValues[index];
+      return Number.isFinite(used) && total > used ? total - used : null;
+    })
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return computed.length > 0 ? Math.max(...computed) : null;
+}
+
+async function readIntegerFile(path) {
+  try {
+    const content = await readFile(path, "utf8");
+    const value = Number(content.trim());
+    return Number.isFinite(value) ? value : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function execFileText(command, args) {
+  return new Promise((resolve, reject) => {
+    execFileCallback(
+      command,
+      args,
+      {
+        encoding: "utf8",
+        timeout: MEMORY_PROBE_TIMEOUT_MS,
+        windowsHide: true,
+      },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+function estimateRenderTargetBytes(width, height, targetCount) {
+  return width * height * RGBA_BYTES_PER_PIXEL * Math.max(1, targetCount);
+}
+
+function getFullFrameRenderTargetCount(layerCount) {
+  return Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) + 2;
+}
+
+function getStreamRenderTargetCount(layerCount) {
+  return Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) + 1;
+}
+
+function assertRenderTargetBudget(estimatedBytes, maxRenderTargetBytes, width, height) {
+  if (estimatedBytes <= maxRenderTargetBytes) return;
+  throw new Error(
+    `PNG export render targets exceed the ${formatByteCount(maxRenderTargetBytes)} per-render limit at ${width} x ${height}px.`,
+  );
+}
+
+function getStreamTileHeight(
+  width,
+  height,
+  maxBandBytes,
+  maxRenderTargetBytes,
+  maxDimension = Number.POSITIVE_INFINITY,
+  layerCount = 1,
+) {
+  const rowStride = getPngRowStride(width);
+  const byBandBytes = Math.floor(maxBandBytes / rowStride);
+  const targetCount = getStreamRenderTargetCount(layerCount);
+  const byRenderTargetBytes = Math.floor(
+    maxRenderTargetBytes / (width * RGBA_BYTES_PER_PIXEL * targetCount),
+  );
+  const tileHeight = Math.min(height, maxDimension, byBandBytes, byRenderTargetBytes);
+  if (!Number.isFinite(tileHeight) || tileHeight < 1) {
+    throw new Error(
+      `PNG export tile is too large for ${width}px rows under the ${formatByteCount(maxRenderTargetBytes)} per-render limit.`,
+    );
+  }
+  return Math.max(1, Math.floor(tileHeight));
+}
+
+function getMaxRenderDimension(gl) {
+  const maxRenderbufferSize =
+    typeof gl.getParameter === "function"
+      ? Number(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE))
+      : Number.POSITIVE_INFINITY;
+  return Number.isFinite(maxRenderbufferSize) && maxRenderbufferSize > 0
+    ? maxRenderbufferSize
+    : Number.POSITIVE_INFINITY;
 }
 
 function pngChunk(type, data) {
@@ -942,6 +1590,17 @@ function crc32(buffer) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
+function formatByteCount(bytes) {
+  const units = ["bytes", "KiB", "MiB", "GiB"];
+  let value = Number(bytes);
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
 function positiveIntegerOrDefault(value, fallback) {
   const number = Number(value);
   if (Number.isFinite(number) && number > 0) {
@@ -950,9 +1609,27 @@ function positiveIntegerOrDefault(value, fallback) {
   return Math.max(1, Math.round(Number(fallback) || 1));
 }
 
+function positiveNumberOrDefault(value, fallback) {
+  const number = Number(value);
+  if (Number.isFinite(number) && number > 0) {
+    return number;
+  }
+  const fallbackNumber = Number(fallback);
+  return Number.isFinite(fallbackNumber) && fallbackNumber > 0 ? fallbackNumber : 1;
+}
+
 function numberOrDefault(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizeExportStrategy(value) {
+  if (value == null) return "auto";
+  const strategy = String(value);
+  if (strategy === "auto" || strategy === "full-frame" || strategy === "stream") {
+    return strategy;
+  }
+  throw new TypeError("strategy must be 'auto', 'full-frame', or 'stream'.");
 }
 
 function finiteOrThrow(value, name) {

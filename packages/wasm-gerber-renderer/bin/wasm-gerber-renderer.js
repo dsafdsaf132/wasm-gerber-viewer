@@ -15,6 +15,7 @@ Options:
   --background <color>             Background color, e.g. #05070c (default: transparent)
   --alpha <0-1>                    Global layer alpha (default: 0.7)
   --minimum-feature-pixels <px>    Minimum line/arc display width (default: 1)
+  --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --approx-region-arcs             Approximate region arcs before rendering (default: false)
   --arc-quality <0|1|2>            Approx arc quality: low, normal, high (default: 1)
   --no-fit                         Use identity view instead of fit view (default: fit enabled)
@@ -89,6 +90,8 @@ function parseArgs(args) {
       frameOptions.globalAlpha = readNumber(args, ++index, arg);
     } else if (arg === "--minimum-feature-pixels") {
       frameOptions.minimumFeaturePixels = readNumber(args, ++index, arg);
+    } else if (arg === "--max-render-target-bytes") {
+      frameOptions.maxRenderTargetBytes = readByteSize(args, ++index, arg);
     } else if (arg === "--approx-region-arcs") {
       frameOptions.preserveArcRegions = false;
     } else if (arg === "--arc-quality") {
@@ -162,6 +165,40 @@ function readNumber(args, index, option) {
     throw new Error(`${option} requires a finite number.`);
   }
   return value;
+}
+
+function readByteSize(args, index, option) {
+  const rawValue = readOptionValue(args, index, option).trim();
+  const match = rawValue.match(/^(\d+(?:\.\d+)?)\s*([kmgt]?i?b?|bytes?)?$/i);
+  if (!match) {
+    throw new Error(`${option} requires a byte size such as 2147483648, 512m, or 2g.`);
+  }
+
+  const value = Number(match[1]);
+  const unit = (match[2] || "b").toLowerCase();
+  const multipliers = {
+    b: 1,
+    byte: 1,
+    bytes: 1,
+    k: 1024,
+    kb: 1024,
+    kib: 1024,
+    m: 1024 ** 2,
+    mb: 1024 ** 2,
+    mib: 1024 ** 2,
+    g: 1024 ** 3,
+    gb: 1024 ** 3,
+    gib: 1024 ** 3,
+    t: 1024 ** 4,
+    tb: 1024 ** 4,
+    tib: 1024 ** 4,
+  };
+  const multiplier = multipliers[unit];
+  const bytes = value * multiplier;
+  if (!Number.isFinite(bytes) || bytes <= 0 || !Number.isSafeInteger(Math.round(bytes))) {
+    throw new Error(`${option} requires a positive safe byte size.`);
+  }
+  return Math.round(bytes);
 }
 
 async function collectInputLayers(inputs) {

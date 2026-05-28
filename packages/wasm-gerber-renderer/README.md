@@ -293,6 +293,7 @@ CLI options:
 - `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
 - `--alpha <0-1>`: global layer opacity. Defaults to `0.7`.
 - `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
+- `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
 - `--approx-region-arcs`: converts region arcs to line segments before rendering.
 - `--arc-quality <0|1|2>`: approximate arc quality. Defaults to `1`.
 - `--no-fit`: disables fit-to-view.

@@ -61,6 +61,7 @@ Useful CLI options:
 - `--padding <px>` adds fit-to-view padding.
 - `--alpha <0-1>` sets global layer opacity.
 - `--minimum-feature-pixels <px>` keeps thin lines/arcs visible.
+- `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
 - `--approx-region-arcs` uses faster approximate region arcs.
 - `--arc-quality <0|1|2>` controls approximate arc quality.
 - `--no-fit` disables automatic fit-to-view.

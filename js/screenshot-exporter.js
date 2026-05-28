@@ -1,4 +1,7 @@
-import { MAX_SCREENSHOT_STREAM_BAND_BYTES } from "./config.js";
+import {
+  MAX_SCREENSHOT_RENDER_TARGET_BYTES,
+  MAX_SCREENSHOT_STREAM_BAND_BYTES,
+} from "./config.js";
 import { formatFileSize, getErrorMessage } from "./file-utils.js";
 
 function normalizeLayerOffset(offset = {}) {
@@ -382,6 +385,7 @@ export class ScreenshotExporter {
       canvas,
       gl,
       processor,
+      layerCount: this.getLayers().length,
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
     };
@@ -425,7 +429,11 @@ export class ScreenshotExporter {
       );
     }
 
-    const tileSize = this.getStreamTileDimensions();
+    const tileSize = this.getStreamTileDimensions(
+      exportWidth,
+      exportHeight,
+      screenshotRenderer.layerCount,
+    );
     this.validateStreamMemory(exportWidth, exportHeight, tileSize);
     const totalTiles =
       Math.ceil(exportWidth / tileSize.width) *
@@ -565,13 +573,33 @@ export class ScreenshotExporter {
     ].join(" ");
   }
 
-  getStreamTileDimensions() {
-    const rect = this.canvas.getBoundingClientRect();
+  getStreamTileDimensions(exportWidth, exportHeight, layerCount = 1) {
     const maxDimension = this.getMaxDimension();
+    const tileWidth = Math.max(1, Math.min(exportWidth, maxDimension));
+
+    const layerTargetCount = Math.max(1, Math.floor(Number(layerCount) || 1)) + 1;
+    const rowStride = this.getPngRowStride(exportWidth);
+    const heightByBandMemory = Math.floor(
+      MAX_SCREENSHOT_STREAM_BAND_BYTES / rowStride,
+    );
+    const heightByRenderTargets = Math.floor(
+      MAX_SCREENSHOT_RENDER_TARGET_BYTES / (tileWidth * 4 * layerTargetCount),
+    );
+    const tileHeight = Math.min(
+      exportHeight,
+      maxDimension,
+      heightByBandMemory,
+      heightByRenderTargets,
+    );
+    if (!Number.isFinite(tileHeight) || tileHeight < 1) {
+      throw new Error(
+        this.getMemoryLimitMessage(exportWidth, exportHeight, rowStride),
+      );
+    }
 
     return {
-      width: Math.max(1, Math.min(maxDimension, Math.round(rect.width * 2))),
-      height: Math.max(1, Math.min(maxDimension, Math.round(rect.height))),
+      width: tileWidth,
+      height: Math.max(1, Math.floor(tileHeight)),
     };
   }
 

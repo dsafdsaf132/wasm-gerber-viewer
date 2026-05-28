@@ -1,6 +1,7 @@
 export const NOTIFICATION_DURATION_MS = 2000;
 export const MAX_FILE_SIZE_BYTES = 300 * 1024 * 1024;
 export const MAX_SCREENSHOT_STREAM_BAND_BYTES = 1024 * 1024 * 1024;
+export const MAX_SCREENSHOT_RENDER_TARGET_BYTES = 2 * 1024 * 1024 * 1024;
 
 export const ZIP_MIME_TYPES = new Set([
   "application/zip",
