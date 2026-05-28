@@ -921,6 +921,8 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     exportOptions.background == null
       ? null
       : parseColor(exportOptions.background, true);
+  const pngColorType = getPngColorType(background);
+  const pngChannels = getPngChannelCount(pngColorType);
   const maxBandBytes = positiveIntegerOrDefault(
     exportOptions.maxBandBytes,
     plan.maxBandBytes || DEFAULT_MAX_STREAM_BAND_BYTES,
@@ -1002,20 +1004,28 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
     maxRenderTargetBytes,
     maxDimension,
     layerCount,
+    pngChannels,
   );
-  const rowStride = getPngRowStride(width);
+  const rowStride = getPngRowStride(width, pngChannels);
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
   header[8] = 8;
-  header[9] = 6;
+  header[9] = pngColorType;
   header[10] = 0;
   header[11] = 0;
   header[12] = 0;
 
   const deflatedChunks = await deflatePngRows(async (writeRow) => {
     if (plan.layers.length === 0 || !plan.view) {
-      await writeBlankPngRows(writeRow, width, height, tileHeight, background);
+      await writeBlankPngRows(
+        writeRow,
+        width,
+        height,
+        tileHeight,
+        background,
+        pngChannels,
+      );
       return;
     }
 
@@ -1066,6 +1076,7 @@ async function renderPlanToPngBuffer(renderer, plan, exportOptions) {
           currentTileHeight,
           rowStride,
           background,
+          pngChannels,
         );
       }
     } finally {
@@ -1228,11 +1239,18 @@ async function deflatePngRows(writeRows) {
   return chunks;
 }
 
-async function writeBlankPngRows(writeRow, width, height, tileHeight, background) {
-  const rowStride = getPngRowStride(width);
+async function writeBlankPngRows(
+  writeRow,
+  width,
+  height,
+  tileHeight,
+  background,
+  channels,
+) {
+  const rowStride = getPngRowStride(width, channels);
   const band = Buffer.alloc(rowStride * tileHeight);
   if (background) {
-    fillBandBackground(band, width, tileHeight, rowStride, background);
+    fillBandBackground(band, width, tileHeight, rowStride, background, channels);
   }
   for (let y = 0; y < height; y += tileHeight) {
     const currentTileHeight = Math.min(tileHeight, height - y);
@@ -1247,6 +1265,7 @@ async function writeTileRows(
   rowCount,
   rowStride,
   background,
+  channels,
 ) {
   const band = Buffer.allocUnsafe(rowStride * rowCount);
   const sourceRowBytes = width * 4;
@@ -1255,7 +1274,25 @@ async function writeTileRows(
     band[rowStart] = 0;
     const sourceStart = (rowCount - 1 - y) * sourceRowBytes;
     if (background) {
-      writeOpaqueBackgroundRow(band, rowStart + 1, tilePixels, sourceStart, sourceRowBytes, background);
+      if (channels === 3) {
+        writeOpaqueBackgroundRgbRow(
+          band,
+          rowStart + 1,
+          tilePixels,
+          sourceStart,
+          sourceRowBytes,
+          background,
+        );
+      } else {
+        writeOpaqueBackgroundRgbaRow(
+          band,
+          rowStart + 1,
+          tilePixels,
+          sourceStart,
+          sourceRowBytes,
+          background,
+        );
+      }
     } else {
       copyPremultipliedRowToPng(band, rowStart + 1, tilePixels, sourceStart, sourceRowBytes);
     }
@@ -1263,7 +1300,7 @@ async function writeTileRows(
   await writeRow(band);
 }
 
-function writeOpaqueBackgroundRow(
+function writeOpaqueBackgroundRgbaRow(
   output,
   outputOffset,
   source,
@@ -1308,16 +1345,47 @@ function writeOpaqueBackgroundRow(
   }
 }
 
-function fillBandBackground(band, width, height, rowStride, background) {
+function writeOpaqueBackgroundRgbRow(
+  output,
+  outputOffset,
+  source,
+  sourceOffset,
+  byteLength,
+  background,
+) {
+  const bgR = background[0];
+  const bgG = background[1];
+  const bgB = background[2];
+  if (bgR === 0 && bgG === 0 && bgB === 0) {
+    for (let offset = 0, target = outputOffset; offset < byteLength; offset += 4, target += 3) {
+      output[target] = source[sourceOffset + offset];
+      output[target + 1] = source[sourceOffset + offset + 1];
+      output[target + 2] = source[sourceOffset + offset + 2];
+    }
+    return;
+  }
+
+  for (let offset = 0, target = outputOffset; offset < byteLength; offset += 4, target += 3) {
+    const srcA = source[sourceOffset + offset + 3];
+    const inverseA = 255 - srcA;
+    output[target] = source[sourceOffset + offset] + Math.round((bgR * inverseA) / 255);
+    output[target + 1] = source[sourceOffset + offset + 1] + Math.round((bgG * inverseA) / 255);
+    output[target + 2] = source[sourceOffset + offset + 2] + Math.round((bgB * inverseA) / 255);
+  }
+}
+
+function fillBandBackground(band, width, height, rowStride, background, channels) {
   for (let y = 0; y < height; y += 1) {
     const rowStart = y * rowStride;
     band[rowStart] = 0;
     for (let x = 0; x < width; x += 1) {
-      const offset = rowStart + 1 + x * 4;
+      const offset = rowStart + 1 + x * channels;
       band[offset] = background[0];
       band[offset + 1] = background[1];
       band[offset + 2] = background[2];
-      band[offset + 3] = background[3];
+      if (channels === 4) {
+        band[offset + 3] = background[3];
+      }
     }
   }
 }
@@ -1392,15 +1460,35 @@ function toByte(value) {
 }
 
 function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
+  const pngColorType = getPngColorType(background);
+  const pngChannels = getPngChannelCount(pngColorType);
   const rowBytes = width * 4;
-  const rowStride = getPngRowStride(width);
+  const rowStride = getPngRowStride(width, pngChannels);
   const raw = Buffer.allocUnsafe(rowStride * height);
   for (let y = 0; y < height; y += 1) {
     const rawOffset = y * rowStride;
     const sourceStart = (height - 1 - y) * rowBytes;
     raw[rawOffset] = 0;
     if (background) {
-      writeOpaqueBackgroundRow(raw, rawOffset + 1, rgba, sourceStart, rowBytes, background);
+      if (pngChannels === 3) {
+        writeOpaqueBackgroundRgbRow(
+          raw,
+          rawOffset + 1,
+          rgba,
+          sourceStart,
+          rowBytes,
+          background,
+        );
+      } else {
+        writeOpaqueBackgroundRgbaRow(
+          raw,
+          rawOffset + 1,
+          rgba,
+          sourceStart,
+          rowBytes,
+          background,
+        );
+      }
     } else {
       copyPremultipliedRowToPng(raw, rawOffset + 1, rgba, sourceStart, rowBytes);
     }
@@ -1410,7 +1498,7 @@ function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
   header[8] = 8;
-  header[9] = 6;
+  header[9] = pngColorType;
   header[10] = 0;
   header[11] = 0;
   header[12] = 0;
@@ -1423,8 +1511,16 @@ function bottomUpRgbaToPngBuffer(rgba, width, height, background) {
   ]);
 }
 
-function getPngRowStride(width) {
-  return 1 + width * RGBA_BYTES_PER_PIXEL;
+function getPngColorType(background) {
+  return background && background[3] === 255 ? 2 : 6;
+}
+
+function getPngChannelCount(colorType) {
+  return colorType === 2 ? 3 : RGBA_BYTES_PER_PIXEL;
+}
+
+function getPngRowStride(width, channels = RGBA_BYTES_PER_PIXEL) {
+  return 1 + width * channels;
 }
 
 function estimateFullFrameBytes(width, height, safetyFactor) {
@@ -1598,8 +1694,9 @@ function getStreamTileHeight(
   maxRenderTargetBytes,
   maxDimension = Number.POSITIVE_INFINITY,
   layerCount = 1,
+  pngChannels = RGBA_BYTES_PER_PIXEL,
 ) {
-  const rowStride = getPngRowStride(width);
+  const rowStride = getPngRowStride(width, pngChannels);
   const byBandBytes = Math.floor(maxBandBytes / rowStride);
   const targetCount = getStreamRenderTargetCount(layerCount);
   const byRenderTargetBytes = Math.floor(
