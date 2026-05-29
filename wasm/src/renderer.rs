@@ -43,6 +43,38 @@ pub struct Renderer {
     minimum_feature_pixels: f32,
 }
 
+struct BufferCacheBuildGuard {
+    gl: WebGl2RenderingContext,
+    cache: BufferCache,
+    committed: bool,
+}
+
+impl BufferCacheBuildGuard {
+    fn new(gl: &WebGl2RenderingContext) -> Self {
+        Self {
+            gl: gl.clone(),
+            cache: BufferCache::default(),
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) -> BufferCache {
+        self.committed = true;
+        std::mem::take(&mut self.cache)
+    }
+}
+
+impl Drop for BufferCacheBuildGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        self.gl.bind_vertex_array(None);
+        Renderer::delete_buffer_cache(&self.gl, std::mem::take(&mut self.cache));
+    }
+}
+
 impl Renderer {
     /// Create a new renderer with WebGL context (no layers initially)
     pub fn new(gl: WebGl2RenderingContext) -> Result<Renderer, JsValue> {
@@ -1603,14 +1635,30 @@ impl Renderer {
         offsets: &[u32],
         vertex_count: usize,
     ) -> Result<(), JsValue> {
+        Self::validate_offsets_invariant(label, sublayer_idx, offsets, vertex_count)
+            .map_err(|message| JsValue::from_str(&message))
+    }
+
+    fn validate_offsets_invariant(
+        label: &str,
+        sublayer_idx: usize,
+        offsets: &[u32],
+        vertex_count: usize,
+    ) -> Result<(), String> {
+        if offsets.first().copied() != Some(0) {
+            return Err(format!(
+                "Sublayer {} {} must start at 0",
+                sublayer_idx, label
+            ));
+        }
         let mut previous = 0;
         for &offset in offsets {
             let offset = offset as usize;
             if offset < previous || offset > vertex_count {
-                return Err(JsValue::from_str(&format!(
+                return Err(format!(
                     "Sublayer {} {} are not monotonically within the vertex buffer",
                     sublayer_idx, label
-                )));
+                ));
             }
             previous = offset;
         }
@@ -2048,9 +2096,16 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         Self::upload_f32_slice_to_bound_buffer(gl, data);
-        let loc = program.attributes.get(attr_name).ok_or_else(|| {
-            JsValue::from_str(&format!("Missing shader attribute: {}", attr_name))
-        })?;
+        let loc = match program.attributes.get(attr_name) {
+            Some(loc) => loc,
+            None => {
+                gl.delete_buffer(Some(&buffer));
+                return Err(JsValue::from_str(&format!(
+                    "Missing shader attribute: {}",
+                    attr_name
+                )));
+            }
+        };
         gl.enable_vertex_attrib_array(*loc);
         gl.vertex_attrib_pointer_with_i32(*loc, 1, FLOAT, false, 0, 0);
         gl.vertex_attrib_divisor(*loc, divisor);
@@ -2261,6 +2316,7 @@ impl Renderer {
                     "triangle vertex count",
                     triangles.vertices.len() / 2,
                 )?;
+                let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
                 let vao = self
@@ -2268,6 +2324,7 @@ impl Renderer {
                     .create_vertex_array()
                     .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
                 self.gl.bind_vertex_array(Some(&vao));
+                pending_cache.cache.triangle_vao = Some(vao);
 
                 // Create and bind vertex buffer
                 let vertex_buffer = self
@@ -2275,6 +2332,7 @@ impl Renderer {
                     .create_buffer()
                     .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
+                pending_cache.cache.triangle_vertex_buffer = Some(vertex_buffer);
                 Self::upload_f32_slice_to_bound_buffer(&self.gl, &triangles.vertices);
 
                 // Set up attributes
@@ -2300,6 +2358,7 @@ impl Renderer {
                         "hole_x_instance",
                         0,
                     )?;
+                    pending_cache.cache.triangle_hole_x_buffer = Some(hole_x_buffer);
                     let hole_y_buffer = Self::create_instance_buffer(
                         &self.gl,
                         &triangles.hole_y,
@@ -2307,6 +2366,7 @@ impl Renderer {
                         "hole_y_instance",
                         0,
                     )?;
+                    pending_cache.cache.triangle_hole_y_buffer = Some(hole_y_buffer);
                     let hole_radius_buffer = Self::create_instance_buffer(
                         &self.gl,
                         &triangles.hole_radius,
@@ -2314,21 +2374,22 @@ impl Renderer {
                         "hole_radius_instance",
                         0,
                     )?;
-
-                    let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                    buffer_cache.triangle_hole_x_buffer = Some(hole_x_buffer);
-                    buffer_cache.triangle_hole_y_buffer = Some(hole_y_buffer);
-                    buffer_cache.triangle_hole_radius_buffer = Some(hole_radius_buffer);
+                    pending_cache.cache.triangle_hole_radius_buffer = Some(hole_radius_buffer);
                 }
 
                 // Unbind VAO
                 self.gl.bind_vertex_array(None);
+                let mut built_cache = pending_cache.commit();
 
                 // Cache VAO and buffers for this sublayer
                 let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                buffer_cache.triangle_vao = Some(vao);
+                buffer_cache.triangle_vao = built_cache.triangle_vao.take();
                 buffer_cache.triangle_vertex_count = vertex_count;
-                buffer_cache.triangle_vertex_buffer = Some(vertex_buffer);
+                buffer_cache.triangle_vertex_buffer = built_cache.triangle_vertex_buffer.take();
+                buffer_cache.triangle_hole_x_buffer = built_cache.triangle_hole_x_buffer.take();
+                buffer_cache.triangle_hole_y_buffer = built_cache.triangle_hole_y_buffer.take();
+                buffer_cache.triangle_hole_radius_buffer =
+                    built_cache.triangle_hole_radius_buffer.take();
                 layer.gerber_data[sublayer_idx]
                     .triangles
                     .release_cpu_geometry();
@@ -2424,18 +2485,26 @@ impl Renderer {
                         "triangle template instance count",
                         template.instance_x.len(),
                     )?;
+                    let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
+                    pending_cache
+                        .cache
+                        .triangle_template_caches
+                        .resize_with(1, TriangleTemplateBufferCache::default);
 
                     let vao = self
                         .gl
                         .create_vertex_array()
                         .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
                     self.gl.bind_vertex_array(Some(&vao));
+                    pending_cache.cache.triangle_template_caches[0].vao = Some(vao);
 
                     let vertex_buffer = self
                         .gl
                         .create_buffer()
                         .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
                     self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
+                    pending_cache.cache.triangle_template_caches[0].vertex_buffer =
+                        Some(vertex_buffer);
                     Self::upload_f32_slice_to_bound_buffer(&self.gl, &template.vertices);
 
                     let position_loc = Self::shader_attribute(program, "position")?;
@@ -2450,6 +2519,8 @@ impl Renderer {
                         "instance_x",
                         1,
                     )?;
+                    pending_cache.cache.triangle_template_caches[0].instance_x_buffer =
+                        Some(instance_x_buffer);
                     let instance_y_buffer = Self::create_instance_buffer(
                         &self.gl,
                         &template.instance_y,
@@ -2457,17 +2528,23 @@ impl Renderer {
                         "instance_y",
                         1,
                     )?;
+                    pending_cache.cache.triangle_template_caches[0].instance_y_buffer =
+                        Some(instance_y_buffer);
 
                     self.gl.bind_vertex_array(None);
+                    let mut built_cache = pending_cache.commit();
 
                     let template_cache = &mut layer.buffer_caches[sublayer_idx]
                         .triangle_template_caches[template_idx];
-                    template_cache.vao = Some(vao);
+                    let built_template_cache = &mut built_cache.triangle_template_caches[0];
+                    template_cache.vao = built_template_cache.vao.take();
                     template_cache.vertex_count = vertex_count;
                     template_cache.instance_count = instance_count;
-                    template_cache.vertex_buffer = Some(vertex_buffer);
-                    template_cache.instance_x_buffer = Some(instance_x_buffer);
-                    template_cache.instance_y_buffer = Some(instance_y_buffer);
+                    template_cache.vertex_buffer = built_template_cache.vertex_buffer.take();
+                    template_cache.instance_x_buffer =
+                        built_template_cache.instance_x_buffer.take();
+                    template_cache.instance_y_buffer =
+                        built_template_cache.instance_y_buffer.take();
 
                     layer.gerber_data[sublayer_idx].triangle_templates[template_idx]
                         .release_cpu_geometry();
@@ -2529,12 +2606,14 @@ impl Renderer {
                 }
                 let instance_count =
                     Self::checked_usize_to_i32("line instance count", lines.start_x.len())?;
+                let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 let vao = self
                     .gl
                     .create_vertex_array()
                     .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
                 self.gl.bind_vertex_array(Some(&vao));
+                pending_cache.cache.line_vao = Some(vao);
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
                 let position_loc = Self::shader_attribute(program, "position")?;
                 self.gl.enable_vertex_attrib_array(position_loc);
@@ -2548,6 +2627,7 @@ impl Renderer {
                     "start_x_instance",
                     1,
                 )?;
+                pending_cache.cache.line_start_x_buffer = Some(start_x_buffer);
                 let start_y_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &lines.start_y,
@@ -2555,6 +2635,7 @@ impl Renderer {
                     "start_y_instance",
                     1,
                 )?;
+                pending_cache.cache.line_start_y_buffer = Some(start_y_buffer);
                 let end_x_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &lines.end_x,
@@ -2562,6 +2643,7 @@ impl Renderer {
                     "end_x_instance",
                     1,
                 )?;
+                pending_cache.cache.line_end_x_buffer = Some(end_x_buffer);
                 let end_y_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &lines.end_y,
@@ -2569,6 +2651,7 @@ impl Renderer {
                     "end_y_instance",
                     1,
                 )?;
+                pending_cache.cache.line_end_y_buffer = Some(end_y_buffer);
                 let width_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &lines.width,
@@ -2576,17 +2659,19 @@ impl Renderer {
                     "width_instance",
                     1,
                 )?;
+                pending_cache.cache.line_width_buffer = Some(width_buffer);
 
                 self.gl.bind_vertex_array(None);
+                let mut built_cache = pending_cache.commit();
 
                 let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                buffer_cache.line_vao = Some(vao);
+                buffer_cache.line_vao = built_cache.line_vao.take();
                 buffer_cache.line_instance_count = instance_count;
-                buffer_cache.line_start_x_buffer = Some(start_x_buffer);
-                buffer_cache.line_start_y_buffer = Some(start_y_buffer);
-                buffer_cache.line_end_x_buffer = Some(end_x_buffer);
-                buffer_cache.line_end_y_buffer = Some(end_y_buffer);
-                buffer_cache.line_width_buffer = Some(width_buffer);
+                buffer_cache.line_start_x_buffer = built_cache.line_start_x_buffer.take();
+                buffer_cache.line_start_y_buffer = built_cache.line_start_y_buffer.take();
+                buffer_cache.line_end_x_buffer = built_cache.line_end_x_buffer.take();
+                buffer_cache.line_end_y_buffer = built_cache.line_end_y_buffer.take();
+                buffer_cache.line_width_buffer = built_cache.line_width_buffer.take();
                 layer.gerber_data[sublayer_idx].lines.release_cpu_geometry();
                 layer.cpu_geometry_released = true;
             }
@@ -2644,6 +2729,7 @@ impl Renderer {
                     &self.programs.circle
                 };
                 self.gl.use_program(Some(&program.program));
+                let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
                 let vao = self
@@ -2651,6 +2737,7 @@ impl Renderer {
                     .create_vertex_array()
                     .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
                 self.gl.bind_vertex_array(Some(&vao));
+                pending_cache.cache.circle_vao = Some(vao);
 
                 // Bind shared quad buffer for position attribute
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
@@ -2666,6 +2753,7 @@ impl Renderer {
                     "center_x_instance",
                     1,
                 )?;
+                pending_cache.cache.circle_center_x_buffer = Some(center_x_buffer);
                 let center_y_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &circles.y,
@@ -2673,6 +2761,7 @@ impl Renderer {
                     "center_y_instance",
                     1,
                 )?;
+                pending_cache.cache.circle_center_y_buffer = Some(center_y_buffer);
                 let radius_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &circles.radius,
@@ -2680,6 +2769,7 @@ impl Renderer {
                     "radius_instance",
                     1,
                 )?;
+                pending_cache.cache.circle_radius_buffer = Some(radius_buffer);
                 if has_holes {
                     let hole_x_buffer = Self::create_instance_buffer(
                         &self.gl,
@@ -2688,6 +2778,7 @@ impl Renderer {
                         "hole_x_instance",
                         1,
                     )?;
+                    pending_cache.cache.circle_hole_x_buffer = Some(hole_x_buffer);
                     let hole_y_buffer = Self::create_instance_buffer(
                         &self.gl,
                         &circles.hole_y,
@@ -2695,6 +2786,7 @@ impl Renderer {
                         "hole_y_instance",
                         1,
                     )?;
+                    pending_cache.cache.circle_hole_y_buffer = Some(hole_y_buffer);
                     let hole_radius_buffer = Self::create_instance_buffer(
                         &self.gl,
                         &circles.hole_radius,
@@ -2702,23 +2794,24 @@ impl Renderer {
                         "hole_radius_instance",
                         1,
                     )?;
-
-                    let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                    buffer_cache.circle_hole_x_buffer = Some(hole_x_buffer);
-                    buffer_cache.circle_hole_y_buffer = Some(hole_y_buffer);
-                    buffer_cache.circle_hole_radius_buffer = Some(hole_radius_buffer);
+                    pending_cache.cache.circle_hole_radius_buffer = Some(hole_radius_buffer);
                 }
 
                 // Unbind VAO
                 self.gl.bind_vertex_array(None);
+                let mut built_cache = pending_cache.commit();
 
                 // Cache VAO and buffers for this sublayer
                 let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                buffer_cache.circle_vao = Some(vao);
+                buffer_cache.circle_vao = built_cache.circle_vao.take();
                 buffer_cache.circle_instance_count = instance_count;
-                buffer_cache.circle_center_x_buffer = Some(center_x_buffer);
-                buffer_cache.circle_center_y_buffer = Some(center_y_buffer);
-                buffer_cache.circle_radius_buffer = Some(radius_buffer);
+                buffer_cache.circle_center_x_buffer = built_cache.circle_center_x_buffer.take();
+                buffer_cache.circle_center_y_buffer = built_cache.circle_center_y_buffer.take();
+                buffer_cache.circle_radius_buffer = built_cache.circle_radius_buffer.take();
+                buffer_cache.circle_hole_x_buffer = built_cache.circle_hole_x_buffer.take();
+                buffer_cache.circle_hole_y_buffer = built_cache.circle_hole_y_buffer.take();
+                buffer_cache.circle_hole_radius_buffer =
+                    built_cache.circle_hole_radius_buffer.take();
                 layer.gerber_data[sublayer_idx]
                     .circles
                     .release_cpu_geometry();
@@ -2788,6 +2881,7 @@ impl Renderer {
                 }
                 let instance_count =
                     Self::checked_usize_to_i32("arc instance count", arcs.x.len())?;
+                let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
                 let vao = self
@@ -2795,6 +2889,7 @@ impl Renderer {
                     .create_vertex_array()
                     .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
                 self.gl.bind_vertex_array(Some(&vao));
+                pending_cache.cache.arc_vao = Some(vao);
 
                 // Bind shared quad buffer for position attribute
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
@@ -2810,6 +2905,7 @@ impl Renderer {
                     "center_x_instance",
                     1,
                 )?;
+                pending_cache.cache.arc_center_x_buffer = Some(center_x_buffer);
                 let center_y_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &arcs.y,
@@ -2817,6 +2913,7 @@ impl Renderer {
                     "center_y_instance",
                     1,
                 )?;
+                pending_cache.cache.arc_center_y_buffer = Some(center_y_buffer);
                 let radius_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &arcs.radius,
@@ -2824,6 +2921,7 @@ impl Renderer {
                     "radius_instance",
                     1,
                 )?;
+                pending_cache.cache.arc_radius_buffer = Some(radius_buffer);
                 let start_angle_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &arcs.start_angle,
@@ -2831,6 +2929,7 @@ impl Renderer {
                     "startAngle_instance",
                     1,
                 )?;
+                pending_cache.cache.arc_start_angle_buffer = Some(start_angle_buffer);
                 let sweep_angle_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &arcs.sweep_angle,
@@ -2838,6 +2937,7 @@ impl Renderer {
                     "sweepAngle_instance",
                     1,
                 )?;
+                pending_cache.cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
                 let thickness_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &arcs.thickness,
@@ -2845,20 +2945,22 @@ impl Renderer {
                     "thickness_instance",
                     1,
                 )?;
+                pending_cache.cache.arc_thickness_buffer = Some(thickness_buffer);
 
                 // Unbind VAO
                 self.gl.bind_vertex_array(None);
+                let mut built_cache = pending_cache.commit();
 
                 // Cache VAO and buffers for this sublayer
                 let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                buffer_cache.arc_vao = Some(vao);
+                buffer_cache.arc_vao = built_cache.arc_vao.take();
                 buffer_cache.arc_instance_count = instance_count;
-                buffer_cache.arc_center_x_buffer = Some(center_x_buffer);
-                buffer_cache.arc_center_y_buffer = Some(center_y_buffer);
-                buffer_cache.arc_radius_buffer = Some(radius_buffer);
-                buffer_cache.arc_start_angle_buffer = Some(start_angle_buffer);
-                buffer_cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
-                buffer_cache.arc_thickness_buffer = Some(thickness_buffer);
+                buffer_cache.arc_center_x_buffer = built_cache.arc_center_x_buffer.take();
+                buffer_cache.arc_center_y_buffer = built_cache.arc_center_y_buffer.take();
+                buffer_cache.arc_radius_buffer = built_cache.arc_radius_buffer.take();
+                buffer_cache.arc_start_angle_buffer = built_cache.arc_start_angle_buffer.take();
+                buffer_cache.arc_sweep_angle_buffer = built_cache.arc_sweep_angle_buffer.take();
+                buffer_cache.arc_thickness_buffer = built_cache.arc_thickness_buffer.take();
                 layer.gerber_data[sublayer_idx].arcs.release_cpu_geometry();
                 layer.cpu_geometry_released = true;
             }
@@ -2919,6 +3021,7 @@ impl Renderer {
                 }
                 let instance_count =
                     Self::checked_usize_to_i32("thermal instance count", thermals.x.len())?;
+                let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
                 let vao = self
@@ -2926,6 +3029,7 @@ impl Renderer {
                     .create_vertex_array()
                     .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
                 self.gl.bind_vertex_array(Some(&vao));
+                pending_cache.cache.thermal_vao = Some(vao);
 
                 // Bind shared quad buffer for position attribute
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
@@ -2941,6 +3045,7 @@ impl Renderer {
                     "center_x_instance",
                     1,
                 )?;
+                pending_cache.cache.thermal_center_x_buffer = Some(center_x_buffer);
                 let center_y_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &thermals.y,
@@ -2948,6 +3053,7 @@ impl Renderer {
                     "center_y_instance",
                     1,
                 )?;
+                pending_cache.cache.thermal_center_y_buffer = Some(center_y_buffer);
                 let outer_diameter_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &thermals.outer_diameter,
@@ -2955,6 +3061,7 @@ impl Renderer {
                     "outer_diameter_instance",
                     1,
                 )?;
+                pending_cache.cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
                 let inner_diameter_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &thermals.inner_diameter,
@@ -2962,6 +3069,7 @@ impl Renderer {
                     "inner_diameter_instance",
                     1,
                 )?;
+                pending_cache.cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
                 let gap_thickness_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &thermals.gap_thickness,
@@ -2969,6 +3077,7 @@ impl Renderer {
                     "gap_thickness_instance",
                     1,
                 )?;
+                pending_cache.cache.thermal_gap_thickness_buffer = Some(gap_thickness_buffer);
                 let rotation_buffer = Self::create_instance_buffer(
                     &self.gl,
                     &thermals.rotation,
@@ -2976,20 +3085,25 @@ impl Renderer {
                     "rotation_instance",
                     1,
                 )?;
+                pending_cache.cache.thermal_rotation_buffer = Some(rotation_buffer);
 
                 // Unbind VAO
                 self.gl.bind_vertex_array(None);
+                let mut built_cache = pending_cache.commit();
 
                 // Cache VAO and buffers for this sublayer
                 let buffer_cache = &mut layer.buffer_caches[sublayer_idx];
-                buffer_cache.thermal_vao = Some(vao);
+                buffer_cache.thermal_vao = built_cache.thermal_vao.take();
                 buffer_cache.thermal_instance_count = instance_count;
-                buffer_cache.thermal_center_x_buffer = Some(center_x_buffer);
-                buffer_cache.thermal_center_y_buffer = Some(center_y_buffer);
-                buffer_cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
-                buffer_cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
-                buffer_cache.thermal_gap_thickness_buffer = Some(gap_thickness_buffer);
-                buffer_cache.thermal_rotation_buffer = Some(rotation_buffer);
+                buffer_cache.thermal_center_x_buffer = built_cache.thermal_center_x_buffer.take();
+                buffer_cache.thermal_center_y_buffer = built_cache.thermal_center_y_buffer.take();
+                buffer_cache.thermal_outer_diameter_buffer =
+                    built_cache.thermal_outer_diameter_buffer.take();
+                buffer_cache.thermal_inner_diameter_buffer =
+                    built_cache.thermal_inner_diameter_buffer.take();
+                buffer_cache.thermal_gap_thickness_buffer =
+                    built_cache.thermal_gap_thickness_buffer.take();
+                buffer_cache.thermal_rotation_buffer = built_cache.thermal_rotation_buffer.take();
                 layer.gerber_data[sublayer_idx]
                     .thermals
                     .release_cpu_geometry();
@@ -3070,74 +3184,78 @@ impl Renderer {
         self.gl.clear_stencil(0);
         self.gl.clear(STENCIL_BUFFER_BIT);
 
-        for region_idx in 0..region_count {
-            self.gl.color_mask(false, false, false, false);
-            self.gl.stencil_func(ALWAYS, 0, 0xff);
-            self.gl.stencil_op(KEEP, KEEP, INVERT);
+        let result = (|| {
+            for region_idx in 0..region_count {
+                self.gl.color_mask(false, false, false, false);
+                self.gl.stencil_func(ALWAYS, 0, 0xff);
+                self.gl.stencil_op(KEEP, KEEP, INVERT);
 
-            let wedge_start = Self::checked_u32_to_i32(
-                "path wedge vertex start",
-                path_regions.wedge_vertex_offsets[region_idx],
-            )?;
-            let wedge_end = Self::checked_u32_to_i32(
-                "path wedge vertex end",
-                path_regions.wedge_vertex_offsets[region_idx + 1],
-            )?;
-            if wedge_end > wedge_start {
+                let wedge_start = Self::checked_u32_to_i32(
+                    "path wedge vertex start",
+                    path_regions.wedge_vertex_offsets[region_idx],
+                )?;
+                let wedge_end = Self::checked_u32_to_i32(
+                    "path wedge vertex end",
+                    path_regions.wedge_vertex_offsets[region_idx + 1],
+                )?;
+                if wedge_end > wedge_start {
+                    self.draw_path_solid_range(
+                        transform,
+                        color,
+                        buffer_cache.path_wedge_vao.as_ref(),
+                        wedge_start,
+                        wedge_end - wedge_start,
+                    )?;
+                }
+
+                let sector_start = Self::checked_u32_to_i32(
+                    "path sector vertex start",
+                    path_regions.sector_vertex_offsets[region_idx],
+                )?;
+                let sector_end = Self::checked_u32_to_i32(
+                    "path sector vertex end",
+                    path_regions.sector_vertex_offsets[region_idx + 1],
+                )?;
+                if sector_end > sector_start {
+                    self.draw_path_sector_range(
+                        transform,
+                        buffer_cache,
+                        sector_start,
+                        sector_end - sector_start,
+                    )?;
+                }
+
+                self.gl.color_mask(true, true, true, true);
+                self.gl.stencil_func(NOTEQUAL, 0, 0xff);
+                self.gl.stencil_op(KEEP, KEEP, KEEP);
+
                 self.draw_path_solid_range(
                     transform,
                     color,
-                    buffer_cache.path_wedge_vao.as_ref(),
-                    wedge_start,
-                    wedge_end - wedge_start,
+                    buffer_cache.path_clear_vao.as_ref(),
+                    Self::checked_path_region_quad_start(region_idx)?,
+                    6,
                 )?;
-            }
 
-            let sector_start = Self::checked_u32_to_i32(
-                "path sector vertex start",
-                path_regions.sector_vertex_offsets[region_idx],
-            )?;
-            let sector_end = Self::checked_u32_to_i32(
-                "path sector vertex end",
-                path_regions.sector_vertex_offsets[region_idx + 1],
-            )?;
-            if sector_end > sector_start {
-                self.draw_path_sector_range(
+                self.gl.color_mask(false, false, false, false);
+                self.gl.stencil_func(ALWAYS, 0, 0xff);
+                self.gl.stencil_op(ZERO, ZERO, ZERO);
+                self.draw_path_solid_range(
                     transform,
-                    buffer_cache,
-                    sector_start,
-                    sector_end - sector_start,
+                    color,
+                    buffer_cache.path_cover_vao.as_ref(),
+                    Self::checked_path_region_quad_start(region_idx)?,
+                    6,
                 )?;
             }
 
-            self.gl.color_mask(true, true, true, true);
-            self.gl.stencil_func(NOTEQUAL, 0, 0xff);
-            self.gl.stencil_op(KEEP, KEEP, KEEP);
-
-            self.draw_path_solid_range(
-                transform,
-                color,
-                buffer_cache.path_clear_vao.as_ref(),
-                Self::checked_path_region_quad_start(region_idx)?,
-                6,
-            )?;
-
-            self.gl.color_mask(false, false, false, false);
-            self.gl.stencil_func(ALWAYS, 0, 0xff);
-            self.gl.stencil_op(ZERO, ZERO, ZERO);
-            self.draw_path_solid_range(
-                transform,
-                color,
-                buffer_cache.path_cover_vao.as_ref(),
-                Self::checked_path_region_quad_start(region_idx)?,
-                6,
-            )?;
-        }
+            Ok(())
+        })();
 
         self.gl.disable(STENCIL_TEST);
         self.gl.color_mask(true, true, true, true);
         self.gl.bind_vertex_array(None);
-        Ok(())
+        result
     }
 
     fn create_path_region_gpu_cache(
@@ -3760,7 +3878,7 @@ impl Renderer {
 
             if let Some(layer) = &self.layers[layer_idx] {
                 let color_offset = color_index * color_stride;
-                if color_offset + 2 < color_data.len() {
+                if color_offset + color_stride <= color_data.len() {
                     let layer_alpha = if color_stride == 4 {
                         color_data[color_offset + 3] * alpha
                     } else {
@@ -3916,5 +4034,27 @@ impl Drop for Renderer {
         self.clear_all();
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_offsets_rejects_nonzero_initial_offset() {
+        assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[0, 9], 9).is_ok());
+        assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[1, 9], 9).is_err());
+        assert!(
+            Renderer::validate_offsets_invariant("path sector offsets", 0, &[2, 6], 6).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_path_region_data_accepts_normalized_empty_offsets() {
+        let path_regions = PathRegions::new(vec![], vec![], vec![], vec![], vec![], vec![]);
+        assert_eq!(path_regions.wedge_vertex_offsets, vec![0]);
+        assert_eq!(path_regions.sector_vertex_offsets, vec![0]);
+        assert!(Renderer::validate_path_region_data(&path_regions, 0).is_ok());
     }
 }

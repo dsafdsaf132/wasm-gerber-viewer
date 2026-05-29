@@ -1,10 +1,12 @@
 mod parser;
 mod renderer;
 mod shape;
+mod util;
 
-use crate::parser::{parse_gerber, parse_gerber_with_options};
+use crate::parser::parse_gerber_with_options;
 use crate::renderer::Renderer;
 use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
+use crate::util::format_bytes;
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
 
@@ -13,23 +15,6 @@ use web_sys::WebGl2RenderingContext;
 pub fn init_panic_hook() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
-}
-
-fn format_bytes(bytes: usize) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let bytes = bytes as f64;
-
-    if bytes >= GIB {
-        format!("{:.1} GB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.1} MB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.1} KB", bytes / KIB)
-    } else {
-        format!("{} B", bytes as usize)
-    }
 }
 
 /// Preflight a large JS-to-WASM input copy with catchable allocation failure.
@@ -56,11 +41,8 @@ fn parse_layer_data(
         return Err(JsValue::from_str("Layer offset must be finite"));
     }
 
-    let mut gerber_data_layers = if preserve_arc_regions {
-        parse_gerber(content)?
-    } else {
-        parse_gerber_with_options(content, preserve_arc_regions, arc_tessellation_quality)?
-    };
+    let mut gerber_data_layers =
+        parse_gerber_with_options(content, preserve_arc_regions, arc_tessellation_quality)?;
 
     if offset_x != 0.0 || offset_y != 0.0 {
         for layer in &mut gerber_data_layers {
@@ -113,7 +95,6 @@ pub fn parse_gerber_layer_with_options(
 /// Main Gerber processor with stateful WebGL renderer
 #[wasm_bindgen]
 pub struct GerberProcessor {
-    gl: Option<WebGl2RenderingContext>,
     renderer: Option<Renderer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
@@ -123,7 +104,6 @@ pub struct GerberProcessor {
 impl Default for GerberProcessor {
     fn default() -> Self {
         Self {
-            gl: None,
             renderer: None,
             preserve_arc_regions: true,
             arc_tessellation_quality: 1,
@@ -178,10 +158,9 @@ impl GerberProcessor {
     /// * `"init_done"` signal on success
     pub fn init(&mut self, gl: WebGl2RenderingContext) -> Result<String, JsValue> {
         // Create renderer with WebGL context (initially no layers)
-        let mut renderer = Renderer::new(gl.clone())?;
+        let mut renderer = Renderer::new(gl)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         self.renderer = Some(renderer);
-        self.gl = Some(gl);
         Ok("init_done".to_string())
     }
 
@@ -194,10 +173,9 @@ impl GerberProcessor {
         width: u32,
         height: u32,
     ) -> Result<String, JsValue> {
-        let mut renderer = Renderer::new_headless(gl.clone(), width, height)?;
+        let mut renderer = Renderer::new_headless(gl, width, height)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         self.renderer = Some(renderer);
-        self.gl = Some(gl);
         Ok("init_done".to_string())
     }
 
@@ -239,14 +217,13 @@ impl GerberProcessor {
     /// layers from the retained source file contents.
     pub fn restore_context(&mut self, gl: WebGl2RenderingContext) -> Result<String, JsValue> {
         if let Some(renderer) = &mut self.renderer {
-            renderer.restore_context(gl.clone())?;
+            renderer.restore_context(gl)?;
         } else {
-            let mut renderer = Renderer::new(gl.clone())?;
+            let mut renderer = Renderer::new(gl)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
             self.renderer = Some(renderer);
         }
 
-        self.gl = Some(gl);
         Ok("restore_done".to_string())
     }
 
@@ -259,14 +236,13 @@ impl GerberProcessor {
     ) -> Result<String, JsValue> {
         if let Some(renderer) = &mut self.renderer {
             renderer.set_framebuffer_size(width, height)?;
-            renderer.restore_context(gl.clone())?;
+            renderer.restore_context(gl)?;
         } else {
-            let mut renderer = Renderer::new_headless(gl.clone(), width, height)?;
+            let mut renderer = Renderer::new_headless(gl, width, height)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
             self.renderer = Some(renderer);
         }
 
-        self.gl = Some(gl);
         Ok("restore_done".to_string())
     }
 

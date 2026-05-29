@@ -19,6 +19,7 @@ use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
 };
+use crate::util::{format_bytes, format_count};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
@@ -771,38 +772,6 @@ fn checked_capacity(
     })
 }
 
-fn format_count(value: usize) -> String {
-    let digits = value.to_string();
-    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
-    let first_group_len = digits.len() % 3;
-
-    for (index, ch) in digits.chars().enumerate() {
-        if index > 0 && index >= first_group_len && (index - first_group_len) % 3 == 0 {
-            formatted.push(',');
-        }
-        formatted.push(ch);
-    }
-
-    formatted
-}
-
-fn format_bytes(bytes: usize) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let bytes = bytes as f64;
-
-    if bytes >= GIB {
-        format!("{:.1} GB", bytes / GIB)
-    } else if bytes >= MIB {
-        format!("{:.1} MB", bytes / MIB)
-    } else if bytes >= KIB {
-        format!("{:.1} KB", bytes / KIB)
-    } else {
-        format!("{} B", bytes as usize)
-    }
-}
-
 fn format_value_allocation<T>(additional: usize) -> String {
     let values = format_count(additional);
     match additional.checked_mul(size_of::<T>()) {
@@ -1240,6 +1209,7 @@ fn parse_aperture_block(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn parse_gerber(data: &str) -> Result<Vec<GerberData>, JsValue> {
     parse_gerber_with_options(data, true, 1)
 }
