@@ -78,6 +78,31 @@ function isParseWorkerCapabilityErrorMessage(message) {
   );
 }
 
+function getWorkerErrorEventMessage(event) {
+  const messages = [
+    getErrorMessage(event?.error),
+    event?.message,
+  ].filter(
+    (message) =>
+      message &&
+      message !== "undefined" &&
+      message !== "null" &&
+      message !== "Unknown error",
+  );
+  const message = messages[0] || "Gerber parse worker failed";
+  const line = Number(event?.lineno);
+  const column = Number(event?.colno);
+
+  if (event?.filename && Number.isFinite(line) && line > 0) {
+    const location = Number.isFinite(column) && column > 0
+      ? `${event.filename}:${line}:${column}`
+      : `${event.filename}:${line}`;
+    return `${message} (${location})`;
+  }
+
+  return message;
+}
+
 function getUtf8ByteLength(value) {
   let bytes = 0;
 
@@ -377,33 +402,11 @@ class GerberParseWorkerPool {
   }
 
   handleWorkerError(worker, event) {
-    const task = this.activeTasks.get(worker);
-    this.activeTasks.delete(worker);
-    worker.terminate();
-    this.workers = this.workers.filter((item) => item !== worker);
-    this.idleWorkers = this.idleWorkers.filter((item) => item !== worker);
-    const isUnavailable = this.workers.length === 0;
-    if (isUnavailable) {
-      this.unavailableError = new ParseWorkerUnavailableError(
-        event.message || "No parse workers are available",
-      );
-    }
-
-    if (task) {
-      task.reject(
-        isUnavailable
-          ? this.unavailableError
-          : new Error(event.message || "Gerber parse worker failed"),
-      );
-    }
-    if (isUnavailable) {
-      for (const queuedTask of this.queue) {
-        queuedTask.reject(this.unavailableError);
-      }
-      this.queue = [];
-    }
-
-    this.pump();
+    event?.preventDefault?.();
+    const error = new ParseWorkerUnavailableError(
+      getWorkerErrorEventMessage(event),
+    );
+    this.rejectRemainingTasksAsUnavailable(error);
   }
 
   dispose() {
