@@ -161,6 +161,24 @@ jobs:
           echo "path=${artifact_dir}/${tarball}" >> "$GITHUB_OUTPUT"
           echo "name=${tarball}" >> "$GITHUB_OUTPUT"
 
+      - name: Pack prebuilt WASM artifact
+        id: wasm-artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="${RUNNER_TEMP}/wasm-package"
+          artifact_name="wasm-pkg-${{ steps.release.outputs.tag }}.tar.gz"
+          artifact_path="${artifact_dir}/${artifact_name}"
+          mkdir -p "$artifact_dir"
+
+          test -f wasm/pkg/wasm_gerber_processor.js
+          test -f wasm/pkg/wasm_gerber_processor_bg.wasm
+          tar -czf "$artifact_path" -C wasm/pkg .
+
+          echo "path=${artifact_path}" >> "$GITHUB_OUTPUT"
+          echo "name=${artifact_name}" >> "$GITHUB_OUTPUT"
+
       - name: Publish to npmjs
         if: steps.release.outputs.npmjs_exists != 'true'
         working-directory: ${{ env.PACKAGE_DIR }}
@@ -212,10 +230,11 @@ jobs:
 
           tag="${{ steps.release.outputs.tag }}"
           title="${{ steps.release.outputs.package_name }} ${{ steps.release.outputs.version }}"
-          artifact="${{ steps.package-artifact.outputs.path }}"
+          package_artifact="${{ steps.package-artifact.outputs.path }}"
+          wasm_artifact="${{ steps.wasm-artifact.outputs.path }}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$artifact" --clobber
+            gh release upload "$tag" "$package_artifact" "$wasm_artifact" --clobber
           else
-            gh release create "$tag" "$artifact" --title "$title" --generate-notes
+            gh release create "$tag" "$package_artifact" "$wasm_artifact" --title "$title" --generate-notes
           fi

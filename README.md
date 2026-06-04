@@ -26,26 +26,51 @@ Website:
 - Ruler measurements with mm/inch unit switching
 - Screenshot export with resolution options, including ruler overlays
 
-## Requirements
+## Quick Start
+
+This uses the prebuilt WASM package from the latest GitHub Release. It only
+requires `bash`, `curl`, `sed`, `tar`, and a static file server such as Python 3.
+
+```bash
+set -euo pipefail
+
+git clone https://github.com/dsafdsaf132/wasm-gerber-viewer.git
+cd wasm-gerber-viewer
+
+version="$(
+  curl -fsSL https://api.github.com/repos/dsafdsaf132/wasm-gerber-viewer/releases/latest |
+  sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p'
+)"
+test -n "$version"
+
+mkdir -p wasm/pkg
+curl -fsSL \
+  "https://github.com/dsafdsaf132/wasm-gerber-viewer/releases/download/${version}/wasm-pkg-${version}.tar.gz" |
+  tar -xz -C wasm/pkg
+
+python3 -m http.server 8000
+```
+
+Open `http://localhost:8000` and upload Gerber files.
+
+## Building
+
+Use this when you need to rebuild the WASM package locally instead of using the
+prebuilt release artifact.
+
+Requirements:
 
 - **Rust stable** - install with [rustup](https://rustup.rs/)
 - **wasm-pack** - `cargo install wasm-pack`
 - **Python 3** or another static file server
 - **Modern WebGL2 browser** - Chrome, Firefox, Safari, or Edge
 
-## Quick Start
-
 ```bash
-git clone https://github.com/dsafdsaf132/wasm-gerber-viewer.git
-cd wasm-gerber-viewer
-
 rustup target add wasm32-unknown-unknown
 wasm-pack build wasm --target web --out-dir pkg --release
 
 python3 -m http.server 8000
 ```
-
-Open `http://localhost:8000` and upload Gerber files.
 
 ## npm Package
 
