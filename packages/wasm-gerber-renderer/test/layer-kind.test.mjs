@@ -34,8 +34,8 @@ test("viewer layer kind keeps ambiguous .drd Gerbers as Gerber", () => {
 
 test("viewer source loader inspects regular .drd file previews", async () => {
   const sources = await collectLayerSources([
-    new File([DRILL_CONTENT], "holes.drd", { type: "text/plain" }),
-    new File([GERBER_CONTENT], "board.drd", { type: "text/plain" }),
+    makeFile(DRILL_CONTENT, "holes.drd", "text/plain"),
+    makeFile(GERBER_CONTENT, "board.drd", "text/plain"),
   ]);
 
   assert.equal(sources.length, 2);
@@ -62,7 +62,7 @@ test("viewer ZIP .drd preview failure does not poison readText", async () => {
   };
   const warnings = [];
   const sources = await collectLayerSources(
-    [new File(["zip"], "layers.zip", { type: "application/zip" })],
+    [makeFile("zip", "layers.zip", "application/zip")],
     {
       jsZip: {
         async loadAsync() {
@@ -81,6 +81,17 @@ test("viewer ZIP .drd preview failure does not poison readText", async () => {
   assert.equal(await sources[0].readText(), GERBER_CONTENT);
   assert.equal(readCount, 2);
 });
+
+function makeFile(content, name, type = "") {
+  const blob = new Blob([content], { type });
+  return {
+    name,
+    type,
+    size: blob.size,
+    slice: (...args) => blob.slice(...args),
+    text: () => blob.text(),
+  };
+}
 
 test("package layer kind uses source paths, names, and raw content deliberately", () => {
   assert.equal(normalizeLayerKind(null, { path: "holes.drl" }), "drill");
