@@ -90,6 +90,60 @@ function createLayerItem({
   return item;
 }
 
+function createGroupHeader(title) {
+  const item = document.createElement("li");
+  item.className = "layer-group-heading";
+  item.textContent = title;
+  return item;
+}
+
+function createDrillItem({
+  layer,
+  formatBounds,
+  onVisibilityChange,
+  onToggleVisibility,
+  onDelete,
+}) {
+  const item = document.createElement("li");
+  item.className = "layer-item drill-layer-item";
+  item.dataset.layerId = layer.id;
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "layer-checkbox";
+  checkbox.checked = layer.visible;
+  checkbox.addEventListener("change", () => {
+    onVisibilityChange(layer, checkbox.checked);
+  });
+
+  const label = document.createElement("label");
+  label.className = "layer-label";
+  const layerName = document.createElement("strong");
+  const layerMeta = document.createElement("span");
+  layerName.textContent = layer.name;
+  layerMeta.textContent = formatBounds(layer);
+  label.append(layerName, layerMeta);
+  label.addEventListener("click", () => {
+    checkbox.checked = !checkbox.checked;
+    onToggleVisibility(layer);
+  });
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "icon-button layer-delete-btn";
+  deleteBtn.setAttribute("aria-label", "Delete drill layer");
+  deleteBtn.title = "Delete drill layer";
+  const deleteIcon = document.createElement("i");
+  deleteIcon.setAttribute("data-lucide", "trash-2");
+  deleteBtn.appendChild(deleteIcon);
+  deleteBtn.addEventListener("click", () => {
+    onDelete(layer.id);
+  });
+
+  item.append(checkbox, label, deleteBtn);
+  return item;
+}
+
 export function renderLayerList({
   container,
   layers,
@@ -108,7 +162,13 @@ export function renderLayerList({
     return;
   }
 
-  for (const [index, layer] of layers.entries()) {
+  const gerberLayers = layers.filter((layer) => layer.kind !== "drill");
+  const drillLayers = layers.filter((layer) => layer.kind === "drill");
+
+  if (gerberLayers.length > 0) {
+    container.appendChild(createGroupHeader("Gerber Layers"));
+  }
+  for (const [index, layer] of gerberLayers.entries()) {
     container.appendChild(
       createLayerItem({
         layer,
@@ -117,6 +177,21 @@ export function renderLayerList({
         onDragStart,
         onDragEnd,
         onColorChange,
+        onVisibilityChange,
+        onToggleVisibility,
+        onDelete,
+      }),
+    );
+  }
+
+  if (drillLayers.length > 0) {
+    container.appendChild(createGroupHeader("Drills"));
+  }
+  for (const layer of drillLayers) {
+    container.appendChild(
+      createDrillItem({
+        layer,
+        formatBounds,
         onVisibilityChange,
         onToggleVisibility,
         onDelete,

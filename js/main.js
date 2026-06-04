@@ -55,6 +55,8 @@ const ARC_TESSELLATION_QUALITY_LEVELS = {
   high: 2,
 };
 const MINIMUM_FEATURE_PIXEL_VALUES = new Set([0, 1, 2]);
+const DRILL_LAYER_KIND = "drill";
+const GERBER_LAYER_KIND = "gerber";
 
 class ParseWorkerUnavailableError extends Error {
   constructor(message) {
@@ -76,6 +78,38 @@ function isParseWorkerCapabilityErrorMessage(message) {
     normalizedMessage.includes("failed to fetch dynamically imported module") ||
     normalizedMessage.includes("wasm_gerber_processor")
   );
+}
+
+function isDrillSource(source) {
+  return source?.kind === DRILL_LAYER_KIND;
+}
+
+function isDrillLayer(layer) {
+  return layer?.kind === DRILL_LAYER_KIND;
+}
+
+function normalizeDrillMetadata(metadata = {}) {
+  const tools = Array.isArray(metadata.tools)
+    ? metadata.tools
+        .map((tool) => ({
+          code: Number(tool.code),
+          diameterMm: Number(tool.diameterMm),
+          hitCount: Number(tool.hitCount ?? 0),
+          slotCount: Number(tool.slotCount ?? 0),
+        }))
+        .filter(
+          (tool) =>
+            Number.isFinite(tool.code) &&
+            Number.isFinite(tool.diameterMm) &&
+            tool.diameterMm > 0,
+        )
+    : [];
+
+  return {
+    tools,
+    hitCount: Number(metadata.hitCount ?? 0),
+    slotCount: Number(metadata.slotCount ?? 0),
+  };
 }
 
 function getWorkerErrorEventMessage(event) {
@@ -987,16 +1021,9 @@ export class GerberViewer {
   async handleWebGlContextRestored() {
     if (this.isRestoringWebGlContext) return;
 
-    const layerSnapshot = this.layers.map((layer) => ({
-      id: layer.id,
-      name: layer.name,
-      layerId: layer.layerId,
-      bounds: layer.bounds ? { ...layer.bounds } : null,
-      visible: layer.visible,
-      color: [...layer.color],
-      sourceContent: layer.sourceContent,
-      offset: { ...normalizeLayerOffset(layer.offset) },
-    }));
+    const layerSnapshot = this.layers.map((layer) =>
+      this.createLayerRecoverySnapshot(layer),
+    );
     const viewState = this.captureCanvasViewState();
 
     this.isRestoringWebGlContext = true;
@@ -1048,14 +1075,7 @@ export class GerberViewer {
     this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
 
     for (const layer of layerSnapshot) {
-      await this.addLayer(layer.name, layer.sourceContent, {
-        id: layer.id,
-        visible: layer.visible,
-        color: layer.color,
-        sourceContent: layer.sourceContent,
-        offset: layer.offset,
-        skipFatalRecovery: true,
-      });
+      await this.restoreLayerFromSnapshot(layer);
     }
   }
 
@@ -1303,18 +1323,22 @@ export class GerberViewer {
           total: layerSnapshot.length,
         });
 
-        try {
-          const parsedLayer = await this.parseLayerContent(
-            layer.sourceContent,
-            layer.offset,
-            null,
-          );
-          parsedLayers.push({ ...layer, parsedLayer });
-        } catch (error) {
-          this.handleLayerLoadError(layer.name, error);
-          throw new Error(
-            `Failed to apply options because ${layer.name} could not be parsed: ${getErrorMessage(error)}`,
-          );
+        if (layer.kind === DRILL_LAYER_KIND) {
+          parsedLayers.push({ ...layer, parsedLayer: null });
+        } else {
+          try {
+            const parsedLayer = await this.parseLayerContent(
+              layer.sourceContent,
+              layer.offset,
+              null,
+            );
+            parsedLayers.push({ ...layer, parsedLayer });
+          } catch (error) {
+            this.handleLayerLoadError(layer.name, error);
+            throw new Error(
+              `Failed to apply options because ${layer.name} could not be parsed: ${getErrorMessage(error)}`,
+            );
+          }
         }
       }
 
@@ -1334,19 +1358,28 @@ export class GerberViewer {
             total: parsedLayers.length,
           });
 
-          const layerRecord = await this.createParsedLayerRecord(
-            layer.name,
-            layer.parsedLayer,
-            {
-              id: layer.id,
-              visible: layer.visible,
-              color: layer.color,
-              sourceContent: layer.sourceContent,
-              offset: layer.offset,
-              skipFatalRecovery: true,
-            },
-            stagedProcessor,
-          );
+          const layerOptions = {
+            id: layer.id,
+            visible: layer.visible,
+            color: layer.color,
+            sourceContent: layer.sourceContent,
+            offset: layer.offset,
+            skipFatalRecovery: true,
+          };
+          const layerRecord =
+            layer.kind === DRILL_LAYER_KIND
+              ? await this.createDrillLayerRecord(
+                  layer.name,
+                  layer.sourceContent,
+                  layerOptions,
+                  stagedProcessor,
+                )
+              : await this.createParsedLayerRecord(
+                  layer.name,
+                  layer.parsedLayer,
+                  layerOptions,
+                  stagedProcessor,
+                );
           this.prepareLayerMetadata(layerRecord);
           stagedLayers.push(layerRecord);
 
@@ -1961,6 +1994,10 @@ export class GerberViewer {
 
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     const total = layerSources.length;
+    if (layerSources.some(isDrillSource)) {
+      return this.loadLayerSourcesSerially(layerSources, { title, total });
+    }
+
     const parseWorkerPool = this.createParseWorkerPool(total);
 
     if (!parseWorkerPool) {
@@ -2075,17 +2112,12 @@ export class GerberViewer {
       };
 
       const discardLayerRecord = (layerRecord) => {
-        if (
-          !layerRecord ||
-          layerRecord.layerId === undefined ||
-          layerRecord.layerId === null ||
-          typeof this.wasmProcessor?.remove_layer !== "function"
-        ) {
+        if (!layerRecord || typeof this.wasmProcessor?.remove_layer !== "function") {
           return;
         }
 
         try {
-          this.wasmProcessor.remove_layer(layerRecord.layerId);
+          this.removeWasmLayerRecord(layerRecord);
         } catch (error) {
           console.warn(
             `[Layer] Failed to discard pending layer ${layerRecord.name}:`,
@@ -2442,7 +2474,11 @@ export class GerberViewer {
         total,
       });
 
-      await this.addLayer(name, content, { offset: source.offset });
+      if (isDrillSource(source)) {
+        await this.addDrillLayer(name, content, { offset: source.offset });
+      } else {
+        await this.addLayer(name, content, { offset: source.offset });
+      }
       this.updateLoadingModal({
         stage: "Loaded",
         fileName: name,
@@ -2555,14 +2591,36 @@ export class GerberViewer {
   }
 
   createLayerRecoverySnapshot(layer) {
-    return {
+    const snapshot = {
       id: layer.id,
+      kind: layer.kind ?? GERBER_LAYER_KIND,
       name: layer.name,
       visible: layer.visible,
       color: layer.color ? [...layer.color] : null,
       sourceContent: layer.sourceContent,
       offset: { ...normalizeLayerOffset(layer.offset) },
     };
+    if (isDrillLayer(layer)) {
+      snapshot.drillMetadata = layer.drillMetadata;
+    }
+    return snapshot;
+  }
+
+  async restoreLayerFromSnapshot(layer) {
+    const options = {
+      id: layer.id,
+      visible: layer.visible,
+      color: layer.color,
+      sourceContent: layer.sourceContent,
+      offset: layer.offset,
+      skipFatalRecovery: true,
+    };
+
+    if (layer.kind === DRILL_LAYER_KIND) {
+      await this.addDrillLayer(layer.name, layer.sourceContent, options);
+    } else {
+      await this.addLayer(layer.name, layer.sourceContent, options);
+    }
   }
 
   preparePendingLayerRecordsForRecovery() {
@@ -2683,14 +2741,7 @@ export class GerberViewer {
 
       for (const layer of layerSnapshot) {
         try {
-          await this.addLayer(layer.name, layer.sourceContent, {
-            id: layer.id,
-            visible: layer.visible,
-            color: layer.color,
-            sourceContent: layer.sourceContent,
-            offset: layer.offset,
-            skipFatalRecovery: true,
-          });
+          await this.restoreLayerFromSnapshot(layer);
         } catch (restoreError) {
           const message = getErrorMessage(restoreError);
           console.error(`[WASM] Failed to restore layer ${layer.name}:`, restoreError);
@@ -2748,6 +2799,7 @@ export class GerberViewer {
     return {
       id: options.id ?? null,
       layerId: layerId,
+      kind: options.kind ?? GERBER_LAYER_KIND,
       name: name,
       visible: options.visible ?? true,
       color: options.color ? [...options.color] : null,
@@ -2774,6 +2826,10 @@ export class GerberViewer {
   prepareLayerMetadata(layer) {
     if (!layer.id) {
       layer.id = `layer-${this.nextLayerDomId++}`;
+    }
+    if (isDrillLayer(layer)) {
+      layer.color = null;
+      return layer;
     }
     if (layer.color) {
       layer.color = [...layer.color];
@@ -2829,6 +2885,75 @@ export class GerberViewer {
       }
 
       console.error(`[Layer] Failed to add layer ${name}:`, error);
+      throw error;
+    }
+  }
+
+  async addDrillLayer(name, content, options = {}) {
+    const layer = await this.createDrillLayerRecord(name, content, options);
+    return this.commitLayerMetadata(layer);
+  }
+
+  async createDrillLayerRecord(
+    name,
+    content,
+    options = {},
+    processor = this.wasmProcessor,
+  ) {
+    try {
+      if (!options.skipFatalRecovery) {
+        await this.waitForWasmProcessorRecovery();
+      }
+      if (!processor || this.isWebGlContextLost) {
+        throw new Error("WebGL renderer is not available");
+      }
+      if (typeof processor.add_drill_layer !== "function") {
+        throw new Error("Drill rendering requires an updated WASM module");
+      }
+
+      this.reserveWasmInputCapacity(content);
+      const offset = normalizeLayerOffset(options.offset);
+      let result;
+      if (offset.x !== 0 || offset.y !== 0) {
+        if (typeof processor.add_drill_layer_with_offset !== "function") {
+          throw new Error("Drill layer offsets require an updated WASM module");
+        }
+        result = processor.add_drill_layer_with_offset(content, offset.x, offset.y);
+      } else {
+        result = processor.add_drill_layer(content);
+      }
+      const outlineLayerId = Number(result?.outlineLayerId);
+      const fillLayerId = Number(result?.fillLayerId);
+      if (!Number.isFinite(outlineLayerId) || !Number.isFinite(fillLayerId)) {
+        throw new Error("Failed to get drill layer IDs from WASM processor");
+      }
+
+      const bounds = processor.get_layer_boundary(outlineLayerId);
+      return {
+        id: options.id ?? null,
+        kind: DRILL_LAYER_KIND,
+        name,
+        visible: options.visible ?? true,
+        color: null,
+        layerId: outlineLayerId,
+        outlineLayerId,
+        fillLayerId,
+        drillMetadata: normalizeDrillMetadata(result?.metadata),
+        sourceContent: options.sourceContent ?? content,
+        offset,
+        bounds: {
+          minX: bounds.min_x,
+          maxX: bounds.max_x,
+          minY: bounds.min_y,
+          maxY: bounds.max_y,
+        },
+      };
+    } catch (error) {
+      if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
+        await this.recoverWasmProcessorAfterFatalError(name, error);
+      }
+
+      console.error(`[Layer] Failed to add drill layer ${name}:`, error);
       throw error;
     }
   }
@@ -2904,18 +3029,35 @@ export class GerberViewer {
     }
 
     try {
-      const { activeLayerIds, colorData } = this.getRenderLayerPayload();
+      const { activeLayerIds, colorData, blendModes } = this.getRenderLayerPayload();
 
       // Render with active layers
-      this.wasmProcessor.render(
-        activeLayerIds,
-        colorData,
-        this.getViewScaleX(),
-        this.getViewScaleY(),
-        this.camera.offsetX,
-        this.camera.offsetY,
-        this.globalAlpha,
-      );
+      if (blendModes.some((mode) => mode !== 0)) {
+        if (typeof this.wasmProcessor.render_with_clear_and_blend_modes !== "function") {
+          throw new Error("Drill fill rendering requires an updated WASM module");
+        }
+        this.wasmProcessor.render_with_clear_and_blend_modes(
+          activeLayerIds,
+          colorData,
+          blendModes,
+          this.getViewScaleX(),
+          this.getViewScaleY(),
+          this.camera.offsetX,
+          this.camera.offsetY,
+          this.globalAlpha,
+          true,
+        );
+      } else {
+        this.wasmProcessor.render(
+          activeLayerIds,
+          colorData,
+          this.getViewScaleX(),
+          this.getViewScaleY(),
+          this.camera.offsetX,
+          this.camera.offsetY,
+          this.globalAlpha,
+        );
+      }
       this.zoomReadout.textContent = this.formatZoom();
     } catch (error) {
       const message = getErrorMessage(error);
@@ -2930,17 +3072,44 @@ export class GerberViewer {
     const selectedLayerIds = this.getSelectedLayerIds();
     const activeLayerIds = [];
     const colorData = [];
+    const blendModes = [];
+    const backgroundColor = this.isCanvasLight ? [1, 1, 1] : [0, 0, 0];
+    const outlineColor = this.isCanvasLight ? [0, 0, 0] : [1, 1, 1];
+    const drillAlpha = this.globalAlpha > 0 ? 1 / this.globalAlpha : 0;
 
     this.layers.forEach((layer) => {
-      if (selectedLayerIds.has(layer.id)) {
+      if (!isDrillLayer(layer) && selectedLayerIds.has(layer.id)) {
         activeLayerIds.push(layer.layerId);
-        colorData.push(layer.color[0], layer.color[1], layer.color[2]);
+        colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
+        blendModes.push(0);
+      }
+    });
+
+    this.layers.forEach((layer) => {
+      if (isDrillLayer(layer) && layer.visible) {
+        activeLayerIds.push(layer.outlineLayerId);
+        colorData.push(outlineColor[0], outlineColor[1], outlineColor[2], drillAlpha);
+        blendModes.push(0);
+      }
+    });
+
+    this.layers.forEach((layer) => {
+      if (isDrillLayer(layer) && layer.visible) {
+        activeLayerIds.push(layer.fillLayerId);
+        colorData.push(
+          backgroundColor[0],
+          backgroundColor[1],
+          backgroundColor[2],
+          drillAlpha,
+        );
+        blendModes.push(1);
       }
     });
 
     return {
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
+      blendModes: new Uint8Array(blendModes),
     };
   }
 
@@ -3393,7 +3562,7 @@ export class GerberViewer {
 
   updateLayerColor(layerId, hexColor) {
     const layer = this.layers.find((l) => l.id === layerId);
-    if (!layer) return;
+    if (!layer || isDrillLayer(layer)) return;
 
     const r = parseInt(hexColor.substr(1, 2), 16) / 255;
     const g = parseInt(hexColor.substr(3, 2), 16) / 255;
@@ -3418,7 +3587,7 @@ export class GerberViewer {
       try {
         // remove from WASM processor and handle errors
         if (this.wasmProcessor) {
-          this.wasmProcessor.remove_layer(layer.layerId);
+          this.removeWasmLayerRecord(layer);
         }
 
         // remove from JS array only if WASM removal succeeded
@@ -3435,6 +3604,20 @@ export class GerberViewer {
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
+  }
+
+  removeWasmLayerRecord(layer) {
+    if (!this.wasmProcessor || !layer) return;
+
+    const layerIds = isDrillLayer(layer)
+      ? [layer.outlineLayerId, layer.fillLayerId]
+      : [layer.layerId];
+
+    for (const layerId of layerIds) {
+      if (layerId !== undefined && layerId !== null) {
+        this.wasmProcessor.remove_layer(layerId);
+      }
+    }
   }
 
   clearAllLayers() {
@@ -3468,7 +3651,9 @@ export class GerberViewer {
 
   selectLayersByFilter(kind) {
     this.layers.forEach((layer) => {
-      layer.visible = this.layerFilterStore.matches(layer, kind);
+      if (!isDrillLayer(layer)) {
+        layer.visible = this.layerFilterStore.matches(layer, kind);
+      }
     });
     this.renderLayerList();
     this.requestRender();
@@ -3534,7 +3719,9 @@ export class GerberViewer {
 
     event.preventDefault();
     event.stopPropagation();
-    const fromIndex = this.layers.findIndex(
+    const gerberLayers = this.layers.filter((layer) => !isDrillLayer(layer));
+    const drillLayers = this.layers.filter(isDrillLayer);
+    const fromIndex = gerberLayers.findIndex(
       (layer) => layer.id === this.draggedLayerId,
     );
     if (fromIndex === -1) return;
@@ -3545,8 +3732,9 @@ export class GerberViewer {
     }
 
     if (fromIndex !== toIndex) {
-      const [layer] = this.layers.splice(fromIndex, 1);
-      this.layers.splice(toIndex, 0, layer);
+      const [layer] = gerberLayers.splice(fromIndex, 1);
+      gerberLayers.splice(toIndex, 0, layer);
+      this.layers = [...gerberLayers, ...drillLayers];
       this.renderLayerList();
       this.requestRender();
       this.updateUiState();
@@ -3559,7 +3747,7 @@ export class GerberViewer {
 
   getLayerDropPlacement(clientY) {
     const items = Array.from(
-      this.layerList.querySelectorAll(".layer-item[data-layer-id]"),
+      this.layerList.querySelectorAll('.layer-item[draggable="true"][data-layer-id]'),
     );
     if (items.length === 0) return null;
 
@@ -3613,6 +3801,10 @@ export class GerberViewer {
   }
 
   formatLayerBounds(layer) {
+    if (isDrillLayer(layer)) {
+      return this.formatDrillLayerMeta(layer);
+    }
+
     if (!layer.bounds) {
       return layer.visible ? "visible" : "hidden";
     }
@@ -3620,6 +3812,39 @@ export class GerberViewer {
     const width = layer.bounds.maxX - layer.bounds.minX;
     const height = layer.bounds.maxY - layer.bounds.minY;
     return formatDimensionPair(width, height, this.measurementUnit);
+  }
+
+  formatDrillLayerMeta(layer) {
+    const metadata = layer.drillMetadata ?? {};
+    const tools = Array.isArray(metadata.tools) ? metadata.tools : [];
+    const totalHits = Number(metadata.hitCount ?? 0);
+    const totalSlots = Number(metadata.slotCount ?? 0);
+    const parts = tools.slice(0, 3).map((tool) => {
+      const count = Number(tool.hitCount ?? 0) + Number(tool.slotCount ?? 0);
+      return `${this.formatDrillDiameter(tool.diameterMm)} x ${count}`;
+    });
+    if (tools.length > 3) {
+      parts.push(`+${tools.length - 3}`);
+    }
+
+    const countText =
+      totalSlots > 0
+        ? `${totalHits} hits, ${totalSlots} slots`
+        : `${totalHits} hits`;
+    return [countText, ...parts].join("\n");
+  }
+
+  formatDrillDiameter(diameterMm) {
+    const value = Number(diameterMm);
+    if (!Number.isFinite(value)) {
+      return "Ø ?";
+    }
+
+    if (this.measurementUnit === "inch") {
+      return `Ø ${(value / 25.4).toFixed(4)} in`;
+    }
+
+    return `Ø ${value.toFixed(3)} mm`;
   }
 
   triggerCanvasResize() {

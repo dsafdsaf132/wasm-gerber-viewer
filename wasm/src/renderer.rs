@@ -2249,6 +2249,27 @@ impl Renderer {
         Ok(())
     }
 
+    fn validate_blend_modes(active_layer_ids: &[u32], blend_modes: &[u8]) -> Result<(), JsValue> {
+        if blend_modes.len() != active_layer_ids.len() {
+            return Err(JsValue::from_str(&format!(
+                "Blend mode data length mismatch: expected {}, got {}",
+                active_layer_ids.len(),
+                blend_modes.len()
+            )));
+        }
+        if blend_modes.iter().any(|&mode| mode > 1) {
+            return Err(JsValue::from_str("Blend mode must be 0 or 1"));
+        }
+        Ok(())
+    }
+
+    fn blend_mode_at(blend_modes: Option<&[u8]>, index: usize) -> u8 {
+        blend_modes
+            .and_then(|modes| modes.get(index))
+            .copied()
+            .unwrap_or(0)
+    }
+
     fn color_data_stride(active_layer_ids: &[u32], color_data: &[f32]) -> usize {
         let rgba_len = active_layer_ids.len().saturating_mul(4);
         if color_data.len() >= rgba_len {
@@ -3551,7 +3572,7 @@ impl Renderer {
         // Get transform matrix
         let transform = self.camera.get_transform_matrix(width, height);
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true)
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true, None)
     }
 
     /// Render geometry and optionally preserve the existing canvas contents.
@@ -3585,7 +3606,56 @@ impl Renderer {
 
         let transform = self.camera.get_transform_matrix(width, height);
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform, clear_canvas)
+        self.render_with_transform(
+            active_layer_ids,
+            color_data,
+            alpha,
+            transform,
+            clear_canvas,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_clear_and_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+        clear_canvas: bool,
+    ) -> Result<(), JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+        Self::validate_blend_modes(active_layer_ids, blend_modes)?;
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
+        }
+
+        let transform = self.camera.get_transform_matrix(width, height);
+
+        self.render_with_transform(
+            active_layer_ids,
+            color_data,
+            alpha,
+            transform,
+            clear_canvas,
+            Some(blend_modes),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3635,7 +3705,66 @@ impl Renderer {
             tile_height,
         );
 
-        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true)
+        self.render_with_transform(active_layer_ids, color_data, alpha, transform, true, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile_with_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<(), JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+        Self::validate_blend_modes(active_layer_ids, blend_modes)?;
+        Self::validate_tile_inputs(
+            export_width,
+            export_height,
+            tile_x,
+            tile_y,
+            tile_width,
+            tile_height,
+        )?;
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let transform = Self::tile_transform_matrix(
+            self.camera
+                .get_transform_matrix(export_width, export_height),
+            export_width,
+            export_height,
+            tile_x,
+            tile_y,
+            tile_width,
+            tile_height,
+        );
+
+        self.render_with_transform(
+            active_layer_ids,
+            color_data,
+            alpha,
+            transform,
+            true,
+            Some(blend_modes),
+        )
     }
 
     /// Render to an offscreen framebuffer and return bottom-up RGBA pixels.
@@ -3685,6 +3814,83 @@ impl Renderer {
                 color_data,
                 alpha,
                 clear_canvas,
+                None,
+                Some(&output_fbo.framebuffer),
+            )?;
+            self.gl
+                .read_pixels_with_opt_u8_array(
+                    0,
+                    0,
+                    width_i32,
+                    height_i32,
+                    WebGl2RenderingContext::RGBA,
+                    WebGl2RenderingContext::UNSIGNED_BYTE,
+                    Some(&mut pixels),
+                )
+                .map_err(|error| {
+                    if error.is_string() {
+                        error
+                    } else {
+                        JsValue::from_str("Failed to read rendered pixels")
+                    }
+                })?;
+            Ok(pixels)
+        })();
+
+        Self::delete_fbo(&self.gl, output_fbo);
+        result
+    }
+
+    /// Render to an offscreen framebuffer with per-layer composite modes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_pixels_with_clear_and_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+        clear_canvas: bool,
+    ) -> Result<Vec<u8>, JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+        Self::validate_blend_modes(active_layer_ids, blend_modes)?;
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
+        }
+
+        let transform = self.camera.get_transform_matrix(width, height);
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let pixel_count = Self::checked_u32_to_usize("render output width", width)?
+            .checked_mul(Self::checked_u32_to_usize("render output height", height)?)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| JsValue::from_str("Render output size exceeds platform limits"))?;
+        let mut pixels = Self::reserved_vec("render output pixels", pixel_count)?;
+        pixels.resize(pixel_count, 0);
+
+        let output_fbo = Self::create_fbo(&self.gl, width, height, false)?;
+        let result = (|| {
+            self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+            self.composite_layers_to_target(
+                active_layer_ids,
+                color_data,
+                alpha,
+                clear_canvas,
+                Some(blend_modes),
                 Some(&output_fbo.framebuffer),
             )?;
             self.gl
@@ -3718,6 +3924,7 @@ impl Renderer {
         alpha: f32,
         transform: [f32; 9],
         clear_canvas: bool,
+        blend_modes: Option<&[u8]>,
     ) -> Result<(), JsValue> {
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
@@ -3728,7 +3935,13 @@ impl Renderer {
         self.render_layer_fbos(active_layer_ids, transform, width, height)?;
 
         // STEP 2: Composite FBOs to canvas
-        self.composite_layers(active_layer_ids, color_data, alpha, clear_canvas)?;
+        self.composite_layers(
+            active_layer_ids,
+            color_data,
+            alpha,
+            clear_canvas,
+            blend_modes,
+        )?;
 
         Ok(())
     }
@@ -3839,8 +4052,16 @@ impl Renderer {
         color_data: &[f32],
         alpha: f32,
         clear_canvas: bool,
+        blend_modes: Option<&[u8]>,
     ) -> Result<(), JsValue> {
-        self.composite_layers_to_target(active_layer_ids, color_data, alpha, clear_canvas, None)
+        self.composite_layers_to_target(
+            active_layer_ids,
+            color_data,
+            alpha,
+            clear_canvas,
+            blend_modes,
+            None,
+        )
     }
 
     fn composite_layers_to_target(
@@ -3849,6 +4070,7 @@ impl Renderer {
         color_data: &[f32],
         alpha: f32,
         clear_canvas: bool,
+        blend_modes: Option<&[u8]>,
         target_framebuffer: Option<&WebGlFramebuffer>,
     ) -> Result<(), JsValue> {
         // Get canvas dimensions
@@ -3866,9 +4088,7 @@ impl Renderer {
             self.gl.clear(COLOR_BUFFER_BIT);
         }
 
-        // Setup additive blending for layer compositing (lighter blend mode)
         self.gl.enable(BLEND);
-        self.gl.blend_func(ONE, ONE);
         self.gl.blend_equation(FUNC_ADD);
 
         // Render each active layer's FBO to canvas with its color/alpha
@@ -3890,6 +4110,16 @@ impl Renderer {
                         color_data[color_offset + 2],
                         layer_alpha,
                     ];
+                    if Self::blend_mode_at(blend_modes, color_index) == 1 {
+                        self.gl.blend_func_separate(
+                            ONE,
+                            ONE_MINUS_SRC_ALPHA,
+                            ONE,
+                            ONE_MINUS_SRC_ALPHA,
+                        );
+                    } else {
+                        self.gl.blend_func(ONE, ONE);
+                    }
                     self.draw_fbo_texture(&layer.fbo.texture, &color)?;
                 }
             }

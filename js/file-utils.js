@@ -1,4 +1,8 @@
-import { GERBER_FILE_EXTENSIONS, ZIP_MIME_TYPES } from "./config.js";
+import {
+  DRILL_FILE_EXTENSIONS,
+  GERBER_FILE_EXTENSIONS,
+  ZIP_MIME_TYPES,
+} from "./config.js";
 
 export function isZipFile(file) {
   return getFileExtension(file.name) === ".zip" || ZIP_MIME_TYPES.has(file.type);
@@ -6,6 +10,18 @@ export function isZipFile(file) {
 
 export function isSupportedGerberPath(path) {
   return GERBER_FILE_EXTENSIONS.has(getFileExtension(path));
+}
+
+export function isSupportedDrillPath(path) {
+  return DRILL_FILE_EXTENSIONS.has(getFileExtension(path));
+}
+
+export function isSupportedLayerPath(path) {
+  return isSupportedGerberPath(path) || isSupportedDrillPath(path);
+}
+
+export function getLayerSourceKind(path) {
+  return isSupportedDrillPath(path) ? "drill" : "gerber";
 }
 
 export function isArchiveMetadataPath(path) {

@@ -16,6 +16,10 @@ export const DEFAULT_BACKGROUND = null;
 export const DEFAULT_GLOBAL_ALPHA = 0.7;
 export const DEFAULT_MINIMUM_FEATURE_PIXELS = 1;
 export const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
+export const LAYER_KIND_GERBER = "gerber";
+export const LAYER_KIND_DRILL = "drill";
+
+const DRILL_FILE_EXTENSIONS = new Set([".drl", ".nc", ".xnc", ".xln"]);
 
 export class FrameState {
   constructor(options, extra = {}) {
@@ -52,7 +56,10 @@ export class FrameState {
         name: layer.name,
         bounds: layer.bounds,
         color: layer.color,
-        alpha: resolveLayerAlpha(layer.alpha, globalAlpha),
+        alpha: resolveLayerAlpha(
+          layer.alpha,
+          isDrillLayerKind(layer.kind) ? 1 : globalAlpha,
+        ),
       })),
     };
   }
@@ -76,6 +83,7 @@ export function createBaseFrameOptions(frameOptions = {}) {
       frameOptions.minimumFeaturePixels,
       DEFAULT_MINIMUM_FEATURE_PIXELS,
     ),
+    renderDrills: frameOptions.renderDrills !== false,
     globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
     colors: DEFAULT_COLORS.map((color) => [...color]),
   };
@@ -147,6 +155,19 @@ export function addLayerToProcessor(processor, content, offsetX, offsetY) {
   return processor.add_layer(content);
 }
 
+export function addDrillLayerToProcessor(processor, content, offsetX, offsetY) {
+  if (offsetX !== 0 || offsetY !== 0) {
+    if (typeof processor.add_drill_layer_with_offset !== "function") {
+      throw new Error("Drill layer offsets require an updated WASM renderer.");
+    }
+    return processor.add_drill_layer_with_offset(content, offsetX, offsetY);
+  }
+  if (typeof processor.add_drill_layer !== "function") {
+    throw new Error("Drill rendering requires an updated WASM renderer.");
+  }
+  return processor.add_drill_layer(content);
+}
+
 export function normalizeParseOptions(options = {}) {
   return {
     preserveArcRegions: options.preserveArcRegions !== false,
@@ -178,8 +199,10 @@ export async function renderLayersBestEffort(renderer, layers, options = {}) {
 
   for (const layer of layers) {
     try {
-      await renderer.renderLayer(layer);
-      renderedCount += 1;
+      const layerId = await renderer.renderLayer(layer);
+      if (layerId != null) {
+        renderedCount += 1;
+      }
     } catch (error) {
       const failure = {
         layer,
@@ -215,7 +238,10 @@ export async function loadLayersBestEffort(renderer, layers, options = {}) {
 
   for (const layer of layers) {
     try {
-      preparedLayers.push(await renderer.loadLayer(layer, layerOptions));
+      const preparedLayer = await renderer.loadLayer(layer, layerOptions);
+      if (preparedLayer) {
+        preparedLayers.push(preparedLayer);
+      }
     } catch (error) {
       const failure = {
         layer,
@@ -265,6 +291,68 @@ export function normalizeLayer(layer, layerOptions = {}, options = {}) {
   return {
     source: layer,
     options: { ...layerOptions },
+  };
+}
+
+export function normalizeLayerKind(kind, source, name = "") {
+  if (kind == null || kind === "") {
+    return isDrillSource(source, name) ? LAYER_KIND_DRILL : LAYER_KIND_GERBER;
+  }
+
+  const normalized = String(kind).toLowerCase();
+  if (normalized === LAYER_KIND_GERBER || normalized === LAYER_KIND_DRILL) {
+    return normalized;
+  }
+  throw new TypeError("Layer kind must be 'gerber' or 'drill'.");
+}
+
+export function isDrillLayerKind(kind) {
+  return kind === LAYER_KIND_DRILL;
+}
+
+export function isDrillSource(source, name = "") {
+  const sourceName = getSourceName(source);
+  return Boolean(
+    (name && isDrillPath(name)) || (sourceName && isDrillPath(sourceName)),
+  );
+}
+
+export function isDrillPath(path) {
+  const normalized = String(path).toLowerCase();
+  const dotIndex = normalized.lastIndexOf(".");
+  return dotIndex >= 0 && DRILL_FILE_EXTENSIONS.has(normalized.slice(dotIndex));
+}
+
+export function resolveDrillRenderColors(background) {
+  const fill = normalizeDrillFillColor(background);
+  return {
+    fill,
+    outline: [1 - fill[0], 1 - fill[1], 1 - fill[2]],
+  };
+}
+
+export function parseDrillLayerPayload(wasmModule, content, offsetX, offsetY) {
+  if (typeof wasmModule.parse_drill_layer !== "function") {
+    throw new Error("Drill parsing requires an updated WASM renderer.");
+  }
+  const payload = wasmModule.parse_drill_layer(content, offsetX, offsetY);
+  const outlineLayer = payload?.outlineLayer;
+  const fillLayer = payload?.fillLayer;
+  if (!outlineLayer || !fillLayer) {
+    throw new Error("Drill parsing did not return renderable layers.");
+  }
+  const bounds = mergeBounds(
+    payloadBounds(outlineLayer),
+    payloadBounds(fillLayer),
+  );
+  if (!bounds) {
+    throw new Error("File does not contain valid drill data (no holes found)");
+  }
+  return {
+    outlineLayer,
+    fillLayer,
+    metadata: payload.metadata ?? null,
+    bounds,
   };
 }
 
@@ -330,6 +418,15 @@ export function getLayerFailureName(layer) {
     }
   }
   return getSourceName(layer) || "Layer";
+}
+
+export function payloadBounds(payload) {
+  const sublayers = Array.from(payload?.sublayers ?? []);
+  let bounds = null;
+  for (const sublayer of sublayers) {
+    bounds = mergeBounds(bounds, boundaryToPlainObject(sublayer.boundary));
+  }
+  return bounds;
 }
 
 export function resolveFrameView(frameOptions, bounds, width, height) {
@@ -802,6 +899,17 @@ function isLayerConfig(value) {
     !isBlob(value) &&
     !isArrayBufferLike(value)
   );
+}
+
+function normalizeDrillFillColor(background) {
+  if (background == null) {
+    return [0, 0, 0];
+  }
+  try {
+    return parseColor(background, true).slice(0, 3).map((value) => value / 255);
+  } catch (_error) {
+    return [0, 0, 0];
+  }
 }
 
 function isBlob(value) {

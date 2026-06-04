@@ -17,6 +17,7 @@ export type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      kind?: LayerKind;
     }
   | {
       path: string;
@@ -25,6 +26,7 @@ export type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      kind?: LayerKind;
     };
 
 export type NodeLayerBounds = {
@@ -40,6 +42,7 @@ export type GerberNodePreparedLayer = {
   readonly [preparedLayerBrand]: true;
   readonly name: string;
   readonly sourceName: string;
+  readonly kind: LayerKind;
   readonly bounds: NodeLayerBounds;
   readonly offsetX: number;
   readonly offsetY: number;
@@ -47,6 +50,7 @@ export type GerberNodePreparedLayer = {
 
 export type RGBColor = [number, number, number];
 export type RGBAColor = [number, number, number, number];
+export type LayerKind = "gerber" | "drill";
 export type PngRenderStrategy = "auto" | "full-frame" | "stream";
 
 export type NodeRendererOptions = {
@@ -79,6 +83,7 @@ export type NodeFrameOptions = {
   preserveArcRegions?: boolean;
   arcTessellationQuality?: 0 | 1 | 2;
   minimumFeaturePixels?: number;
+  renderDrills?: boolean;
   globalAlpha?: number;
   maxBandBytes?: number;
   maxFullFrameBytes?: number;
@@ -103,6 +108,7 @@ export type NodeLayerOptions = {
   alpha?: number;
   offsetX?: number;
   offsetY?: number;
+  kind?: LayerKind;
 };
 
 export type NodeLayerLoadOptions = NodeLayerOptions & {
@@ -169,7 +175,7 @@ export declare class NodeGerberRenderer {
   renderLayer(
     layer: GerberNodeLayer,
     layerOptions?: NodeLayerOptions,
-  ): Promise<number>;
+  ): Promise<number | null>;
 
   renderLayers(
     layers: GerberNodeLayer | GerberNodeLayer[],

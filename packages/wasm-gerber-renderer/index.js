@@ -2,6 +2,7 @@ import {
   DEFAULT_BACKGROUND,
   FrameState,
   PNG_SIGNATURE,
+  addDrillLayerToProcessor,
   addLayerToProcessor,
   applyProcessorOptions,
   boundaryToPlainObject,
@@ -12,12 +13,15 @@ import {
   getPngColorType,
   getPngRowStride,
   getSourceName,
+  isDrillLayerKind,
   loadWasmJsModule,
   normalizeColor,
+  normalizeLayerKind,
   normalizeLayer,
   normalizeLayerList,
   numberOrDefault,
   optionalAlpha,
+  resolveDrillRenderColors,
   parseColor,
   positiveIntegerOrDefault,
   renderLayersBestEffort,
@@ -164,6 +168,9 @@ export class GerberRenderer {
     }
 
     const layerRecord = await this.createLayerRecord(layer, layerOptions);
+    if (!layerRecord) {
+      return null;
+    }
     this.frame.addLayer(layerRecord);
     return layerRecord.layerId;
   }
@@ -244,9 +251,42 @@ export class GerberRenderer {
 
   async createLayerRecord(layer, layerOptions) {
     const { source, options } = normalizeLayer(layer, layerOptions);
-    const content = await sourceToText(source);
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
+    const kind = normalizeLayerKind(options.kind, source, options.name);
+    if (isDrillLayerKind(kind)) {
+      if (!this.frame.options.renderDrills) {
+        return null;
+      }
+      const content = await sourceToText(source);
+      const result = addDrillLayerToProcessor(
+        this.frame.processor,
+        content,
+        offsetX,
+        offsetY,
+      );
+      const outlineLayerId = Number(result?.outlineLayerId);
+      const fillLayerId = Number(result?.fillLayerId);
+      if (!Number.isInteger(outlineLayerId) || !Number.isInteger(fillLayerId)) {
+        throw new Error("Drill rendering did not return layer IDs.");
+      }
+      const bounds = boundaryToPlainObject(
+        this.frame.processor.get_layer_boundary(outlineLayerId),
+      );
+      const alpha = optionalAlpha(options.alpha);
+      return {
+        kind,
+        layerId: outlineLayerId,
+        outlineLayerId,
+        fillLayerId,
+        name: options.name || getSourceName(source) || `Layer ${outlineLayerId}`,
+        bounds,
+        color: null,
+        alpha,
+      };
+    }
+
+    const content = await sourceToText(source);
     const layerId = addLayerToProcessor(
       this.frame.processor,
       content,
@@ -263,6 +303,7 @@ export class GerberRenderer {
     const alpha = optionalAlpha(options.alpha);
 
     return {
+      kind,
       layerId,
       name: options.name || getSourceName(source) || `Layer ${layerId}`,
       bounds,
@@ -293,37 +334,63 @@ export class GerberRenderer {
       this.canvas.width,
       this.canvas.height,
     );
-    const activeLayerIds = new Uint32Array(frame.layers.map((layer) => layer.layerId));
     const globalAlpha = clamp01(numberOrDefault(frame.options.globalAlpha, 1));
+    const renderEntries = createRenderEntries(
+      frame.layers,
+      globalAlpha,
+      frame.options.background,
+    );
+    const activeLayerIds = new Uint32Array(renderEntries.map((entry) => entry.layerId));
+    const blendModes = new Uint8Array(renderEntries.map((entry) => entry.blendMode));
 
     if (typeof frame.processor.render_with_clear === "function") {
       const colorData = new Float32Array(
-        frame.layers.flatMap((layer) => [
-          layer.color[0],
-          layer.color[1],
-          layer.color[2],
-          resolveLayerAlpha(layer.alpha, globalAlpha),
+        renderEntries.flatMap((entry) => [
+          entry.color[0],
+          entry.color[1],
+          entry.color[2],
+          entry.alpha,
         ]),
       );
-      frame.processor.render_with_clear(
-        activeLayerIds,
-        colorData,
-        view.zoomX,
-        view.zoomY,
-        view.offsetX,
-        view.offsetY,
-        1,
-        clear,
-      );
+      if (blendModes.some((mode) => mode !== 0)) {
+        if (typeof frame.processor.render_with_clear_and_blend_modes !== "function") {
+          throw new Error("Drill rendering requires an updated WASM renderer.");
+        }
+        frame.processor.render_with_clear_and_blend_modes(
+          activeLayerIds,
+          colorData,
+          blendModes,
+          view.zoomX,
+          view.zoomY,
+          view.offsetX,
+          view.offsetY,
+          1,
+          clear,
+        );
+      } else {
+        frame.processor.render_with_clear(
+          activeLayerIds,
+          colorData,
+          view.zoomX,
+          view.zoomY,
+          view.offsetX,
+          view.offsetY,
+          1,
+          clear,
+        );
+      }
     } else {
       if (!clear) {
         throw new Error("clear:false requires an updated WASM renderer.");
       }
-      if (frame.layers.some((layer) => layer.alpha != null)) {
+      if (
+        frame.layers.some((layer) => layer.alpha != null) ||
+        frame.layers.some((layer) => isDrillLayerKind(layer.kind))
+      ) {
         throw new Error("Layer alpha requires an updated WASM renderer.");
       }
       const colorData = new Float32Array(
-        frame.layers.flatMap((layer) => layer.color),
+        renderEntries.flatMap((entry) => entry.color),
       );
       frame.processor.render(
         activeLayerIds,
@@ -396,6 +463,46 @@ export class GerberRenderer {
       throw new Error("GerberRenderer has been disposed.");
     }
   }
+}
+
+function createRenderEntries(layers, globalAlpha, background) {
+  const entries = [];
+  const drillColors = resolveDrillRenderColors(background);
+
+  for (const layer of layers) {
+    if (!isDrillLayerKind(layer.kind)) {
+      entries.push({
+        layerId: layer.layerId,
+        color: layer.color,
+        alpha: resolveLayerAlpha(layer.alpha, globalAlpha),
+        blendMode: 0,
+      });
+    }
+  }
+
+  for (const layer of layers) {
+    if (isDrillLayerKind(layer.kind)) {
+      entries.push({
+        layerId: layer.outlineLayerId,
+        color: drillColors.outline,
+        alpha: resolveLayerAlpha(layer.alpha, 1),
+        blendMode: 0,
+      });
+    }
+  }
+
+  for (const layer of layers) {
+    if (isDrillLayerKind(layer.kind)) {
+      entries.push({
+        layerId: layer.fillLayerId,
+        color: drillColors.fill,
+        alpha: resolveLayerAlpha(layer.alpha, 1),
+        blendMode: 1,
+      });
+    }
+  }
+
+  return entries;
 }
 
 async function loadWasmModule(rendererOptions) {

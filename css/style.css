@@ -730,6 +730,24 @@ button {
   background: var(--surface-2);
 }
 
+.layer-group-heading {
+  padding: 8px 2px 2px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.drill-layer-item {
+  grid-template-columns: 24px minmax(0, 1fr) 32px;
+}
+
+.drill-layer-item .layer-label span {
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
 .layer-item[draggable="true"] {
   cursor: grab;
 }

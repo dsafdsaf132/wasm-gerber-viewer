@@ -1,7 +1,8 @@
 import {
   getBaseFileName,
+  getLayerSourceKind,
   isArchiveMetadataPath,
-  isSupportedGerberPath,
+  isSupportedLayerPath,
   isZipFile,
 } from "./file-utils.js";
 
@@ -84,6 +85,7 @@ export async function collectLayerSources(files, callbacks = {}) {
 
     layerSources.push({
       name: file.name,
+      kind: getLayerSourceKind(file.name),
       sizeBytes: file.size,
       readText: (onProgress) => readFileText(file, onProgress),
     });
@@ -103,6 +105,7 @@ export function repeatLayerSources(layerSources, repeat, { offset = {} } = {}) {
     const readText = createSharedTextReader(source.readText);
     return Array.from({ length: repeat }, (_, index) => ({
       name: `${source.name} #${index + 1}`,
+      kind: source.kind,
       sizeBytes: source.sizeBytes,
       readText,
       offset: addLayerOffsets(source.offset, {
@@ -209,7 +212,7 @@ async function collectZipLayerSources(
         (entry) =>
           !entry.dir &&
           !isArchiveMetadataPath(entry.name) &&
-          isSupportedGerberPath(entry.name),
+          isSupportedLayerPath(entry.name),
       )
       .sort((a, b) =>
         a.name.localeCompare(b.name, undefined, {
@@ -221,15 +224,16 @@ async function collectZipLayerSources(
     if (entries.length === 0) {
       onArchiveWarning(
         file.name,
-        "No supported Gerber files found in archive",
+        "No supported layer files found in archive",
       );
       return [];
     }
 
-    onArchiveInfo(file.name, `${entries.length} Gerber files found in archive`);
+    onArchiveInfo(file.name, `${entries.length} layer files found in archive`);
 
     return entries.map((entry) => ({
       name: getBaseFileName(entry.name),
+      kind: getLayerSourceKind(entry.name),
       sizeBytes: getZipEntrySizeBytes(entry),
       readText: (onProgress = () => {}) =>
         entry.async("string", (metadata) => {

@@ -18,6 +18,28 @@ function hasLayerOffset(offset) {
   return offset.x !== 0 || offset.y !== 0;
 }
 
+function isDrillLayer(layer) {
+  return layer?.kind === "drill";
+}
+
+function hexColorToRgb(color) {
+  const match = String(color ?? "").match(/^#([0-9a-f]{6})$/i);
+  if (!match) {
+    return [0, 0, 0];
+  }
+
+  const value = match[1];
+  return [
+    Number.parseInt(value.slice(0, 2), 16) / 255,
+    Number.parseInt(value.slice(2, 4), 16) / 255,
+    Number.parseInt(value.slice(4, 6), 16) / 255,
+  ];
+}
+
+function invertRgb(rgb) {
+  return [1 - rgb[0], 1 - rgb[1], 1 - rgb[2]];
+}
+
 export class ScreenshotExporter {
   constructor({
     canvas,
@@ -226,7 +248,7 @@ export class ScreenshotExporter {
     let screenshotRenderer = null;
 
     try {
-      screenshotRenderer = this.createRenderer();
+      screenshotRenderer = this.createRenderer(renderState);
       let blob = null;
 
       if (shouldStream) {
@@ -319,7 +341,7 @@ export class ScreenshotExporter {
     });
   }
 
-  createRenderer() {
+  createRenderer(renderState) {
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
     if (!gl) {
@@ -360,9 +382,42 @@ export class ScreenshotExporter {
 
     const activeLayerIds = [];
     const colorData = [];
+    const blendModes = [];
+    const drillLayers = [];
+    const drillFillColor = hexColorToRgb(renderState.backgroundColor);
+    const drillOutlineColor = invertRgb(drillFillColor);
+    const drillAlpha = renderState.globalAlpha > 0 ? 1 / renderState.globalAlpha : 0;
     for (const layer of this.getLayers()) {
       if (typeof layer.sourceContent !== "string") {
         throw new Error("Reload files before using high-resolution screenshot export.");
+      }
+
+      if (isDrillLayer(layer)) {
+        if (typeof processor.add_drill_layer !== "function") {
+          throw new Error("Drill screenshot export requires an updated WASM module.");
+        }
+        const offsetX = Number(layer.offset?.x) || 0;
+        const offsetY = Number(layer.offset?.y) || 0;
+        let result;
+        if (offsetX !== 0 || offsetY !== 0) {
+          if (typeof processor.add_drill_layer_with_offset !== "function") {
+            throw new Error("Drill screenshot offsets require an updated WASM module.");
+          }
+          result = processor.add_drill_layer_with_offset(
+            layer.sourceContent,
+            offsetX,
+            offsetY,
+          );
+        } else {
+          result = processor.add_drill_layer(layer.sourceContent);
+        }
+        if (layer.visible) {
+          drillLayers.push({
+            outlineLayerId: Number(result?.outlineLayerId),
+            fillLayerId: Number(result?.fillLayerId),
+          });
+        }
+        continue;
       }
 
       const offset = normalizeLayerOffset(layer.offset);
@@ -377,7 +432,29 @@ export class ScreenshotExporter {
         : processor.add_layer(layer.sourceContent);
       if (layer.visible) {
         activeLayerIds.push(layerId);
-        colorData.push(layer.color[0], layer.color[1], layer.color[2]);
+        colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
+        blendModes.push(0);
+      }
+    }
+
+    for (const layer of drillLayers) {
+      if (Number.isFinite(layer.outlineLayerId)) {
+        activeLayerIds.push(layer.outlineLayerId);
+        colorData.push(
+          drillOutlineColor[0],
+          drillOutlineColor[1],
+          drillOutlineColor[2],
+          drillAlpha,
+        );
+        blendModes.push(0);
+      }
+    }
+
+    for (const layer of drillLayers) {
+      if (Number.isFinite(layer.fillLayerId)) {
+        activeLayerIds.push(layer.fillLayerId);
+        colorData.push(drillFillColor[0], drillFillColor[1], drillFillColor[2], drillAlpha);
+        blendModes.push(1);
       }
     }
 
@@ -388,6 +465,7 @@ export class ScreenshotExporter {
       layerCount: this.getLayers().length,
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
+      blendModes: new Uint8Array(blendModes),
     };
   }
 
@@ -773,21 +851,43 @@ export class ScreenshotExporter {
       screenshotRenderer.canvas.height = tileHeight;
       screenshotRenderer.processor.resize();
     }
-    screenshotRenderer.processor.render_tile(
-      screenshotRenderer.activeLayerIds,
-      screenshotRenderer.colorData,
-      exportWidth,
-      exportHeight,
-      tileX,
-      tileY,
-      tileWidth,
-      tileHeight,
-      renderState.viewScaleX,
-      renderState.viewScaleY,
-      renderState.offsetX,
-      renderState.offsetY,
-      renderState.globalAlpha,
-    );
+    if (screenshotRenderer.blendModes.some((mode) => mode !== 0)) {
+      if (typeof screenshotRenderer.processor.render_tile_with_blend_modes !== "function") {
+        throw new Error("Drill screenshot rendering requires an updated WASM module.");
+      }
+      screenshotRenderer.processor.render_tile_with_blend_modes(
+        screenshotRenderer.activeLayerIds,
+        screenshotRenderer.colorData,
+        screenshotRenderer.blendModes,
+        exportWidth,
+        exportHeight,
+        tileX,
+        tileY,
+        tileWidth,
+        tileHeight,
+        renderState.viewScaleX,
+        renderState.viewScaleY,
+        renderState.offsetX,
+        renderState.offsetY,
+        renderState.globalAlpha,
+      );
+    } else {
+      screenshotRenderer.processor.render_tile(
+        screenshotRenderer.activeLayerIds,
+        screenshotRenderer.colorData,
+        exportWidth,
+        exportHeight,
+        tileX,
+        tileY,
+        tileWidth,
+        tileHeight,
+        renderState.viewScaleX,
+        renderState.viewScaleY,
+        renderState.offsetX,
+        renderState.offsetY,
+        renderState.globalAlpha,
+      );
+    }
     screenshotRenderer.gl.finish();
   }
 

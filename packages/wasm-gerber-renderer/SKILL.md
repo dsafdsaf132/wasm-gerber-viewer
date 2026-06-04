@@ -71,6 +71,7 @@ Useful CLI options:
 - `--arc-quality <0|1|2>` controls approximate arc quality.
 - `--flip-x` mirrors the output horizontally.
 - `--flip-y` mirrors the output vertically.
+- `--no-drill` skips NC drill layers.
 - `--no-fit` disables automatic fit-to-view.
 - `--skill` prints package usage notes for AI agents.
 
@@ -275,6 +276,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`.
 - `globalAlpha`: opacity multiplier for all layers.
 - `minimumFeaturePixels`: minimum visible line/arc width.
+- `renderDrills`: render NC drill files as drill overlays; set `false` to skip them.
 - `preserveArcRegions`: defaults to `true`; set `false` for approximate region arcs.
 - `arcTessellationQuality`: `0` low, `1` normal, `2` high.
 

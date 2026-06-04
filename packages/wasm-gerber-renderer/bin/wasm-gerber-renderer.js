@@ -2,7 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { fileLayer, renderGerberToPngFile } from "../node.js";
+import { createNodeGerberRenderer, fileLayer } from "../node.js";
 
 const USAGE = `Usage:
   gerber-renderer <input.gbr|input.tar.gz...> [options]
@@ -20,6 +20,7 @@ Options:
   --arc-quality <0|1|2>            Approx arc quality: low, normal, high (default: 1)
   --flip-x                         Mirror the output horizontally
   --flip-y                         Mirror the output vertically
+  --no-drill                       Skip NC drill layers
   --no-fit                         Use identity view instead of fit view (default: fit enabled)
   --skill                          Print AI usage notes
   -h, --help                       Show this help
@@ -58,9 +59,18 @@ async function main() {
     skippedLayers.push(name);
     process.stderr.write(`Skipped ${name}: ${errorMessage(error)}\n`);
   };
-  await renderGerberToPngFile(outputPath, layers, frameOptions);
+  const renderer = await createNodeGerberRenderer();
+  let renderResult = { renderedCount: 0, failures: [] };
+  try {
+    await renderer.withFrame(frameOptions, async () => {
+      renderResult = await renderer.renderLayers(layers, frameOptions);
+    });
+    await renderer.exportPngFile(outputPath, { background: frameOptions.background });
+  } finally {
+    renderer.dispose();
+  }
   process.stdout.write(
-    `Rendered ${layers.length - skippedLayers.length}/${layers.length} layer(s) to ${outputPath}\n`,
+    `Rendered ${renderResult.renderedCount}/${layers.length} layer(s) to ${outputPath}\n`,
   );
 }
 
@@ -102,6 +112,8 @@ function parseArgs(args) {
       frameOptions.flipX = true;
     } else if (arg === "--flip-y") {
       frameOptions.flipY = true;
+    } else if (arg === "--no-drill") {
+      frameOptions.renderDrills = false;
     } else if (arg === "--no-fit") {
       frameOptions.fit = false;
     } else if (arg.startsWith("-")) {

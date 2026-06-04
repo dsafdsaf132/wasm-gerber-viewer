@@ -1,14 +1,19 @@
+mod drill;
 mod parser;
 mod renderer;
 mod shape;
 mod util;
 
+use crate::drill::{parse_drill_with_offset, DrillParseResult};
 use crate::parser::parse_gerber_with_options;
 use crate::renderer::Renderer;
 use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::util::format_bytes;
+use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
+
+const DRILL_OUTLINE_WIDTH_MM: f32 = 0.05;
 
 /// Initialize panic hook for better error messages in browser console
 #[wasm_bindgen]
@@ -92,6 +97,36 @@ pub fn parse_gerber_layer_with_options(
     gerber_data_layers_to_js(&gerber_data_layers)
 }
 
+fn drill_parse_result_to_js(drill: DrillParseResult) -> Result<JsValue, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &JsValue::from_str("outlineLayer"),
+        &gerber_data_layers_to_js(&[drill.outline_layer])?,
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("fillLayer"),
+        &gerber_data_layers_to_js(&[drill.fill_layer])?,
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("metadata"),
+        &drill.metadata.to_js()?,
+    )?;
+    Ok(object.into())
+}
+
+#[wasm_bindgen]
+pub fn parse_drill_layer(
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<JsValue, JsValue> {
+    let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?;
+    drill_parse_result_to_js(drill)
+}
+
 /// Main Gerber processor with stateful WebGL renderer
 #[wasm_bindgen]
 pub struct GerberProcessor {
@@ -138,6 +173,48 @@ impl GerberProcessor {
                 "Renderer not initialized. Call init() first.",
             ))
         }
+    }
+
+    fn add_drill_parse_result(&mut self, drill: DrillParseResult) -> Result<JsValue, JsValue> {
+        if !drill.fill_layer.has_geometry() {
+            return Err(JsValue::from_str(
+                "File does not contain valid drill data (no holes found)",
+            ));
+        }
+
+        let Some(renderer) = &mut self.renderer else {
+            return Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ));
+        };
+
+        let outline_layer_id = renderer.add_layer(vec![drill.outline_layer])?;
+        let fill_layer_id = match renderer.add_layer(vec![drill.fill_layer]) {
+            Ok(layer_id) => layer_id,
+            Err(error) => {
+                let _ = renderer.remove_layer(outline_layer_id);
+                return Err(error);
+            }
+        };
+
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &JsValue::from_str("outlineLayerId"),
+            &JsValue::from_f64(outline_layer_id as f64),
+        )?;
+        Reflect::set(
+            &object,
+            &JsValue::from_str("fillLayerId"),
+            &JsValue::from_f64(fill_layer_id as f64),
+        )?;
+        Reflect::set(
+            &object,
+            &JsValue::from_str("metadata"),
+            &drill.metadata.to_js()?,
+        )?;
+
+        Ok(object.into())
     }
 }
 
@@ -289,6 +366,22 @@ impl GerberProcessor {
         self.add_parsed_layers(gerber_data_layers)
     }
 
+    /// Add an Excellon / NC Drill file as a drill overlay.
+    pub fn add_drill_layer(&mut self, content: String) -> Result<JsValue, JsValue> {
+        let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, 0.0, 0.0)?;
+        self.add_drill_parse_result(drill)
+    }
+
+    pub fn add_drill_layer_with_offset(
+        &mut self,
+        content: String,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<JsValue, JsValue> {
+        let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?;
+        self.add_drill_parse_result(drill)
+    }
+
     /// Add a layer from geometry parsed in a worker or another WASM instance.
     pub fn add_parsed_layer(&mut self, parsed_layer: JsValue) -> Result<u32, JsValue> {
         let gerber_data_layers = gerber_data_layers_from_js(&parsed_layer)?;
@@ -427,6 +520,39 @@ impl GerberProcessor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_clear_and_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+        clear_canvas: bool,
+    ) -> Result<String, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.render_with_clear_and_blend_modes(
+                active_layer_ids,
+                color_data,
+                blend_modes,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+                alpha,
+                clear_canvas,
+            )?;
+            Ok("render_done".to_string())
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
     /// Render into an offscreen framebuffer and return bottom-up RGBA pixels.
     #[allow(clippy::too_many_arguments)]
     pub fn render_pixels_with_clear(
@@ -444,6 +570,38 @@ impl GerberProcessor {
             renderer.render_pixels_with_clear(
                 active_layer_ids,
                 color_data,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+                alpha,
+                clear_canvas,
+            )
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_pixels_with_clear_and_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+        clear_canvas: bool,
+    ) -> Result<Vec<u8>, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.render_pixels_with_clear_and_blend_modes(
+                active_layer_ids,
+                color_data,
+                blend_modes,
                 zoom_x,
                 zoom_y,
                 offset_x,
@@ -484,6 +642,49 @@ impl GerberProcessor {
             renderer.render_tile(
                 active_layer_ids,
                 color_data,
+                export_width,
+                export_height,
+                tile_x,
+                tile_y,
+                tile_width,
+                tile_height,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+                alpha,
+            )?;
+            Ok("render_tile_done".to_string())
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile_with_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<String, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.render_tile_with_blend_modes(
+                active_layer_ids,
+                color_data,
+                blend_modes,
                 export_width,
                 export_height,
                 tile_x,

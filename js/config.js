@@ -51,3 +51,10 @@ export const GERBER_FILE_EXTENSIONS = new Set([
   ".tsk",
   ".tsm",
 ]);
+
+export const DRILL_FILE_EXTENSIONS = new Set([
+  ".drl",
+  ".nc",
+  ".xnc",
+  ".xln",
+]);

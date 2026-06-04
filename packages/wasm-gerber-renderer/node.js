@@ -14,7 +14,6 @@ import {
   PNG_SIGNATURE,
   addLayerToProcessor,
   applyProcessorOptions,
-  boundaryToPlainObject,
   clamp01,
   createBaseFrameOptions,
   createPngHeader,
@@ -22,19 +21,23 @@ import {
   getPngColorType,
   getPngRowStride,
   getSourceName,
+  isDrillLayerKind,
   loadLayersBestEffort,
   loadWasmJsModule,
-  mergeBounds,
   normalizeColor,
   normalizeLayer,
+  normalizeLayerKind,
   normalizeLayerList,
   normalizeParseOptions,
   numberOrDefault,
   optionalAlpha,
+  parseDrillLayerPayload,
   parseColor,
+  payloadBounds,
   positiveIntegerOrDefault,
   positiveNumberOrDefault,
   renderLayersBestEffort,
+  resolveDrillRenderColors,
   resolveFrameView,
   resolveLayerAlpha,
   sourceToText,
@@ -170,6 +173,9 @@ export class NodeGerberRenderer {
     }
 
     const layerRecord = await this.createLayerRecord(layer, layerOptions);
+    if (!layerRecord) {
+      return null;
+    }
     this.frame.addLayer(layerRecord);
     return layerRecord.layerId;
   }
@@ -321,6 +327,12 @@ export class NodeGerberRenderer {
           ...this.frame.options,
           ...layerOptions,
         });
+    if (!prepared) {
+      return null;
+    }
+    if (isDrillLayerKind(prepared.kind) && !this.frame.options.renderDrills) {
+      return null;
+    }
     const layerId = this.frame.layers.length;
     const color =
       prepared.color == null
@@ -330,10 +342,12 @@ export class NodeGerberRenderer {
           });
 
     return {
+      kind: prepared.kind,
       layerId,
       name: prepared.name || `Layer ${layerId}`,
       content: prepared.content,
       parsedLayer: prepared.parsedLayer,
+      parsedDrillLayer: prepared.parsedDrillLayer,
       offsetX: prepared.offsetX,
       offsetY: prepared.offsetY,
       bounds: prepared.bounds,
@@ -350,30 +364,43 @@ export class NodeGerberRenderer {
     const { source, options } = normalizeLayer(layer, layerOptions, {
       allowPathConfig: true,
     });
+    const offsetX = numberOrDefault(options.offsetX, 0);
+    const offsetY = numberOrDefault(options.offsetY, 0);
+    const kind = normalizeLayerKind(options.kind, source, options.name);
+    if (isDrillLayerKind(kind) && options.renderDrills === false) {
+      return null;
+    }
     const content = await sourceToText(source, {
       fileUrlToPath: fileURLToPath,
       readPathText: (path) => readFile(path, "utf8"),
       sourceDescription:
         "a string, File, Blob, ArrayBuffer, Uint8Array, URL, or path config",
     });
-    const offsetX = numberOrDefault(options.offsetX, 0);
-    const offsetY = numberOrDefault(options.offsetY, 0);
     const parseOptions = normalizeParseOptions(options);
-    const parsed = parseLayerPayload(
-      this.wasmModule,
-      content,
-      offsetX,
-      offsetY,
-      parseOptions,
-    );
+    const parsed = isDrillLayerKind(kind)
+      ? parseDrillLayerPayload(this.wasmModule, content, offsetX, offsetY)
+      : parseLayerPayload(
+          this.wasmModule,
+          content,
+          offsetX,
+          offsetY,
+          parseOptions,
+        );
     const sourceName = getSourceName(source);
 
     return {
       [NODE_PREPARED_LAYER]: true,
+      kind,
       name: options.name || sourceName || "Layer",
       sourceName,
       content: supportsParsedLayerReuse(this.wasmModule) ? null : content,
-      parsedLayer: parsed.payload,
+      parsedLayer: isDrillLayerKind(kind) ? null : parsed.payload,
+      parsedDrillLayer: isDrillLayerKind(kind)
+        ? {
+            outlineLayer: parsed.outlineLayer,
+            fillLayer: parsed.fillLayer,
+          }
+        : null,
       bounds: parsed.bounds,
       offsetX,
       offsetY,
@@ -438,8 +465,10 @@ class NodeFrameState extends FrameState {
       framebufferMemorySafetyFactor: this.options.framebufferMemorySafetyFactor,
       strategy: this.options.strategy,
       layers: this.layers.map((layer) => ({
+        kind: layer.kind,
         content: layer.content,
         parsedLayer: layer.parsedLayer,
+        parsedDrillLayer: layer.parsedDrillLayer,
         offsetX: layer.offsetX,
         offsetY: layer.offsetY,
         color: layer.color,
@@ -589,11 +618,7 @@ function parseLayerPayload(wasmModule, content, offsetX, offsetY, frameOptions) 
     payload = parseDefault(content, offsetX, offsetY);
   }
 
-  const sublayers = Array.from(payload?.sublayers ?? []);
-  let bounds = null;
-  for (const sublayer of sublayers) {
-    bounds = mergeBounds(bounds, boundaryToPlainObject(sublayer.boundary));
-  }
+  const bounds = payloadBounds(payload);
   if (!bounds) {
     throw new Error("File does not contain valid Gerber data (no geometry found)");
   }
@@ -642,11 +667,19 @@ function isPreparedNodeLayer(value) {
 function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
   const offsetX = numberOrDefault(preparedLayer.offsetX, 0);
   const offsetY = numberOrDefault(preparedLayer.offsetY, 0);
+  const kind = normalizeLayerKind(preparedLayer.kind, { name: preparedLayer.sourceName });
   if (
     ("offsetX" in layerOptions && numberOrDefault(layerOptions.offsetX, 0) !== offsetX) ||
     ("offsetY" in layerOptions && numberOrDefault(layerOptions.offsetY, 0) !== offsetY)
   ) {
     throw new Error("Prepared layer offsets are fixed. Load the layer again to change offsets.");
+  }
+  if (
+    "kind" in layerOptions &&
+      layerOptions.kind != null &&
+    normalizeLayerKind(layerOptions.kind, { name: preparedLayer.sourceName }) !== kind
+  ) {
+    throw new Error("Prepared layer kind is fixed. Load the layer again to change kind.");
   }
 
   return {
@@ -655,6 +688,7 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
       "name" in layerOptions && layerOptions.name != null
         ? String(layerOptions.name)
         : preparedLayer.name,
+    kind,
     color:
       "color" in layerOptions
         ? layerOptions.color
@@ -710,7 +744,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     exportOptions.framebufferMemorySafetyFactor,
     plan.framebufferMemorySafetyFactor || DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR,
   );
-  const layerCount = Math.max(1, plan.layers.length);
+  const layerCount = Math.max(1, getRenderLayerCount(plan.layers));
   const fullFrameEstimate = estimateFullFrameBytes(
     width,
     height,
@@ -956,21 +990,43 @@ function renderStreamBand(state, width, height, tileY, view, bandRowBytes) {
     const renderTileX =
       currentTileWidth === state.tileWidth ? tileX : Math.max(0, width - state.tileWidth);
     const readX = tileX - renderTileX;
-    state.renderContext.processor.render_tile(
-      state.renderContext.activeLayerIds,
-      state.renderContext.colorData,
-      width,
-      height,
-      renderTileX,
-      renderTileY,
-      state.tileWidth,
-      state.tileHeight,
-      view.zoomX,
-      view.zoomY,
-      view.offsetX,
-      view.offsetY,
-      1,
-    );
+    if (hasBlendModes(state.renderContext.blendModes)) {
+      if (typeof state.renderContext.processor.render_tile_with_blend_modes !== "function") {
+        throw new Error("Drill rendering requires an updated WASM renderer.");
+      }
+      state.renderContext.processor.render_tile_with_blend_modes(
+        state.renderContext.activeLayerIds,
+        state.renderContext.colorData,
+        state.renderContext.blendModes,
+        width,
+        height,
+        renderTileX,
+        renderTileY,
+        state.tileWidth,
+        state.tileHeight,
+        view.zoomX,
+        view.zoomY,
+        view.offsetX,
+        view.offsetY,
+        1,
+      );
+    } else {
+      state.renderContext.processor.render_tile(
+        state.renderContext.activeLayerIds,
+        state.renderContext.colorData,
+        width,
+        height,
+        renderTileX,
+        renderTileY,
+        state.tileWidth,
+        state.tileHeight,
+        view.zoomX,
+        view.zoomY,
+        view.offsetX,
+        view.offsetY,
+        1,
+      );
+    }
     state.renderGl.finish?.();
     state.renderGl.readPixels(
       readX,
@@ -1028,16 +1084,7 @@ async function renderPlanToFullFramePngSink(
   try {
     const pixels = plan.layers.length === 0 || !plan.view
       ? new Uint8Array(width * height * 4)
-      : renderContext.processor.render_pixels_with_clear(
-          renderContext.activeLayerIds,
-          renderContext.colorData,
-          plan.view.zoomX,
-          plan.view.zoomY,
-          plan.view.offsetX,
-          plan.view.offsetY,
-          1,
-          true,
-        );
+      : renderPlanPixels(renderContext, plan);
     await writePngDocument(sink, width, height, pngColorType, async (writeRow) => {
       await writeFullFramePixelRows(
         writeRow,
@@ -1064,22 +1111,62 @@ function createProcessorForPlan(renderer, plan, gl, width, height) {
     processor.init_with_size(gl, width, height);
     applyProcessorOptions(processor, plan);
 
-    const activeLayerIds = new Uint32Array(plan.layers.length);
-    const colorData = new Float32Array(plan.layers.length * 4);
-    for (const [index, layer] of plan.layers.entries()) {
-      activeLayerIds[index] = addPlanLayerToProcessor(processor, layer);
+    const renderEntries = createPlanRenderEntries(processor, plan);
+    const activeLayerIds = new Uint32Array(
+      renderEntries.map((entry) => entry.layerId),
+    );
+    const blendModes = new Uint8Array(renderEntries.map((entry) => entry.blendMode));
+    const colorData = new Float32Array(renderEntries.length * 4);
+    for (const [index, entry] of renderEntries.entries()) {
       const offset = index * 4;
-      colorData[offset] = layer.color[0];
-      colorData[offset + 1] = layer.color[1];
-      colorData[offset + 2] = layer.color[2];
-      colorData[offset + 3] = resolveLayerAlpha(layer.alpha, plan.globalAlpha);
+      colorData[offset] = entry.color[0];
+      colorData[offset + 1] = entry.color[1];
+      colorData[offset + 2] = entry.color[2];
+      colorData[offset + 3] = entry.alpha;
     }
 
-    return { processor, activeLayerIds, colorData };
+    return { processor, activeLayerIds, colorData, blendModes };
   } catch (error) {
     disposeProcessor(processor);
     throw error;
   }
+}
+
+function renderPlanPixels(renderContext, plan) {
+  if (hasBlendModes(renderContext.blendModes)) {
+    if (
+      typeof renderContext.processor.render_pixels_with_clear_and_blend_modes !==
+      "function"
+    ) {
+      throw new Error("Drill rendering requires an updated WASM renderer.");
+    }
+    return renderContext.processor.render_pixels_with_clear_and_blend_modes(
+      renderContext.activeLayerIds,
+      renderContext.colorData,
+      renderContext.blendModes,
+      plan.view.zoomX,
+      plan.view.zoomY,
+      plan.view.offsetX,
+      plan.view.offsetY,
+      1,
+      true,
+    );
+  }
+
+  return renderContext.processor.render_pixels_with_clear(
+    renderContext.activeLayerIds,
+    renderContext.colorData,
+    plan.view.zoomX,
+    plan.view.zoomY,
+    plan.view.offsetX,
+    plan.view.offsetY,
+    1,
+    true,
+  );
+}
+
+function hasBlendModes(blendModes) {
+  return Boolean(blendModes?.some((mode) => mode !== 0));
 }
 
 function addPlanLayerToProcessor(processor, layer) {
@@ -1095,6 +1182,85 @@ function addPlanLayerToProcessor(processor, layer) {
     throw new Error("Layer content is unavailable for rendering.");
   }
   return addLayerToProcessor(processor, layer.content, layer.offsetX, layer.offsetY);
+}
+
+function createPlanRenderEntries(processor, plan) {
+  const gerberEntries = [];
+  const drillOutlineEntries = [];
+  const drillFillEntries = [];
+  const drillColors = resolveDrillRenderColors(plan.background);
+
+  for (const layer of plan.layers) {
+    if (isDrillLayerKind(layer.kind)) {
+      const { outlineLayerId, fillLayerId } = addPlanDrillLayerToProcessor(processor, layer);
+      const alpha = resolveLayerAlpha(layer.alpha, 1);
+      drillOutlineEntries.push({
+        layerId: outlineLayerId,
+        color: drillColors.outline,
+        alpha,
+        blendMode: 0,
+      });
+      drillFillEntries.push({
+        layerId: fillLayerId,
+        color: drillColors.fill,
+        alpha,
+        blendMode: 1,
+      });
+      continue;
+    }
+
+    gerberEntries.push({
+      layerId: addPlanLayerToProcessor(processor, layer),
+      color: layer.color,
+      alpha: resolveLayerAlpha(layer.alpha, plan.globalAlpha),
+      blendMode: 0,
+    });
+  }
+
+  return [...gerberEntries, ...drillOutlineEntries, ...drillFillEntries];
+}
+
+function addPlanDrillLayerToProcessor(processor, layer) {
+  if (layer.parsedDrillLayer && typeof processor.add_parsed_layer === "function") {
+    return {
+      outlineLayerId: processor.add_parsed_layer(layer.parsedDrillLayer.outlineLayer),
+      fillLayerId: processor.add_parsed_layer(layer.parsedDrillLayer.fillLayer),
+    };
+  }
+  if (typeof layer.content !== "string") {
+    throw new Error("Drill layer content is unavailable for rendering.");
+  }
+  if (layer.offsetX !== 0 || layer.offsetY !== 0) {
+    if (typeof processor.add_drill_layer_with_offset !== "function") {
+      throw new Error("Drill layer offsets require an updated WASM renderer.");
+    }
+    const result = processor.add_drill_layer_with_offset(
+      layer.content,
+      layer.offsetX,
+      layer.offsetY,
+    );
+    return normalizeDrillLayerIds(result);
+  }
+  if (typeof processor.add_drill_layer !== "function") {
+    throw new Error("Drill rendering requires an updated WASM renderer.");
+  }
+  return normalizeDrillLayerIds(processor.add_drill_layer(layer.content));
+}
+
+function normalizeDrillLayerIds(result) {
+  const outlineLayerId = Number(result?.outlineLayerId);
+  const fillLayerId = Number(result?.fillLayerId);
+  if (!Number.isInteger(outlineLayerId) || !Number.isInteger(fillLayerId)) {
+    throw new Error("Drill rendering did not return layer IDs.");
+  }
+  return { outlineLayerId, fillLayerId };
+}
+
+function getRenderLayerCount(layers) {
+  return layers.reduce(
+    (count, layer) => count + (isDrillLayerKind(layer.kind) ? 2 : 1),
+    0,
+  );
 }
 
 function supportsParsedLayerReuse(wasmModule) {

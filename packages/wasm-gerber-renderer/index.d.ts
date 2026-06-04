@@ -14,10 +14,12 @@ export type GerberLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      kind?: LayerKind;
     };
 
 export type RGBColor = [number, number, number];
 export type RGBAColor = [number, number, number, number];
+export type LayerKind = "gerber" | "drill";
 
 export type RendererOptions = {
   wasmModule?: unknown;
@@ -45,6 +47,7 @@ export type FrameOptions = {
   preserveArcRegions?: boolean;
   arcTessellationQuality?: 0 | 1 | 2;
   minimumFeaturePixels?: number;
+  renderDrills?: boolean;
   globalAlpha?: number;
   rendererOptions?: RendererOptions;
   onLayerError?: (failure: LayerFailure) => void;
@@ -64,6 +67,7 @@ export type LayerOptions = {
   alpha?: number;
   offsetX?: number;
   offsetY?: number;
+  kind?: LayerKind;
 };
 
 export type ExportOptions = {
@@ -107,7 +111,7 @@ export declare class GerberRenderer {
     callback: () => void | Promise<void>,
   ): Promise<void>;
 
-  renderLayer(layer: GerberLayer, layerOptions?: LayerOptions): Promise<number>;
+  renderLayer(layer: GerberLayer, layerOptions?: LayerOptions): Promise<number | null>;
 
   renderLayers(
     layers: GerberLayer | GerberLayer[] | FileList,

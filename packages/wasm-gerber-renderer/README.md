@@ -283,6 +283,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `preserveArcRegions`: keeps exact region arcs. Defaults to `true`; set `false` to approximate region arcs.
 - `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
 - `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
+- `renderDrills`: renders NC drill files (`.drl`, `.nc`, `.xnc`, `.xln`) as drill overlays. Defaults to `true`.
 - `globalAlpha`: opacity for layers without an explicit layer `alpha`. Defaults to `0.7`.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
@@ -294,6 +295,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `alpha`: per-layer opacity. When set, it overrides `globalAlpha` for that layer.
 - `offsetX`: X offset applied while loading geometry. Defaults to `0`.
 - `offsetY`: Y offset applied while loading geometry. Defaults to `0`.
+- `kind`: force `"gerber"` or `"drill"` when a source filename is unavailable or ambiguous.
 - `name`: layer display name for config objects such as `{ source, name }` or `{ path, name }`.
 
 `exportOptions` control PNG export:
@@ -347,7 +349,7 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI options:
 
-- `<input...>`: one or more Gerber files or `.tar.gz`/`.tgz` archives. Multiple files render as layers in argument order.
+- `<input...>`: one or more Gerber/drill files or `.tar.gz`/`.tgz` archives. Multiple files render as layers in argument order.
 - `-o, --output <path>`: PNG output path. Required for multiple inputs. Parent directories must already exist.
 - `--width <px>`: output width. Defaults to `1200`.
 - `--height <px>`: output height. Defaults to `800`.
@@ -360,6 +362,7 @@ CLI options:
 - `--arc-quality <0|1|2>`: approximate arc quality. Defaults to `1`.
 - `--flip-x`: mirrors the output horizontally.
 - `--flip-y`: mirrors the output vertically.
+- `--no-drill`: skips NC drill layers.
 - `--no-fit`: disables fit-to-view.
 - `--skill`: prints [package usage notes](SKILL.md) for AI agents.
 - `-h, --help`: prints CLI usage and exits.
