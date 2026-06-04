@@ -509,7 +509,7 @@ function createRenderEntries(layers, globalAlpha, background) {
         layerId: layer.fillLayerId,
         color: drillColors.fill,
         alpha: resolveLayerAlpha(layer.alpha, 1),
-        blendMode: background == null ? 2 : 1,
+        blendMode: drillColors.hasBackground ? 1 : 2,
       });
     }
   }

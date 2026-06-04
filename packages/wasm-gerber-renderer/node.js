@@ -1205,7 +1205,7 @@ function createPlanRenderEntries(processor, plan) {
         layerId: fillLayerId,
         color: drillColors.fill,
         alpha,
-        blendMode: plan.background == null ? 2 : 1,
+        blendMode: drillColors.hasBackground ? 1 : 2,
       });
       continue;
     }

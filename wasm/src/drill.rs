@@ -67,6 +67,22 @@ enum Mode {
     Rout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RoutingInterpolation {
+    Linear,
+    ClockwiseArc,
+    CounterClockwiseArc,
+}
+
+impl RoutingInterpolation {
+    fn is_arc(self) -> bool {
+        matches!(
+            self,
+            RoutingInterpolation::ClockwiseArc | RoutingInterpolation::CounterClockwiseArc
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Tool {
     diameter_mm: f32,
@@ -329,7 +345,7 @@ impl DrillGeometry {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 struct CoordinateWords {
     x: Option<f32>,
     y: Option<f32>,
@@ -338,10 +354,22 @@ struct CoordinateWords {
     a: Option<f32>,
 }
 
+impl CoordinateWords {
+    fn has_xy(self) -> bool {
+        self.x.is_some() || self.y.is_some()
+    }
+
+    fn has_arc_definition(self) -> bool {
+        self.a.is_some() || self.i.is_some() || self.j.is_some()
+    }
+}
+
 struct DrillParser {
     unit: Unit,
     coordinate_format: CoordinateFormat,
     mode: Mode,
+    routing_interpolation: RoutingInterpolation,
+    modal_arc_words: CoordinateWords,
     is_absolute: bool,
     routing_down: bool,
     current_tool: Option<u32>,
@@ -365,6 +393,8 @@ impl DrillParser {
             unit: Unit::Metric,
             coordinate_format: CoordinateFormat::new(Unit::Metric),
             mode: Mode::Drill,
+            routing_interpolation: RoutingInterpolation::Linear,
+            modal_arc_words: CoordinateWords::default(),
             is_absolute: true,
             routing_down: false,
             current_tool: None,
@@ -449,6 +479,22 @@ impl DrillParser {
             self.is_absolute = false;
             return Ok(());
         }
+        if line == "ICI,ON" {
+            self.is_absolute = false;
+            return Ok(());
+        }
+        if line == "ICI,OFF" {
+            self.is_absolute = true;
+            return Ok(());
+        }
+        if line == "LZ" {
+            self.coordinate_format.zero_suppression = ZeroSuppression::Leading;
+            return Ok(());
+        }
+        if line == "TZ" {
+            self.coordinate_format.zero_suppression = ZeroSuppression::Trailing;
+            return Ok(());
+        }
         if line.starts_with("METRIC") {
             self.set_unit(Unit::Metric, line)?;
             return Ok(());
@@ -478,7 +524,9 @@ impl DrillParser {
             return Ok(());
         }
 
-        if let Some(code) = parse_tool_selection(line) {
+        if let Some(code) =
+            parse_tool_selection(line).map_err(|message| JsValue::from_str(&message))?
+        {
             if code == 0 {
                 self.current_tool = None;
                 return Ok(());
@@ -494,6 +542,7 @@ impl DrillParser {
 
         if g_code == Some(0) {
             self.mode = Mode::Rout;
+            self.routing_interpolation = RoutingInterpolation::Linear;
             if let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)? {
                 let (x, y) = self.resolve_xy(words.x, words.y);
                 self.current_x = x;
@@ -503,6 +552,7 @@ impl DrillParser {
         }
 
         if g_code == Some(1) {
+            self.routing_interpolation = RoutingInterpolation::Linear;
             let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
             else {
                 return Ok(());
@@ -517,17 +567,15 @@ impl DrillParser {
             return Ok(());
         }
 
-        if g_code == Some(85) {
-            let word_sets = parse_coordinate_word_sets(line, self.unit, self.coordinate_format)?;
-            if word_sets.is_empty() {
+        if g_code == Some(85) || line_has_g_code(line, 85) {
+            let Some((start_words, end_words)) =
+                parse_g85_words(line, self.unit, self.coordinate_format)?
+            else {
                 return Ok(());
-            }
-            let (start_x, start_y, end_words) = if word_sets.len() >= 2 {
-                let (start_x, start_y) = self.resolve_xy(word_sets[0].x, word_sets[0].y);
-                (start_x, start_y, &word_sets[1])
-            } else {
-                (self.current_x, self.current_y, &word_sets[0])
             };
+            let (start_x, start_y) = start_words
+                .map(|words| self.resolve_xy(words.x, words.y))
+                .unwrap_or((self.current_x, self.current_y));
             let (end_x, end_y) = if self.is_absolute {
                 (
                     end_words.x.unwrap_or(start_x),
@@ -546,13 +594,27 @@ impl DrillParser {
         }
 
         if matches!(g_code, Some(2) | Some(3)) {
+            self.routing_interpolation = if g_code == Some(3) {
+                RoutingInterpolation::CounterClockwiseArc
+            } else {
+                RoutingInterpolation::ClockwiseArc
+            };
             let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
             else {
                 return Ok(());
             };
+            self.update_modal_arc_words(words);
+            if !words.has_xy() {
+                return Ok(());
+            }
             let (end_x, end_y) = self.resolve_xy(words.x, words.y);
             if self.mode == Mode::Rout && self.routing_down {
-                self.push_arc(end_x, end_y, words, g_code == Some(3))?;
+                self.push_arc(
+                    end_x,
+                    end_y,
+                    self.words_with_modal_arc(words),
+                    self.routing_interpolation == RoutingInterpolation::CounterClockwiseArc,
+                )?;
             }
             self.current_x = end_x;
             self.current_y = end_y;
@@ -560,17 +622,83 @@ impl DrillParser {
         }
 
         if let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)? {
+            if !words.has_xy() && words.has_arc_definition() {
+                self.update_modal_arc_words(words);
+                return Ok(());
+            }
             let (x, y) = self.resolve_xy(words.x, words.y);
             if self.mode == Mode::Drill {
                 self.push_hit(x, y)?;
             } else if self.mode == Mode::Rout && self.routing_down {
-                self.push_slot(x, y)?;
+                if self.routing_interpolation.is_arc() && !words.has_xy() {
+                    self.update_modal_arc_words(words);
+                    return Ok(());
+                }
+                self.push_modal_rout(x, y, words)?;
             }
             self.current_x = x;
             self.current_y = y;
         }
 
         Ok(())
+    }
+
+    fn push_modal_rout(
+        &mut self,
+        end_x: f32,
+        end_y: f32,
+        words: CoordinateWords,
+    ) -> Result<(), JsValue> {
+        match self.routing_interpolation {
+            RoutingInterpolation::Linear => self.push_slot(end_x, end_y),
+            RoutingInterpolation::ClockwiseArc => {
+                self.update_modal_arc_words(words);
+                self.push_arc(end_x, end_y, self.words_with_modal_arc(words), false)
+            }
+            RoutingInterpolation::CounterClockwiseArc => {
+                self.update_modal_arc_words(words);
+                self.push_arc(end_x, end_y, self.words_with_modal_arc(words), true)
+            }
+        }
+    }
+
+    fn update_modal_arc_words(&mut self, words: CoordinateWords) {
+        if words.a.is_some() {
+            self.modal_arc_words.a = words.a;
+            self.modal_arc_words.i = None;
+            self.modal_arc_words.j = None;
+            return;
+        }
+        if words.i.is_some() || words.j.is_some() {
+            if words.i.is_some() {
+                self.modal_arc_words.i = words.i;
+            }
+            if words.j.is_some() {
+                self.modal_arc_words.j = words.j;
+            }
+            self.modal_arc_words.a = None;
+        }
+    }
+
+    fn words_with_modal_arc(&self, mut words: CoordinateWords) -> CoordinateWords {
+        if words.a.is_some() {
+            return words;
+        }
+        if words.i.is_some() || words.j.is_some() {
+            if words.i.is_none() {
+                words.i = self.modal_arc_words.i;
+            }
+            if words.j.is_none() {
+                words.j = self.modal_arc_words.j;
+            }
+            return words;
+        }
+        if !words.has_arc_definition() {
+            words.a = self.modal_arc_words.a;
+            words.i = self.modal_arc_words.i;
+            words.j = self.modal_arc_words.j;
+        }
+        words
     }
 
     fn resolve_xy(&self, x: Option<f32>, y: Option<f32>) -> (f32, f32) {
@@ -786,17 +914,48 @@ fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, 
     Ok(Some((code, diameter)))
 }
 
-fn parse_tool_selection(line: &str) -> Option<u32> {
+fn parse_tool_selection(line: &str) -> Result<Option<u32>, String> {
     let line = line.strip_prefix("G54").unwrap_or(line);
-    if !line.starts_with('T') || line.len() < 2 {
-        return None;
+    let Some(rest) = line.strip_prefix('T') else {
+        return Ok(None);
+    };
+    let digits_end = rest
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if digits_end == 0 {
+        return Err("Invalid drill tool selection".to_string());
     }
 
-    line[1..]
-        .chars()
-        .all(|ch| ch.is_ascii_digit())
-        .then(|| parse_tool_code(&line[1..]))
-        .flatten()
+    let code = parse_tool_code(&rest[..digits_end])
+        .ok_or_else(|| "Invalid drill tool selection".to_string())?;
+    parse_tool_selection_suffix(&rest[digits_end..])?;
+    Ok(Some(code))
+}
+
+fn parse_tool_selection_suffix(mut suffix: &str) -> Result<(), String> {
+    while !suffix.is_empty() {
+        let Some(word) = suffix.chars().next() else {
+            return Ok(());
+        };
+        if !matches!(word, 'F' | 'S') {
+            return Err(format!("Invalid drill tool selection suffix `{suffix}`"));
+        }
+        let value_start = word.len_utf8();
+        let Some(token) = read_number(&suffix[value_start..]) else {
+            return Err(format!("Invalid drill tool selection suffix `{suffix}`"));
+        };
+        let value = token
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid drill tool selection suffix `{suffix}`"))?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(format!("Invalid drill tool selection suffix `{suffix}`"));
+        }
+        suffix = &suffix[value_start + token.len()..];
+    }
+    Ok(())
 }
 
 fn parse_tool_code(token: &str) -> Option<u32> {
@@ -821,6 +980,38 @@ fn parse_g_code(line: &str) -> Option<u32> {
     }
 
     rest[..digits_end].parse::<u32>().ok()
+}
+
+fn line_has_g_code(line: &str, code: u32) -> bool {
+    line.char_indices()
+        .filter(|(_, ch)| *ch == 'G')
+        .any(|(index, _)| parse_g_code(&line[index..]) == Some(code))
+}
+
+fn parse_g85_words(
+    line: &str,
+    unit: Unit,
+    format: CoordinateFormat,
+) -> Result<Option<(Option<CoordinateWords>, CoordinateWords)>, JsValue> {
+    let Some(g85_index) = find_g_code_index(line, 85) else {
+        return Ok(None);
+    };
+    let start_words = parse_coordinate_words(&line[..g85_index], unit, format)?;
+    let suffix = &line[g85_index..];
+    let suffix_sets = parse_coordinate_word_sets(suffix, unit, format)?;
+    if suffix_sets.len() >= 2 && start_words.is_none() {
+        return Ok(Some((Some(suffix_sets[0]), suffix_sets[1])));
+    }
+    if let Some(end_words) = suffix_sets.into_iter().next() {
+        return Ok(Some((start_words, end_words)));
+    }
+    Ok(None)
+}
+
+fn find_g_code_index(line: &str, code: u32) -> Option<usize> {
+    line.char_indices()
+        .filter(|(_, ch)| *ch == 'G')
+        .find_map(|(index, _)| (parse_g_code(&line[index..]) == Some(code)).then_some(index))
 }
 
 fn parse_coordinate_words(
@@ -1255,6 +1446,63 @@ M30",
     }
 
     #[test]
+    fn parses_embedded_g85_start_and_end_coordinates() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+X1.0Y2.0G85X4.0Y2.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Embedded G85 slot endpoints should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 2);
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
+    }
+
+    #[test]
+    fn parses_embedded_g85_with_omitted_axes() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+Y2.0G85X4.0Y3.0
+Y5.0G85X6.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Embedded G85 omitted axes should parse from the G85 split point");
+
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 2);
+        assert_eq!(parsed.metadata.slot_count, 2);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 0.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_y[0], 3.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[1], 4.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_y[1], 5.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[1], 6.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_y[1], 5.0);
+    }
+
+    #[test]
     fn parses_short_g_rout_commands_as_slot() {
         let parsed = parse_drill_with_offset(
             "\
@@ -1305,6 +1553,39 @@ M30",
     }
 
     #[test]
+    fn accepts_tool_selection_with_feed_and_speed_words() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.6
+T02C1.2
+%
+T02F200S61
+X9.0Y3.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Tool selection with feed and speed words should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+        assert_eq!(parsed.metadata.hit_count, 1);
+        assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.6);
+    }
+
+    #[test]
+    fn rejects_malformed_tool_selection_suffixes() {
+        for selection in ["T02F", "T02Q1", "G54T02F", "T02F+", "T02S."] {
+            assert!(
+                super::parse_tool_selection(selection).is_err(),
+                "malformed tool selection `{selection}` should fail"
+            );
+        }
+    }
+
+    #[test]
     fn preserves_modal_rout_coordinate_moves() {
         let parsed = parse_drill_with_offset(
             "\
@@ -1333,6 +1614,151 @@ M30",
         assert_approx_eq(parsed.fill_layer.lines.end_x[0], 2.0);
         assert_approx_eq(parsed.fill_layer.lines.start_x[1], 2.0);
         assert_approx_eq(parsed.fill_layer.lines.end_x[1], 3.0);
+    }
+
+    #[test]
+    fn preserves_modal_arc_rout_coordinate_moves() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C1.0
+%
+T01
+G00X10.0Y0.0
+M15
+G03X0.0Y10.0I-10.0J0.0
+X-10.0Y0.0I0.0J-10.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Modal coordinate-only arc rout move should parse as an arc");
+
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
+        assert_eq!(parsed.fill_layer.arcs.x.len(), 2);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 2);
+        assert_approx_eq(parsed.fill_layer.arcs.x[1], 0.0);
+        assert_approx_eq(parsed.fill_layer.arcs.y[1], 0.0);
+    }
+
+    #[test]
+    fn preserves_modal_arc_definition_for_coordinate_only_rout() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C1.0
+%
+T01
+G00X10.0Y0.0
+M15
+G03I-10.0J0.0
+X0.0Y10.0
+X-10.0Y0.0I0.0J-10.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Modal arc definition should apply to coordinate-only rout moves");
+
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
+        assert_eq!(parsed.fill_layer.arcs.x.len(), 2);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 2);
+        assert_approx_eq(parsed.fill_layer.arcs.x[0], 0.0);
+        assert_approx_eq(parsed.fill_layer.arcs.y[0], 0.0);
+        assert_approx_eq(parsed.fill_layer.arcs.x[1], 0.0);
+        assert_approx_eq(parsed.fill_layer.arcs.y[1], 0.0);
+    }
+
+    #[test]
+    fn updates_modal_arc_definition_without_endpoint() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C1.0
+%
+T01
+G00X10.0Y0.0
+M15
+G03I-10.0J0.0
+I-10.0J0.0
+X0.0Y10.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Arc definition-only rout records should update modal state");
+
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
+        assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.arcs.x[0], 0.0);
+        assert_approx_eq(parsed.fill_layer.arcs.y[0], 0.0);
+    }
+
+    #[test]
+    fn stores_arc_definition_before_arc_interpolation() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C1.0
+%
+T01
+G00X0.0Y0.0
+M15
+A1.0
+G03X1.0Y1.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Arc definition-only records should be modal before G03");
+
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
+        assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.arcs.radius[0], 1.0);
+    }
+
+    #[test]
+    fn merges_partial_modal_arc_center_offsets() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C1.0
+%
+T01
+G00X0.0Y10.0
+M15
+G03I0.0J-10.0
+X-10.0Y0.0I0.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Partial modal I/J updates should retain the omitted companion word");
+
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
+        assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.arcs.x[0], 0.0);
+        assert_approx_eq(parsed.fill_layer.arcs.y[0], 0.0);
     }
 
     #[test]
@@ -1392,6 +1818,36 @@ M30",
     }
 
     #[test]
+    fn honors_ici_incremental_coordinate_mode() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+ICI,ON
+T01C0.6
+%
+T01
+X10.0Y10.0
+X1.0Y0.0
+ICI,OFF
+X1.0Y0.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("ICI incremental coordinate mode should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 3);
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[1], 11.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[1], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[2], 1.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[2], 0.0);
+    }
+
+    #[test]
     fn treats_t00_as_tool_unload() {
         let parsed = parse_drill_with_offset(
             "\
@@ -1432,6 +1888,33 @@ M30",
 
         assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
         assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+    }
+
+    #[test]
+    fn honors_standalone_zero_suppression_commands() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+TZ
+T01C0.6
+%
+T01
+X009Y010
+LZ
+X011Y012
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Standalone zero-suppression commands should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 2);
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[1], 0.011);
+        assert_approx_eq(parsed.fill_layer.circles.y[1], 0.012);
     }
 
     #[test]
