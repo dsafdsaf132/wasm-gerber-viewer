@@ -248,7 +248,7 @@ export class ScreenshotExporter {
     let screenshotRenderer = null;
 
     try {
-      screenshotRenderer = this.createRenderer(renderState);
+      screenshotRenderer = this.createRenderer(renderState, includeBackground);
       let blob = null;
 
       if (shouldStream) {
@@ -341,7 +341,7 @@ export class ScreenshotExporter {
     });
   }
 
-  createRenderer(renderState) {
+  createRenderer(renderState, includeBackground) {
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
     if (!gl) {
@@ -454,7 +454,7 @@ export class ScreenshotExporter {
       if (Number.isFinite(layer.fillLayerId)) {
         activeLayerIds.push(layer.fillLayerId);
         colorData.push(drillFillColor[0], drillFillColor[1], drillFillColor[2], drillAlpha);
-        blendModes.push(1);
+        blendModes.push(includeBackground ? 1 : 2);
       }
     }
 

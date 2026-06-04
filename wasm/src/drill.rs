@@ -271,7 +271,7 @@ impl DrillGeometry {
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 struct CoordinateWords {
     x: Option<f32>,
     y: Option<f32>,
@@ -367,7 +367,9 @@ impl DrillParser {
             return Ok(());
         }
 
-        if line == "G05" {
+        let g_code = parse_g_code(line);
+
+        if g_code == Some(5) {
             self.mode = Mode::Drill;
             self.routing_down = false;
             return Ok(());
@@ -431,7 +433,7 @@ impl DrillParser {
             return Ok(());
         }
 
-        if line.starts_with("G00") {
+        if g_code == Some(0) {
             self.mode = Mode::Rout;
             if let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)? {
                 let (x, y) = self.resolve_xy(words.x, words.y);
@@ -441,7 +443,7 @@ impl DrillParser {
             return Ok(());
         }
 
-        if line.starts_with("G01") {
+        if g_code == Some(1) {
             let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
             else {
                 return Ok(());
@@ -455,26 +457,42 @@ impl DrillParser {
             return Ok(());
         }
 
-        if line.starts_with("G85") {
-            let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
-            else {
+        if g_code == Some(85) {
+            let word_sets = parse_coordinate_word_sets(line, self.unit, self.coordinate_format)?;
+            if word_sets.is_empty() {
                 return Ok(());
+            }
+            let (start_x, start_y, end_words) = if word_sets.len() >= 2 {
+                let (start_x, start_y) = self.resolve_xy(word_sets[0].x, word_sets[0].y);
+                (start_x, start_y, &word_sets[1])
+            } else {
+                (self.current_x, self.current_y, &word_sets[0])
             };
-            let (end_x, end_y) = self.resolve_xy(words.x, words.y);
-            self.push_slot(end_x, end_y)?;
+            let (end_x, end_y) = if self.is_absolute {
+                (
+                    end_words.x.unwrap_or(start_x),
+                    end_words.y.unwrap_or(start_y),
+                )
+            } else {
+                (
+                    start_x + end_words.x.unwrap_or(0.0),
+                    start_y + end_words.y.unwrap_or(0.0),
+                )
+            };
+            self.push_slot_between(start_x, start_y, end_x, end_y)?;
             self.current_x = end_x;
             self.current_y = end_y;
             return Ok(());
         }
 
-        if line.starts_with("G02") || line.starts_with("G03") {
+        if matches!(g_code, Some(2) | Some(3)) {
             let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
             else {
                 return Ok(());
             };
             let (end_x, end_y) = self.resolve_xy(words.x, words.y);
             if self.mode == Mode::Rout && self.routing_down {
-                self.push_arc(end_x, end_y, words, line.starts_with("G03"))?;
+                self.push_arc(end_x, end_y, words, g_code == Some(3))?;
             }
             self.current_x = end_x;
             self.current_y = end_y;
@@ -562,6 +580,16 @@ impl DrillParser {
     }
 
     fn push_slot(&mut self, end_x: f32, end_y: f32) -> Result<(), JsValue> {
+        self.push_slot_between(self.current_x, self.current_y, end_x, end_y)
+    }
+
+    fn push_slot_between(
+        &mut self,
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+    ) -> Result<(), JsValue> {
         let (code, diameter_mm) = self.selected_tool()?;
         if diameter_mm <= 0.0 || !diameter_mm.is_finite() {
             return Err(JsValue::from_str(&format!(
@@ -569,8 +597,8 @@ impl DrillParser {
             )));
         }
 
-        let start_x = self.current_x + self.offset_x;
-        let start_y = self.current_y + self.offset_y;
+        let start_x = start_x + self.offset_x;
+        let start_y = start_y + self.offset_y;
         let end_x = end_x + self.offset_x;
         let end_y = end_y + self.offset_y;
         self.outline.push_line(
@@ -711,6 +739,21 @@ fn parse_tool_code(token: &str) -> Option<u32> {
     }
 }
 
+fn parse_g_code(line: &str) -> Option<u32> {
+    let rest = line.strip_prefix('G')?;
+    let digits_end = rest
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if digits_end == 0 {
+        return None;
+    }
+
+    rest[..digits_end].parse::<u32>().ok()
+}
+
 fn parse_coordinate_words(
     line: &str,
     unit: Unit,
@@ -725,6 +768,62 @@ fn parse_coordinate_words(
         (x.is_some() || y.is_some() || i.is_some() || j.is_some() || a.is_some())
             .then_some(CoordinateWords { x, y, i, j, a }),
     )
+}
+
+fn parse_coordinate_word_sets(
+    line: &str,
+    unit: Unit,
+    format: CoordinateFormat,
+) -> Result<Vec<CoordinateWords>, JsValue> {
+    let mut words = Vec::new();
+    let mut current = CoordinateWords::default();
+    let mut has_current = false;
+    let mut index = 0;
+
+    while index < line.len() {
+        let Some((relative_index, word)) = line[index..]
+            .char_indices()
+            .find(|(_, ch)| matches!(ch, 'X' | 'Y' | 'I' | 'J' | 'A'))
+        else {
+            break;
+        };
+        index += relative_index;
+
+        let starts_new_set = matches!(
+            (word, current.x, current.y, current.i, current.j, current.a),
+            ('X', Some(_), _, _, _, _)
+                | ('Y', _, Some(_), _, _, _)
+                | ('I', _, _, Some(_), _, _)
+                | ('J', _, _, _, Some(_), _)
+                | ('A', _, _, _, _, Some(_))
+        );
+        if starts_new_set && has_current {
+            words.push(current);
+            current = CoordinateWords::default();
+        }
+
+        let value_start = index + word.len_utf8();
+        let token = read_number(&line[value_start..]).ok_or_else(|| {
+            JsValue::from_str(&format!("Invalid drill coordinate word {word} in `{line}`"))
+        })?;
+        let value = parse_coordinate_number(token, unit, format)?;
+        match word {
+            'X' => current.x = Some(value),
+            'Y' => current.y = Some(value),
+            'I' => current.i = Some(value),
+            'J' => current.j = Some(value),
+            'A' => current.a = Some(value),
+            _ => {}
+        }
+        has_current = true;
+        index = value_start + token.len();
+    }
+
+    if has_current {
+        words.push(current);
+    }
+
+    Ok(words)
 }
 
 fn parse_word_value(
@@ -1041,6 +1140,61 @@ M30",
         assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
         assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
         assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);
+    }
+
+    #[test]
+    fn parses_inline_g85_start_and_end_coordinates() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+G85X1.0Y2.0X4.0Y2.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Inline G85 slot endpoints should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 0);
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
+    }
+
+    #[test]
+    fn parses_short_g_rout_commands_as_slot() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+G0X8.01Y3.825
+M15
+G1X6.54Y3.825
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Short Excellon rout commands should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 0);
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 8.01);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 6.54);
     }
 
     #[test]
