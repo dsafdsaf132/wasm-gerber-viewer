@@ -51,6 +51,7 @@ const RGBA_BYTES_PER_PIXEL = 4;
 const DEFAULT_MAX_STREAM_BAND_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_FULL_FRAME_BYTES = 512 * 1024 * 1024;
 const DEFAULT_MAX_RENDER_TARGET_BYTES = 2 * 1024 * 1024 * 1024;
+const MIN_STREAM_TILE_WIDTH = 1;
 const DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR = 2;
 const MIN_RENDER_TARGET_BYTES = 64 * 1024 * 1024;
 const MEMORY_PROBE_TIMEOUT_MS = 750;
@@ -720,7 +721,6 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     height,
     getFullFrameRenderTargetCount(layerCount),
   );
-
   if (plan.layers.length === 0 || !plan.view) {
     const blankTileHeight = getBlankStreamTileHeight(
       width,
@@ -782,84 +782,227 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     PROBE_RENDER_TARGET_SIZE,
   );
   const maxDimension = getMaxRenderDimension(gl);
-  if (width > maxDimension) {
-    throw new Error(
-      `PNG export width ${width}px exceeds this renderer's ${maxDimension}px render limit.`,
-    );
-  }
-
-  const tileHeight = getStreamTileHeight(
-    width,
-    height,
-    maxBandBytes,
-    maxRenderTargetBytes,
-    maxDimension,
-    layerCount,
-    pngChannels,
-  );
+  const tileWidth = getStreamTileWidth(width, maxDimension);
   if (!renderer.rendererOptions.gl) {
     renderer.releaseContext();
   }
-  const renderGl = renderer.rendererOptions.gl
-    ? gl
-    : renderer.createExportContext(width, tileHeight);
   const rowStride = getPngRowStride(width, pngChannels);
 
   await writePngDocument(sink, width, height, pngColorType, async (writeRow) => {
-    const renderContext = createProcessorForPlan(
+    let streamState = createStreamRenderStateWithFallback(
       renderer,
       plan,
-      renderGl,
+      tileWidth,
       width,
-      tileHeight,
+      height,
+      maxBandBytes,
+      maxRenderTargetBytes,
+      maxDimension,
+      layerCount,
+      pngChannels,
     );
-    const tilePixels = new Uint8Array(width * tileHeight * 4);
+    const bandRowBytes = width * 4;
     try {
-      for (let tileY = 0; tileY < height; tileY += tileHeight) {
-        const currentTileHeight = Math.min(tileHeight, height - tileY);
-        const renderTileY =
-          currentTileHeight === tileHeight ? tileY : Math.max(0, height - tileHeight);
-        const sourceRowOffset = tileY - renderTileY;
-        const readY = tileHeight - sourceRowOffset - currentTileHeight;
-        renderContext.processor.render_tile(
-          renderContext.activeLayerIds,
-          renderContext.colorData,
-          width,
-          height,
-          0,
-          renderTileY,
-          width,
-          tileHeight,
-          plan.view.zoomX,
-          plan.view.zoomY,
-          plan.view.offsetX,
-          plan.view.offsetY,
-          1,
-        );
-        renderGl.finish?.();
-        renderGl.readPixels(
-          0,
-          readY,
-          width,
-          currentTileHeight,
-          renderGl.RGBA,
-          renderGl.UNSIGNED_BYTE,
-          tilePixels,
-        );
+      let tileY = 0;
+      while (tileY < height) {
+        let currentTileHeight = 0;
+        for (;;) {
+          try {
+            currentTileHeight = renderStreamBand(
+              streamState,
+              width,
+              height,
+              tileY,
+              plan.view,
+              bandRowBytes,
+            );
+            break;
+          } catch (error) {
+            if (!canReduceStreamTileWidth(streamState.tileWidth)) {
+              throw error;
+            }
+            const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
+            disposeStreamRenderState(renderer, streamState, true);
+            streamState = null;
+            streamState = createStreamRenderStateWithFallback(
+              renderer,
+              plan,
+              nextTileWidth,
+              width,
+              height,
+              maxBandBytes,
+              maxRenderTargetBytes,
+              maxDimension,
+              layerCount,
+              pngChannels,
+            );
+          }
+        }
+
         await writePixelRowsToPngRows(
           writeRow,
-          tilePixels,
+          streamState.bandPixels.subarray(0, bandRowBytes * currentTileHeight),
           width,
           currentTileHeight,
           rowStride,
           background,
           pngChannels,
         );
+        tileY += currentTileHeight;
       }
     } finally {
-      disposeProcessor(renderContext.processor);
+      disposeStreamRenderState(renderer, streamState, false);
     }
   });
+}
+
+function createStreamRenderStateWithFallback(
+  renderer,
+  plan,
+  tileWidth,
+  width,
+  height,
+  maxBandBytes,
+  maxRenderTargetBytes,
+  maxDimension,
+  layerCount,
+  pngChannels,
+) {
+  let nextTileWidth = tileWidth;
+  for (;;) {
+    try {
+      return createStreamRenderState(
+        renderer,
+        plan,
+        nextTileWidth,
+        width,
+        height,
+        maxBandBytes,
+        maxRenderTargetBytes,
+        maxDimension,
+        layerCount,
+        pngChannels,
+      );
+    } catch (error) {
+      if (!canReduceStreamTileWidth(nextTileWidth)) {
+        throw error;
+      }
+      nextTileWidth = reduceStreamTileWidth(nextTileWidth);
+    }
+  }
+}
+
+function createStreamRenderState(
+  renderer,
+  plan,
+  tileWidth,
+  width,
+  height,
+  maxBandBytes,
+  maxRenderTargetBytes,
+  maxDimension,
+  layerCount,
+  pngChannels,
+) {
+  const tileHeight = getStreamTileHeight(
+    width,
+    height,
+    tileWidth,
+    maxBandBytes,
+    maxRenderTargetBytes,
+    maxDimension,
+    layerCount,
+    pngChannels,
+  );
+  const renderGl = renderer.createExportContext(tileWidth, tileHeight);
+  let renderContext = null;
+  try {
+    renderContext = createProcessorForPlan(
+      renderer,
+      plan,
+      renderGl,
+      tileWidth,
+      tileHeight,
+    );
+    return {
+      tileWidth,
+      tileHeight,
+      renderGl,
+      renderContext,
+      tilePixels: new Uint8Array(tileWidth * tileHeight * 4),
+      bandPixels: new Uint8Array(width * tileHeight * 4),
+    };
+  } catch (error) {
+    if (renderContext) {
+      disposeProcessor(renderContext.processor);
+    }
+    if (!renderer.rendererOptions.gl) {
+      renderer.releaseContext();
+    }
+    throw error;
+  }
+}
+
+function renderStreamBand(state, width, height, tileY, view, bandRowBytes) {
+  const currentTileHeight = Math.min(state.tileHeight, height - tileY);
+  const renderTileY =
+    currentTileHeight === state.tileHeight ? tileY : Math.max(0, height - state.tileHeight);
+  const sourceRowOffset = tileY - renderTileY;
+  const readY = state.tileHeight - sourceRowOffset - currentTileHeight;
+  state.bandPixels.fill(0, 0, bandRowBytes * currentTileHeight);
+
+  for (let tileX = 0; tileX < width; tileX += state.tileWidth) {
+    const currentTileWidth = Math.min(state.tileWidth, width - tileX);
+    const renderTileX =
+      currentTileWidth === state.tileWidth ? tileX : Math.max(0, width - state.tileWidth);
+    const readX = tileX - renderTileX;
+    state.renderContext.processor.render_tile(
+      state.renderContext.activeLayerIds,
+      state.renderContext.colorData,
+      width,
+      height,
+      renderTileX,
+      renderTileY,
+      state.tileWidth,
+      state.tileHeight,
+      view.zoomX,
+      view.zoomY,
+      view.offsetX,
+      view.offsetY,
+      1,
+    );
+    state.renderGl.finish?.();
+    state.renderGl.readPixels(
+      readX,
+      readY,
+      currentTileWidth,
+      currentTileHeight,
+      state.renderGl.RGBA,
+      state.renderGl.UNSIGNED_BYTE,
+      state.tilePixels,
+    );
+
+    const tileRowBytes = currentTileWidth * 4;
+    for (let row = 0; row < currentTileHeight; row += 1) {
+      const sourceStart = row * tileRowBytes;
+      const sourceEnd = sourceStart + tileRowBytes;
+      const destStart = row * bandRowBytes + tileX * 4;
+      state.bandPixels.set(
+        state.tilePixels.subarray(sourceStart, sourceEnd),
+        destStart,
+      );
+    }
+  }
+
+  return currentTileHeight;
+}
+
+function disposeStreamRenderState(renderer, state, releaseContext) {
+  if (!state) return;
+  disposeProcessor(state.renderContext.processor);
+  if (releaseContext && !renderer.rendererOptions.gl) {
+    renderer.releaseContext();
+  }
 }
 
 async function renderPlanToFullFramePngSink(
@@ -1347,9 +1490,29 @@ function assertRenderTargetBudget(estimatedBytes, maxRenderTargetBytes, width, h
   );
 }
 
+function getStreamTileWidth(width, maxDimension = Number.POSITIVE_INFINITY) {
+  const tileWidth = Math.min(width, maxDimension);
+  if (!Number.isFinite(tileWidth) || tileWidth < 1) {
+    throw new Error("PNG export tile width is outside this renderer's limits.");
+  }
+  return Math.max(1, Math.floor(tileWidth));
+}
+
+function canReduceStreamTileWidth(tileWidth) {
+  return Number.isFinite(tileWidth) && tileWidth > MIN_STREAM_TILE_WIDTH;
+}
+
+function reduceStreamTileWidth(tileWidth) {
+  if (!canReduceStreamTileWidth(tileWidth)) {
+    return tileWidth;
+  }
+  return Math.max(MIN_STREAM_TILE_WIDTH, Math.floor(tileWidth / 2));
+}
+
 function getStreamTileHeight(
   width,
   height,
+  tileWidth,
   maxBandBytes,
   maxRenderTargetBytes,
   maxDimension = Number.POSITIVE_INFINITY,
@@ -1360,7 +1523,7 @@ function getStreamTileHeight(
   const byBandBytes = Math.floor(maxBandBytes / rowStride);
   const targetCount = getStreamRenderTargetCount(layerCount);
   const byRenderTargetBytes = Math.floor(
-    maxRenderTargetBytes / (width * RGBA_BYTES_PER_PIXEL * targetCount),
+    maxRenderTargetBytes / (tileWidth * RGBA_BYTES_PER_PIXEL * targetCount),
   );
   const tileHeight = Math.min(height, maxDimension, byBandBytes, byRenderTargetBytes);
   if (!Number.isFinite(tileHeight) || tileHeight < 1) {

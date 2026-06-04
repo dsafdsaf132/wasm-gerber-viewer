@@ -574,8 +574,14 @@ export class ScreenshotExporter {
   }
 
   getStreamTileDimensions(exportWidth, exportHeight, layerCount = 1) {
+    const rect = this.canvas.getBoundingClientRect();
     const maxDimension = this.getMaxDimension();
-    const tileWidth = Math.max(1, Math.min(exportWidth, maxDimension));
+    const preferredTileWidth = Math.max(1, Math.round(rect.width * 2));
+    const preferredTileHeight = Math.max(1, Math.round(rect.height));
+    const tileWidth = Math.max(
+      1,
+      Math.min(exportWidth, maxDimension, preferredTileWidth),
+    );
 
     const layerTargetCount = Math.max(1, Math.floor(Number(layerCount) || 1)) + 1;
     const rowStride = this.getPngRowStride(exportWidth);
@@ -588,6 +594,7 @@ export class ScreenshotExporter {
     const tileHeight = Math.min(
       exportHeight,
       maxDimension,
+      preferredTileHeight,
       heightByBandMemory,
       heightByRenderTargets,
     );
