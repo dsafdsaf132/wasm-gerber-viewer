@@ -722,6 +722,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
   const width = positiveIntegerOrDefault(plan.width, DEFAULT_WIDTH);
   const height = positiveIntegerOrDefault(plan.height, DEFAULT_HEIGHT);
   const strategy = normalizeExportStrategy(exportOptions.strategy || plan.strategy);
+  const renderPlan = { ...plan, background: exportOptions.background };
   const background =
     exportOptions.background == null
       ? null
@@ -744,7 +745,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     exportOptions.framebufferMemorySafetyFactor,
     plan.framebufferMemorySafetyFactor || DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR,
   );
-  const layerCount = Math.max(1, getRenderLayerCount(plan.layers));
+  const layerCount = Math.max(1, getRenderLayerCount(renderPlan.layers));
   const fullFrameEstimate = estimateFullFrameBytes(
     width,
     height,
@@ -755,7 +756,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     height,
     getFullFrameRenderTargetCount(layerCount),
   );
-  if (plan.layers.length === 0 || !plan.view) {
+  if (renderPlan.layers.length === 0 || !renderPlan.view) {
     const blankTileHeight = getBlankStreamTileHeight(
       width,
       height,
@@ -790,7 +791,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     try {
       await renderPlanToFullFramePngSink(
         renderer,
-        plan,
+        renderPlan,
         sink,
         width,
         height,
@@ -825,7 +826,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
   await writePngDocument(sink, width, height, pngColorType, async (writeRow) => {
     let streamState = createStreamRenderStateWithFallback(
       renderer,
-      plan,
+      renderPlan,
       tileWidth,
       width,
       height,
@@ -1204,7 +1205,7 @@ function createPlanRenderEntries(processor, plan) {
         layerId: fillLayerId,
         color: drillColors.fill,
         alpha,
-        blendMode: 1,
+        blendMode: plan.background == null ? 2 : 1,
       });
       continue;
     }

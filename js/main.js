@@ -1289,14 +1289,9 @@ export class GerberViewer {
   }
 
   async rebuildLayersForParserOptions() {
-    const layerSnapshot = this.layers.map((layer) => ({
-      id: layer.id,
-      name: layer.name,
-      visible: layer.visible,
-      color: layer.color ? [...layer.color] : null,
-      sourceContent: layer.sourceContent,
-      offset: { ...normalizeLayerOffset(layer.offset) },
-    }));
+    const layerSnapshot = this.layers.map((layer) =>
+      this.createLayerRecoverySnapshot(layer),
+    );
 
     if (
       layerSnapshot.some((layer) => typeof layer.sourceContent !== "string")

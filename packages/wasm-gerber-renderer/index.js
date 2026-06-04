@@ -63,20 +63,26 @@ export async function renderGerberToPng(
   frameOptions = {},
   exportOptions = {},
 ) {
+  const renderFrameOptions = {
+    ...frameOptions,
+    ...("background" in exportOptions
+      ? { background: exportOptions.background }
+      : {}),
+  };
   const renderer = await createGerberRenderer(
     canvas,
     {
       releaseContext: false,
-      ...(frameOptions.rendererOptions || {}),
+      ...(renderFrameOptions.rendererOptions || {}),
     },
   );
 
   try {
-    await renderer.withFrame(frameOptions, async () => {
-      await renderer.renderLayers(layers, frameOptions);
+    await renderer.withFrame(renderFrameOptions, async () => {
+      await renderer.renderLayers(layers, renderFrameOptions);
     });
     return await renderer.exportPng({
-      background: frameOptions.background,
+      background: renderFrameOptions.background,
       ...exportOptions,
     });
   } finally {
@@ -91,20 +97,26 @@ export async function renderGerberToPngStream(
   frameOptions = {},
   exportOptions = {},
 ) {
+  const renderFrameOptions = {
+    ...frameOptions,
+    ...("background" in exportOptions
+      ? { background: exportOptions.background }
+      : {}),
+  };
   const renderer = await createGerberRenderer(
     canvas,
     {
       releaseContext: false,
-      ...(frameOptions.rendererOptions || {}),
+      ...(renderFrameOptions.rendererOptions || {}),
     },
   );
 
   try {
-    await renderer.withFrame(frameOptions, async () => {
-      await renderer.renderLayers(layers, frameOptions);
+    await renderer.withFrame(renderFrameOptions, async () => {
+      await renderer.renderLayers(layers, renderFrameOptions);
     });
     await renderer.exportPngStream(writable, {
-      background: frameOptions.background,
+      background: renderFrameOptions.background,
       ...exportOptions,
     });
   } finally {
@@ -497,7 +509,7 @@ function createRenderEntries(layers, globalAlpha, background) {
         layerId: layer.fillLayerId,
         color: drillColors.fill,
         alpha: resolveLayerAlpha(layer.alpha, 1),
-        blendMode: 1,
+        blendMode: background == null ? 2 : 1,
       });
     }
   }

@@ -19,7 +19,7 @@ export const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
 export const LAYER_KIND_GERBER = "gerber";
 export const LAYER_KIND_DRILL = "drill";
 
-const DRILL_FILE_EXTENSIONS = new Set([".drl", ".nc", ".xnc", ".xln"]);
+const DRILL_FILE_EXTENSIONS = new Set([".drd", ".drl", ".nc", ".xnc", ".xln"]);
 
 export class FrameState {
   constructor(options, extra = {}) {

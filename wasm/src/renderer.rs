@@ -2257,8 +2257,8 @@ impl Renderer {
                 blend_modes.len()
             )));
         }
-        if blend_modes.iter().any(|&mode| mode > 1) {
-            return Err(JsValue::from_str("Blend mode must be 0 or 1"));
+        if blend_modes.iter().any(|&mode| mode > 2) {
+            return Err(JsValue::from_str("Blend mode must be 0, 1, or 2"));
         }
         Ok(())
     }
@@ -4110,15 +4110,24 @@ impl Renderer {
                         color_data[color_offset + 2],
                         layer_alpha,
                     ];
-                    if Self::blend_mode_at(blend_modes, color_index) == 1 {
-                        self.gl.blend_func_separate(
-                            ONE,
-                            ONE_MINUS_SRC_ALPHA,
-                            ONE,
-                            ONE_MINUS_SRC_ALPHA,
-                        );
-                    } else {
-                        self.gl.blend_func(ONE, ONE);
+                    match Self::blend_mode_at(blend_modes, color_index) {
+                        1 => {
+                            self.gl.blend_func_separate(
+                                ONE,
+                                ONE_MINUS_SRC_ALPHA,
+                                ONE,
+                                ONE_MINUS_SRC_ALPHA,
+                            );
+                        }
+                        2 => {
+                            self.gl.blend_func_separate(
+                                ZERO,
+                                ONE_MINUS_SRC_ALPHA,
+                                ZERO,
+                                ONE_MINUS_SRC_ALPHA,
+                            );
+                        }
+                        _ => self.gl.blend_func(ONE, ONE),
                     }
                     self.draw_fbo_texture(&layer.fbo.texture, &color)?;
                 }

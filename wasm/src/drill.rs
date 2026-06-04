@@ -455,6 +455,18 @@ impl DrillParser {
             return Ok(());
         }
 
+        if line.starts_with("G85") {
+            let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
+            else {
+                return Ok(());
+            };
+            let (end_x, end_y) = self.resolve_xy(words.x, words.y);
+            self.push_slot(end_x, end_y)?;
+            self.current_x = end_x;
+            self.current_y = end_y;
+            return Ok(());
+        }
+
         if line.starts_with("G02") || line.starts_with("G03") {
             let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)?
             else {
@@ -1000,6 +1012,35 @@ M30",
         assert_eq!(parsed.metadata.slot_count, 1);
         assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);
         assert_approx_eq(parsed.outline_layer.lines.width[0], 0.9);
+    }
+
+    #[test]
+    fn parses_g85_as_slot_from_current_position() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+X1.0Y2.0
+G85X4.0Y2.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("G85 slot command should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+        assert_eq!(parsed.metadata.hit_count, 1);
+        assert_eq!(parsed.metadata.slot_count, 1);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);
     }
 
     #[test]
