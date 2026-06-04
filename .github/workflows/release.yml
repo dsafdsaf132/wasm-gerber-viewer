@@ -158,8 +158,12 @@ jobs:
             exit 1
           fi
 
-          echo "path=${artifact_dir}/${tarball}" >> "$GITHUB_OUTPUT"
-          echo "name=${tarball}" >> "$GITHUB_OUTPUT"
+          artifact_name="wasm-gerber-renderer-${{ steps.release.outputs.tag }}.tar.gz"
+          artifact_path="${artifact_dir}/${artifact_name}"
+          cp "${artifact_dir}/${tarball}" "$artifact_path"
+
+          echo "path=${artifact_path}" >> "$GITHUB_OUTPUT"
+          echo "name=${artifact_name}" >> "$GITHUB_OUTPUT"
 
       - name: Pack prebuilt WASM artifact
         id: wasm-artifact
