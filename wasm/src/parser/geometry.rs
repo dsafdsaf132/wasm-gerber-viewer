@@ -1,3 +1,7 @@
+use crate::parse_common::{
+    parse_g_code, parse_omitted_decimal_number, read_word_value,
+    CoordinateFormat as CommonCoordinateFormat, ZeroSuppression,
+};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer, ZeroOmission};
 use crate::shape::PathRegions;
 use crate::util::{format_bytes, format_count};
@@ -942,33 +946,7 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
 
 /// Extracts the numeric value after a specific character in a string (e.g., "X1000" → "1000")
 pub fn extract_value(line: &str, key: char) -> Option<String> {
-    let key_str = key.to_string();
-    if let Some(pos) = line.find(&key_str) {
-        let rest = &line[pos + 1..];
-        let mut value = String::new();
-        let mut has_minus = false;
-
-        for ch in rest.chars() {
-            if ch == '-' || ch == '+' {
-                has_minus = ch == '-';
-            } else if ch.is_ascii_digit() {
-                if has_minus && value.is_empty() {
-                    value.push('-');
-                }
-                value.push(ch);
-            } else {
-                break;
-            }
-        }
-
-        if value.is_empty() {
-            None
-        } else {
-            Some(value)
-        }
-    } else {
-        None
-    }
+    read_word_value(line, key, false).map(ToString::to_string)
 }
 
 /// Coordinate value conversion - decimal point processing according to format spec
@@ -978,53 +956,28 @@ pub fn convert_coordinate(
     format_spec: &FormatSpec,
     unit_multiplier: f32,
 ) -> f32 {
-    let normalized_coord;
-    let coord_str = if format_spec.zero_omission == ZeroOmission::Trailing {
-        let (sign, digits) = match coord_str.as_bytes().first().copied() {
-            Some(b'-') | Some(b'+') => coord_str.split_at(1),
-            _ => ("", coord_str),
-        };
-        let total_digits = match axis {
-            'x' => format_spec.x_total_digits,
-            'y' => format_spec.y_total_digits,
-            _ => 0,
-        }
-        .max(0) as usize;
-
-        if digits.len() < total_digits {
-            normalized_coord = format!("{sign}{digits:0<total_digits$}");
-            normalized_coord.as_str()
-        } else {
-            coord_str
-        }
-    } else {
-        coord_str
+    let (integer_digits, decimal_digits) = match axis {
+        'x' => (format_spec.x_integer_digits, format_spec.x_decimal_digits),
+        'y' => (format_spec.y_integer_digits, format_spec.y_decimal_digits),
+        _ => (0, 4),
     };
+    let zero_suppression = match format_spec.zero_omission {
+        ZeroOmission::Leading => ZeroSuppression::Leading,
+        ZeroOmission::Trailing => ZeroSuppression::Trailing,
+    };
+    let result = parse_omitted_decimal_number(
+        coord_str,
+        CommonCoordinateFormat {
+            integer_digits,
+            decimal_digits,
+            zero_suppression,
+        },
+        "Gerber coordinate",
+    )
+    .map(|value| value * unit_multiplier)
+    .unwrap_or(0.0);
 
-    if let Ok(val) = coord_str.parse::<i64>() {
-        let divisor = match axis {
-            'x' => format_spec.x_divisor,
-            'y' => format_spec.y_divisor,
-            _ => 10000.0,
-        };
-
-        // Check for division by zero
-        if divisor == 0.0 || !divisor.is_finite() {
-            return 0.0;
-        }
-
-        // Divide by decimal point position (no padding) and then convert units (1.0 for mm, 25.4 for inch)
-        let result = (val as f64 / divisor) as f32 * unit_multiplier;
-
-        // Check for numeric overflow
-        if !result.is_finite() {
-            return 0.0;
-        }
-
-        result
-    } else {
-        0.0
-    }
+    result.is_finite().then_some(result).unwrap_or(0.0)
 }
 
 /// Flash aperture at given position without Step and Repeat
@@ -2160,8 +2113,8 @@ pub fn parse_graphic_command(
     let clean_line = line.trim_end_matches('*');
 
     // Process G-code
-    if let Some(g_match) = extract_value(clean_line, 'G') {
-        if let Ok(g_code) = g_match.parse::<u32>() {
+    if let Some(g_index) = clean_line.find('G') {
+        if let Some(g_code) = parse_g_code(&clean_line[g_index..]) {
             match g_code {
                 1 => {
                     // G01: Linear interpolation (1x scale)

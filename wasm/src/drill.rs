@@ -1,3 +1,8 @@
+use crate::parse_common::{
+    find_g_code_index, line_has_g_code, parse_coordinate_number as parse_common_coordinate_number,
+    parse_decimal_number as parse_common_decimal_number, parse_g_code, read_number,
+    CoordinateFormat as CommonCoordinateFormat, ZeroSuppression,
+};
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -38,12 +43,6 @@ impl Unit {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum ZeroSuppression {
-    Leading,
-    Trailing,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct CoordinateFormat {
     integer_digits: u32,
@@ -57,6 +56,14 @@ impl CoordinateFormat {
             integer_digits: unit.default_integer_digits(),
             decimal_digits: unit.default_decimal_digits(),
             zero_suppression: ZeroSuppression::Leading,
+        }
+    }
+
+    fn to_common(self) -> CommonCoordinateFormat {
+        CommonCoordinateFormat {
+            integer_digits: self.integer_digits,
+            decimal_digits: self.decimal_digits,
+            zero_suppression: self.zero_suppression,
         }
     }
 }
@@ -962,7 +969,7 @@ fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, 
         .ok_or_else(|| JsValue::from_str("Invalid drill tool declaration"))?;
     let code = parse_tool_code(&line[1..c_index])
         .ok_or_else(|| JsValue::from_str("Invalid drill tool number"))?;
-    let diameter_token = read_number(&line[c_index + 1..])
+    let diameter_token = read_number(&line[c_index + 1..], true)
         .ok_or_else(|| JsValue::from_str("Invalid drill tool diameter"))?;
     let diameter = parse_decimal_number(diameter_token)? * unit.multiplier();
     if diameter <= 0.0 || !diameter.is_finite() {
@@ -1002,7 +1009,7 @@ fn parse_tool_selection_suffix(mut suffix: &str) -> Result<(), String> {
             return Err(format!("Invalid drill tool selection suffix `{suffix}`"));
         }
         let value_start = word.len_utf8();
-        let Some(token) = read_number(&suffix[value_start..]) else {
+        let Some(token) = read_number(&suffix[value_start..], true) else {
             return Err(format!("Invalid drill tool selection suffix `{suffix}`"));
         };
         let value = token
@@ -1025,27 +1032,6 @@ fn parse_tool_code(token: &str) -> Option<u32> {
     }
 }
 
-fn parse_g_code(line: &str) -> Option<u32> {
-    let rest = line.strip_prefix('G')?;
-    let digits_end = rest
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit())
-        .map(|(index, ch)| index + ch.len_utf8())
-        .last()
-        .unwrap_or(0);
-    if digits_end == 0 {
-        return None;
-    }
-
-    rest[..digits_end].parse::<u32>().ok()
-}
-
-fn line_has_g_code(line: &str, code: u32) -> bool {
-    line.char_indices()
-        .filter(|(_, ch)| *ch == 'G')
-        .any(|(index, _)| parse_g_code(&line[index..]) == Some(code))
-}
-
 fn parse_g85_words(
     line: &str,
     unit: Unit,
@@ -1064,12 +1050,6 @@ fn parse_g85_words(
         return Ok(Some((start_words, end_words)));
     }
     Ok(None)
-}
-
-fn find_g_code_index(line: &str, code: u32) -> Option<usize> {
-    line.char_indices()
-        .filter(|(_, ch)| *ch == 'G')
-        .find_map(|(index, _)| (parse_g_code(&line[index..]) == Some(code)).then_some(index))
 }
 
 fn zero_suppression_from_excellon_token(token: &str) -> Option<ZeroSuppression> {
@@ -1136,7 +1116,7 @@ fn parse_repeat_hole_spacing(
             ));
         }
         let value_start = index + word.len_utf8();
-        let token = read_number(&suffix[value_start..])
+        let token = read_number(&suffix[value_start..], true)
             .ok_or_else(|| format!("Invalid repeat drill spacing in `{line}`"))?;
         let value = parse_coordinate_number(token, unit, format)
             .map_err(|_| format!("Invalid repeat drill spacing in `{line}`"))?;
@@ -1204,7 +1184,7 @@ fn parse_coordinate_word_sets(
         }
 
         let value_start = index + word.len_utf8();
-        let token = read_number(&line[value_start..]).ok_or_else(|| {
+        let token = read_number(&line[value_start..], true).ok_or_else(|| {
             JsValue::from_str(&format!("Invalid drill coordinate word {word} in `{line}`"))
         })?;
         let value = parse_coordinate_number(token, unit, format)?;
@@ -1237,22 +1217,11 @@ fn parse_word_value(
         return Ok(None);
     };
     let value_start = index + word.len_utf8();
-    let token = read_number(&line[value_start..]).ok_or_else(|| {
+    let token = read_number(&line[value_start..], true).ok_or_else(|| {
         JsValue::from_str(&format!("Invalid drill coordinate word {word} in `{line}`"))
     })?;
 
     Ok(Some(parse_coordinate_number(token, unit, format)?))
-}
-
-fn read_number(text: &str) -> Option<&str> {
-    let end = text
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-'))
-        .map(|(index, ch)| index + ch.len_utf8())
-        .last()
-        .unwrap_or(0);
-
-    (end > 0).then_some(&text[..end])
 }
 
 fn parse_coordinate_number(
@@ -1260,46 +1229,12 @@ fn parse_coordinate_number(
     unit: Unit,
     format: CoordinateFormat,
 ) -> Result<f32, JsValue> {
-    let value = if token.contains('.') {
-        parse_decimal_number(token)?
-    } else {
-        parse_omitted_decimal_number(token, format)?
-    };
-
-    Ok(value * unit.multiplier())
+    parse_common_coordinate_number(token, format.to_common(), unit.multiplier(), "drill")
+        .map_err(|message| JsValue::from_str(&message))
 }
 
 fn parse_decimal_number(token: &str) -> Result<f32, JsValue> {
-    token
-        .parse::<f32>()
-        .map_err(|_| JsValue::from_str(&format!("Invalid drill number `{token}`")))
-}
-
-fn parse_omitted_decimal_number(token: &str, format: CoordinateFormat) -> Result<f32, JsValue> {
-    let sign = if token.starts_with('-') { -1.0 } else { 1.0 };
-    let digits = token.trim_start_matches(['+', '-']);
-    if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
-        return Err(JsValue::from_str(&format!(
-            "Invalid drill number `{token}`"
-        )));
-    }
-
-    let value_token = match format.zero_suppression {
-        ZeroSuppression::Leading => digits.to_string(),
-        ZeroSuppression::Trailing => {
-            let total_digits = (format.integer_digits + format.decimal_digits) as usize;
-            if digits.len() >= total_digits {
-                digits.to_string()
-            } else {
-                format!("{digits:0<total_digits$}")
-            }
-        }
-    };
-    let value = value_token
-        .parse::<i64>()
-        .map_err(|_| JsValue::from_str(&format!("Invalid drill number `{token}`")))?;
-    let divisor = 10_i64.pow(format.decimal_digits) as f32;
-    Ok(sign * value as f32 / divisor)
+    parse_common_decimal_number(token, "drill").map_err(|message| JsValue::from_str(&message))
 }
 
 fn parse_format_token(token: &str) -> Result<Option<(u32, u32)>, JsValue> {
