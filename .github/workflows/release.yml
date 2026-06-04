@@ -179,6 +179,28 @@ jobs:
           echo "path=${artifact_path}" >> "$GITHUB_OUTPUT"
           echo "name=${artifact_name}" >> "$GITHUB_OUTPUT"
 
+      - name: Pack prebuilt viewer artifact
+        id: viewer-artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="${RUNNER_TEMP}/viewer-package"
+          artifact_name="wasm-gerber-viewer-${{ steps.release.outputs.tag }}.tar.gz"
+          package_root="${artifact_dir}/wasm-gerber-viewer-${{ steps.release.outputs.tag }}"
+          artifact_path="${artifact_dir}/${artifact_name}"
+          mkdir -p "${package_root}/wasm"
+
+          test -f wasm/pkg/wasm_gerber_processor.js
+          test -f wasm/pkg/wasm_gerber_processor_bg.wasm
+          cp index.html LICENSE "${package_root}/"
+          cp -R css js vendor "${package_root}/"
+          cp -R wasm/pkg "${package_root}/wasm/pkg"
+          tar -czf "$artifact_path" -C "$artifact_dir" "wasm-gerber-viewer-${{ steps.release.outputs.tag }}"
+
+          echo "path=${artifact_path}" >> "$GITHUB_OUTPUT"
+          echo "name=${artifact_name}" >> "$GITHUB_OUTPUT"
+
       - name: Publish to npmjs
         if: steps.release.outputs.npmjs_exists != 'true'
         working-directory: ${{ env.PACKAGE_DIR }}
@@ -232,9 +254,10 @@ jobs:
           title="${{ steps.release.outputs.package_name }} ${{ steps.release.outputs.version }}"
           package_artifact="${{ steps.package-artifact.outputs.path }}"
           wasm_artifact="${{ steps.wasm-artifact.outputs.path }}"
+          viewer_artifact="${{ steps.viewer-artifact.outputs.path }}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$package_artifact" "$wasm_artifact" --clobber
+            gh release upload "$tag" "$package_artifact" "$wasm_artifact" "$viewer_artifact" --clobber
           else
-            gh release create "$tag" "$package_artifact" "$wasm_artifact" --title "$title" --generate-notes
+            gh release create "$tag" "$package_artifact" "$wasm_artifact" "$viewer_artifact" --title "$title" --generate-notes
           fi
