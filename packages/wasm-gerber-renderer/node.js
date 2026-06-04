@@ -333,9 +333,11 @@ export class NodeGerberRenderer {
     if (isDrillLayerKind(prepared.kind) && !this.frame.options.renderDrills) {
       return null;
     }
+    const isDrill = isDrillLayerKind(prepared.kind);
     const layerId = this.frame.layers.length;
-    const color =
-      prepared.color == null
+    const color = isDrill
+      ? null
+      : prepared.color == null
         ? this.frame.nextColor()
         : normalizeColor(prepared.color, this.frame.options.colors[0], {
             allowString: true,

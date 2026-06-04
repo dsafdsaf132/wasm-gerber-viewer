@@ -375,6 +375,7 @@ struct DrillParser {
     current_tool: Option<u32>,
     current_x: f32,
     current_y: f32,
+    last_hit: Option<(f32, f32)>,
     tools: BTreeMap<u32, Tool>,
     fill: DrillGeometry,
     outline: DrillGeometry,
@@ -400,6 +401,7 @@ impl DrillParser {
             current_tool: None,
             current_x: 0.0,
             current_y: 0.0,
+            last_hit: None,
             tools: BTreeMap::new(),
             fill: DrillGeometry::new(),
             outline: DrillGeometry::new(),
@@ -488,11 +490,13 @@ impl DrillParser {
             return Ok(());
         }
         if line == "LZ" {
-            self.coordinate_format.zero_suppression = ZeroSuppression::Leading;
+            self.coordinate_format.zero_suppression = zero_suppression_from_excellon_token(line)
+                .unwrap_or(self.coordinate_format.zero_suppression);
             return Ok(());
         }
         if line == "TZ" {
-            self.coordinate_format.zero_suppression = ZeroSuppression::Trailing;
+            self.coordinate_format.zero_suppression = zero_suppression_from_excellon_token(line)
+                .unwrap_or(self.coordinate_format.zero_suppression);
             return Ok(());
         }
         if line.starts_with("METRIC") {
@@ -621,6 +625,16 @@ impl DrillParser {
             return Ok(());
         }
 
+        if self.mode == Mode::Drill {
+            if let Some((count, spacing)) =
+                parse_repeat_hole(line, self.unit, self.coordinate_format)
+                    .map_err(|message| JsValue::from_str(&message))?
+            {
+                self.push_repeated_hits(count, spacing)?;
+                return Ok(());
+            }
+        }
+
         if let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)? {
             if !words.has_xy() && words.has_arc_definition() {
                 self.update_modal_arc_words(words);
@@ -716,15 +730,11 @@ impl DrillParser {
         self.unit = unit;
         let mut format = CoordinateFormat::new(unit);
         for token in line.split(',').skip(1) {
-            match token {
-                "LZ" => format.zero_suppression = ZeroSuppression::Leading,
-                "TZ" => format.zero_suppression = ZeroSuppression::Trailing,
-                _ => {
-                    if let Some((integer_digits, decimal_digits)) = parse_format_token(token)? {
-                        format.integer_digits = integer_digits;
-                        format.decimal_digits = decimal_digits;
-                    }
-                }
+            if let Some(zero_suppression) = zero_suppression_from_excellon_token(token) {
+                format.zero_suppression = zero_suppression;
+            } else if let Some((integer_digits, decimal_digits)) = parse_format_token(token)? {
+                format.integer_digits = integer_digits;
+                format.decimal_digits = decimal_digits;
             }
         }
         self.coordinate_format = format;
@@ -749,6 +759,27 @@ impl DrillParser {
         Ok((code, tool.diameter_mm))
     }
 
+    fn push_repeated_hits(&mut self, count: u32, spacing: CoordinateWords) -> Result<(), JsValue> {
+        let dx = spacing.x.unwrap_or(0.0);
+        let dy = spacing.y.unwrap_or(0.0);
+        let Some((mut x, mut y)) = self.last_hit else {
+            return Err(JsValue::from_str(
+                "Repeat drill record appears before an initial drill hit",
+            ));
+        };
+
+        for _ in 0..count {
+            x += dx;
+            y += dy;
+            self.push_hit(x, y)?;
+        }
+
+        self.current_x = x;
+        self.current_y = y;
+        self.last_hit = Some((x, y));
+        Ok(())
+    }
+
     fn push_hit(&mut self, x: f32, y: f32) -> Result<(), JsValue> {
         let (code, diameter_mm) = self.selected_tool()?;
         if diameter_mm <= 0.0 || !diameter_mm.is_finite() {
@@ -766,6 +797,7 @@ impl DrillParser {
         if let Some(tool) = self.tools.get_mut(&code) {
             tool.hit_count = tool.hit_count.saturating_add(1);
         }
+        self.last_hit = Some((x - self.offset_x, y - self.offset_y));
         Ok(())
     }
 
@@ -1012,6 +1044,89 @@ fn find_g_code_index(line: &str, code: u32) -> Option<usize> {
     line.char_indices()
         .filter(|(_, ch)| *ch == 'G')
         .find_map(|(index, _)| (parse_g_code(&line[index..]) == Some(code)).then_some(index))
+}
+
+fn zero_suppression_from_excellon_token(token: &str) -> Option<ZeroSuppression> {
+    match token {
+        "LZ" => Some(ZeroSuppression::Trailing),
+        "TZ" => Some(ZeroSuppression::Leading),
+        _ => None,
+    }
+}
+
+fn parse_repeat_hole(
+    line: &str,
+    unit: Unit,
+    format: CoordinateFormat,
+) -> Result<Option<(u32, CoordinateWords)>, String> {
+    let Some(rest) = line.strip_prefix('R') else {
+        return Ok(None);
+    };
+    let digits_end = rest
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if digits_end == 0 {
+        return Ok(None);
+    }
+    if digits_end > 4 {
+        return Err(format!(
+            "Repeat drill count must be 1 to 4 digits in `{line}`"
+        ));
+    }
+
+    let count = rest[..digits_end]
+        .parse::<u32>()
+        .map_err(|_| format!("Invalid repeat drill count in `{line}`"))?;
+    if count == 0 {
+        return Err(format!("Repeat drill count must be positive in `{line}`"));
+    }
+    let words = parse_repeat_hole_spacing(&rest[digits_end..], unit, format, line)?;
+
+    Ok(Some((count, words)))
+}
+
+fn parse_repeat_hole_spacing(
+    suffix: &str,
+    unit: Unit,
+    format: CoordinateFormat,
+    line: &str,
+) -> Result<CoordinateWords, String> {
+    if suffix.is_empty() || !matches!(suffix.chars().next(), Some('X' | 'Y')) {
+        return Err(format!(
+            "Repeat drill record requires X or Y spacing in `{line}`"
+        ));
+    }
+
+    let mut words = CoordinateWords::default();
+    let mut index = 0;
+    while index < suffix.len() {
+        let word = suffix[index..].chars().next().unwrap_or_default();
+        if !matches!(word, 'X' | 'Y') {
+            return Err(format!(
+                "Repeat drill record only supports X/Y spacing in `{line}`"
+            ));
+        }
+        let value_start = index + word.len_utf8();
+        let token = read_number(&suffix[value_start..])
+            .ok_or_else(|| format!("Invalid repeat drill spacing in `{line}`"))?;
+        let value = parse_coordinate_number(token, unit, format)
+            .map_err(|_| format!("Invalid repeat drill spacing in `{line}`"))?;
+        match word {
+            'X' if words.x.is_none() => words.x = Some(value),
+            'Y' if words.y.is_none() => words.y = Some(value),
+            _ => {
+                return Err(format!(
+                    "Repeat drill record has duplicate spacing word in `{line}`"
+                ));
+            }
+        }
+        index = value_start + token.len();
+    }
+
+    Ok(words)
 }
 
 fn parse_coordinate_words(
@@ -1323,7 +1438,7 @@ fn angle_is_on_sweep(angle: f32, start_angle: f32, sweep_angle: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_drill_with_offset;
+    use super::{parse_drill_with_offset, parse_repeat_hole, CoordinateFormat, Unit};
 
     fn assert_approx_eq(actual: f32, expected: f32) {
         assert!(
@@ -1870,7 +1985,28 @@ M30",
     }
 
     #[test]
-    fn honors_trailing_zero_suppressed_metric_coordinates() {
+    fn honors_included_leading_zero_metric_coordinates() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC,LZ
+T01C0.6
+%
+T01
+X009Y010
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("METRIC,LZ omitted-decimal coordinates should parse");
+
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+    }
+
+    #[test]
+    fn honors_included_trailing_zero_metric_coordinates() {
         let parsed = parse_drill_with_offset(
             "\
 M48
@@ -1886,8 +2022,8 @@ M30",
         )
         .expect("METRIC,TZ omitted-decimal coordinates should parse");
 
-        assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
-        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 0.009);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 0.010);
     }
 
     #[test]
@@ -1896,12 +2032,12 @@ M30",
             "\
 M48
 METRIC
-TZ
+LZ
 T01C0.6
 %
 T01
 X009Y010
-LZ
+TZ
 X011Y012
 M30",
             0.05,
@@ -1918,12 +2054,66 @@ M30",
     }
 
     #[test]
-    fn ignores_fmat_and_preserves_tz_after_m71() {
+    fn parses_repeat_hole_records() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC,LZ
+T01C0.6
+%
+T01
+X009Y010
+R3X001Y000
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Repeat-hole records should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 4);
+        assert_eq!(parsed.metadata.hit_count, 4);
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[1], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[1], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[2], 11.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[2], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[3], 12.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[3], 10.0);
+    }
+
+    #[test]
+    fn rejects_unsupported_repeat_pattern_records() {
+        let error = parse_repeat_hole(
+            "R2M02X001Y001",
+            Unit::Metric,
+            CoordinateFormat::new(Unit::Metric),
+        )
+        .expect_err("Repeat-pattern records should not be treated as repeat holes");
+
+        assert!(error.contains("requires X or Y spacing"));
+    }
+
+    #[test]
+    fn rejects_repeat_hole_counts_over_four_digits() {
+        let error = parse_repeat_hole(
+            "R10000X001Y000",
+            Unit::Metric,
+            CoordinateFormat::new(Unit::Metric),
+        )
+        .expect_err("Repeat-hole counts should be limited");
+
+        assert!(error.contains("1 to 4 digits"));
+    }
+
+    #[test]
+    fn ignores_fmat_and_preserves_zero_format_after_m71() {
         let parsed = parse_drill_with_offset(
             "\
 M48
 FMAT,2
-METRIC,TZ
+METRIC,LZ
 T01C0.6
 %
 M71
