@@ -209,7 +209,14 @@ impl DrillGeometry {
         self.arc_start_angle.push(start_angle);
         self.arc_sweep_angle.push(sweep_angle);
         self.arc_thickness.push(thickness);
-        self.include_circle_bounds(center_x, center_y, radius + thickness / 2.0);
+        self.include_arc_bounds(
+            center_x,
+            center_y,
+            radius,
+            start_angle,
+            sweep_angle,
+            thickness,
+        );
     }
 
     fn include_circle_bounds(&mut self, x: f32, y: f32, radius: f32) {
@@ -218,6 +225,57 @@ impl DrillGeometry {
         self.min_y = self.min_y.min(y - radius);
         self.max_y = self.max_y.max(y + radius);
         self.has_geometry = true;
+    }
+
+    fn include_arc_bounds(
+        &mut self,
+        center_x: f32,
+        center_y: f32,
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+        thickness: f32,
+    ) {
+        let cap_radius = thickness / 2.0;
+        if sweep_angle.abs() >= TWO_PI - 0.000001 {
+            self.include_circle_bounds(center_x, center_y, radius + cap_radius);
+            return;
+        }
+
+        self.include_arc_point_bounds(center_x, center_y, radius, start_angle, cap_radius);
+        self.include_arc_point_bounds(
+            center_x,
+            center_y,
+            radius,
+            start_angle + sweep_angle,
+            cap_radius,
+        );
+
+        for angle in [
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+            std::f32::consts::PI * 1.5,
+        ] {
+            if angle_is_on_sweep(angle, start_angle, sweep_angle) {
+                self.include_arc_point_bounds(center_x, center_y, radius, angle, cap_radius);
+            }
+        }
+    }
+
+    fn include_arc_point_bounds(
+        &mut self,
+        center_x: f32,
+        center_y: f32,
+        radius: f32,
+        angle: f32,
+        cap_radius: f32,
+    ) {
+        self.include_circle_bounds(
+            center_x + angle.cos() * radius,
+            center_y + angle.sin() * radius,
+            cap_radius,
+        );
     }
 
     fn boundary(&self) -> Boundary {
@@ -375,6 +433,7 @@ impl DrillParser {
             return Ok(());
         }
         if line == "M15" {
+            self.mode = Mode::Rout;
             self.routing_down = true;
             return Ok(());
         }
@@ -449,7 +508,8 @@ impl DrillParser {
                 return Ok(());
             };
             let (end_x, end_y) = self.resolve_xy(words.x, words.y);
-            if self.mode == Mode::Rout && self.routing_down {
+            if self.routing_down {
+                self.mode = Mode::Rout;
                 self.push_slot(end_x, end_y)?;
             }
             self.current_x = end_x;
@@ -503,6 +563,8 @@ impl DrillParser {
             let (x, y) = self.resolve_xy(words.x, words.y);
             if self.mode == Mode::Drill {
                 self.push_hit(x, y)?;
+            } else if self.mode == Mode::Rout && self.routing_down {
+                self.push_slot(x, y)?;
             }
             self.current_x = x;
             self.current_y = y;
@@ -512,13 +574,13 @@ impl DrillParser {
     }
 
     fn resolve_xy(&self, x: Option<f32>, y: Option<f32>) -> (f32, f32) {
-        let x = x.unwrap_or(self.current_x);
-        let y = y.unwrap_or(self.current_y);
-
         if self.is_absolute {
-            (x, y)
+            (x.unwrap_or(self.current_x), y.unwrap_or(self.current_y))
         } else {
-            (self.current_x + x, self.current_y + y)
+            (
+                self.current_x + x.unwrap_or(0.0),
+                self.current_y + y.unwrap_or(0.0),
+            )
         }
     }
 
@@ -601,6 +663,8 @@ impl DrillParser {
         let start_y = start_y + self.offset_y;
         let end_x = end_x + self.offset_x;
         let end_y = end_y + self.offset_y;
+        let outline_radius = diameter_mm / 2.0 + self.outline_width_mm;
+        let fill_radius = diameter_mm / 2.0;
         self.outline.push_line(
             start_x,
             start_y,
@@ -608,8 +672,12 @@ impl DrillParser {
             end_y,
             diameter_mm + self.outline_width_mm * 2.0,
         );
+        self.outline.push_circle(start_x, start_y, outline_radius);
+        self.outline.push_circle(end_x, end_y, outline_radius);
         self.fill
             .push_line(start_x, start_y, end_x, end_y, diameter_mm);
+        self.fill.push_circle(start_x, start_y, fill_radius);
+        self.fill.push_circle(end_x, end_y, fill_radius);
         if let Some(tool) = self.tools.get_mut(&code) {
             tool.slot_count = tool.slot_count.saturating_add(1);
         }
@@ -719,6 +787,7 @@ fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, 
 }
 
 fn parse_tool_selection(line: &str) -> Option<u32> {
+    let line = line.strip_prefix("G54").unwrap_or(line);
     if !line.starts_with('T') || line.len() < 2 {
         return None;
     }
@@ -1047,6 +1116,20 @@ fn positive_angle_delta(angle: f32) -> f32 {
     }
 }
 
+fn angle_is_on_sweep(angle: f32, start_angle: f32, sweep_angle: f32) -> bool {
+    let epsilon = 0.000001;
+    if sweep_angle.abs() >= TWO_PI - epsilon {
+        return true;
+    }
+
+    let delta = if sweep_angle >= 0.0 {
+        positive_angle_delta(angle - start_angle)
+    } else {
+        positive_angle_delta(start_angle - angle)
+    };
+    delta <= sweep_angle.abs() + epsilon
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_drill_with_offset;
@@ -1107,6 +1190,8 @@ M30",
         )
         .expect("XNC rout file should parse");
 
+        assert_eq!(parsed.fill_layer.circles.x.len(), 2);
+        assert_eq!(parsed.outline_layer.circles.x.len(), 2);
         assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
         assert_eq!(parsed.metadata.slot_count, 1);
         assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);
@@ -1131,7 +1216,7 @@ M30",
         )
         .expect("G85 slot command should parse");
 
-        assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+        assert_eq!(parsed.fill_layer.circles.x.len(), 3);
         assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
         assert_eq!(parsed.metadata.hit_count, 1);
         assert_eq!(parsed.metadata.slot_count, 1);
@@ -1159,7 +1244,7 @@ M30",
         )
         .expect("Inline G85 slot endpoints should parse");
 
-        assert_eq!(parsed.fill_layer.circles.x.len(), 0);
+        assert_eq!(parsed.fill_layer.circles.x.len(), 2);
         assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
         assert_eq!(parsed.metadata.hit_count, 0);
         assert_eq!(parsed.metadata.slot_count, 1);
@@ -1189,12 +1274,121 @@ M30",
         )
         .expect("Short Excellon rout commands should parse");
 
-        assert_eq!(parsed.fill_layer.circles.x.len(), 0);
+        assert_eq!(parsed.fill_layer.circles.x.len(), 2);
         assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
         assert_eq!(parsed.metadata.hit_count, 0);
         assert_eq!(parsed.metadata.slot_count, 1);
         assert_approx_eq(parsed.fill_layer.lines.start_x[0], 8.01);
         assert_approx_eq(parsed.fill_layer.lines.end_x[0], 6.54);
+    }
+
+    #[test]
+    fn accepts_g54_prefixed_tool_selection() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.6
+%
+G54T01
+X9.0Y3.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("G54-prefixed tool selection should parse");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+        assert_eq!(parsed.metadata.hit_count, 1);
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
+    }
+
+    #[test]
+    fn preserves_modal_rout_coordinate_moves() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+G00X1.0Y1.0
+M15
+G01X2.0Y1.0
+X3.0Y1.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Modal coordinate-only rout move should parse as a slot");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 4);
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 2);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 2);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[1], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[1], 3.0);
+    }
+
+    #[test]
+    fn routes_g01_after_m15_without_prior_g00() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.8
+%
+T01
+M15
+G01X2.0Y1.0
+X3.0Y1.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("G01 after M15 should start a routed slot");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 4);
+        assert_eq!(parsed.fill_layer.lines.start_x.len(), 2);
+        assert_eq!(parsed.metadata.hit_count, 0);
+        assert_eq!(parsed.metadata.slot_count, 2);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[0], 0.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[0], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.start_x[1], 2.0);
+        assert_approx_eq(parsed.fill_layer.lines.end_x[1], 3.0);
+    }
+
+    #[test]
+    fn incremental_coordinates_keep_omitted_axis_current() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C0.6
+%
+T01
+X10.0Y10.0
+G91
+X1.0
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Incremental omitted axes should preserve current coordinate");
+
+        assert_eq!(parsed.fill_layer.circles.x.len(), 2);
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+        assert_approx_eq(parsed.fill_layer.circles.x[1], 11.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[1], 10.0);
     }
 
     #[test]
@@ -1289,5 +1483,32 @@ M30",
         assert_eq!(parsed.metadata.slot_count, 1);
         assert_approx_eq(parsed.fill_layer.arcs.radius[0], 1.0);
         assert_approx_eq(parsed.fill_layer.arcs.thickness[0], 0.8);
+    }
+
+    #[test]
+    fn routed_arc_bounds_follow_sweep() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+METRIC
+T01C1.0
+%
+T01
+G00X10.0Y0.0
+M15
+G03X0.0Y10.0I-10.0J0.0
+M16
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("Routed arc should parse");
+
+        assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+        assert_approx_eq(parsed.fill_layer.boundary.min_x, -0.5);
+        assert_approx_eq(parsed.fill_layer.boundary.max_x, 10.5);
+        assert_approx_eq(parsed.fill_layer.boundary.min_y, -0.5);
+        assert_approx_eq(parsed.fill_layer.boundary.max_y, 10.5);
     }
 }

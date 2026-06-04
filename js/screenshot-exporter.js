@@ -384,6 +384,7 @@ export class ScreenshotExporter {
     const colorData = [];
     const blendModes = [];
     const drillLayers = [];
+    let wasmLayerCount = 0;
     const drillFillColor = hexColorToRgb(renderState.backgroundColor);
     const drillOutlineColor = invertRgb(drillFillColor);
     const drillAlpha = renderState.globalAlpha > 0 ? 1 / renderState.globalAlpha : 0;
@@ -411,6 +412,7 @@ export class ScreenshotExporter {
         } else {
           result = processor.add_drill_layer(layer.sourceContent);
         }
+        wasmLayerCount += 2;
         if (layer.visible) {
           drillLayers.push({
             outlineLayerId: Number(result?.outlineLayerId),
@@ -430,6 +432,7 @@ export class ScreenshotExporter {
       const layerId = hasLayerOffset(offset)
         ? processor.add_layer_with_offset(layer.sourceContent, offset.x, offset.y)
         : processor.add_layer(layer.sourceContent);
+      wasmLayerCount += 1;
       if (layer.visible) {
         activeLayerIds.push(layerId);
         colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
@@ -462,7 +465,7 @@ export class ScreenshotExporter {
       canvas,
       gl,
       processor,
-      layerCount: this.getLayers().length,
+      layerCount: wasmLayerCount,
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
       blendModes: new Uint8Array(blendModes),
