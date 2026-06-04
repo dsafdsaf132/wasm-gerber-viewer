@@ -28,6 +28,9 @@ Website:
 
 ## Quick Start
 
+<details>
+<summary>Bash</summary>
+
 ```bash
 set -euo pipefail
 
@@ -54,6 +57,38 @@ python3 -m http.server 8000
 ```
 
 Open `http://localhost:8000` and upload Gerber files.
+
+</details>
+
+<details>
+<summary>PowerShell</summary>
+
+```powershell
+git clone https://github.com/dsafdsaf132/wasm-gerber-viewer.git
+Set-Location wasm-gerber-viewer
+
+$release = Invoke-RestMethod `
+  -Uri "https://api.github.com/repos/dsafdsaf132/wasm-gerber-viewer/releases"
+$asset = $release |
+  ForEach-Object { $_.assets } |
+  Where-Object { $_.name -match '^wasm-pkg-v.*\.tar\.gz$' } |
+  Select-Object -First 1
+if (-not $asset) { throw "No prebuilt WASM release asset found." }
+
+$version = $asset.browser_download_url -replace '^.*/download/([^/]+)/.*$', '$1'
+git checkout $version
+
+New-Item -ItemType Directory -Force wasm/pkg | Out-Null
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile wasm-pkg.tar.gz
+tar -xzf wasm-pkg.tar.gz -C wasm/pkg
+Remove-Item wasm-pkg.tar.gz
+
+py -3 -m http.server 8000
+```
+
+Open `http://localhost:8000` and upload Gerber files.
+
+</details>
 
 ## Building
 
