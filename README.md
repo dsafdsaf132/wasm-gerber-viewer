@@ -28,9 +28,6 @@ Website:
 
 ## Quick Start
 
-This uses the prebuilt WASM package from the latest GitHub Release. It only
-requires `bash`, `curl`, `sed`, `tar`, and a static file server such as Python 3.
-
 ```bash
 set -euo pipefail
 
@@ -62,14 +59,10 @@ Requirements:
 
 - **Rust stable** - install with [rustup](https://rustup.rs/)
 - **wasm-pack** - `cargo install wasm-pack`
-- **Python 3** or another static file server
-- **Modern WebGL2 browser** - Chrome, Firefox, Safari, or Edge
 
 ```bash
 rustup target add wasm32-unknown-unknown
 wasm-pack build wasm --target web --out-dir pkg --release
-
-python3 -m http.server 8000
 ```
 
 ## npm Package
