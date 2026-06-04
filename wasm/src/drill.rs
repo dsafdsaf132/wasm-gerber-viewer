@@ -367,6 +367,7 @@ impl CoordinateWords {
 struct DrillParser {
     unit: Unit,
     coordinate_format: CoordinateFormat,
+    coordinate_format_from_comment: bool,
     mode: Mode,
     routing_interpolation: RoutingInterpolation,
     modal_arc_words: CoordinateWords,
@@ -393,6 +394,7 @@ impl DrillParser {
         Ok(Self {
             unit: Unit::Metric,
             coordinate_format: CoordinateFormat::new(Unit::Metric),
+            coordinate_format_from_comment: false,
             mode: Mode::Drill,
             routing_interpolation: RoutingInterpolation::Linear,
             modal_arc_words: CoordinateWords::default(),
@@ -413,6 +415,12 @@ impl DrillParser {
 
     fn parse(mut self, content: &str) -> Result<DrillParseResult, JsValue> {
         for raw_line in content.lines() {
+            if let Some((integer_digits, decimal_digits)) = parse_file_format_comment(raw_line) {
+                self.coordinate_format.integer_digits = integer_digits;
+                self.coordinate_format.decimal_digits = decimal_digits;
+                self.coordinate_format_from_comment = true;
+                continue;
+            }
             let line = sanitize_line(raw_line);
             if line.is_empty() {
                 continue;
@@ -729,12 +737,17 @@ impl DrillParser {
     fn set_unit(&mut self, unit: Unit, line: &str) -> Result<(), JsValue> {
         self.unit = unit;
         let mut format = CoordinateFormat::new(unit);
+        if self.coordinate_format_from_comment {
+            format.integer_digits = self.coordinate_format.integer_digits;
+            format.decimal_digits = self.coordinate_format.decimal_digits;
+        }
         for token in line.split(',').skip(1) {
             if let Some(zero_suppression) = zero_suppression_from_excellon_token(token) {
                 format.zero_suppression = zero_suppression;
             } else if let Some((integer_digits, decimal_digits)) = parse_format_token(token)? {
                 format.integer_digits = integer_digits;
                 format.decimal_digits = decimal_digits;
+                self.coordinate_format_from_comment = false;
             }
         }
         self.coordinate_format = format;
@@ -742,7 +755,7 @@ impl DrillParser {
     }
 
     fn set_unit_code(&mut self, unit: Unit) {
-        if self.unit != unit {
+        if self.unit != unit && !self.coordinate_format_from_comment {
             self.coordinate_format.integer_digits = unit.default_integer_digits();
             self.coordinate_format.decimal_digits = unit.default_decimal_digits();
         }
@@ -924,6 +937,19 @@ fn sanitize_line(raw_line: &str) -> String {
         .trim()
         .replace(char::is_whitespace, "")
         .to_ascii_uppercase()
+}
+
+fn parse_file_format_comment(raw_line: &str) -> Option<(u32, u32)> {
+    let comment = raw_line.trim_start().strip_prefix(';')?;
+    let normalized = comment
+        .trim()
+        .replace(char::is_whitespace, "")
+        .to_ascii_uppercase();
+    let value = normalized.strip_prefix("FILE_FORMAT=")?;
+    let (integer, decimal) = value.split_once(':').or_else(|| value.split_once('.'))?;
+    let integer_digits = integer.parse::<u32>().ok()?;
+    let decimal_digits = decimal.parse::<u32>().ok()?;
+    (integer_digits > 0 && decimal_digits > 0).then_some((integer_digits, decimal_digits))
 }
 
 fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, JsValue> {
@@ -2051,6 +2077,28 @@ M30",
         assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
         assert_approx_eq(parsed.fill_layer.circles.x[1], 0.011);
         assert_approx_eq(parsed.fill_layer.circles.y[1], 0.012);
+    }
+
+    #[test]
+    fn honors_file_format_precision_comments() {
+        let parsed = parse_drill_with_offset(
+            "\
+M48
+;FILE_FORMAT=4:4
+METRIC,LZ
+T01C0.6
+%
+T01
+X00090000Y00100000
+M30",
+            0.05,
+            0.0,
+            0.0,
+        )
+        .expect("FILE_FORMAT comment should set coordinate precision");
+
+        assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
+        assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
     }
 
     #[test]

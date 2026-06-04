@@ -19,7 +19,7 @@ export const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
 export const LAYER_KIND_GERBER = "gerber";
 export const LAYER_KIND_DRILL = "drill";
 
-const DRILL_FILE_EXTENSIONS = new Set([".drd", ".drl", ".nc", ".xnc", ".xln"]);
+const DRILL_FILE_EXTENSIONS = new Set([".drl", ".nc", ".xnc", ".xln"]);
 const CSS_NAMED_COLORS = new Map([
   ["aliceblue", [240, 248, 255, 255]],
   ["antiquewhite", [250, 235, 215, 255]],
@@ -445,9 +445,9 @@ export function normalizeLayer(layer, layerOptions = {}, options = {}) {
   };
 }
 
-export function normalizeLayerKind(kind, source, name = "") {
+export function normalizeLayerKind(kind, source, name = "", content = "") {
   if (kind == null || kind === "") {
-    return isDrillSource(source, name) ? LAYER_KIND_DRILL : LAYER_KIND_GERBER;
+    return isDrillSource(source, name, content) ? LAYER_KIND_DRILL : LAYER_KIND_GERBER;
   }
 
   const normalized = String(kind).toLowerCase();
@@ -461,10 +461,14 @@ export function isDrillLayerKind(kind) {
   return kind === LAYER_KIND_DRILL;
 }
 
-export function isDrillSource(source, name = "") {
+export function isDrillSource(source, name = "", content = "") {
   const sourceName = getSourceName(source);
+  const hasDrillPath = (name && isDrillPath(name)) || (sourceName && isDrillPath(sourceName));
+  const hasAmbiguousDrdPath =
+    (name && isAmbiguousDrdPath(name)) || (sourceName && isAmbiguousDrdPath(sourceName));
+  const hasSourcePath = Boolean(sourceName || (name && hasFileExtension(name)));
   return Boolean(
-    (name && isDrillPath(name)) || (sourceName && isDrillPath(sourceName)),
+    hasDrillPath || ((!hasSourcePath || hasAmbiguousDrdPath) && looksLikeDrillContent(content)),
   );
 }
 
@@ -472,6 +476,31 @@ export function isDrillPath(path) {
   const normalized = String(path).toLowerCase();
   const dotIndex = normalized.lastIndexOf(".");
   return dotIndex >= 0 && DRILL_FILE_EXTENSIONS.has(normalized.slice(dotIndex));
+}
+
+function isAmbiguousDrdPath(path) {
+  const normalized = String(path).toLowerCase();
+  return normalized.endsWith(".drd");
+}
+
+function hasFileExtension(path) {
+  const fileName = fileBasename(String(path));
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex > 0 && dotIndex < fileName.length - 1;
+}
+
+export function looksLikeDrillContent(content) {
+  const lines = String(content ?? "")
+    .split(/\r?\n/, 80)
+    .map((line) => line.trim().toUpperCase());
+  if (lines.some((line) => line === "M48")) {
+    return true;
+  }
+  const hasToolDeclaration = lines.some((line) => /^T\d+C[+\-.\d]+/.test(line));
+  const hasDrillCommand = lines.some((line) =>
+    /^(METRIC|INCH|M71|M72|G05|G90|G91|ICI,ON|ICI,OFF)\b/.test(line),
+  );
+  return hasToolDeclaration && hasDrillCommand;
 }
 
 export function resolveDrillRenderColors(background) {

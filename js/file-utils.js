@@ -20,8 +20,14 @@ export function isSupportedLayerPath(path) {
   return isSupportedGerberPath(path) || isSupportedDrillPath(path);
 }
 
-export function getLayerSourceKind(path) {
-  return isSupportedDrillPath(path) ? "drill" : "gerber";
+export function getLayerSourceKind(path, content = "") {
+  if (isSupportedDrillPath(path)) {
+    return "drill";
+  }
+  if (isAmbiguousDrdPath(path) && looksLikeDrillContent(content)) {
+    return "drill";
+  }
+  return "gerber";
 }
 
 export function isArchiveMetadataPath(path) {
@@ -38,6 +44,24 @@ export function getFileExtension(path) {
   }
 
   return fileName.slice(dotIndex).toLowerCase();
+}
+
+export function isAmbiguousDrdPath(path) {
+  return getFileExtension(path) === ".drd";
+}
+
+export function looksLikeDrillContent(content) {
+  const lines = String(content ?? "")
+    .split(/\r?\n/, 80)
+    .map((line) => line.trim().toUpperCase());
+  if (lines.some((line) => line === "M48")) {
+    return true;
+  }
+  const hasToolDeclaration = lines.some((line) => /^T\d+C[+\-.\d]+/.test(line));
+  const hasDrillCommand = lines.some((line) =>
+    /^(METRIC|INCH|M71|M72|G05|G90|G91|ICI,ON|ICI,OFF)\b/.test(line),
+  );
+  return hasToolDeclaration && hasDrillCommand;
 }
 
 export function getBaseFileName(path) {

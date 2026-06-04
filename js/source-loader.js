@@ -1,5 +1,6 @@
 import {
   getBaseFileName,
+  isAmbiguousDrdPath,
   getLayerSourceKind,
   isArchiveMetadataPath,
   isSupportedLayerPath,
@@ -85,7 +86,7 @@ export async function collectLayerSources(files, callbacks = {}) {
 
     layerSources.push({
       name: file.name,
-      kind: getLayerSourceKind(file.name),
+      kind: getLayerSourceKind(file.name, await readLayerKindPreview(file)),
       sizeBytes: file.size,
       readText: (onProgress) => readFileText(file, onProgress),
     });
@@ -231,19 +232,51 @@ async function collectZipLayerSources(
 
     onArchiveInfo(file.name, `${entries.length} layer files found in archive`);
 
-    return entries.map((entry) => ({
-      name: getBaseFileName(entry.name),
-      kind: getLayerSourceKind(entry.name),
-      sizeBytes: getZipEntrySizeBytes(entry),
-      readText: (onProgress = () => {}) =>
-        entry.async("string", (metadata) => {
-          onProgress(Math.min(metadata.percent / 100, 1));
-        }),
-    }));
+    const sources = [];
+    for (const entry of entries) {
+      const readText = createSharedTextReader((onProgress = () => {}) =>
+        readZipEntryText(entry, onProgress),
+      );
+      let preview = "";
+      if (isAmbiguousDrdPath(entry.name)) {
+        try {
+          preview = await readZipEntryText(entry);
+        } catch (_error) {
+          onArchiveWarning(
+            file.name,
+            `Could not inspect ${getBaseFileName(entry.name)}; loading as Gerber`,
+          );
+        }
+      }
+      sources.push({
+        name: getBaseFileName(entry.name),
+        kind: getLayerSourceKind(entry.name, preview),
+        sizeBytes: getZipEntrySizeBytes(entry),
+        readText,
+      });
+    }
+
+    return sources;
   } catch (error) {
     onArchiveError(file.name, error);
     return [];
   }
+}
+
+function readZipEntryText(entry, onProgress = () => {}) {
+  return entry.async("string", (metadata) => {
+    onProgress(Math.min(metadata.percent / 100, 1));
+  });
+}
+
+async function readLayerKindPreview(file) {
+  if (!isAmbiguousDrdPath(file.name)) {
+    return "";
+  }
+  if (typeof file.slice === "function") {
+    return file.slice(0, 8192).text();
+  }
+  return file.text();
 }
 
 function getZipEntrySizeBytes(entry) {

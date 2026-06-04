@@ -265,12 +265,18 @@ export class GerberRenderer {
     const { source, options } = normalizeLayer(layer, layerOptions);
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
-    const kind = normalizeLayerKind(options.kind, source, options.name);
+    const initialKind = normalizeLayerKind(options.kind, source, options.name);
+    if (isDrillLayerKind(initialKind) && !this.frame.options.renderDrills) {
+      return null;
+    }
+    const content = await sourceToText(source);
+    const kind = isDrillLayerKind(initialKind)
+      ? initialKind
+      : normalizeLayerKind(options.kind, source, options.name, content);
     if (isDrillLayerKind(kind)) {
       if (!this.frame.options.renderDrills) {
         return null;
       }
-      const content = await sourceToText(source);
       const result = addDrillLayerToProcessor(
         this.frame.processor,
         content,
@@ -298,7 +304,6 @@ export class GerberRenderer {
       };
     }
 
-    const content = await sourceToText(source);
     const layerId = addLayerToProcessor(
       this.frame.processor,
       content,

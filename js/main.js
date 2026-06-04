@@ -3068,8 +3068,10 @@ export class GerberViewer {
     const activeLayerIds = [];
     const colorData = [];
     const blendModes = [];
-    const backgroundColor = this.isCanvasLight ? [1, 1, 1] : [0, 0, 0];
-    const outlineColor = this.isCanvasLight ? [0, 0, 0] : [1, 1, 1];
+    const backgroundColor = this.isCanvasLight
+      ? [248 / 255, 250 / 255, 252 / 255]
+      : [2 / 255, 6 / 255, 23 / 255];
+    const outlineColor = backgroundColor.map((value) => 1 - value);
     const drillAlpha = this.globalAlpha > 0 ? 1 / this.globalAlpha : 0;
 
     this.layers.forEach((layer) => {

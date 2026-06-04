@@ -53,7 +53,6 @@ export const GERBER_FILE_EXTENSIONS = new Set([
 ]);
 
 export const DRILL_FILE_EXTENSIONS = new Set([
-  ".drd",
   ".drl",
   ".nc",
   ".xnc",
