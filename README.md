@@ -34,16 +34,21 @@ set -euo pipefail
 git clone https://github.com/dsafdsaf132/wasm-gerber-viewer.git
 cd wasm-gerber-viewer
 
-version="$(
-  curl -fsSL https://api.github.com/repos/dsafdsaf132/wasm-gerber-viewer/releases/latest |
-  sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p'
+wasm_url="$(
+  curl -fsSL https://api.github.com/repos/dsafdsaf132/wasm-gerber-viewer/releases |
+  sed -n '/"browser_download_url": .*\/wasm-pkg-v.*\.tar\.gz"/ {
+    s/.*"browser_download_url": *"\([^"]*\)".*/\1/p
+    q
+  }'
 )"
+test -n "$wasm_url"
+
+version="$(printf '%s\n' "$wasm_url" | sed -n 's#.*/download/\([^/]*\)/.*#\1#p')"
 test -n "$version"
+git checkout "$version"
 
 mkdir -p wasm/pkg
-curl -fsSL \
-  "https://github.com/dsafdsaf132/wasm-gerber-viewer/releases/download/${version}/wasm-pkg-${version}.tar.gz" |
-  tar -xz -C wasm/pkg
+curl -fsSL "$wasm_url" | tar -xz -C wasm/pkg
 
 python3 -m http.server 8000
 ```
