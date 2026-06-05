@@ -5,7 +5,7 @@ mod state;
 
 // Export only what's needed externally
 pub use aperture::Aperture;
-pub use state::{FormatSpec, ParserState, Polarity, ZeroOmission};
+pub use state::{FormatSpec, ParserState, Polarity};
 
 // Internal use only
 use aperture::parse_aperture;

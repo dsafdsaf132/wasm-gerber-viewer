@@ -98,6 +98,40 @@ M02*",
 }
 
 #[test]
+fn explicit_decimal_coordinates_use_common_number_parser() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X1.25Y-2.5D03*
+M02*",
+    )
+    .expect("explicit decimal coordinates should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert!(has_circle_at(&layers[0].circles, 1.25, -2.5, 0.5));
+}
+
+#[test]
+fn x_and_y_coordinate_formats_can_differ() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y36*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X010000Y1000000D03*
+M02*",
+    )
+    .expect("mixed X/Y coordinate formats should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert!(has_circle_at(&layers[0].circles, 1.0, 1.0, 0.5));
+}
+
+#[test]
 fn x2_attributes_are_ignored_for_image_rendering() {
     let layers = parse_gerber(
         "\

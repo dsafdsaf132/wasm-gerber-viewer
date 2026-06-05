@@ -1,7 +1,7 @@
 use crate::parse_common::{
     find_g_code_index, line_has_g_code, parse_coordinate_number as parse_common_coordinate_number,
     parse_decimal_number as parse_common_decimal_number, parse_g_code, read_number,
-    CoordinateFormat as CommonCoordinateFormat, ZeroSuppression,
+    CoordinateFormat, ZeroSuppression,
 };
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
@@ -43,28 +43,11 @@ impl Unit {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct CoordinateFormat {
-    integer_digits: u32,
-    decimal_digits: u32,
-    zero_suppression: ZeroSuppression,
-}
-
-impl CoordinateFormat {
-    fn new(unit: Unit) -> Self {
-        Self {
-            integer_digits: unit.default_integer_digits(),
-            decimal_digits: unit.default_decimal_digits(),
-            zero_suppression: ZeroSuppression::Leading,
-        }
-    }
-
-    fn to_common(self) -> CommonCoordinateFormat {
-        CommonCoordinateFormat {
-            integer_digits: self.integer_digits,
-            decimal_digits: self.decimal_digits,
-            zero_suppression: self.zero_suppression,
-        }
+fn default_coordinate_format(unit: Unit) -> CoordinateFormat {
+    CoordinateFormat {
+        integer_digits: unit.default_integer_digits(),
+        decimal_digits: unit.default_decimal_digits(),
+        zero_suppression: ZeroSuppression::Leading,
     }
 }
 
@@ -400,7 +383,7 @@ impl DrillParser {
 
         Ok(Self {
             unit: Unit::Metric,
-            coordinate_format: CoordinateFormat::new(Unit::Metric),
+            coordinate_format: default_coordinate_format(Unit::Metric),
             coordinate_format_from_comment: false,
             mode: Mode::Drill,
             routing_interpolation: RoutingInterpolation::Linear,
@@ -743,7 +726,7 @@ impl DrillParser {
 
     fn set_unit(&mut self, unit: Unit, line: &str) -> Result<(), JsValue> {
         self.unit = unit;
-        let mut format = CoordinateFormat::new(unit);
+        let mut format = default_coordinate_format(unit);
         if self.coordinate_format_from_comment {
             format.integer_digits = self.coordinate_format.integer_digits;
             format.decimal_digits = self.coordinate_format.decimal_digits;
@@ -1229,7 +1212,7 @@ fn parse_coordinate_number(
     unit: Unit,
     format: CoordinateFormat,
 ) -> Result<f32, JsValue> {
-    parse_common_coordinate_number(token, format.to_common(), unit.multiplier(), "drill")
+    parse_common_coordinate_number(token, format, unit.multiplier(), "drill")
         .map_err(|message| JsValue::from_str(&message))
 }
 
@@ -1399,7 +1382,7 @@ fn angle_is_on_sweep(angle: f32, start_angle: f32, sweep_angle: f32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_drill_with_offset, parse_repeat_hole, CoordinateFormat, Unit};
+    use super::{default_coordinate_format, parse_drill_with_offset, parse_repeat_hole, Unit};
 
     fn assert_approx_eq(actual: f32, expected: f32) {
         assert!(
@@ -2074,7 +2057,7 @@ M30",
         let error = parse_repeat_hole(
             "R2M02X001Y001",
             Unit::Metric,
-            CoordinateFormat::new(Unit::Metric),
+            default_coordinate_format(Unit::Metric),
         )
         .expect_err("Repeat-pattern records should not be treated as repeat holes");
 
@@ -2086,7 +2069,7 @@ M30",
         let error = parse_repeat_hole(
             "R10000X001Y000",
             Unit::Metric,
-            CoordinateFormat::new(Unit::Metric),
+            default_coordinate_format(Unit::Metric),
         )
         .expect_err("Repeat-hole counts should be limited");
 

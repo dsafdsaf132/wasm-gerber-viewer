@@ -1,5 +1,8 @@
 use super::geometry::Primitive;
 use super::PolarityLayer;
+use crate::parse_common::{
+    CoordinateFormat as CommonCoordinateFormat, ZeroSuppression as CommonZeroSuppression,
+};
 use crate::shape::PathRegions;
 use std::mem::take;
 
@@ -43,6 +46,25 @@ impl Default for FormatSpec {
             y_divisor: 10000.0, // 10^4
             x_total_digits: 6,  // 2 + 4
             y_total_digits: 6,  // 2 + 4
+        }
+    }
+}
+
+impl FormatSpec {
+    pub fn coordinate_format(&self, axis: char) -> CommonCoordinateFormat {
+        let (integer_digits, decimal_digits) = match axis {
+            'x' | 'X' => (self.x_integer_digits, self.x_decimal_digits),
+            'y' | 'Y' => (self.y_integer_digits, self.y_decimal_digits),
+            _ => (0, 4),
+        };
+
+        CommonCoordinateFormat {
+            integer_digits,
+            decimal_digits,
+            zero_suppression: match self.zero_omission {
+                ZeroOmission::Leading => CommonZeroSuppression::Leading,
+                ZeroOmission::Trailing => CommonZeroSuppression::Trailing,
+            },
         }
     }
 }

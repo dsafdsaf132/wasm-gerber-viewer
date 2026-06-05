@@ -1,8 +1,5 @@
-use crate::parse_common::{
-    parse_g_code, parse_omitted_decimal_number, read_word_value,
-    CoordinateFormat as CommonCoordinateFormat, ZeroSuppression,
-};
-use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer, ZeroOmission};
+use crate::parse_common::{parse_coordinate_number, parse_g_code, read_word_value};
+use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
 use crate::shape::PathRegions;
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
@@ -949,6 +946,10 @@ pub fn extract_value(line: &str, key: char) -> Option<String> {
     read_word_value(line, key, false).map(ToString::to_string)
 }
 
+fn extract_coordinate_value(line: &str, key: char) -> Option<String> {
+    read_word_value(line, key, true).map(ToString::to_string)
+}
+
 /// Coordinate value conversion - decimal point processing according to format spec
 pub fn convert_coordinate(
     coord_str: &str,
@@ -956,25 +957,12 @@ pub fn convert_coordinate(
     format_spec: &FormatSpec,
     unit_multiplier: f32,
 ) -> f32 {
-    let (integer_digits, decimal_digits) = match axis {
-        'x' => (format_spec.x_integer_digits, format_spec.x_decimal_digits),
-        'y' => (format_spec.y_integer_digits, format_spec.y_decimal_digits),
-        _ => (0, 4),
-    };
-    let zero_suppression = match format_spec.zero_omission {
-        ZeroOmission::Leading => ZeroSuppression::Leading,
-        ZeroOmission::Trailing => ZeroSuppression::Trailing,
-    };
-    let result = parse_omitted_decimal_number(
+    let result = parse_coordinate_number(
         coord_str,
-        CommonCoordinateFormat {
-            integer_digits,
-            decimal_digits,
-            zero_suppression,
-        },
+        format_spec.coordinate_format(axis),
+        unit_multiplier,
         "Gerber coordinate",
     )
-    .map(|value| value * unit_multiplier)
     .unwrap_or(0.0);
 
     result.is_finite().then_some(result).unwrap_or(0.0)
@@ -2246,10 +2234,10 @@ pub fn parse_graphic_command(
     }
 
     // Extract coordinates and D-code using regex
-    let x_match = extract_value(clean_line, 'X');
-    let y_match = extract_value(clean_line, 'Y');
-    let i_match = extract_value(clean_line, 'I');
-    let j_match = extract_value(clean_line, 'J');
+    let x_match = extract_coordinate_value(clean_line, 'X');
+    let y_match = extract_coordinate_value(clean_line, 'Y');
+    let i_match = extract_coordinate_value(clean_line, 'I');
+    let j_match = extract_coordinate_value(clean_line, 'J');
     let d_match = extract_value(clean_line, 'D');
 
     let mut x = state.x;
