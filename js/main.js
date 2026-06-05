@@ -55,8 +55,14 @@ const ARC_TESSELLATION_QUALITY_LEVELS = {
   high: 2,
 };
 const MINIMUM_FEATURE_PIXEL_VALUES = new Set([0, 1, 2]);
+const DRILL_OUTLINE_PIXEL_VALUES = new Set([0, 1, 2, 3]);
+const PTH_PLATING_MICROMETER_VALUES = new Set([10, 20, 30, 40, 50]);
 const DRILL_LAYER_KIND = "drill";
 const GERBER_LAYER_KIND = "gerber";
+const PTH_DRILL_TYPE = "pth";
+const NPTH_DRILL_TYPE = "npth";
+const DEFAULT_PTH_DRILL_COLOR = [1.0, 1.0, 0.0];
+const DEFAULT_NPTH_DRILL_COLOR = [1.0, 1.0, 1.0];
 
 class ParseWorkerUnavailableError extends Error {
   constructor(message) {
@@ -86,6 +92,20 @@ function isDrillSource(source) {
 
 function isDrillLayer(layer) {
   return layer?.kind === DRILL_LAYER_KIND;
+}
+
+function getDefaultDrillColor(name) {
+  return getDrillType(name) === NPTH_DRILL_TYPE
+    ? [...DEFAULT_NPTH_DRILL_COLOR]
+    : [...DEFAULT_PTH_DRILL_COLOR];
+}
+
+function getDrillType(name) {
+  const normalized = String(name ?? "").toLowerCase();
+  const isNpth = /(^|[^a-z0-9])(npth|non[-_ ]?plated|nonplated)([^a-z0-9]|$)/i.test(
+    normalized,
+  );
+  return isNpth ? NPTH_DRILL_TYPE : PTH_DRILL_TYPE;
 }
 
 function normalizeDrillMetadata(metadata = {}) {
@@ -554,6 +574,12 @@ export class GerberViewer {
     this.minimumFeaturePixels = Number(
       this.viewerOptionsStore.get("minimumFeaturePixels") ?? 0,
     );
+    this.drillOutlinePixels = Number(
+      this.viewerOptionsStore.get("drillOutlinePixels") ?? 0,
+    );
+    this.pthPlatingMicrometers = Number(
+      this.viewerOptionsStore.get("pthPlatingMicrometers") ?? 20,
+    );
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -934,6 +960,22 @@ export class GerberViewer {
       });
     }
 
+    for (const input of this.getDrillOutlineInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setDrillOutlinePixels(Number(input.value));
+        }
+      });
+    }
+
+    for (const input of this.getPthPlatingInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setPthPlatingMicrometers(Number(input.value));
+        }
+      });
+    }
+
     this.topFilterInput.addEventListener("input", () => {
       this.updateLayerFilter("top", this.topFilterInput.value);
     });
@@ -1100,6 +1142,8 @@ export class GerberViewer {
   getRenderOptions() {
     return {
       minimumFeaturePixels: this.minimumFeaturePixels,
+      drillOutlinePixels: this.drillOutlinePixels,
+      pthPlatingMicrometers: this.pthPlatingMicrometers,
     };
   }
 
@@ -1123,6 +1167,25 @@ export class GerberViewer {
     ];
   }
 
+  getDrillOutlineInputs() {
+    return [
+      this.drillOutlineOffInput,
+      this.drillOutline1Input,
+      this.drillOutline2Input,
+      this.drillOutline3Input,
+    ];
+  }
+
+  getPthPlatingInputs() {
+    return [
+      this.pthPlating10Input,
+      this.pthPlating20Input,
+      this.pthPlating30Input,
+      this.pthPlating40Input,
+      this.pthPlating50Input,
+    ];
+  }
+
   syncOptionControls() {
     this.regionArcExactInput.checked = this.preserveArcRegions;
     this.regionArcApproximateInput.checked = !this.preserveArcRegions;
@@ -1134,6 +1197,16 @@ export class GerberViewer {
 
     for (const input of this.getMinimumVisibilityInputs()) {
       input.checked = Number(input.value) === this.minimumFeaturePixels;
+      input.disabled = this.isRendererBusy();
+    }
+
+    for (const input of this.getDrillOutlineInputs()) {
+      input.checked = Number(input.value) === this.drillOutlinePixels;
+      input.disabled = this.isRendererBusy();
+    }
+
+    for (const input of this.getPthPlatingInputs()) {
+      input.checked = Number(input.value) === this.pthPlatingMicrometers;
       input.disabled = this.isRendererBusy();
     }
   }
@@ -1288,6 +1361,130 @@ export class GerberViewer {
     }
   }
 
+  setDrillOutlinePixels(pixels) {
+    if (!DRILL_OUTLINE_PIXEL_VALUES.has(pixels)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (pixels === this.drillOutlinePixels) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previousPixels = this.drillOutlinePixels;
+    this.drillOutlinePixels = pixels;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set("drillOutlinePixels", this.drillOutlinePixels);
+
+    try {
+      this.applyDrillOutlineStyles();
+      this.requestRender();
+    } catch (error) {
+      this.drillOutlinePixels = previousPixels;
+      this.syncOptionControls();
+      this.viewerOptionsStore.set("drillOutlinePixels", this.drillOutlinePixels);
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.applyDrillOutlineStyles();
+      this.showError(`Failed to apply drill outline: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
+  setPthPlatingMicrometers(micrometers) {
+    if (!PTH_PLATING_MICROMETER_VALUES.has(micrometers)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (micrometers === this.pthPlatingMicrometers) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previousMicrometers = this.pthPlatingMicrometers;
+    this.pthPlatingMicrometers = micrometers;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set(
+      "pthPlatingMicrometers",
+      this.pthPlatingMicrometers,
+    );
+
+    try {
+      this.applyDrillOutlineStyles();
+      this.requestRender();
+    } catch (error) {
+      this.pthPlatingMicrometers = previousMicrometers;
+      this.syncOptionControls();
+      this.viewerOptionsStore.set(
+        "pthPlatingMicrometers",
+        this.pthPlatingMicrometers,
+      );
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.applyDrillOutlineStyles();
+      this.showError(`Failed to apply PTH plating: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
+  getDrillOutlineStyle(layer) {
+    if (layer.drillType === NPTH_DRILL_TYPE) {
+      return {
+        pixels: this.drillOutlinePixels,
+        worldMm: 0,
+      };
+    }
+
+    return {
+      pixels: 0,
+      worldMm: this.pthPlatingMicrometers / 1000,
+    };
+  }
+
+  shouldRenderDrillOutline(layer) {
+    const style = this.getDrillOutlineStyle(layer);
+    return style.pixels > 0 || style.worldMm > 0;
+  }
+
+  applyDrillLayerOutlineStyle(layer, processor = this.wasmProcessor) {
+    if (!processor || !isDrillLayer(layer)) return;
+
+    const style = this.getDrillOutlineStyle(layer);
+    if (typeof processor.set_layer_inner_outline === "function") {
+      processor.set_layer_inner_outline(
+        layer.outlineLayerId,
+        style.pixels,
+        style.worldMm,
+      );
+      return;
+    }
+
+    if (typeof processor.set_layer_feature_extra_pixels === "function") {
+      if (style.worldMm > 0) {
+        throw new Error("PTH plating requires an updated WASM module.");
+      }
+      processor.set_layer_feature_extra_pixels(layer.outlineLayerId, style.pixels);
+      return;
+    }
+
+    if (style.pixels > 0 || style.worldMm > 0) {
+      throw new Error("Drill outline rendering requires an updated WASM module.");
+    }
+  }
+
+  applyDrillOutlineStyles(processor = this.wasmProcessor) {
+    if (!processor) return;
+    for (const layer of this.layers) {
+      this.applyDrillLayerOutlineStyle(layer, processor);
+    }
+  }
+
   async rebuildLayersForParserOptions() {
     const layerSnapshot = this.layers.map((layer) =>
       this.createLayerRecoverySnapshot(layer),
@@ -1359,6 +1556,7 @@ export class GerberViewer {
             color: layer.color,
             sourceContent: layer.sourceContent,
             offset: layer.offset,
+            drillType: layer.drillType,
             skipFatalRecovery: true,
           };
           const layerRecord =
@@ -1459,6 +1657,12 @@ export class GerberViewer {
       input.disabled = rendererBusy || this.preserveArcRegions;
     }
     for (const input of this.getMinimumVisibilityInputs()) {
+      input.disabled = rendererBusy;
+    }
+    for (const input of this.getDrillOutlineInputs()) {
+      input.disabled = rendererBusy;
+    }
+    for (const input of this.getPthPlatingInputs()) {
       input.disabled = rendererBusy;
     }
 
@@ -2597,6 +2801,7 @@ export class GerberViewer {
     };
     if (isDrillLayer(layer)) {
       snapshot.drillMetadata = layer.drillMetadata;
+      snapshot.drillType = layer.drillType;
     }
     return snapshot;
   }
@@ -2608,6 +2813,7 @@ export class GerberViewer {
       color: layer.color,
       sourceContent: layer.sourceContent,
       offset: layer.offset,
+      drillType: layer.drillType,
       skipFatalRecovery: true,
     };
 
@@ -2823,7 +3029,10 @@ export class GerberViewer {
       layer.id = `layer-${this.nextLayerDomId++}`;
     }
     if (isDrillLayer(layer)) {
-      layer.color = null;
+      layer.drillType = layer.drillType ?? getDrillType(layer.name);
+      layer.color = layer.color
+        ? [...layer.color]
+        : getDefaultDrillColor(layer.name);
       return layer;
     }
     if (layer.color) {
@@ -2924,12 +3133,13 @@ export class GerberViewer {
       }
 
       const bounds = processor.get_layer_boundary(outlineLayerId);
-      return {
+      const layer = {
         id: options.id ?? null,
         kind: DRILL_LAYER_KIND,
         name,
+        drillType: options.drillType ?? getDrillType(name),
         visible: options.visible ?? true,
-        color: null,
+        color: options.color ? [...options.color] : getDefaultDrillColor(name),
         layerId: outlineLayerId,
         outlineLayerId,
         fillLayerId,
@@ -2943,6 +3153,8 @@ export class GerberViewer {
           maxY: bounds.max_y,
         },
       };
+      this.applyDrillLayerOutlineStyle(layer, processor);
+      return layer;
     } catch (error) {
       if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
@@ -3071,7 +3283,6 @@ export class GerberViewer {
     const backgroundColor = this.isCanvasLight
       ? [248 / 255, 250 / 255, 252 / 255]
       : [2 / 255, 6 / 255, 23 / 255];
-    const outlineColor = backgroundColor.map((value) => 1 - value);
     const drillAlpha = this.globalAlpha > 0 ? 1 / this.globalAlpha : 0;
 
     this.layers.forEach((layer) => {
@@ -3084,19 +3295,24 @@ export class GerberViewer {
 
     this.layers.forEach((layer) => {
       if (isDrillLayer(layer) && layer.visible) {
-        activeLayerIds.push(layer.outlineLayerId);
-        colorData.push(outlineColor[0], outlineColor[1], outlineColor[2], drillAlpha);
-        blendModes.push(0);
-      }
-    });
-
-    this.layers.forEach((layer) => {
-      if (isDrillLayer(layer) && layer.visible) {
         activeLayerIds.push(layer.fillLayerId);
         colorData.push(
           backgroundColor[0],
           backgroundColor[1],
           backgroundColor[2],
+          drillAlpha,
+        );
+        blendModes.push(1);
+      }
+    });
+
+    this.layers.forEach((layer) => {
+      if (isDrillLayer(layer) && layer.visible && this.shouldRenderDrillOutline(layer)) {
+        activeLayerIds.push(layer.outlineLayerId);
+        colorData.push(
+          layer.color[0],
+          layer.color[1],
+          layer.color[2],
           drillAlpha,
         );
         blendModes.push(1);
@@ -3559,7 +3775,7 @@ export class GerberViewer {
 
   updateLayerColor(layerId, hexColor) {
     const layer = this.layers.find((l) => l.id === layerId);
-    if (!layer || isDrillLayer(layer)) return;
+    if (!layer) return;
 
     const r = parseInt(hexColor.substr(1, 2), 16) / 255;
     const g = parseInt(hexColor.substr(3, 2), 16) / 255;

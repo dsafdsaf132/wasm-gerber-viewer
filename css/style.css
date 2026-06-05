@@ -739,10 +739,6 @@ button {
   text-transform: uppercase;
 }
 
-.drill-layer-item {
-  grid-template-columns: 24px minmax(0, 1fr) 32px;
-}
-
 .drill-layer-item .layer-label span {
   line-height: 1.45;
   white-space: pre-line;
@@ -1195,6 +1191,14 @@ button {
 
 .segmented-control.three-up {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.segmented-control.four-up {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.segmented-control.five-up {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .segmented-control label {

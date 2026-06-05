@@ -21,9 +21,12 @@ import {
   getPngColorType,
   getPngRowStride,
   getSourceName,
+  getDefaultDrillOutlineStyle,
+  hasDrillOutlineStyle,
   isDrillLayerKind,
   loadLayersBestEffort,
   loadWasmJsModule,
+  normalizeDrillOutlineColor,
   normalizeColor,
   normalizeLayer,
   normalizeLayerKind,
@@ -40,6 +43,7 @@ import {
   resolveDrillRenderColors,
   resolveFrameView,
   resolveLayerAlpha,
+  setDefaultDrillInnerOutline,
   sourceToText,
   pngChunk,
   writeBlankPngRows,
@@ -336,7 +340,10 @@ export class NodeGerberRenderer {
     const isDrill = isDrillLayerKind(prepared.kind);
     const layerId = this.frame.layers.length;
     const color = isDrill
-      ? null
+      ? normalizeDrillOutlineColor(prepared.color, {
+          allowString: true,
+          name: prepared.name,
+        })
       : prepared.color == null
         ? this.frame.nextColor()
         : normalizeColor(prepared.color, this.frame.options.colors[0], {
@@ -355,6 +362,9 @@ export class NodeGerberRenderer {
       bounds: prepared.bounds,
       color,
       alpha: prepared.alpha,
+      outlineStyle: isDrill
+        ? getDefaultDrillOutlineStyle(prepared.name)
+        : null,
     };
   }
 
@@ -474,6 +484,7 @@ class NodeFrameState extends FrameState {
       strategy: this.options.strategy,
       layers: this.layers.map((layer) => ({
         kind: layer.kind,
+        name: layer.name,
         content: layer.content,
         parsedLayer: layer.parsedLayer,
         parsedDrillLayer: layer.parsedDrillLayer,
@@ -481,6 +492,7 @@ class NodeFrameState extends FrameState {
         offsetY: layer.offsetY,
         color: layer.color,
         alpha: layer.alpha,
+        outlineStyle: layer.outlineStyle,
       })),
     };
   }
@@ -1203,18 +1215,20 @@ function createPlanRenderEntries(processor, plan) {
     if (isDrillLayerKind(layer.kind)) {
       const { outlineLayerId, fillLayerId } = addPlanDrillLayerToProcessor(processor, layer);
       const alpha = resolveLayerAlpha(layer.alpha, 1);
-      drillOutlineEntries.push({
-        layerId: outlineLayerId,
-        color: drillColors.outline,
-        alpha,
-        blendMode: 0,
-      });
       drillFillEntries.push({
         layerId: fillLayerId,
         color: drillColors.fill,
         alpha,
         blendMode: drillColors.hasBackground ? 1 : 2,
       });
+      if (hasDrillOutlineStyle(layer.outlineStyle)) {
+        drillOutlineEntries.push({
+          layerId: outlineLayerId,
+          color: layer.color,
+          alpha,
+          blendMode: 1,
+        });
+      }
       continue;
     }
 
@@ -1226,13 +1240,17 @@ function createPlanRenderEntries(processor, plan) {
     });
   }
 
-  return [...gerberEntries, ...drillOutlineEntries, ...drillFillEntries];
+  return [...gerberEntries, ...drillFillEntries, ...drillOutlineEntries];
 }
 
 function addPlanDrillLayerToProcessor(processor, layer) {
   if (layer.parsedDrillLayer && typeof processor.add_parsed_layer === "function") {
+    const outlineLayerId = processor.add_parsed_layer(
+      layer.parsedDrillLayer.outlineLayer,
+    );
+    setDefaultDrillInnerOutline(processor, outlineLayerId, layer.name);
     return {
-      outlineLayerId: processor.add_parsed_layer(layer.parsedDrillLayer.outlineLayer),
+      outlineLayerId,
       fillLayerId: processor.add_parsed_layer(layer.parsedDrillLayer.fillLayer),
     };
   }
@@ -1248,12 +1266,16 @@ function addPlanDrillLayerToProcessor(processor, layer) {
       layer.offsetX,
       layer.offsetY,
     );
-    return normalizeDrillLayerIds(result);
+    const ids = normalizeDrillLayerIds(result);
+    setDefaultDrillInnerOutline(processor, ids.outlineLayerId, layer.name);
+    return ids;
   }
   if (typeof processor.add_drill_layer !== "function") {
     throw new Error("Drill rendering requires an updated WASM renderer.");
   }
-  return normalizeDrillLayerIds(processor.add_drill_layer(layer.content));
+  const ids = normalizeDrillLayerIds(processor.add_drill_layer(layer.content));
+  setDefaultDrillInnerOutline(processor, ids.outlineLayerId, layer.name);
+  return ids;
 }
 
 function normalizeDrillLayerIds(result) {

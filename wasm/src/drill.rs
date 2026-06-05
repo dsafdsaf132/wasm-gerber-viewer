@@ -1459,6 +1459,9 @@ M30",
 
         assert_eq!(parsed.fill_layer.circles.x.len(), 2);
         assert_eq!(parsed.outline_layer.circles.x.len(), 2);
+        assert_eq!(parsed.outline_layer.arcs.x.len(), 0);
+        assert_approx_eq(parsed.outline_layer.circles.radius[0], 0.45);
+        assert_approx_eq(parsed.outline_layer.circles.radius[1], 0.45);
         assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
         assert_eq!(parsed.metadata.slot_count, 1);
         assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);

@@ -100,6 +100,7 @@ function createGroupHeader(title) {
 function createDrillItem({
   layer,
   formatBounds,
+  onColorChange,
   onVisibilityChange,
   onToggleVisibility,
   onDelete,
@@ -107,6 +108,14 @@ function createDrillItem({
   const item = document.createElement("li");
   item.className = "layer-item drill-layer-item";
   item.dataset.layerId = layer.id;
+
+  const colorPicker = document.createElement("input");
+  colorPicker.type = "color";
+  colorPicker.className = "layer-color-picker";
+  colorPicker.value = rgbToHex(layer.color);
+  colorPicker.addEventListener("change", (event) => {
+    onColorChange(layer.id, event.target.value);
+  });
 
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
@@ -140,7 +149,7 @@ function createDrillItem({
     onDelete(layer.id);
   });
 
-  item.append(checkbox, label, deleteBtn);
+  item.append(colorPicker, checkbox, label, deleteBtn);
   return item;
 }
 
@@ -192,6 +201,7 @@ export function renderLayerList({
       createDrillItem({
         layer,
         formatBounds,
+        onColorChange,
         onVisibilityChange,
         onToggleVisibility,
         onDelete,

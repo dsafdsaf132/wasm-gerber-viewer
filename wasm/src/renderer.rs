@@ -27,6 +27,8 @@ pub struct LayerMetadata {
     boundary: Boundary,              // Combined boundary
     fbo_dirty: bool,
     fbo_transform: Option<[f32; 9]>,
+    inner_outline_pixels: f32,
+    inner_outline_world: f32,
     cpu_geometry_released: bool,
     has_path_regions: bool,
 }
@@ -139,6 +141,36 @@ impl Renderer {
         self.mark_all_layers_dirty();
     }
 
+    pub fn set_layer_inner_outline(
+        &mut self,
+        layer_id: usize,
+        pixels: f32,
+        world: f32,
+    ) -> Result<(), JsValue> {
+        let next_pixels = if pixels.is_finite() {
+            pixels.clamp(0.0, 8.0)
+        } else {
+            0.0
+        };
+        let next_world = if world.is_finite() {
+            world.max(0.0)
+        } else {
+            0.0
+        };
+        let layer = self.get_layer_mut(layer_id)?;
+        if (layer.inner_outline_pixels - next_pixels).abs() <= f32::EPSILON
+            && (layer.inner_outline_world - next_world).abs() <= f32::EPSILON
+        {
+            return Ok(());
+        }
+
+        layer.inner_outline_pixels = next_pixels;
+        layer.inner_outline_world = next_world;
+        layer.fbo_dirty = true;
+        layer.fbo_transform = None;
+        Ok(())
+    }
+
     /// Add a new layer with parsed Gerber data
     /// Returns the layer index (layer_id)
     pub fn add_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
@@ -181,6 +213,8 @@ impl Renderer {
             boundary,
             fbo_dirty: true,
             fbo_transform: None,
+            inner_outline_pixels: 0.0,
+            inner_outline_world: 0.0,
             cpu_geometry_released: false,
             has_path_regions: needs_stencil,
         };
@@ -271,6 +305,8 @@ impl Renderer {
             boundary: Boundary::new(min_x, max_x, min_y, max_y),
             fbo_dirty: true,
             fbo_transform: None,
+            inner_outline_pixels: 0.0,
+            inner_outline_world: 0.0,
             cpu_geometry_released: true,
             has_path_regions: needs_stencil,
         };
@@ -1214,6 +1250,8 @@ impl Renderer {
         program: &ShaderProgram,
         viewport_width: u32,
         viewport_height: u32,
+        inner_outline_pixels: f32,
+        inner_outline_world: f32,
     ) {
         if let Some(loc) = program.uniforms.get("viewport_size") {
             self.gl.uniform2f(
@@ -1224,6 +1262,12 @@ impl Renderer {
         }
         if let Some(loc) = program.uniforms.get("minimum_feature_pixels") {
             self.gl.uniform1f(Some(loc), self.minimum_feature_pixels);
+        }
+        if let Some(loc) = program.uniforms.get("inner_outline_pixels") {
+            self.gl.uniform1f(Some(loc), inner_outline_pixels);
+        }
+        if let Some(loc) = program.uniforms.get("inner_outline_world") {
+            self.gl.uniform1f(Some(loc), inner_outline_world);
         }
     }
 
@@ -2193,6 +2237,15 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Layer deallocated"))
     }
 
+    fn get_layer_mut(&mut self, layer_id: usize) -> Result<&mut LayerMetadata, JsValue> {
+        if layer_id >= self.layers.len() {
+            return Err(JsValue::from_str("Invalid layer index"));
+        }
+        self.layers[layer_id]
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Layer deallocated"))
+    }
+
     fn shader_attribute(program: &ShaderProgram, attr_name: &str) -> Result<u32, JsValue> {
         program
             .attributes
@@ -2714,7 +2767,14 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
-        self.set_view_feature_uniforms(program, viewport_width, viewport_height);
+        let layer = self.get_layer(layer_id)?;
+        self.set_view_feature_uniforms(
+            program,
+            viewport_width,
+            viewport_height,
+            layer.inner_outline_pixels,
+            layer.inner_outline_world,
+        );
 
         self.gl
             .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
@@ -2730,6 +2790,8 @@ impl Renderer {
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
+        viewport_width: u32,
+        viewport_height: u32,
     ) -> Result<(), JsValue> {
         let instance_count = {
             let layer = self.layers[layer_id]
@@ -2866,6 +2928,14 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
+        let layer = self.get_layer(layer_id)?;
+        self.set_view_feature_uniforms(
+            program,
+            viewport_width,
+            viewport_height,
+            layer.inner_outline_pixels,
+            layer.inner_outline_world,
+        );
 
         // Draw
         self.gl
@@ -3007,7 +3077,14 @@ impl Renderer {
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
-        self.set_view_feature_uniforms(program, viewport_width, viewport_height);
+        let layer = self.get_layer(layer_id)?;
+        self.set_view_feature_uniforms(
+            program,
+            viewport_width,
+            viewport_height,
+            layer.inner_outline_pixels,
+            layer.inner_outline_world,
+        );
 
         // Draw
         self.gl
@@ -3520,7 +3597,14 @@ impl Renderer {
                 viewport_width,
                 viewport_height,
             )?;
-            self.draw_instanced_circles(transform, &white_color, layer_id, sublayer_idx)?;
+            self.draw_instanced_circles(
+                transform,
+                &white_color,
+                layer_id,
+                sublayer_idx,
+                viewport_width,
+                viewport_height,
+            )?;
             self.draw_instanced_arcs(
                 transform,
                 &white_color,

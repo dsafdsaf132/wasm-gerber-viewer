@@ -11,13 +11,15 @@ uniform mat3 transform;
 out highp vec2 vPosition;
 out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
+
 void main() {
     vec2 center = vec2(center_x_instance, center_y_instance);
-    vec2 scaledPos = position * radius_instance + center;
+    float effectiveRadius = max(radius_instance, 0.0);
+    vec2 scaledPos = position * effectiveRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
-    float safeRadius = max(radius_instance, 0.000000001);
+    float safeRadius = max(effectiveRadius, 0.000000001);
     vHoleCenter = (vec2(hole_x_instance, hole_y_instance) - center) / safeRadius;
     vHoleRadius = hole_radius_instance / safeRadius;
 }

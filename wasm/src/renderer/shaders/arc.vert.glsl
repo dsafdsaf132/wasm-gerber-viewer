@@ -10,11 +10,14 @@ in float thickness_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+uniform float inner_outline_pixels;
+uniform float inner_outline_world;
 out highp vec2 vPosition;
 out highp float vRadius;
 out highp float vStartAngle;
 out highp float vSweepAngle;
 out highp float vThickness;
+out highp float vOutlineThickness;
 
 float weakestPixelsPerWorld() {
     vec2 pixelScale = viewport_size * 0.5;
@@ -42,4 +45,6 @@ void main() {
     vStartAngle = startAngle_instance;
     vSweepAngle = sweepAngle_instance;
     vThickness = effectiveThickness;
+    vOutlineThickness = inner_outline_world
+        + inner_outline_pixels / max(pixelsPerWorld, 0.000001);
 }

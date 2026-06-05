@@ -292,7 +292,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
 - `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
 - `renderDrills`: renders NC drill files (`.drl`, `.nc`, `.xnc`, `.xln`) as drill overlays. Defaults to `true`.
-- `globalAlpha`: opacity for layers without an explicit layer `alpha`. Defaults to `0.7`.
+- `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha`. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
 - `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
@@ -300,7 +300,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 `layerOptions` control a single layer:
 
 - `color`: layer color. Browser accepts `[r, g, b]`; Node also accepts hex and `rgb()`/`rgba()` strings. Defaults to an automatic color cycle.
-- `alpha`: per-layer opacity. When set, it overrides `globalAlpha` for that layer.
+- `alpha`: per-layer opacity. When set, it overrides `globalAlpha`; drill layers default to full opacity unless set.
 - `offsetX`: X offset applied while loading geometry. Defaults to `0`.
 - `offsetY`: Y offset applied while loading geometry. Defaults to `0`.
 - `kind`: force `"gerber"` or `"drill"` when a source filename is unavailable or ambiguous.
@@ -363,7 +363,7 @@ CLI options:
 - `--height <px>`: output height. Defaults to `800`.
 - `--padding <px>`: fit-to-view padding. Defaults to `0`.
 - `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
-- `--alpha <0-1>`: global layer opacity. Defaults to `0.7`.
+- `--alpha <0-1>`: global Gerber layer opacity. Defaults to `0.7`; drill overlays render at full opacity.
 - `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
 - `--approx-region-arcs`: converts region arcs to line segments before rendering.

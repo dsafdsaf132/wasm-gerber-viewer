@@ -22,6 +22,20 @@ function isDrillLayer(layer) {
   return layer?.kind === "drill";
 }
 
+function getDrillOutlineStyle(layer, renderOptions = {}) {
+  if (layer?.drillType === "npth") {
+    return {
+      pixels: Number(renderOptions.drillOutlinePixels ?? 0),
+      worldMm: 0,
+    };
+  }
+
+  return {
+    pixels: 0,
+    worldMm: Number(renderOptions.pthPlatingMicrometers ?? 20) / 1000,
+  };
+}
+
 function hexColorToRgb(color) {
   const match = String(color ?? "").match(/^#([0-9a-f]{6})$/i);
   if (!match) {
@@ -34,10 +48,6 @@ function hexColorToRgb(color) {
     Number.parseInt(value.slice(2, 4), 16) / 255,
     Number.parseInt(value.slice(4, 6), 16) / 255,
   ];
-}
-
-function invertRgb(rgb) {
-  return [1 - rgb[0], 1 - rgb[1], 1 - rgb[2]];
 }
 
 export class ScreenshotExporter {
@@ -385,8 +395,10 @@ export class ScreenshotExporter {
     const blendModes = [];
     const drillLayers = [];
     let wasmLayerCount = 0;
-    const drillFillColor = hexColorToRgb(renderState.backgroundColor);
-    const drillOutlineColor = invertRgb(drillFillColor);
+    const drillFillColor = includeBackground
+      ? hexColorToRgb(renderState.backgroundColor)
+      : [0, 0, 0];
+    const drillFillBlendMode = includeBackground ? 1 : 2;
     const drillAlpha = renderState.globalAlpha > 0 ? 1 / renderState.globalAlpha : 0;
     for (const layer of this.getLayers()) {
       if (typeof layer.sourceContent !== "string") {
@@ -414,9 +426,30 @@ export class ScreenshotExporter {
         }
         wasmLayerCount += 2;
         if (layer.visible) {
+          const outlineLayerId = Number(result?.outlineLayerId);
+          const outlineStyle = getDrillOutlineStyle(layer, renderOptions);
+          if (typeof processor.set_layer_inner_outline === "function") {
+            processor.set_layer_inner_outline(
+              outlineLayerId,
+              outlineStyle.pixels,
+              outlineStyle.worldMm,
+            );
+          } else if (
+            typeof processor.set_layer_feature_extra_pixels === "function" &&
+            outlineStyle.worldMm === 0
+          ) {
+            processor.set_layer_feature_extra_pixels(
+              outlineLayerId,
+              outlineStyle.pixels,
+            );
+          } else if (outlineStyle.pixels > 0 || outlineStyle.worldMm > 0) {
+            throw new Error("Drill outline export requires an updated WASM module.");
+          }
           drillLayers.push({
-            outlineLayerId: Number(result?.outlineLayerId),
+            outlineLayerId,
             fillLayerId: Number(result?.fillLayerId),
+            color: layer.color,
+            outlineStyle,
           });
         }
         continue;
@@ -441,23 +474,31 @@ export class ScreenshotExporter {
     }
 
     for (const layer of drillLayers) {
-      if (Number.isFinite(layer.outlineLayerId)) {
-        activeLayerIds.push(layer.outlineLayerId);
+      if (Number.isFinite(layer.fillLayerId)) {
+        activeLayerIds.push(layer.fillLayerId);
         colorData.push(
-          drillOutlineColor[0],
-          drillOutlineColor[1],
-          drillOutlineColor[2],
+          drillFillColor[0],
+          drillFillColor[1],
+          drillFillColor[2],
           drillAlpha,
         );
-        blendModes.push(0);
+        blendModes.push(drillFillBlendMode);
       }
     }
 
     for (const layer of drillLayers) {
-      if (Number.isFinite(layer.fillLayerId)) {
-        activeLayerIds.push(layer.fillLayerId);
-        colorData.push(drillFillColor[0], drillFillColor[1], drillFillColor[2], drillAlpha);
-        blendModes.push(includeBackground ? 1 : 2);
+      if (
+        Number.isFinite(layer.outlineLayerId) &&
+        (layer.outlineStyle.pixels > 0 || layer.outlineStyle.worldMm > 0)
+      ) {
+        activeLayerIds.push(layer.outlineLayerId);
+        colorData.push(
+          layer.color[0],
+          layer.color[1],
+          layer.color[2],
+          drillAlpha,
+        );
+        blendModes.push(1);
       }
     }
 

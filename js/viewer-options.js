@@ -2,10 +2,14 @@ const DEFAULT_VIEWER_OPTIONS = {
   preserveArcRegions: true,
   arcTessellationQuality: "normal",
   minimumFeaturePixels: 0,
+  drillOutlinePixels: 0,
+  pthPlatingMicrometers: 20,
 };
 
 const ARC_TESSELLATION_QUALITIES = new Set(["low", "normal", "high"]);
 const MINIMUM_FEATURE_PIXELS = new Set([0, 1, 2]);
+const DRILL_OUTLINE_PIXELS = new Set([0, 1, 2, 3]);
+const PTH_PLATING_MICROMETERS = new Set([10, 20, 30, 40, 50]);
 
 function createMemoryStorage() {
   const values = new Map();
@@ -61,6 +65,14 @@ export class ViewerOptionsStore {
         )
           ? stored.minimumFeaturePixels
           : DEFAULT_VIEWER_OPTIONS.minimumFeaturePixels,
+        drillOutlinePixels: DRILL_OUTLINE_PIXELS.has(stored.drillOutlinePixels)
+          ? stored.drillOutlinePixels
+          : DEFAULT_VIEWER_OPTIONS.drillOutlinePixels,
+        pthPlatingMicrometers: PTH_PLATING_MICROMETERS.has(
+          stored.pthPlatingMicrometers,
+        )
+          ? stored.pthPlatingMicrometers
+          : DEFAULT_VIEWER_OPTIONS.pthPlatingMicrometers,
       };
     } catch {
       return this.getDefaults();

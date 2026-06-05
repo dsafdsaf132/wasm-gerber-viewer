@@ -14,7 +14,7 @@ use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
 
-const DRILL_OUTLINE_WIDTH_MM: f32 = 0.05;
+const DRILL_OUTLINE_WIDTH_MM: f32 = 0.0;
 
 /// Initialize panic hook for better error messages in browser console
 #[wasm_bindgen]
@@ -135,6 +135,8 @@ pub struct GerberProcessor {
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     minimum_feature_pixels: f32,
+    drill_outline_pixels: f32,
+    drill_outline_layer_ids: Vec<u32>,
 }
 
 impl Default for GerberProcessor {
@@ -144,6 +146,8 @@ impl Default for GerberProcessor {
             preserve_arc_regions: true,
             arc_tessellation_quality: 1,
             minimum_feature_pixels: 0.0,
+            drill_outline_pixels: 0.0,
+            drill_outline_layer_ids: Vec::new(),
         }
     }
 }
@@ -190,6 +194,7 @@ impl GerberProcessor {
         };
 
         let outline_layer_id = renderer.add_layer(vec![drill.outline_layer])?;
+        renderer.set_layer_inner_outline(outline_layer_id, self.drill_outline_pixels, 0.0)?;
         let fill_layer_id = match renderer.add_layer(vec![drill.fill_layer]) {
             Ok(layer_id) => layer_id,
             Err(error) => {
@@ -197,6 +202,7 @@ impl GerberProcessor {
                 return Err(error);
             }
         };
+        self.drill_outline_layer_ids.push(outline_layer_id as u32);
 
         let object = Object::new();
         Reflect::set(
@@ -286,6 +292,46 @@ impl GerberProcessor {
         if let Some(renderer) = &mut self.renderer {
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         }
+    }
+
+    pub fn set_drill_outline_pixels(&mut self, pixels: f32) {
+        self.drill_outline_pixels = if pixels.is_finite() {
+            pixels.clamp(0.0, 8.0)
+        } else {
+            0.0
+        };
+
+        if let Some(renderer) = &mut self.renderer {
+            self.drill_outline_layer_ids.retain(|&layer_id| {
+                renderer
+                    .set_layer_inner_outline(layer_id as usize, self.drill_outline_pixels, 0.0)
+                    .is_ok()
+            });
+        }
+    }
+
+    pub fn set_layer_inner_outline(
+        &mut self,
+        layer_id: u32,
+        pixels: f32,
+        world: f32,
+    ) -> Result<String, JsValue> {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_layer_inner_outline(layer_id as usize, pixels, world)?;
+            Ok("layer_inner_outline_done".to_string())
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
+    pub fn set_layer_feature_extra_pixels(
+        &mut self,
+        layer_id: u32,
+        pixels: f32,
+    ) -> Result<String, JsValue> {
+        self.set_layer_inner_outline(layer_id, pixels, 0.0)
     }
 
     /// Recreate WebGL-owned resources after browser context restoration.
@@ -410,6 +456,8 @@ impl GerberProcessor {
     pub fn remove_layer(&mut self, layer_id: u32) -> Result<String, JsValue> {
         if let Some(renderer) = &mut self.renderer {
             renderer.remove_layer(layer_id as usize)?;
+            self.drill_outline_layer_ids
+                .retain(|&outline_layer_id| outline_layer_id != layer_id);
             Ok("remove_done".to_string())
         } else {
             Err(JsValue::from_str(
@@ -425,6 +473,7 @@ impl GerberProcessor {
     pub fn clear(&mut self) -> Result<String, JsValue> {
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_all();
+            self.drill_outline_layer_ids.clear();
             Ok("clear_done".to_string())
         } else {
             Err(JsValue::from_str(

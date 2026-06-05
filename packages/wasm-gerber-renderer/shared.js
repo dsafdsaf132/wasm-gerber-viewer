@@ -11,6 +11,10 @@ export const DEFAULT_COLORS = [
   [1.0, 1.0, 0.0],
   [0.0, 1.0, 1.0],
 ];
+export const DEFAULT_PTH_DRILL_COLOR = [1.0, 1.0, 0.0];
+export const DEFAULT_NPTH_DRILL_COLOR = [1.0, 1.0, 1.0];
+export const DEFAULT_NPTH_DRILL_OUTLINE_PIXELS = 0;
+export const DEFAULT_PTH_PLATING_MICROMETERS = 20;
 
 export const DEFAULT_BACKGROUND = null;
 export const DEFAULT_GLOBAL_ALPHA = 0.7;
@@ -507,9 +511,61 @@ export function resolveDrillRenderColors(background) {
   const { fill, hasBackground } = normalizeDrillFillColor(background);
   return {
     fill,
-    outline: [1 - fill[0], 1 - fill[1], 1 - fill[2]],
     hasBackground,
   };
+}
+
+export function getDrillLayerType(name) {
+  const normalized = String(name ?? "").toLowerCase();
+  return /(^|[^a-z0-9])(npth|non[-_ ]?plated|nonplated)([^a-z0-9]|$)/i.test(
+    normalized,
+  )
+    ? "npth"
+    : "pth";
+}
+
+export function getDefaultDrillColor(name) {
+  return getDrillLayerType(name) === "npth"
+    ? DEFAULT_NPTH_DRILL_COLOR
+    : DEFAULT_PTH_DRILL_COLOR;
+}
+
+export function normalizeDrillOutlineColor(color, options = {}) {
+  return normalizeColor(color, getDefaultDrillColor(options.name), options);
+}
+
+export function getDefaultDrillOutlineStyle(name) {
+  if (getDrillLayerType(name) === "npth") {
+    return {
+      pixels: DEFAULT_NPTH_DRILL_OUTLINE_PIXELS,
+      worldMm: 0,
+    };
+  }
+
+  return {
+    pixels: 0,
+    worldMm: DEFAULT_PTH_PLATING_MICROMETERS / 1000,
+  };
+}
+
+export function hasDrillOutlineStyle(style) {
+  return Number(style?.pixels) > 0 || Number(style?.worldMm) > 0;
+}
+
+export function setDefaultDrillInnerOutline(processor, outlineLayerId, name) {
+  const style = getDefaultDrillOutlineStyle(name);
+  if (typeof processor.set_layer_inner_outline === "function") {
+    processor.set_layer_inner_outline(outlineLayerId, style.pixels, style.worldMm);
+    return style;
+  }
+  if (
+    typeof processor.set_layer_feature_extra_pixels === "function" &&
+    style.worldMm === 0
+  ) {
+    processor.set_layer_feature_extra_pixels(outlineLayerId, style.pixels);
+    return style;
+  }
+  throw new Error("Drill outline rendering requires an updated WASM renderer.");
 }
 
 export function parseDrillLayerPayload(wasmModule, content, offsetX, offsetY) {

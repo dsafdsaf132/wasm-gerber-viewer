@@ -13,8 +13,10 @@ import {
   getPngColorType,
   getPngRowStride,
   getSourceName,
+  hasDrillOutlineStyle,
   isDrillLayerKind,
   loadWasmJsModule,
+  normalizeDrillOutlineColor,
   normalizeColor,
   normalizeLayerKind,
   normalizeLayer,
@@ -27,6 +29,7 @@ import {
   renderLayersBestEffort,
   resolveFrameView,
   resolveLayerAlpha,
+  setDefaultDrillInnerOutline,
   sourceToText,
   pngChunk,
   writePixelRowsToPngRows,
@@ -288,19 +291,30 @@ export class GerberRenderer {
       if (!Number.isInteger(outlineLayerId) || !Number.isInteger(fillLayerId)) {
         throw new Error("Drill rendering did not return layer IDs.");
       }
+      const name = options.name || getSourceName(source) || `Layer ${outlineLayerId}`;
+      const outlineStyle = setDefaultDrillInnerOutline(
+        this.frame.processor,
+        outlineLayerId,
+        name,
+      );
       const bounds = boundaryToPlainObject(
         this.frame.processor.get_layer_boundary(outlineLayerId),
       );
+      const color = normalizeDrillOutlineColor(options.color, {
+        allowString: true,
+        name,
+      });
       const alpha = optionalAlpha(options.alpha);
       return {
         kind,
         layerId: outlineLayerId,
         outlineLayerId,
         fillLayerId,
-        name: options.name || getSourceName(source) || `Layer ${outlineLayerId}`,
+        name,
         bounds,
-        color: null,
+        color,
         alpha,
+        outlineStyle,
       };
     }
 
@@ -499,22 +513,23 @@ function createRenderEntries(layers, globalAlpha, background) {
 
   for (const layer of layers) {
     if (isDrillLayerKind(layer.kind)) {
+      const alpha = resolveLayerAlpha(layer.alpha, 1);
       entries.push({
-        layerId: layer.outlineLayerId,
-        color: drillColors.outline,
-        alpha: resolveLayerAlpha(layer.alpha, 1),
-        blendMode: 0,
+        layerId: layer.fillLayerId,
+        color: drillColors.fill,
+        alpha,
+        blendMode: drillColors.hasBackground ? 1 : 2,
       });
     }
   }
 
   for (const layer of layers) {
-    if (isDrillLayerKind(layer.kind)) {
+    if (isDrillLayerKind(layer.kind) && hasDrillOutlineStyle(layer.outlineStyle)) {
       entries.push({
-        layerId: layer.fillLayerId,
-        color: drillColors.fill,
+        layerId: layer.outlineLayerId,
+        color: layer.color,
         alpha: resolveLayerAlpha(layer.alpha, 1),
-        blendMode: drillColors.hasBackground ? 1 : 2,
+        blendMode: 1,
       });
     }
   }

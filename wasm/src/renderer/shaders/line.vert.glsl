@@ -9,6 +9,10 @@ in float width_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+uniform float inner_outline_pixels;
+uniform float inner_outline_world;
+out highp float vSide;
+out highp float vInnerSide;
 
 vec2 clipToPixel(vec2 clipPosition) {
     return clipPosition * viewport_size * 0.5;
@@ -39,6 +43,14 @@ void main() {
     vec2 widthClip = mat2(transform) * worldNormal * width_instance;
     float halfWidthPixels = length(widthClip * viewport_size * 0.5) * 0.5;
     halfWidthPixels = max(halfWidthPixels, minimum_feature_pixels * 0.5);
+    float pixelsPerWorld = width_instance > 0.000001
+        ? halfWidthPixels / (width_instance * 0.5)
+        : 0.0;
+    float outlinePixels = inner_outline_pixels + inner_outline_world * pixelsPerWorld;
+    vSide = position.y;
+    vInnerSide = outlinePixels > 0.0 && halfWidthPixels > 0.000001
+        ? max((halfWidthPixels - outlinePixels) / halfWidthPixels, 0.0)
+        : 0.0;
 
     float t = position.x * 0.5 + 0.5;
     vec2 centerPixels = mix(startPixels, endPixels, t);

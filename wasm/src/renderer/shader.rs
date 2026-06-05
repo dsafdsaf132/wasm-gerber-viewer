@@ -127,6 +127,8 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "inner_outline_pixels",
+                "inner_outline_world",
             ],
         )?;
 
@@ -140,7 +142,13 @@ impl ShaderPrograms {
                 "center_y_instance",
                 "radius_instance",
             ],
-            &["transform", "color"],
+            &[
+                "transform",
+                "color",
+                "viewport_size",
+                "inner_outline_pixels",
+                "inner_outline_world",
+            ],
         )?;
 
         let circle_holed = compile_program(
@@ -177,6 +185,8 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "inner_outline_pixels",
+                "inner_outline_world",
             ],
         )?;
 

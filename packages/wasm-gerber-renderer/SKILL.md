@@ -64,7 +64,7 @@ Useful CLI options:
 - `--output <path>` sets the PNG output path and is required for multiple inputs.
 - `--background <color>` accepts hex or `rgb()`/`rgba()`; omit for transparent output.
 - `--padding <px>` adds fit-to-view padding.
-- `--alpha <0-1>` sets global layer opacity.
+- `--alpha <0-1>` sets global Gerber layer opacity; drill overlays render at full opacity.
 - `--minimum-feature-pixels <px>` keeps thin lines/arcs visible.
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
 - `--approx-region-arcs` uses faster approximate region arcs.
@@ -244,7 +244,7 @@ Layer options:
 
 - `name`
 - `color`
-- `alpha` overrides frame/global alpha for that layer
+- `alpha` overrides frame/global alpha for that layer; drill layers default to full opacity unless set
 - `offsetX`
 - `offsetY`
 
@@ -274,7 +274,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 - `padding`: fit-to-view padding in pixels.
 - `flipX`, `flipY`: mirror the output around the frame center.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`.
-- `globalAlpha`: opacity multiplier for all layers.
+- `globalAlpha`: opacity for Gerber layers without explicit layer `alpha`.
 - `minimumFeaturePixels`: minimum visible line/arc width.
 - `renderDrills`: render NC drill files as drill overlays; set `false` to skip them.
 - `preserveArcRegions`: defaults to `true`; set `false` for approximate region arcs.
