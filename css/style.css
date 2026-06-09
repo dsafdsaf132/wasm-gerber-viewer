@@ -522,6 +522,8 @@ button {
 
 .side-panel.collapsed .panel-section[data-panel="layers"] {
   display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 10px;
 }
 
@@ -1528,6 +1530,7 @@ button {
   }
 
   .side-panel.collapsed .panel-section[data-panel="layers"] {
+    gap: 8px;
     padding: 8px 10px;
   }
 
