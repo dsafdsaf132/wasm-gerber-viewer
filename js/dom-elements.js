@@ -67,7 +67,6 @@ export function getViewerElements(documentRef = document) {
       "measurement-unit-toggle",
     ),
     fullscreenBtn: requireElement(documentRef, "fullscreen-btn"),
-    bottomDrawerToggleBtn: requireElement(documentRef, "bottom-drawer-toggle"),
     selectAllBtn: requireElement(documentRef, "select-all-btn"),
     selectTopBtn: requireElement(documentRef, "select-top-btn"),
     selectBottomBtn: requireElement(documentRef, "select-bottom-btn"),

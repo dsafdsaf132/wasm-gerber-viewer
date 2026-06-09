@@ -597,7 +597,6 @@ export class GerberViewer {
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
       toggleButton: this.drawerToggleBtn,
-      bottomToggleButton: this.bottomDrawerToggleBtn,
       dropZone: this.dropZone,
       refreshIcons: () => this.refreshIcons(),
       captureViewState: () => this.captureCanvasViewState(),
