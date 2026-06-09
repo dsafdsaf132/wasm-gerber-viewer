@@ -9,6 +9,7 @@ import {
   clamp01,
   createBaseFrameOptions,
   createPngHeader,
+  expandBounds,
   getPngChannelCount,
   getPngColorType,
   getPngRowStride,
@@ -24,6 +25,7 @@ import {
   numberOrDefault,
   optionalAlpha,
   resolveDrillRenderColors,
+  resolveFrameFitPadding,
   parseColor,
   positiveIntegerOrDefault,
   renderLayersBestEffort,
@@ -300,6 +302,7 @@ export class GerberRenderer {
       const bounds = boundaryToPlainObject(
         this.frame.processor.get_layer_boundary(outlineLayerId),
       );
+      const expandedBounds = expandBounds(bounds, outlineStyle.worldMm);
       const color = normalizeDrillOutlineColor(options.color, {
         allowString: true,
         name,
@@ -311,7 +314,7 @@ export class GerberRenderer {
         outlineLayerId,
         fillLayerId,
         name,
-        bounds,
+        bounds: expandedBounds,
         color,
         alpha,
         outlineStyle,
@@ -360,7 +363,10 @@ export class GerberRenderer {
     }
 
     const view = resolveFrameView(
-      frame.options,
+      {
+        ...frame.options,
+        padding: resolveFrameFitPadding(frame.options, frame.layers),
+      },
       frame.bounds,
       this.canvas.width,
       this.canvas.height,
@@ -512,6 +518,17 @@ function createRenderEntries(layers, globalAlpha, background) {
   }
 
   for (const layer of layers) {
+    if (isDrillLayerKind(layer.kind) && hasDrillOutlineStyle(layer.outlineStyle)) {
+      entries.push({
+        layerId: layer.outlineLayerId,
+        color: layer.color,
+        alpha: resolveLayerAlpha(layer.alpha, 1),
+        blendMode: 1,
+      });
+    }
+  }
+
+  for (const layer of layers) {
     if (isDrillLayerKind(layer.kind)) {
       const alpha = resolveLayerAlpha(layer.alpha, 1);
       entries.push({
@@ -519,17 +536,6 @@ function createRenderEntries(layers, globalAlpha, background) {
         color: drillColors.fill,
         alpha,
         blendMode: drillColors.hasBackground ? 1 : 2,
-      });
-    }
-  }
-
-  for (const layer of layers) {
-    if (isDrillLayerKind(layer.kind) && hasDrillOutlineStyle(layer.outlineStyle)) {
-      entries.push({
-        layerId: layer.outlineLayerId,
-        color: layer.color,
-        alpha: resolveLayerAlpha(layer.alpha, 1),
-        blendMode: 1,
       });
     }
   }

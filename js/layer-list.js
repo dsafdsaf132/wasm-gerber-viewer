@@ -11,10 +11,21 @@ function rgbToHex(rgb) {
   return `#${r}${g}${b}`;
 }
 
-function createEmptyLayerItem() {
+function createEmptyLayerItem(onOpenFiles) {
   const item = document.createElement("li");
-  item.className = "layer-item";
+  item.className = "layer-item layer-empty-item";
   item.style.gridTemplateColumns = "1fr";
+  item.setAttribute("role", "button");
+  item.setAttribute("aria-label", "Open files");
+  item.setAttribute("aria-disabled", "false");
+  item.tabIndex = 0;
+  item.title = "Open files";
+  item.addEventListener("click", onOpenFiles);
+  item.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onOpenFiles();
+  });
 
   const label = document.createElement("label");
   label.className = "layer-label";
@@ -163,11 +174,12 @@ export function renderLayerList({
   onVisibilityChange,
   onToggleVisibility,
   onDelete,
+  onOpenFiles,
 }) {
   container.replaceChildren();
 
   if (layers.length === 0) {
-    container.appendChild(createEmptyLayerItem());
+    container.appendChild(createEmptyLayerItem(onOpenFiles));
     return;
   }
 

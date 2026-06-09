@@ -17,6 +17,7 @@ import {
   clamp01,
   createBaseFrameOptions,
   createPngHeader,
+  expandBounds,
   getPngChannelCount,
   getPngColorType,
   getPngRowStride,
@@ -41,6 +42,7 @@ import {
   positiveNumberOrDefault,
   renderLayersBestEffort,
   resolveDrillRenderColors,
+  resolveFrameFitPadding,
   resolveFrameView,
   resolveLayerAlpha,
   setDefaultDrillInnerOutline,
@@ -349,6 +351,9 @@ export class NodeGerberRenderer {
         : normalizeColor(prepared.color, this.frame.options.colors[0], {
             allowString: true,
           });
+    const outlineStyle = isDrill
+      ? getDefaultDrillOutlineStyle(prepared.name)
+      : null;
 
     return {
       kind: prepared.kind,
@@ -359,12 +364,12 @@ export class NodeGerberRenderer {
       parsedDrillLayer: prepared.parsedDrillLayer,
       offsetX: prepared.offsetX,
       offsetY: prepared.offsetY,
-      bounds: prepared.bounds,
+      bounds: isDrill
+        ? expandBounds(prepared.bounds, outlineStyle.worldMm)
+        : prepared.bounds,
       color,
       alpha: prepared.alpha,
-      outlineStyle: isDrill
-        ? getDefaultDrillOutlineStyle(prepared.name)
-        : null,
+      outlineStyle,
     };
   }
 
@@ -395,6 +400,8 @@ export class NodeGerberRenderer {
       return null;
     }
     const parseOptions = normalizeParseOptions(options);
+    const sourceName = getSourceName(source);
+    const name = options.name || sourceName || "Layer";
     const parsed = isDrillLayerKind(kind)
       ? parseDrillLayerPayload(this.wasmModule, content, offsetX, offsetY)
       : parseLayerPayload(
@@ -404,12 +411,11 @@ export class NodeGerberRenderer {
           offsetY,
           parseOptions,
         );
-    const sourceName = getSourceName(source);
 
     return {
       [NODE_PREPARED_LAYER]: true,
       kind,
-      name: options.name || sourceName || "Layer",
+      name,
       sourceName,
       content: supportsParsedLayerReuse(this.wasmModule) ? null : content,
       parsedLayer: isDrillLayerKind(kind) ? null : parsed.payload,
@@ -441,7 +447,10 @@ export class NodeGerberRenderer {
     }
 
     const view = resolveFrameView(
-      frame.options,
+      {
+        ...frame.options,
+        padding: resolveFrameFitPadding(frame.options, frame.layers),
+      },
       frame.bounds,
       frame.options.width,
       frame.options.height,
@@ -1240,7 +1249,7 @@ function createPlanRenderEntries(processor, plan) {
     });
   }
 
-  return [...gerberEntries, ...drillFillEntries, ...drillOutlineEntries];
+  return [...gerberEntries, ...drillOutlineEntries, ...drillFillEntries];
 }
 
 function addPlanDrillLayerToProcessor(processor, layer) {

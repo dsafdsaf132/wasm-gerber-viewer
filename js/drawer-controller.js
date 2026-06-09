@@ -3,6 +3,7 @@ export class DrawerController {
     drawer,
     resizeHandle,
     toggleButton,
+    bottomToggleButton = null,
     dropZone,
     refreshIcons,
     captureViewState = () => null,
@@ -13,6 +14,7 @@ export class DrawerController {
     this.drawer = drawer;
     this.resizeHandle = resizeHandle;
     this.toggleButton = toggleButton;
+    this.toggleButtons = [toggleButton, bottomToggleButton].filter(Boolean);
     this.dropZone = dropZone;
     this.refreshIcons = refreshIcons;
     this.captureViewState = captureViewState;
@@ -58,11 +60,13 @@ export class DrawerController {
       passive: false,
     });
 
-    this.toggleButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      this.toggle();
-    });
+    for (const button of this.toggleButtons) {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        this.toggle();
+      });
+    }
   }
 
   initialize() {
@@ -346,13 +350,15 @@ export class DrawerController {
         ? "panel-right-open"
         : "panel-right-close";
 
-    this.toggleButton.setAttribute("aria-label", label);
-    this.toggleButton.setAttribute("aria-expanded", String(!isCollapsed));
-    this.toggleButton.title = label;
-    this.toggleButton.replaceChildren();
-    const icon = document.createElement("i");
-    icon.setAttribute("data-lucide", iconName);
-    this.toggleButton.appendChild(icon);
+    for (const button of this.toggleButtons) {
+      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-expanded", String(!isCollapsed));
+      button.title = label;
+      button.replaceChildren();
+      const icon = this.document.createElement("i");
+      icon.setAttribute("data-lucide", iconName);
+      button.appendChild(icon);
+    }
     this.refreshIcons?.();
   }
 

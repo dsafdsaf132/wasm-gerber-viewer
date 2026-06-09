@@ -434,14 +434,6 @@ export class ScreenshotExporter {
               outlineStyle.pixels,
               outlineStyle.worldMm,
             );
-          } else if (
-            typeof processor.set_layer_feature_extra_pixels === "function" &&
-            outlineStyle.worldMm === 0
-          ) {
-            processor.set_layer_feature_extra_pixels(
-              outlineLayerId,
-              outlineStyle.pixels,
-            );
           } else if (outlineStyle.pixels > 0 || outlineStyle.worldMm > 0) {
             throw new Error("Drill outline export requires an updated WASM module.");
           }
@@ -474,19 +466,6 @@ export class ScreenshotExporter {
     }
 
     for (const layer of drillLayers) {
-      if (Number.isFinite(layer.fillLayerId)) {
-        activeLayerIds.push(layer.fillLayerId);
-        colorData.push(
-          drillFillColor[0],
-          drillFillColor[1],
-          drillFillColor[2],
-          drillAlpha,
-        );
-        blendModes.push(drillFillBlendMode);
-      }
-    }
-
-    for (const layer of drillLayers) {
       if (
         Number.isFinite(layer.outlineLayerId) &&
         (layer.outlineStyle.pixels > 0 || layer.outlineStyle.worldMm > 0)
@@ -499,6 +478,19 @@ export class ScreenshotExporter {
           drillAlpha,
         );
         blendModes.push(1);
+      }
+    }
+
+    for (const layer of drillLayers) {
+      if (Number.isFinite(layer.fillLayerId)) {
+        activeLayerIds.push(layer.fillLayerId);
+        colorData.push(
+          drillFillColor[0],
+          drillFillColor[1],
+          drillFillColor[2],
+          drillAlpha,
+        );
+        blendModes.push(drillFillBlendMode);
       }
     }
 

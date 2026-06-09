@@ -558,17 +558,18 @@ export function setDefaultDrillInnerOutline(processor, outlineLayerId, name) {
     processor.set_layer_inner_outline(outlineLayerId, style.pixels, style.worldMm);
     return style;
   }
-  if (
-    typeof processor.set_layer_feature_extra_pixels === "function" &&
-    style.worldMm === 0
-  ) {
-    processor.set_layer_feature_extra_pixels(outlineLayerId, style.pixels);
+  if (!hasDrillOutlineStyle(style)) {
     return style;
   }
   throw new Error("Drill outline rendering requires an updated WASM renderer.");
 }
 
-export function parseDrillLayerPayload(wasmModule, content, offsetX, offsetY) {
+export function parseDrillLayerPayload(
+  wasmModule,
+  content,
+  offsetX,
+  offsetY,
+) {
   if (typeof wasmModule.parse_drill_layer !== "function") {
     throw new Error("Drill parsing requires an updated WASM renderer.");
   }
@@ -714,6 +715,32 @@ export function mergeBounds(first, second) {
     minY: Math.min(first.minY, second.minY),
     maxY: Math.max(first.maxY, second.maxY),
   };
+}
+
+export function expandBounds(bounds, amount) {
+  const value = Number(amount);
+  if (!bounds || !Number.isFinite(value) || value <= 0) {
+    return bounds;
+  }
+  return {
+    minX: bounds.minX - value,
+    maxX: bounds.maxX + value,
+    minY: bounds.minY - value,
+    maxY: bounds.maxY + value,
+  };
+}
+
+export function resolveFrameFitPadding(frameOptions, layers = []) {
+  const basePadding = numberOrDefault(frameOptions.padding, 0);
+  const outlinePadding = layers.reduce(
+    (padding, layer) =>
+      Math.max(
+        padding,
+        isDrillLayerKind(layer.kind) ? Number(layer.outlineStyle?.pixels ?? 0) : 0,
+      ),
+    0,
+  );
+  return Math.max(basePadding, outlinePadding);
 }
 
 export function normalizeColor(color, fallback = DEFAULT_COLORS[0], options = {}) {

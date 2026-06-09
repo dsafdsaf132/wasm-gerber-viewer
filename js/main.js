@@ -108,6 +108,19 @@ function getDrillType(name) {
   return isNpth ? NPTH_DRILL_TYPE : PTH_DRILL_TYPE;
 }
 
+function expandBounds(bounds, amount) {
+  const value = Number(amount);
+  if (!bounds || !Number.isFinite(value) || value <= 0) {
+    return bounds;
+  }
+  return {
+    minX: bounds.minX - value,
+    maxX: bounds.maxX + value,
+    minY: bounds.minY - value,
+    maxY: bounds.maxY + value,
+  };
+}
+
 function normalizeDrillMetadata(metadata = {}) {
   const tools = Array.isArray(metadata.tools)
     ? metadata.tools
@@ -584,6 +597,7 @@ export class GerberViewer {
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
       toggleButton: this.drawerToggleBtn,
+      bottomToggleButton: this.bottomDrawerToggleBtn,
       dropZone: this.dropZone,
       refreshIcons: () => this.refreshIcons(),
       captureViewState: () => this.captureCanvasViewState(),
@@ -661,6 +675,7 @@ export class GerberViewer {
 
     // Initial render
     this.updateEmptyStateHint();
+    this.renderLayerList();
     this.refreshIcons();
     this.syncOptionControls();
     this.syncFilterInputs();
@@ -811,11 +826,11 @@ export class GerberViewer {
 
     // File input
     this.selectFilesBtn.addEventListener("click", () => {
-      this.fileInput.click();
+      this.openFilePicker();
     });
 
     this.emptyUploadBtn.addEventListener("click", () => {
-      this.fileInput.click();
+      this.openFilePicker();
     });
 
     this.fileInput.addEventListener("change", (e) => {
@@ -918,6 +933,10 @@ export class GerberViewer {
     });
 
     this.clearAllBtn.addEventListener("click", () => {
+      this.clearAllLayers();
+    });
+
+    this.toolbarClearAllBtn.addEventListener("click", () => {
       this.clearAllLayers();
     });
 
@@ -1462,20 +1481,18 @@ export class GerberViewer {
         style.pixels,
         style.worldMm,
       );
-      return;
-    }
-
-    if (typeof processor.set_layer_feature_extra_pixels === "function") {
-      if (style.worldMm > 0) {
-        throw new Error("PTH plating requires an updated WASM module.");
-      }
-      processor.set_layer_feature_extra_pixels(layer.outlineLayerId, style.pixels);
+      this.updateDrillLayerBounds(layer, style);
       return;
     }
 
     if (style.pixels > 0 || style.worldMm > 0) {
       throw new Error("Drill outline rendering requires an updated WASM module.");
     }
+  }
+
+  updateDrillLayerBounds(layer, style = this.getDrillOutlineStyle(layer)) {
+    if (!isDrillLayer(layer) || !layer.rawBounds) return;
+    layer.bounds = expandBounds(layer.rawBounds, style.worldMm);
   }
 
   applyDrillOutlineStyles(processor = this.wasmProcessor) {
@@ -1630,6 +1647,11 @@ export class GerberViewer {
     );
   }
 
+  openFilePicker() {
+    if (this.fileInput.disabled || this.isRendererBusy()) return;
+    this.fileInput.click();
+  }
+
   updateUiState() {
     const totalLayers = this.layers.length;
     const visibleLayers = this.layers.filter((layer) => layer.visible).length;
@@ -1651,6 +1673,9 @@ export class GerberViewer {
     this.fileInput.disabled = rendererBusy;
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
+    this.clearAllBtn.disabled = rendererBusy || totalLayers === 0;
+    this.toolbarClearAllBtn.disabled = rendererBusy || totalLayers === 0;
+    this.updateEmptyLayerListActionState(rendererBusy);
     this.regionArcExactInput.disabled = rendererBusy;
     this.regionArcApproximateInput.disabled = rendererBusy;
     for (const input of this.getArcQualityInputs()) {
@@ -1676,6 +1701,14 @@ export class GerberViewer {
     this.boundsReadout.textContent = this.formatCombinedBounds();
     this.renderDiagnostics();
     this.refreshIcons();
+  }
+
+  updateEmptyLayerListActionState(disabled) {
+    const item = this.layerList.querySelector(".layer-empty-item");
+    if (!item) return;
+
+    item.setAttribute("aria-disabled", String(disabled));
+    item.tabIndex = disabled ? -1 : 0;
   }
 
   formatZoom() {
@@ -3133,11 +3166,19 @@ export class GerberViewer {
       }
 
       const bounds = processor.get_layer_boundary(outlineLayerId);
+      const drillType = options.drillType ?? getDrillType(name);
+      const outlineStyle = this.getDrillOutlineStyle({ drillType });
+      const rawBounds = {
+        minX: bounds.min_x,
+        maxX: bounds.max_x,
+        minY: bounds.min_y,
+        maxY: bounds.max_y,
+      };
       const layer = {
         id: options.id ?? null,
         kind: DRILL_LAYER_KIND,
         name,
-        drillType: options.drillType ?? getDrillType(name),
+        drillType,
         visible: options.visible ?? true,
         color: options.color ? [...options.color] : getDefaultDrillColor(name),
         layerId: outlineLayerId,
@@ -3146,12 +3187,8 @@ export class GerberViewer {
         drillMetadata: normalizeDrillMetadata(result?.metadata),
         sourceContent: options.sourceContent ?? content,
         offset,
-        bounds: {
-          minX: bounds.min_x,
-          maxX: bounds.max_x,
-          minY: bounds.min_y,
-          maxY: bounds.max_y,
-        },
+        rawBounds,
+        bounds: expandBounds(rawBounds, outlineStyle.worldMm),
       };
       this.applyDrillLayerOutlineStyle(layer, processor);
       return layer;
@@ -3294,12 +3331,12 @@ export class GerberViewer {
     });
 
     this.layers.forEach((layer) => {
-      if (isDrillLayer(layer) && layer.visible) {
-        activeLayerIds.push(layer.fillLayerId);
+      if (isDrillLayer(layer) && layer.visible && this.shouldRenderDrillOutline(layer)) {
+        activeLayerIds.push(layer.outlineLayerId);
         colorData.push(
-          backgroundColor[0],
-          backgroundColor[1],
-          backgroundColor[2],
+          layer.color[0],
+          layer.color[1],
+          layer.color[2],
           drillAlpha,
         );
         blendModes.push(1);
@@ -3307,12 +3344,12 @@ export class GerberViewer {
     });
 
     this.layers.forEach((layer) => {
-      if (isDrillLayer(layer) && layer.visible && this.shouldRenderDrillOutline(layer)) {
-        activeLayerIds.push(layer.outlineLayerId);
+      if (isDrillLayer(layer) && layer.visible) {
+        activeLayerIds.push(layer.fillLayerId);
         colorData.push(
-          layer.color[0],
-          layer.color[1],
-          layer.color[2],
+          backgroundColor[0],
+          backgroundColor[1],
+          backgroundColor[2],
           drillAlpha,
         );
         blendModes.push(1);
@@ -4009,6 +4046,7 @@ export class GerberViewer {
         this.updateUiState();
       },
       onDelete: (layerId) => this.deleteLayer(layerId),
+      onOpenFiles: () => this.openFilePicker(),
     });
     this.refreshIcons();
   }

@@ -29,12 +29,13 @@ void main() {
     float pixelsPerWorld = weakestPixelsPerWorld();
     float outlineWorldRadius = inner_outline_world
         + inner_outline_pixels / max(pixelsPerWorld, 0.000001);
-    float effectiveRadius = max(radius_instance, 0.0);
+    float baseRadius = max(radius_instance, 0.0);
+    float effectiveRadius = baseRadius + outlineWorldRadius;
     vec2 scaledPos = position * effectiveRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = position;
     vInnerRadius = outlineWorldRadius > 0.0 && effectiveRadius > 0.000001
-        ? max((effectiveRadius - outlineWorldRadius) / effectiveRadius, 0.0)
+        ? baseRadius / effectiveRadius
         : 0.0;
 }

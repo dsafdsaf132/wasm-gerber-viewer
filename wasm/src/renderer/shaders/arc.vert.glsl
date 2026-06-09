@@ -35,7 +35,10 @@ float weakestPixelsPerWorld() {
 void main() {
     float pixelsPerWorld = weakestPixelsPerWorld();
     float minimumWorldThickness = minimum_feature_pixels / max(pixelsPerWorld, 0.000001);
-    float effectiveThickness = max(thickness_instance, minimumWorldThickness);
+    float outlineWorldThickness = inner_outline_world
+        + inner_outline_pixels / max(pixelsPerWorld, 0.000001);
+    float effectiveThickness = max(thickness_instance, minimumWorldThickness)
+        + outlineWorldThickness * 2.0;
     float maxRadius = max(radius_instance + effectiveThickness * 0.5, 0.0);
     vec2 scaledPos = position * maxRadius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
@@ -45,6 +48,5 @@ void main() {
     vStartAngle = startAngle_instance;
     vSweepAngle = sweepAngle_instance;
     vThickness = effectiveThickness;
-    vOutlineThickness = inner_outline_world
-        + inner_outline_pixels / max(pixelsPerWorld, 0.000001);
+    vOutlineThickness = outlineWorldThickness;
 }

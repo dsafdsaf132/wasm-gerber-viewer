@@ -47,13 +47,14 @@ void main() {
         ? halfWidthPixels / (width_instance * 0.5)
         : 0.0;
     float outlinePixels = inner_outline_pixels + inner_outline_world * pixelsPerWorld;
+    float expandedHalfWidthPixels = halfWidthPixels + outlinePixels;
     vSide = position.y;
-    vInnerSide = outlinePixels > 0.0 && halfWidthPixels > 0.000001
-        ? max((halfWidthPixels - outlinePixels) / halfWidthPixels, 0.0)
+    vInnerSide = outlinePixels > 0.0 && expandedHalfWidthPixels > 0.000001
+        ? halfWidthPixels / expandedHalfWidthPixels
         : 0.0;
 
     float t = position.x * 0.5 + 0.5;
     vec2 centerPixels = mix(startPixels, endPixels, t);
-    vec2 adjustedPixels = centerPixels + normal * position.y * halfWidthPixels;
+    vec2 adjustedPixels = centerPixels + normal * position.y * expandedHalfWidthPixels;
     gl_Position = vec4(pixelToClip(adjustedPixels), 0.0, 1.0);
 }
