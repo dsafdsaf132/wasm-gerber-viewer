@@ -1,14 +1,6 @@
 export const DEFAULT_WASM_MODULE_URLS = [
-  // Bundle-size analyzers using webpack/Rspack reject auxiliary JS assets
-  // emitted from these package-relative WASM loader URLs.
-  new URL(
-    /* webpackIgnore: true */ "./wasm/wasm_gerber_processor.js",
-    import.meta.url,
-  ),
-  new URL(
-    /* webpackIgnore: true */ "../../wasm/pkg/wasm_gerber_processor.js",
-    import.meta.url,
-  ),
+  new URL("./wasm/wasm_gerber_processor.js", import.meta.url),
+  new URL("../../wasm/pkg/wasm_gerber_processor.js", import.meta.url),
 ];
 
 export const DEFAULT_COLORS = [
