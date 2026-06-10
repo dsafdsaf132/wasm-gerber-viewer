@@ -1,6 +1,8 @@
+const DEV_WASM_MODULE_PATH = "../../wasm/pkg/wasm_gerber_processor.js";
+
 export const DEFAULT_WASM_MODULE_URLS = [
   new URL("./wasm/wasm_gerber_processor.js", import.meta.url),
-  new URL("../../wasm/pkg/wasm_gerber_processor.js", import.meta.url),
+  new URL(getDevWasmModulePath(), import.meta.url),
 ];
 
 export const DEFAULT_COLORS = [
@@ -175,6 +177,10 @@ const CSS_NAMED_COLORS = new Map([
   ["yellow", [255, 255, 0, 255]],
   ["yellowgreen", [154, 205, 50, 255]],
 ]);
+
+function getDevWasmModulePath() {
+  return DEV_WASM_MODULE_PATH;
+}
 
 export class FrameState {
   constructor(options, extra = {}) {
