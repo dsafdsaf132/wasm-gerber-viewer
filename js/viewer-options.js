@@ -4,12 +4,14 @@ const DEFAULT_VIEWER_OPTIONS = {
   minimumFeaturePixels: 0,
   drillOutlinePixels: 0,
   pthPlatingMicrometers: 20,
+  renderingMode: "lazy",
 };
 
 const ARC_TESSELLATION_QUALITIES = new Set(["low", "normal", "high"]);
 const MINIMUM_FEATURE_PIXELS = new Set([0, 1, 2]);
 const DRILL_OUTLINE_PIXELS = new Set([0, 1, 2, 3]);
 const PTH_PLATING_MICROMETERS = new Set([10, 20, 30, 40, 50]);
+const RENDERING_MODES = new Set(["lazy", "realtime"]);
 
 function createMemoryStorage() {
   const values = new Map();
@@ -73,6 +75,9 @@ export class ViewerOptionsStore {
         )
           ? stored.pthPlatingMicrometers
           : DEFAULT_VIEWER_OPTIONS.pthPlatingMicrometers,
+        renderingMode: RENDERING_MODES.has(stored.renderingMode)
+          ? stored.renderingMode
+          : DEFAULT_VIEWER_OPTIONS.renderingMode,
       };
     } catch {
       return this.getDefaults();

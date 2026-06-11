@@ -90,6 +90,11 @@ export function getViewerElements(documentRef = document) {
     cursorReadout: requireElement(documentRef, "cursor-readout"),
     boundsReadout: requireElement(documentRef, "bounds-readout"),
     diagnosticsCount: requireElement(documentRef, "diagnostics-count"),
+    renderingModeLazyInput: requireElement(documentRef, "rendering-mode-lazy"),
+    renderingModeRealtimeInput: requireElement(
+      documentRef,
+      "rendering-mode-realtime",
+    ),
     regionArcExactInput: requireElement(documentRef, "region-arc-exact"),
     regionArcApproximateInput: requireElement(
       documentRef,

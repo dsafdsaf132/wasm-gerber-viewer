@@ -58,6 +58,13 @@ const ARC_TESSELLATION_QUALITY_LEVELS = {
 const MINIMUM_FEATURE_PIXEL_VALUES = new Set([0, 1, 2]);
 const DRILL_OUTLINE_PIXEL_VALUES = new Set([0, 1, 2, 3]);
 const PTH_PLATING_MICROMETER_VALUES = new Set([10, 20, 30, 40, 50]);
+const RENDERING_MODE_LAZY = "lazy";
+const RENDERING_MODE_REALTIME = "realtime";
+const RENDERING_MODE_VALUES = new Set([
+  RENDERING_MODE_LAZY,
+  RENDERING_MODE_REALTIME,
+]);
+const LAZY_WHEEL_RENDER_DELAY_MS = 140;
 const DRILL_LAYER_KIND = "drill";
 const GERBER_LAYER_KIND = "gerber";
 const PTH_DRILL_TYPE = "pth";
@@ -641,6 +648,9 @@ export class GerberViewer {
     this.draggedLayerId = null;
     this.layerDropIndex = null;
     this.pendingLayerRecordsForRecovery = null;
+    this.pendingLazyRenderTimer = null;
+    this.lazyViewportRenderState = null;
+    this.isViewportTransformActive = false;
 
     // Camera
     this.camera = {
@@ -656,6 +666,7 @@ export class GerberViewer {
 
     // Interaction
     this.isPanning = false;
+    this.pointerGestureDidPan = false;
     this.lastMousePos = { x: 0, y: 0 };
     this.mouseDownPos = { x: 0, y: 0 };
     this.selectedFeature = null;
@@ -713,6 +724,10 @@ export class GerberViewer {
     this.pthPlatingMicrometers = Number(
       this.viewerOptionsStore.get("pthPlatingMicrometers") ?? 20,
     );
+    const storedRenderingMode = this.viewerOptionsStore.get("renderingMode");
+    this.renderingMode = RENDERING_MODE_VALUES.has(storedRenderingMode)
+      ? storedRenderingMode
+      : RENDERING_MODE_LAZY;
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -921,6 +936,7 @@ export class GerberViewer {
     preserveViewState = null,
     commitDrawerLayout = false,
   } = {}) {
+    this.flushLazyViewportRender();
     this.drawerController.syncLayout({ commitLayout: commitDrawerLayout });
 
     const rect = this.canvas.getBoundingClientRect();
@@ -1076,6 +1092,14 @@ export class GerberViewer {
       this.clearDiagnostics();
     });
 
+    for (const input of this.getRenderingModeInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setRenderingMode(input.value);
+        }
+      });
+    }
+
     // Alpha slider
     this.alphaSlider.addEventListener("input", (e) => {
       const alpha = parseInt(e.target.value) / 100;
@@ -1156,7 +1180,9 @@ export class GerberViewer {
     this.canvas.addEventListener("mousemove", (e) => this.handleMouseMove(e));
     this.canvas.addEventListener("mouseup", (e) => this.handleMouseUp(e));
     this.canvas.addEventListener("mouseleave", (e) => this.handleMouseUp(e));
-    this.canvas.addEventListener("wheel", (e) => this.handleWheel(e));
+    this.viewerSurface.addEventListener("wheel", (e) => this.handleWheel(e), {
+      passive: false,
+    });
 
     // Canvas touch events
     this.canvas.addEventListener("touchstart", (e) => this.handleTouchStart(e), {
@@ -1339,7 +1365,22 @@ export class GerberViewer {
     ];
   }
 
+  getRenderingModeInputs() {
+    return [this.renderingModeLazyInput, this.renderingModeRealtimeInput];
+  }
+
+  syncRenderingModeControls() {
+    const renderingModeDisabled =
+      this.isRendererBusy() || this.isViewportGestureActive();
+    for (const input of this.getRenderingModeInputs()) {
+      input.checked = input.value === this.renderingMode;
+      input.disabled = renderingModeDisabled;
+    }
+  }
+
   syncOptionControls() {
+    this.syncRenderingModeControls();
+
     this.regionArcExactInput.checked = this.preserveArcRegions;
     this.regionArcApproximateInput.checked = !this.preserveArcRegions;
 
@@ -1367,6 +1408,47 @@ export class GerberViewer {
   syncFilterInputs() {
     this.topFilterInput.value = this.layerFilterStore.get("top");
     this.bottomFilterInput.value = this.layerFilterStore.get("bottom");
+  }
+
+  setRenderingMode(mode) {
+    if (!RENDERING_MODE_VALUES.has(mode)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (mode === this.renderingMode) {
+      return;
+    }
+    if (this.isRendererBusy() || this.isViewportGestureActive()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    this.renderingMode = mode;
+    this.viewerOptionsStore.set("renderingMode", this.renderingMode);
+    this.syncOptionControls();
+
+    if (this.isRealtimeRendering()) {
+      this.flushLazyViewportRender();
+    }
+
+    this.updateUiState();
+  }
+
+  isRealtimeRendering() {
+    return this.renderingMode === RENDERING_MODE_REALTIME;
+  }
+
+  shouldRenderViewportRealtime() {
+    return this.isRealtimeRendering();
+  }
+
+  isViewportGestureActive() {
+    return (
+      this.isPanning ||
+      this.isTouching ||
+      this.isViewportTransformActive ||
+      this.isLazyViewportPreviewActive()
+    );
   }
 
   async setRegionArcMode(mode) {
@@ -1818,6 +1900,7 @@ export class GerberViewer {
     this.clearAllBtn.disabled = rendererBusy || totalLayers === 0;
     this.toolbarClearAllBtn.disabled = rendererBusy || totalLayers === 0;
     this.updateEmptyLayerListActionState(rendererBusy);
+    this.syncRenderingModeControls();
     this.regionArcExactInput.disabled = rendererBusy;
     this.regionArcApproximateInput.disabled = rendererBusy;
     for (const input of this.getArcQualityInputs()) {
@@ -2027,6 +2110,7 @@ export class GerberViewer {
   }
 
   toggleViewFlip(axis) {
+    this.flushLazyViewportRender();
     const viewportCenter = this.getVisibleCanvasViewportCenter();
 
     if (axis === "x") {
@@ -2054,6 +2138,7 @@ export class GerberViewer {
   }
 
   captureCanvasViewState() {
+    this.flushLazyViewportRender();
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0 || this.camera.zoom === 0) {
       return null;
@@ -2128,6 +2213,7 @@ export class GerberViewer {
   }
 
   openScreenshotDialog() {
+    this.flushLazyViewportRender();
     this.screenshotExporter.openDialog();
   }
 
@@ -2140,6 +2226,7 @@ export class GerberViewer {
   }
 
   updateScreenshotResolutionPreview() {
+    this.flushLazyViewportRender();
     this.screenshotExporter.updateResolutionPreview();
   }
 
@@ -2152,6 +2239,7 @@ export class GerberViewer {
   }
 
   async exportScreenshot({ includeBackground = false, scale = 1 } = {}) {
+    this.flushLazyViewportRender();
     return this.screenshotExporter.export({ includeBackground, scale });
   }
 
@@ -3416,6 +3504,8 @@ export class GerberViewer {
   }
 
   requestRender() {
+    this.cancelLazyViewportRender();
+
     if (this.pendingRenderFrame !== null) {
       return;
     }
@@ -3424,6 +3514,84 @@ export class GerberViewer {
       this.pendingRenderFrame = null;
       this.render();
     });
+  }
+
+  scheduleLazyViewportRender(delayMs = LAZY_WHEEL_RENDER_DELAY_MS) {
+    if (this.pendingLazyRenderTimer !== null) {
+      clearTimeout(this.pendingLazyRenderTimer);
+    }
+
+    this.pendingLazyRenderTimer = window.setTimeout(() => {
+      this.pendingLazyRenderTimer = null;
+      this.lazyViewportRenderState = null;
+      this.clearViewportCssTransform();
+      this.syncRenderingModeControls();
+      this.requestRender();
+    }, delayMs);
+    this.syncRenderingModeControls();
+  }
+
+  flushLazyViewportRender() {
+    const hadPendingRender = this.pendingLazyRenderTimer !== null;
+    const hadViewportTransform = this.isViewportTransformActive;
+    this.cancelLazyViewportRender();
+    if (hadPendingRender || hadViewportTransform) {
+      this.requestRender();
+    }
+  }
+
+  cancelLazyViewportRender() {
+    const hadLazyViewportState =
+      this.pendingLazyRenderTimer !== null ||
+      this.lazyViewportRenderState !== null ||
+      this.isViewportTransformActive;
+    if (this.pendingLazyRenderTimer !== null) {
+      clearTimeout(this.pendingLazyRenderTimer);
+      this.pendingLazyRenderTimer = null;
+    }
+    this.lazyViewportRenderState = null;
+    this.clearViewportCssTransform();
+    if (hadLazyViewportState) {
+      this.syncRenderingModeControls();
+    }
+  }
+
+  cancelPendingRenderFrame() {
+    if (this.pendingRenderFrame === null) {
+      return;
+    }
+    cancelAnimationFrame(this.pendingRenderFrame);
+    this.pendingRenderFrame = null;
+  }
+
+  flushPendingRenderFrame() {
+    if (this.pendingRenderFrame === null) {
+      return;
+    }
+    this.cancelPendingRenderFrame();
+    this.render();
+  }
+
+  isLazyViewportPreviewActive() {
+    return (
+      this.pendingLazyRenderTimer !== null ||
+      this.lazyViewportRenderState !== null
+    );
+  }
+
+  applyViewportCssTransform(transform, origin = "50% 50%") {
+    this.isViewportTransformActive = true;
+    this.canvas.style.transformOrigin = origin;
+    this.canvas.style.transform = transform;
+  }
+
+  clearViewportCssTransform() {
+    if (!this.isViewportTransformActive) {
+      return;
+    }
+    this.isViewportTransformActive = false;
+    this.canvas.style.transform = "";
+    this.canvas.style.transformOrigin = "";
   }
 
   render() {
@@ -3559,7 +3727,7 @@ export class GerberViewer {
   renderMeasurements() {
     renderMeasurementOverlay({
       overlay: this.measurementOverlay,
-      rect: this.canvas.getBoundingClientRect(),
+      rect: this.getViewportRect(),
       measurements: this.measurements,
       rulerStartPoint: this.rulerStartPoint,
       rulerHoverPoint: this.rulerHoverPoint,
@@ -3579,6 +3747,7 @@ export class GerberViewer {
   }
 
   fitView() {
+    this.flushLazyViewportRender();
     const fitView = this.calculateFitView();
     if (!fitView) return;
 
@@ -3635,7 +3804,33 @@ export class GerberViewer {
     e.preventDefault();
 
     const zoomChange = Math.exp(-e.deltaY * this.getWheelZoomSensitivity(e));
-    this.zoomAtCanvasPoint(e.clientX, e.clientY, zoomChange);
+    if (this.shouldRenderViewportRealtime()) {
+      const canvasPoint = this.getClampedCanvasClientPoint(e.clientX, e.clientY);
+      if (canvasPoint) {
+        this.zoomAtCanvasPoint(canvasPoint.x, canvasPoint.y, zoomChange);
+      }
+      return;
+    }
+
+    if (this.isPanning || this.isTouching) {
+      return;
+    }
+
+    this.prepareLazyViewportPreview();
+    const canvasPoint = this.getClampedCanvasClientPoint(e.clientX, e.clientY);
+    if (
+      !canvasPoint ||
+      !this.applyZoomAtCanvasPoint(canvasPoint.x, canvasPoint.y, zoomChange)
+    ) {
+      this.cancelLazyViewportRender();
+      return;
+    }
+
+    this.resetSelectionCycle();
+    this.updateLazyViewportTransform();
+    this.zoomReadout.textContent = this.formatZoom();
+    this.renderMeasurements();
+    this.scheduleLazyViewportRender();
   }
 
   getWheelZoomSensitivity(e) {
@@ -3656,7 +3851,7 @@ export class GerberViewer {
     return clampViewportZoom(zoom, this.camera.zoom, this.minZoom, this.maxZoom);
   }
 
-  zoomAtCanvasPoint(clientX, clientY, zoomChange) {
+  applyZoomAtCanvasPoint(clientX, clientY, zoomChange) {
     const didZoom = zoomCameraAtCanvasPoint({
       clientX,
       clientY,
@@ -3665,11 +3860,97 @@ export class GerberViewer {
       camera: this.camera,
       minZoom: this.minZoom,
       maxZoom: this.maxZoom,
+      rect: this.getViewportRect(),
     });
-    if (didZoom) {
+    return didZoom;
+  }
+
+  getClampedCanvasClientPoint(clientX, clientY) {
+    const rect = this.getViewportRect();
+    if (rect.width === 0 || rect.height === 0) {
+      return null;
+    }
+
+    return {
+      x: Math.min(Math.max(clientX, rect.left), rect.right),
+      y: Math.min(Math.max(clientY, rect.top), rect.bottom),
+    };
+  }
+
+  zoomAtCanvasPoint(clientX, clientY, zoomChange) {
+    if (this.applyZoomAtCanvasPoint(clientX, clientY, zoomChange)) {
       this.resetSelectionCycle();
       this.requestRender();
     }
+  }
+
+  prepareLazyViewportPreview() {
+    this.flushPendingRenderFrame();
+    this.clearViewportCssTransform();
+
+    if (this.lazyViewportRenderState !== null) {
+      return;
+    }
+
+    this.lazyViewportRenderState = this.captureViewportRenderState();
+    this.syncRenderingModeControls();
+  }
+
+  captureViewportRenderState() {
+    const rect = this.getViewportRect();
+    if (rect.width === 0 || rect.height === 0) {
+      return null;
+    }
+
+    return {
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      canvasWidth: this.canvas.width,
+      canvasHeight: this.canvas.height,
+      viewScaleX: this.getViewScaleX(),
+      viewScaleY: this.getViewScaleY(),
+      offsetX: this.camera.offsetX,
+      offsetY: this.camera.offsetY,
+    };
+  }
+
+  getCurrentViewportRenderState(baseState) {
+    return {
+      rectWidth: baseState.rectWidth,
+      rectHeight: baseState.rectHeight,
+      canvasWidth: baseState.canvasWidth,
+      canvasHeight: baseState.canvasHeight,
+      viewScaleX: this.getViewScaleX(),
+      viewScaleY: this.getViewScaleY(),
+      offsetX: this.camera.offsetX,
+      offsetY: this.camera.offsetY,
+    };
+  }
+
+  updateLazyViewportTransform() {
+    const baseState = this.lazyViewportRenderState;
+    if (!baseState || baseState.viewScaleX === 0 || baseState.viewScaleY === 0) {
+      return;
+    }
+
+    const originWorld = { x: 0, y: 0 };
+    const basePoint = this.worldToCanvasPoint(originWorld, baseState);
+    const currentPoint = this.worldToCanvasPoint(
+      originWorld,
+      this.getCurrentViewportRenderState(baseState),
+    );
+    if (!basePoint || !currentPoint) {
+      return;
+    }
+
+    const scaleX = this.getViewScaleX() / baseState.viewScaleX;
+    const scaleY = this.getViewScaleY() / baseState.viewScaleY;
+    const translateX = currentPoint.x - basePoint.x * scaleX;
+    const translateY = currentPoint.y - basePoint.y * scaleY;
+    this.applyViewportCssTransform(
+      `matrix(${scaleX}, 0, 0, ${scaleY}, ${translateX}, ${translateY})`,
+      "0 0",
+    );
   }
 
   handleMouseDown(e) {
@@ -3681,11 +3962,19 @@ export class GerberViewer {
     }
 
     if (e.button === 2) return; // Ignore right-click
+    if (!this.shouldRenderViewportRealtime() && this.isLazyViewportPreviewActive()) {
+      return;
+    }
     this.isPanning = true;
+    this.pointerGestureDidPan = false;
     this.lastMousePos.x = e.clientX;
     this.lastMousePos.y = e.clientY;
     this.mouseDownPos.x = e.clientX;
     this.mouseDownPos.y = e.clientY;
+    if (!this.shouldRenderViewportRealtime()) {
+      this.prepareLazyViewportPreview();
+    }
+    this.syncRenderingModeControls();
   }
 
   handleMouseMove(e) {
@@ -3701,13 +3990,58 @@ export class GerberViewer {
 
     if (!this.isPanning) return;
 
+    const totalDeltaX = e.clientX - this.mouseDownPos.x;
+    const totalDeltaY = e.clientY - this.mouseDownPos.y;
+
+    if (this.shouldRenderViewportRealtime()) {
+      if (
+        Math.hypot(totalDeltaX, totalDeltaY) <=
+        this.getViewportRelativeDistance(POINTER_TAP_MAX_MOVEMENT_VIEWPORT_RATIO)
+      ) {
+        return;
+      }
+
+      const deltaX = e.clientX - this.lastMousePos.x;
+      const deltaY = e.clientY - this.lastMousePos.y;
+      this.resetSelectionCycle();
+      if (panCameraByScreenDelta({
+        deltaX,
+        deltaY,
+        canvas: this.canvas,
+        camera: this.camera,
+        rect: this.getViewportRect(),
+      })) {
+        this.pointerGestureDidPan = true;
+        this.lastMousePos.x = e.clientX;
+        this.lastMousePos.y = e.clientY;
+        this.requestRender();
+      }
+      return;
+    }
+
+    if (
+      Math.hypot(totalDeltaX, totalDeltaY) <=
+      this.getViewportRelativeDistance(POINTER_TAP_MAX_MOVEMENT_VIEWPORT_RATIO)
+    ) {
+      return;
+    }
+
     const deltaX = e.clientX - this.lastMousePos.x;
     const deltaY = e.clientY - this.lastMousePos.y;
-
-    // Visual feedback during drag
-    const transform = `translate(${deltaX}px, ${deltaY}px)`;
-    this.canvas.style.transform = transform;
-    this.measurementOverlay.style.transform = transform;
+    this.resetSelectionCycle();
+    if (panCameraByScreenDelta({
+      deltaX,
+      deltaY,
+      canvas: this.canvas,
+      camera: this.camera,
+      rect: this.getViewportRect(),
+    })) {
+      this.pointerGestureDidPan = true;
+      this.lastMousePos.x = e.clientX;
+      this.lastMousePos.y = e.clientY;
+      this.updateLazyViewportTransform();
+      this.renderMeasurements();
+    }
   }
 
   updateCursorReadout(clientX, clientY) {
@@ -3746,6 +4080,7 @@ export class GerberViewer {
       clientY,
       canvas: this.canvas,
       camera: this.camera,
+      rect: this.getViewportRect(),
     });
   }
 
@@ -3755,7 +4090,16 @@ export class GerberViewer {
       canvas: this.canvas,
       camera: this.camera,
       renderState,
+      rect: renderState ? null : this.getViewportRect(),
     });
+  }
+
+  getViewportRect() {
+    const rect = this.measurementOverlay.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return rect;
+    }
+    return this.canvas.getBoundingClientRect();
   }
 
   handleMouseUp(e) {
@@ -3764,23 +4108,27 @@ export class GerberViewer {
     this.isPanning = false;
 
     // Reset transform
-    this.canvas.style.transform = "";
-    this.measurementOverlay.style.transform = "";
+    this.clearViewportCssTransform();
 
     const canvasRect = this.canvas.getBoundingClientRect();
     if (canvasRect.width === 0 || canvasRect.height === 0) {
+      this.pointerGestureDidPan = false;
+      this.cancelLazyViewportRender();
+      this.syncRenderingModeControls();
       return;
     }
 
-    const deltaX = e.clientX - this.lastMousePos.x;
-    const deltaY = e.clientY - this.lastMousePos.y;
     const totalDeltaX = e.clientX - this.mouseDownPos.x;
     const totalDeltaY = e.clientY - this.mouseDownPos.y;
     if (
+      !this.pointerGestureDidPan &&
       e.type === "mouseup" &&
       Math.hypot(totalDeltaX, totalDeltaY) <=
         this.getViewportRelativeDistance(POINTER_TAP_MAX_MOVEMENT_VIEWPORT_RATIO)
     ) {
+      this.pointerGestureDidPan = false;
+      this.cancelLazyViewportRender();
+      this.syncRenderingModeControls();
       this.selectFeatureAtCanvasPoint(e.clientX, e.clientY, {
         inputType: "mouse",
       });
@@ -3788,12 +4136,25 @@ export class GerberViewer {
     }
 
     this.resetSelectionCycle();
-    panCameraByScreenDelta({
-      deltaX,
-      deltaY,
-      canvas: this.canvas,
-      camera: this.camera,
-    });
+    if (this.pointerGestureDidPan) {
+      panCameraByScreenDelta({
+        deltaX: e.clientX - this.lastMousePos.x,
+        deltaY: e.clientY - this.lastMousePos.y,
+        canvas: this.canvas,
+        camera: this.camera,
+        rect: this.getViewportRect(),
+      });
+    } else {
+      panCameraByScreenDelta({
+        deltaX: totalDeltaX,
+        deltaY: totalDeltaY,
+        canvas: this.canvas,
+        camera: this.camera,
+        rect: this.getViewportRect(),
+      });
+    }
+    this.pointerGestureDidPan = false;
+    this.syncRenderingModeControls();
 
     this.requestRender();
   }
@@ -3862,7 +4223,7 @@ export class GerberViewer {
   }
 
   getViewportRelativeDistance(ratio) {
-    const rect = this.canvas.getBoundingClientRect();
+    const rect = this.getViewportRect();
     const basis = Math.min(rect.width, rect.height);
     if (!Number.isFinite(basis) || basis <= 0) {
       return 0;
@@ -3973,8 +4334,17 @@ export class GerberViewer {
   handleTouchStart(e) {
     e.preventDefault();
 
+    if (
+      !this.isTouching &&
+      !this.shouldRenderViewportRealtime() &&
+      this.isLazyViewportPreviewActive()
+    ) {
+      return;
+    }
+
     this.isTouching = true;
     this.touches = Array.from(e.touches);
+    this.syncRenderingModeControls();
 
     if (this.isRulerActive) {
       if (this.touches.length === 1) {
@@ -3998,13 +4368,20 @@ export class GerberViewer {
 
       const center = this.getTouchCenter(this.touches[0], this.touches[1]);
       this.lastTouchCenter = center;
+      if (!this.shouldRenderViewportRealtime()) {
+        this.prepareLazyViewportPreview();
+      }
     } else if (this.touches.length === 1) {
       this.startTouchTapTracking(this.touches[0]);
       // Single finger: pan
-      this.lastTouchCenter = {
+      const center = {
         x: this.touches[0].clientX,
         y: this.touches[0].clientY,
       };
+      this.lastTouchCenter = center;
+      if (!this.shouldRenderViewportRealtime()) {
+        this.prepareLazyViewportPreview();
+      }
     } else {
       this.cancelTouchTapTracking();
       this.resetSelectionCycle();
@@ -4048,6 +4425,31 @@ export class GerberViewer {
         this.touches[1],
       );
 
+      if (!this.shouldRenderViewportRealtime()) {
+        let didUpdate = false;
+        if (this.lastPinchDistance !== null) {
+          didUpdate = this.applyZoomAtCanvasPoint(
+            currentCenter.x,
+            currentCenter.y,
+            currentDistance / this.lastPinchDistance,
+          ) || didUpdate;
+          this.lastPinchDistance = currentDistance;
+        }
+        didUpdate = panCameraByScreenDelta({
+          deltaX: currentCenter.x - this.lastTouchCenter.x,
+          deltaY: currentCenter.y - this.lastTouchCenter.y,
+          canvas: this.canvas,
+          camera: this.camera,
+          rect: this.getViewportRect(),
+        }) || didUpdate;
+        this.lastTouchCenter = currentCenter;
+        if (didUpdate) {
+          this.updateLazyViewportTransform();
+          this.renderMeasurements();
+        }
+        return;
+      }
+
       // Handle pinch zoom
       if (this.lastPinchDistance !== null) {
         const zoomChange = currentDistance / this.lastPinchDistance;
@@ -4064,6 +4466,7 @@ export class GerberViewer {
         deltaY,
         canvas: this.canvas,
         camera: this.camera,
+        rect: this.getViewportRect(),
       });
 
       this.lastTouchCenter = currentCenter;
@@ -4084,6 +4487,21 @@ export class GerberViewer {
       }
 
       this.resetSelectionCycle();
+      if (!this.shouldRenderViewportRealtime()) {
+        if (panCameraByScreenDelta({
+          deltaX: currentPos.x - this.lastTouchCenter.x,
+          deltaY: currentPos.y - this.lastTouchCenter.y,
+          canvas: this.canvas,
+          camera: this.camera,
+          rect: this.getViewportRect(),
+        })) {
+          this.updateLazyViewportTransform();
+          this.renderMeasurements();
+        }
+        this.lastTouchCenter = currentPos;
+        return;
+      }
+
       const deltaX = currentPos.x - this.lastTouchCenter.x;
       const deltaY = currentPos.y - this.lastTouchCenter.y;
       panCameraByScreenDelta({
@@ -4091,6 +4509,7 @@ export class GerberViewer {
         deltaY,
         canvas: this.canvas,
         camera: this.camera,
+        rect: this.getViewportRect(),
       });
 
       this.lastTouchCenter = currentPos;
@@ -4104,6 +4523,10 @@ export class GerberViewer {
 
   handleTouchEnd(e) {
     e.preventDefault();
+
+    if (!this.isTouching && this.activeRulerTouchIdentifier === null) {
+      return;
+    }
 
     this.touches = Array.from(e.touches);
 
@@ -4123,32 +4546,107 @@ export class GerberViewer {
 
       if (this.touches.length === 0) {
         this.isTouching = false;
+        this.syncRenderingModeControls();
       }
 
       return;
     }
 
-    if (this.touches.length < 2) {
+    if (e.type !== "touchend") {
+      this.commitLazyTouchViewportChange(e);
+      this.resetTouchTapTracking();
+      this.initialPinchDistance = null;
+      this.lastPinchDistance = null;
+
+      if (this.touches.length === 0) {
+        this.resetTouchViewportGesture();
+        this.isTouching = false;
+      } else {
+        this.isTouching = true;
+        this.resetSelectionCycle();
+        this.touchGestureWasMultitouch = true;
+
+        if (this.touches.length >= 2) {
+          this.initialPinchDistance = this.calculateTouchDistance(
+            this.touches[0],
+            this.touches[1],
+          );
+          this.lastPinchDistance = this.initialPinchDistance;
+          this.lastTouchCenter = this.getTouchCenter(
+            this.touches[0],
+            this.touches[1],
+          );
+        } else {
+          this.lastTouchCenter = {
+            x: this.touches[0].clientX,
+            y: this.touches[0].clientY,
+          };
+        }
+
+        if (!this.shouldRenderViewportRealtime()) {
+          this.prepareLazyViewportPreview();
+        }
+      }
+      this.syncRenderingModeControls();
+      return;
+    }
+
+    if (this.touches.length > 0 && this.touches.length < 2) {
       // Reset pinch state
       this.initialPinchDistance = null;
       this.lastPinchDistance = null;
     }
 
     if (this.touches.length === 0) {
-      this.commitTouchTapSelection(e);
+      if (!this.commitTouchTapSelection(e)) {
+        this.commitLazyTouchViewportChange(e);
+      }
+      this.initialPinchDistance = null;
+      this.lastPinchDistance = null;
       this.resetTouchTapTracking();
+      this.resetTouchViewportGesture();
       // All touches ended
       this.isTouching = false;
+      this.syncRenderingModeControls();
     } else if (this.touches.length === 1) {
       this.cancelTouchTapTracking();
       this.resetSelectionCycle();
       this.touchGestureWasMultitouch = true;
       // Transitioned from multi-touch to single touch
-      this.lastTouchCenter = {
+      const center = {
         x: this.touches[0].clientX,
         y: this.touches[0].clientY,
       };
+      this.lastTouchCenter = center;
+      if (
+        !this.shouldRenderViewportRealtime() &&
+        !this.isLazyViewportPreviewActive()
+      ) {
+        this.prepareLazyViewportPreview();
+      }
     }
+  }
+
+  commitLazyTouchViewportChange(event) {
+    if (this.shouldRenderViewportRealtime()) {
+      return false;
+    }
+
+    if (
+      this.touchTapCandidate ||
+      (!this.isViewportTransformActive && this.lazyViewportRenderState === null)
+    ) {
+      return false;
+    }
+
+    this.clearViewportCssTransform();
+    this.resetSelectionCycle();
+    this.requestRender();
+    return true;
+  }
+
+  resetTouchViewportGesture() {
+    this.cancelLazyViewportRender();
   }
 
   startTouchTapTracking(touch) {

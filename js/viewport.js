@@ -93,23 +93,35 @@ export function canvasPointToWorld({
   clientY,
   canvas,
   camera,
+  rect = null,
 }) {
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) {
+  const viewportRect = rect ?? canvas.getBoundingClientRect();
+  if (viewportRect.width === 0 || viewportRect.height === 0) {
     return null;
   }
 
-  const corrected = clientPointToCorrected({ clientX, clientY, rect, canvas });
+  const corrected = clientPointToCorrected({
+    clientX,
+    clientY,
+    rect: viewportRect,
+    canvas,
+  });
   const worldX = (corrected.x - camera.offsetX) / getViewScaleX(camera);
   const worldY = (corrected.y - camera.offsetY) / getViewScaleY(camera);
   return { x: worldX, y: worldY };
 }
 
-export function worldToCanvasPoint({ point, canvas, camera, renderState = null }) {
-  const rect = renderState
+export function worldToCanvasPoint({
+  point,
+  canvas,
+  camera,
+  renderState = null,
+  rect = null,
+}) {
+  const viewportRect = renderState
     ? { width: renderState.rectWidth, height: renderState.rectHeight }
-    : canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) {
+    : rect ?? canvas.getBoundingClientRect();
+  if (viewportRect.width === 0 || viewportRect.height === 0) {
     return null;
   }
 
@@ -125,8 +137,8 @@ export function worldToCanvasPoint({ point, canvas, camera, renderState = null }
   const ndcX = aspect > 1.0 ? correctedX / aspect : correctedX;
   const ndcY = aspect > 1.0 ? correctedY : correctedY * aspect;
   return {
-    x: ((ndcX + 1) / 2) * rect.width,
-    y: ((1 - ndcY) / 2) * rect.height,
+    x: ((ndcX + 1) / 2) * viewportRect.width,
+    y: ((1 - ndcY) / 2) * viewportRect.height,
   };
 }
 
@@ -138,17 +150,23 @@ export function zoomCameraAtCanvasPoint({
   camera,
   minZoom,
   maxZoom,
+  rect = null,
 }) {
   if (!Number.isFinite(zoomChange) || zoomChange <= 0) {
     return false;
   }
 
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) {
+  const viewportRect = rect ?? canvas.getBoundingClientRect();
+  if (viewportRect.width === 0 || viewportRect.height === 0) {
     return false;
   }
 
-  const corrected = clientPointToCorrected({ clientX, clientY, rect, canvas });
+  const corrected = clientPointToCorrected({
+    clientX,
+    clientY,
+    rect: viewportRect,
+    canvas,
+  });
   const prevZoom = camera.zoom;
   const newZoom = clampZoom(prevZoom * zoomChange, prevZoom, minZoom, maxZoom);
   const zoomRatio = newZoom / prevZoom;
@@ -159,14 +177,14 @@ export function zoomCameraAtCanvasPoint({
   return true;
 }
 
-export function panCameraByScreenDelta({ deltaX, deltaY, canvas, camera }) {
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) {
+export function panCameraByScreenDelta({ deltaX, deltaY, canvas, camera, rect = null }) {
+  const viewportRect = rect ?? canvas.getBoundingClientRect();
+  if (viewportRect.width === 0 || viewportRect.height === 0) {
     return false;
   }
 
-  const deltaXNDC = (deltaX / rect.width) * 2;
-  const deltaYNDC = (-deltaY / rect.height) * 2;
+  const deltaXNDC = (deltaX / viewportRect.width) * 2;
+  const deltaYNDC = (-deltaY / viewportRect.height) * 2;
   const aspect = canvas.width / canvas.height;
 
   if (aspect > 1.0) {
