@@ -41,7 +41,13 @@ function formatImperialLength(lengthMm) {
 
 export function drawMeasurementsOnContext(
   context,
-  { measurements, rulerStartPoint, rulerHoverPoint, worldToCanvasPoint, unit },
+  {
+    measurements,
+    rulerStartPoint,
+    rulerHoverPoint,
+    worldToCanvasPoint,
+    unit,
+  },
 ) {
   for (const measurement of measurements) {
     drawMeasurementOnContext({

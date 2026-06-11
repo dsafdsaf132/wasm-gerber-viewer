@@ -12,6 +12,7 @@ import { renderLayerList as renderLayerListView } from "./layer-list.js";
 import {
   drawMeasurementsOnContext,
   formatDimensionPair,
+  formatMeasurementLength,
   renderMeasurements as renderMeasurementOverlay,
 } from "./measurements.js";
 import { NotificationCenter } from "./notifications.js";
@@ -63,6 +64,7 @@ const PTH_DRILL_TYPE = "pth";
 const NPTH_DRILL_TYPE = "npth";
 const DEFAULT_PTH_DRILL_COLOR = [1.0, 1.0, 0.0];
 const DEFAULT_NPTH_DRILL_COLOR = [1.0, 1.0, 1.0];
+const POINTER_TAP_MAX_MOVEMENT_PX = 6;
 
 class ParseWorkerUnavailableError extends Error {
   constructor(message) {
@@ -212,6 +214,101 @@ function normalizeLayerOffset(offset = {}) {
 
 function hasLayerOffset(offset) {
   return offset.x !== 0 || offset.y !== 0;
+}
+
+function formatSelectedFeatureSummary(selection, { unit = "mm" } = {}) {
+  if (!selection) return "";
+
+  const { layer } = selection;
+  const feature = selection.feature ?? selection;
+  const parts = [];
+  if (layer?.name) {
+    parts.push(layer.name);
+  }
+
+  if (isDrillLayer(layer)) {
+    parts.push(String(layer.drillType ?? PTH_DRILL_TYPE).toUpperCase());
+  } else if (feature.aperture) {
+    parts.push(feature.aperture);
+  }
+
+  parts.push(formatFeatureTypeLabel(feature, layer));
+
+  if (!isDrillLayer(layer) && feature.apertureType) {
+    parts.push(formatApertureTypeLabel(feature));
+  }
+
+  parts.push(...formatFeaturePropertyParts(feature, unit));
+  return parts.filter(Boolean).join(" | ");
+}
+
+function formatFeatureTypeLabel(feature, layer) {
+  if (isDrillLayer(layer)) {
+    return feature.aperture ?? "";
+  }
+
+  switch (feature.featureType) {
+    case "aperture-flash":
+      return "Aperture flash";
+    case "aperture-draw":
+      return "Aperture draw";
+    case "arc-draw":
+      return "Arc draw";
+    case "region":
+      return "Region";
+    case "drill-hit":
+      return "Drill hit";
+    case "drill-slot":
+      return "Drill slot";
+    default:
+      return "Feature";
+  }
+}
+
+function formatApertureTypeLabel(feature) {
+  if (feature.apertureType === "macro") {
+    return feature.macroName
+      ? `Macro aperture ${feature.macroName}`
+      : "Macro aperture";
+  }
+  return `${feature.apertureType} aperture`;
+}
+
+function formatFeaturePropertyParts(feature, unit) {
+  const properties = feature.properties ?? {};
+  const parts = [];
+  const diameter = Number(properties.diameter);
+  const width = Number(properties.width);
+  const height = Number(properties.height);
+  const rotation = Number(properties.rotation);
+  const vertices = Number(properties.vertices);
+  const toolCode = Number(properties.toolCode);
+
+  if (Number.isFinite(diameter) && diameter > 0) {
+    parts.push(`dia ${formatMeasurementLength(diameter, unit)}`);
+  } else if (
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    width > 0 &&
+    height > 0
+  ) {
+    parts.push(`size ${formatDimensionPair(width, height, unit)}`);
+  }
+
+  if (Number.isFinite(rotation) && rotation !== 0) {
+    parts.push(`rot ${((rotation * 180) / Math.PI).toFixed(2)} deg`);
+  }
+  if (Number.isFinite(vertices) && vertices > 0) {
+    parts.push(`${Math.trunc(vertices)} vertices`);
+  }
+  const formattedToolCode = Number.isFinite(toolCode) && toolCode > 0
+    ? `T${String(Math.trunc(toolCode)).padStart(2, "0")}`
+    : "";
+  if (formattedToolCode && formattedToolCode !== feature.aperture) {
+    parts.push(formattedToolCode);
+  }
+
+  return parts;
 }
 
 function getParseWorkerCount(layerCount) {
@@ -514,6 +611,7 @@ export class GerberViewer {
     this.wasmModule = null;
     this.wasmExports = null;
     this.wasmProcessor = null;
+    this.interactionsEnabled = true;
     this.isWebGlContextLost = false;
     this.isRestoringWebGlContext = false;
     this.isRecoveringWasmProcessor = false;
@@ -545,6 +643,8 @@ export class GerberViewer {
     // Interaction
     this.isPanning = false;
     this.lastMousePos = { x: 0, y: 0 };
+    this.mouseDownPos = { x: 0, y: 0 };
+    this.selectedFeature = null;
 
     // Touch interaction
     this.isTouching = false;
@@ -552,6 +652,11 @@ export class GerberViewer {
     this.initialPinchDistance = null;
     this.lastPinchDistance = null;
     this.lastTouchCenter = { x: 0, y: 0 };
+    this.touchStartPoint = null;
+    this.touchTapPoint = null;
+    this.touchTapIdentifier = null;
+    this.touchTapCandidate = false;
+    this.touchGestureWasMultitouch = false;
     this.activeRulerTouchIdentifier = null;
     this.rulerTouchStartPoint = null;
     this.rulerTouchPoint = null;
@@ -687,7 +792,10 @@ export class GerberViewer {
   }
 
   createWebGlContext() {
-    const gl = this.canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+    const gl = this.canvas.getContext("webgl2", {
+      preserveDrawingBuffer: true,
+      stencil: true,
+    });
     if (!gl) {
       throw new Error("WebGL2 not supported");
     }
@@ -730,6 +838,10 @@ export class GerberViewer {
     if (typeof processor?.set_minimum_feature_pixels === "function") {
       processor.set_minimum_feature_pixels(this.minimumFeaturePixels);
     }
+
+    if (typeof processor?.set_interactions_enabled === "function") {
+      processor.set_interactions_enabled(this.interactionsEnabled);
+    }
   }
 
   normalizePersistedParserOptions() {
@@ -770,10 +882,10 @@ export class GerberViewer {
   ensureParserOptionsSupported({
     preserveArcRegions = this.preserveArcRegions,
     arcTessellationQuality = this.arcTessellationQuality,
-  } = {}) {
+  } = {}, processor = this.wasmProcessor) {
     if (
       !preserveArcRegions &&
-      typeof this.wasmProcessor?.set_preserve_arc_regions !== "function"
+      typeof processor?.set_preserve_arc_regions !== "function"
     ) {
       throw new Error("Region arc options require an updated WASM module");
     }
@@ -781,7 +893,7 @@ export class GerberViewer {
     if (
       !preserveArcRegions &&
       arcTessellationQuality !== "normal" &&
-      typeof this.wasmProcessor?.set_arc_tessellation_quality !== "function"
+      typeof processor?.set_arc_tessellation_quality !== "function"
     ) {
       throw new Error("Arc tessellation quality requires an updated WASM module");
     }
@@ -1130,6 +1242,7 @@ export class GerberViewer {
 
     this.disposeWasmProcessor();
     this.layers = [];
+    this.clearSelectedFeature({ refresh: false });
     this.createWebGlProcessor();
     this.isWebGlContextLost = false;
     this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
@@ -1154,6 +1267,7 @@ export class GerberViewer {
     return {
       preserveArcRegions: this.preserveArcRegions,
       arcTessellationQuality: this.getArcTessellationQualityLevel(),
+      interactionsEnabled: this.interactionsEnabled,
     };
   }
 
@@ -1531,7 +1645,7 @@ export class GerberViewer {
           total: layerSnapshot.length,
         });
 
-        if (layer.kind === DRILL_LAYER_KIND) {
+        if (this.interactionsEnabled || layer.kind === DRILL_LAYER_KIND) {
           parsedLayers.push({ ...layer, parsedLayer: null });
         } else {
           try {
@@ -1583,6 +1697,13 @@ export class GerberViewer {
                   layerOptions,
                   stagedProcessor,
                 )
+              : this.interactionsEnabled
+                ? await this.createGerberLayerRecord(
+                    layer.name,
+                    layer.sourceContent,
+                    layerOptions,
+                    stagedProcessor,
+                  )
               : await this.createParsedLayerRecord(
                   layer.name,
                   layer.parsedLayer,
@@ -1604,6 +1725,7 @@ export class GerberViewer {
         this.wasmProcessor = stagedProcessor;
         stagedProcessor = null;
         this.layers = stagedLayers;
+        this.clearSelectedFeature({ refresh: false });
         this.disposeWasmProcessorInstance(previousProcessor, "previous processor");
       } catch (error) {
         this.nextLayerDomId = nextLayerDomId;
@@ -1740,6 +1862,12 @@ export class GerberViewer {
   }
 
   formatCombinedBounds() {
+    if (this.selectedFeature) {
+      return formatSelectedFeatureSummary(this.selectedFeature, {
+        unit: this.measurementUnit,
+      });
+    }
+
     if (this.layers.length === 0) {
       return "No bounds";
     }
@@ -2225,7 +2353,7 @@ export class GerberViewer {
 
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     const total = layerSources.length;
-    if (layerSources.some(isDrillSource)) {
+    if (this.interactionsEnabled || layerSources.some(isDrillSource)) {
       return this.loadLayerSourcesSerially(layerSources, { title, total });
     }
 
@@ -2554,6 +2682,10 @@ export class GerberViewer {
   async parseLayerContent(content, offset, parseWorkerPool) {
     const normalizedOffset = normalizeLayerOffset(offset);
     const parseOptions = this.getParseOptions();
+
+    if (parseOptions.interactionsEnabled) {
+      throw new Error("Interactive parsing must run inside the active WASM processor");
+    }
 
     if (parseWorkerPool) {
       return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
@@ -2947,6 +3079,7 @@ export class GerberViewer {
     if (layerSnapshot.length === 0) {
       this.disposeWasmProcessor();
       this.createWebGlProcessor();
+      this.clearSelectedFeature({ refresh: false });
       this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       return;
     }
@@ -2969,6 +3102,7 @@ export class GerberViewer {
     try {
       this.disposeWasmProcessor();
       this.layers = [];
+      this.clearSelectedFeature({ refresh: false });
       this.createWebGlProcessor();
       this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
 
@@ -3084,32 +3218,42 @@ export class GerberViewer {
   }
 
   async addLayer(name, content, options = {}) {
+    const layer = await this.createGerberLayerRecord(name, content, options);
+    return this.commitLayerMetadata(layer);
+  }
+
+  async createGerberLayerRecord(
+    name,
+    content,
+    options = {},
+    processor = this.wasmProcessor,
+  ) {
     try {
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
       }
-      if (!this.wasmProcessor || this.isWebGlContextLost) {
+      if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
 
       // add layer to WASM processor and get layer ID
-      this.ensureParserOptionsSupported();
+      this.ensureParserOptionsSupported({}, processor);
       this.reserveWasmInputCapacity(content);
       const offset = normalizeLayerOffset(options.offset);
       if (
         hasLayerOffset(offset) &&
-        typeof this.wasmProcessor.add_layer_with_offset !== "function"
+        typeof processor.add_layer_with_offset !== "function"
       ) {
         throw new Error("Layer offset requires an updated WASM module");
       }
       const layerId = hasLayerOffset(offset)
-        ? this.wasmProcessor.add_layer_with_offset(content, offset.x, offset.y)
-        : this.wasmProcessor.add_layer(content);
-      this.addLayerMetadata(name, layerId, {
+        ? processor.add_layer_with_offset(content, offset.x, offset.y)
+        : processor.add_layer(content);
+      return this.createLayerMetadata(name, layerId, {
         ...options,
         sourceContent: options.sourceContent ?? content,
         offset,
-      });
+      }, processor);
     } catch (error) {
       if (isNoGeometryError(getErrorMessage(error))) {
         console.warn(`[Layer] Skipped layer ${name}:`, error);
@@ -3301,6 +3445,7 @@ export class GerberViewer {
           this.globalAlpha,
         );
       }
+      this.renderSelectedFeatureHighlight();
       this.zoomReadout.textContent = this.formatZoom();
     } catch (error) {
       const message = getErrorMessage(error);
@@ -3309,6 +3454,34 @@ export class GerberViewer {
     }
 
     this.renderMeasurements();
+  }
+
+  renderSelectedFeatureHighlight() {
+    if (
+      !this.selectedFeature ||
+      typeof this.wasmProcessor?.render_interaction_highlight !== "function"
+    ) {
+      return;
+    }
+
+    try {
+      if (this.clearSelectedFeatureIfUnavailable()) {
+        return;
+      }
+      this.wasmProcessor.render_interaction_highlight(
+        this.selectedFeature.layerId,
+        this.selectedFeature.featureId,
+        this.getViewScaleX(),
+        this.getViewScaleY(),
+        this.camera.offsetX,
+        this.camera.offsetY,
+      );
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("[Render] Failed to render feature highlight:", error);
+      this.addDiagnostic("error", "Feature highlight failed", message);
+      this.clearSelectedFeature();
+    }
   }
 
   getRenderLayerPayload() {
@@ -3488,6 +3661,8 @@ export class GerberViewer {
     this.isPanning = true;
     this.lastMousePos.x = e.clientX;
     this.lastMousePos.y = e.clientY;
+    this.mouseDownPos.x = e.clientX;
+    this.mouseDownPos.y = e.clientY;
   }
 
   handleMouseMove(e) {
@@ -3576,6 +3751,16 @@ export class GerberViewer {
 
     const deltaX = e.clientX - this.lastMousePos.x;
     const deltaY = e.clientY - this.lastMousePos.y;
+    const totalDeltaX = e.clientX - this.mouseDownPos.x;
+    const totalDeltaY = e.clientY - this.mouseDownPos.y;
+    if (
+      e.type === "mouseup" &&
+      Math.hypot(totalDeltaX, totalDeltaY) <= POINTER_TAP_MAX_MOVEMENT_PX
+    ) {
+      this.selectFeatureAtCanvasPoint(e.clientX, e.clientY);
+      return;
+    }
+
     panCameraByScreenDelta({
       deltaX,
       deltaY,
@@ -3584,6 +3769,114 @@ export class GerberViewer {
     });
 
     this.requestRender();
+  }
+
+  selectFeatureAtCanvasPoint(clientX, clientY) {
+    const point = this.canvasPointToWorld(clientX, clientY);
+    if (
+      !point ||
+      !this.interactionsEnabled ||
+      typeof this.wasmProcessor?.pick_interaction_feature !== "function"
+    ) {
+      this.clearSelectedFeature();
+      return;
+    }
+
+    const hit = this.wasmProcessor.pick_interaction_feature(
+      this.getVisibleInteractionLayerIds(),
+      point.x,
+      point.y,
+      this.getFeatureHitToleranceWorld(clientX, clientY),
+    );
+    this.selectedFeature = hit ? this.attachLayerToSelectedFeature(hit) : null;
+    this.updateUiState();
+    this.renderMeasurements();
+    this.requestRender();
+  }
+
+  clearSelectedFeature({ refresh = true } = {}) {
+    if (!this.selectedFeature) return;
+    this.selectedFeature = null;
+    if (!refresh) return;
+    this.updateUiState();
+    this.renderMeasurements();
+    this.requestRender();
+  }
+
+  clearSelectedFeatureForHiddenLayer(layer) {
+    if (!layer.visible && this.selectedFeature?.layerId === this.getLayerInteractionLayerId(layer)) {
+      this.clearSelectedFeature();
+    }
+  }
+
+  attachLayerToSelectedFeature(feature) {
+    const layerId = Number(feature?.layerId);
+    const featureId = Number(feature?.featureId);
+    if (!Number.isFinite(layerId) || !Number.isFinite(featureId)) {
+      return null;
+    }
+
+    const layer = this.layers.find(
+      (candidate) => this.getLayerInteractionLayerId(candidate) === layerId,
+    );
+    if (!layer || !layer.visible) {
+      return null;
+    }
+
+    return {
+      ...feature,
+      layerId,
+      featureId,
+      layer,
+    };
+  }
+
+  getSelectedFeatureLayer() {
+    if (!this.selectedFeature) return null;
+    return this.layers.find(
+      (layer) =>
+        this.getLayerInteractionLayerId(layer) === this.selectedFeature.layerId,
+    ) ?? null;
+  }
+
+  clearSelectedFeatureIfUnavailable() {
+    const layer = this.getSelectedFeatureLayer();
+    if (this.selectedFeature && (!layer || !layer.visible)) {
+      this.clearSelectedFeature();
+      return true;
+    }
+    return false;
+  }
+
+  getVisibleInteractionLayerIds() {
+    const layerIds = [];
+    for (const layer of this.layers) {
+      if (layer.visible && !isDrillLayer(layer)) {
+        layerIds.push(layer.layerId);
+      }
+    }
+    for (const layer of this.layers) {
+      if (layer.visible && isDrillLayer(layer)) {
+        layerIds.push(layer.outlineLayerId);
+      }
+    }
+    return new Uint32Array(layerIds.filter(Number.isFinite));
+  }
+
+  getLayerInteractionLayerId(layer) {
+    return isDrillLayer(layer) ? layer?.outlineLayerId : layer?.layerId;
+  }
+
+  getFeatureHitToleranceWorld(clientX, clientY) {
+    const point = this.canvasPointToWorld(clientX, clientY);
+    const offsetPoint = this.canvasPointToWorld(clientX + 8, clientY);
+    if (!point || !offsetPoint) {
+      return 0.05;
+    }
+    return Math.max(
+      0.01,
+      Math.hypot(offsetPoint.x - point.x, offsetPoint.y - point.y),
+    );
   }
 
   // Touch event handlers
@@ -3603,6 +3896,8 @@ export class GerberViewer {
     }
 
     if (this.touches.length === 2) {
+      this.cancelTouchTapTracking();
+      this.touchGestureWasMultitouch = true;
       // Two-finger gesture: pinch-to-zoom
       this.initialPinchDistance = this.calculateTouchDistance(
         this.touches[0],
@@ -3613,11 +3908,15 @@ export class GerberViewer {
       const center = this.getTouchCenter(this.touches[0], this.touches[1]);
       this.lastTouchCenter = center;
     } else if (this.touches.length === 1) {
+      this.startTouchTapTracking(this.touches[0]);
       // Single finger: pan
       this.lastTouchCenter = {
         x: this.touches[0].clientX,
         y: this.touches[0].clientY,
       };
+    } else {
+      this.cancelTouchTapTracking();
+      this.touchGestureWasMultitouch = true;
     }
   }
 
@@ -3644,6 +3943,8 @@ export class GerberViewer {
     }
 
     if (this.touches.length === 2) {
+      this.cancelTouchTapTracking();
+      this.touchGestureWasMultitouch = true;
       // Two-finger gesture: pinch-to-zoom + pan
       const currentDistance = this.calculateTouchDistance(
         this.touches[0],
@@ -3684,6 +3985,10 @@ export class GerberViewer {
         x: this.touches[0].clientX,
         y: this.touches[0].clientY,
       };
+      this.updateTouchTapTracking(this.touches[0]);
+      if (this.touchTapCandidate) {
+        return;
+      }
 
       const deltaX = currentPos.x - this.lastTouchCenter.x;
       const deltaY = currentPos.y - this.lastTouchCenter.y;
@@ -3696,6 +4001,9 @@ export class GerberViewer {
 
       this.lastTouchCenter = currentPos;
       this.requestRender();
+    } else if (this.touches.length > 2) {
+      this.cancelTouchTapTracking();
+      this.touchGestureWasMultitouch = true;
     }
   }
 
@@ -3732,15 +4040,92 @@ export class GerberViewer {
     }
 
     if (this.touches.length === 0) {
+      this.commitTouchTapSelection(e);
+      this.resetTouchTapTracking();
       // All touches ended
       this.isTouching = false;
     } else if (this.touches.length === 1) {
+      this.cancelTouchTapTracking();
+      this.touchGestureWasMultitouch = true;
       // Transitioned from multi-touch to single touch
       this.lastTouchCenter = {
         x: this.touches[0].clientX,
         y: this.touches[0].clientY,
       };
     }
+  }
+
+  startTouchTapTracking(touch) {
+    const point = {
+      x: touch.clientX,
+      y: touch.clientY,
+    };
+    this.touchStartPoint = point;
+    this.touchTapPoint = point;
+    this.touchTapIdentifier = touch.identifier;
+    this.touchTapCandidate = true;
+    this.touchGestureWasMultitouch = false;
+  }
+
+  updateTouchTapTracking(touch) {
+    if (
+      !this.touchTapCandidate ||
+      this.touchTapIdentifier !== touch.identifier ||
+      !this.touchStartPoint
+    ) {
+      return;
+    }
+
+    const point = {
+      x: touch.clientX,
+      y: touch.clientY,
+    };
+    this.touchTapPoint = point;
+    if (
+      Math.hypot(
+        point.x - this.touchStartPoint.x,
+        point.y - this.touchStartPoint.y,
+      ) > POINTER_TAP_MAX_MOVEMENT_PX
+    ) {
+      this.touchTapCandidate = false;
+    }
+  }
+
+  commitTouchTapSelection(event) {
+    if (
+      event.type !== "touchend" ||
+      !this.touchTapCandidate ||
+      this.touchGestureWasMultitouch ||
+      this.touchTapIdentifier === null
+    ) {
+      return false;
+    }
+
+    const endedTouch = Array.from(event.changedTouches).find(
+      (touch) => touch.identifier === this.touchTapIdentifier,
+    );
+    if (!endedTouch) {
+      return false;
+    }
+
+    const point = this.touchTapPoint ?? {
+      x: endedTouch.clientX,
+      y: endedTouch.clientY,
+    };
+    this.selectFeatureAtCanvasPoint(point.x, point.y);
+    return true;
+  }
+
+  cancelTouchTapTracking() {
+    this.touchTapCandidate = false;
+  }
+
+  resetTouchTapTracking() {
+    this.touchStartPoint = null;
+    this.touchTapPoint = null;
+    this.touchTapIdentifier = null;
+    this.touchTapCandidate = false;
+    this.touchGestureWasMultitouch = false;
   }
 
   startRulerTouch(touch) {
@@ -3841,6 +4226,11 @@ export class GerberViewer {
 
         // remove from JS array only if WASM removal succeeded
         this.layers.splice(index, 1);
+        if (
+          this.selectedFeature?.layerId === this.getLayerInteractionLayerId(layer)
+        ) {
+          this.selectedFeature = null;
+        }
         if (this.layers.length === 0) {
           this.fitViewZoom = null;
         }
@@ -3877,6 +4267,7 @@ export class GerberViewer {
       }
 
       this.layers = [];
+      this.selectedFeature = null;
       this.nextColorIndex = 0;
       this.nextLayerDomId = 0;
       this.fitViewZoom = null;
@@ -3904,6 +4295,7 @@ export class GerberViewer {
         layer.visible = this.layerFilterStore.matches(layer, kind);
       }
     });
+    this.clearSelectedFeatureIfUnavailable();
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
@@ -3913,6 +4305,7 @@ export class GerberViewer {
     this.layers.forEach((layer) => {
       layer.visible = false;
     });
+    this.clearSelectedFeature();
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
@@ -4036,11 +4429,13 @@ export class GerberViewer {
       onColorChange: (layerId, color) => this.updateLayerColor(layerId, color),
       onVisibilityChange: (layer, visible) => {
         layer.visible = visible;
+        this.clearSelectedFeatureForHiddenLayer(layer);
         this.requestRender();
         this.updateUiState();
       },
       onToggleVisibility: (layer) => {
         layer.visible = !layer.visible;
+        this.clearSelectedFeatureForHiddenLayer(layer);
         this.requestRender();
         this.updateUiState();
       },

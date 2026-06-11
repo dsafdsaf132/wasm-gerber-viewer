@@ -6,18 +6,22 @@ mod shader;
 use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
 use camera::Camera;
 use shader::{
-    ShaderProgram, ShaderPrograms, ALWAYS, ARRAY_BUFFER, BLEND, COLOR_BUFFER_BIT, FLOAT, FUNC_ADD,
-    INVERT, KEEP, NOTEQUAL, ONE, ONE_MINUS_SRC_ALPHA, STATIC_DRAW, STENCIL_BUFFER_BIT,
-    STENCIL_TEST, TRIANGLES, ZERO,
+    compile_program, ShaderProgram, ShaderPrograms, ALWAYS, ARRAY_BUFFER, BLEND, COLOR_BUFFER_BIT,
+    EQUAL, FLOAT, FUNC_ADD, HIGHLIGHT_FRAGMENT_SHADER, HIGHLIGHT_STENCIL_FRAGMENT_SHADER,
+    HIGHLIGHT_VERTEX_SHADER, INVERT, KEEP, NOTEQUAL, ONE, ONE_MINUS_SRC_ALPHA, REPLACE, SRC_ALPHA,
+    STATIC_DRAW, STENCIL_BUFFER_BIT, STENCIL_TEST, STREAM_DRAW, TRIANGLES, ZERO,
 };
 
+use crate::interaction::InteractionFeature;
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
 };
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
 use wasm_bindgen::{prelude::*, JsCast};
-use web_sys::{WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlTexture};
+use web_sys::{
+    WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlTexture, WebGlVertexArrayObject,
+};
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
 pub struct LayerMetadata {
@@ -43,6 +47,10 @@ pub struct Renderer {
     camera: Camera,
     quad_buffer: WebGlBuffer, // Shared quad buffer for all layers
     minimum_feature_pixels: f32,
+    highlight_program: Option<ShaderProgram>,
+    highlight_stencil_program: Option<ShaderProgram>,
+    highlight_buffer: Option<WebGlBuffer>,
+    highlight_vertex_array: Option<WebGlVertexArrayObject>,
 }
 
 struct BufferCacheBuildGuard {
@@ -112,6 +120,10 @@ impl Renderer {
             camera: Camera::new(),
             quad_buffer,
             minimum_feature_pixels: 0.0,
+            highlight_program: None,
+            highlight_stencil_program: None,
+            highlight_buffer: None,
+            highlight_vertex_array: None,
         })
     }
 
@@ -2190,6 +2202,17 @@ impl Renderer {
         gl.buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
     }
 
+    fn upload_f32_slice_to_bound_buffer_with_usage(
+        gl: &WebGl2RenderingContext,
+        data: &[f32],
+        usage: u32,
+    ) {
+        unsafe {
+            let array = Float32Array::view(data);
+            gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, usage);
+        }
+    }
+
     fn upload_f32_slice_to_bound_buffer(gl: &WebGl2RenderingContext, data: &[f32]) {
         // Avoid JS memory copy.
         unsafe {
@@ -2354,6 +2377,372 @@ impl Renderer {
         self.gl.draw_arrays(TRIANGLES, 0, 6);
 
         Ok(())
+    }
+
+    fn ensure_highlight_resources(&mut self) -> Result<(), JsValue> {
+        if self.highlight_program.is_some()
+            && self.highlight_stencil_program.is_some()
+            && self.highlight_buffer.is_some()
+            && self.highlight_vertex_array.is_some()
+        {
+            return Ok(());
+        }
+
+        self.delete_highlight_resources();
+
+        let highlight_program = compile_program(
+            &self.gl,
+            HIGHLIGHT_VERTEX_SHADER,
+            HIGHLIGHT_FRAGMENT_SHADER,
+            &["position"],
+            &["transform"],
+        )?;
+        let stencil_program = match compile_program(
+            &self.gl,
+            HIGHLIGHT_VERTEX_SHADER,
+            HIGHLIGHT_STENCIL_FRAGMENT_SHADER,
+            &["position"],
+            &["transform"],
+        ) {
+            Ok(program) => program,
+            Err(error) => {
+                self.gl.delete_program(Some(&highlight_program.program));
+                return Err(error);
+            }
+        };
+        let buffer = match self.gl.create_buffer() {
+            Some(buffer) => buffer,
+            None => {
+                self.gl.delete_program(Some(&highlight_program.program));
+                self.gl.delete_program(Some(&stencil_program.program));
+                return Err(JsValue::from_str("Failed to create highlight buffer"));
+            }
+        };
+        let vertex_array = match self.gl.create_vertex_array() {
+            Some(vertex_array) => vertex_array,
+            None => {
+                self.gl.delete_buffer(Some(&buffer));
+                self.gl.delete_program(Some(&highlight_program.program));
+                self.gl.delete_program(Some(&stencil_program.program));
+                return Err(JsValue::from_str("Failed to create highlight VAO"));
+            }
+        };
+
+        self.highlight_program = Some(highlight_program);
+        self.highlight_stencil_program = Some(stencil_program);
+        self.highlight_buffer = Some(buffer);
+        self.highlight_vertex_array = Some(vertex_array);
+        Ok(())
+    }
+
+    fn delete_highlight_resources(&mut self) {
+        Self::delete_highlight_resources_from(
+            &self.gl,
+            &mut self.highlight_program,
+            &mut self.highlight_stencil_program,
+            &mut self.highlight_buffer,
+            &mut self.highlight_vertex_array,
+        );
+    }
+
+    fn delete_highlight_resources_from(
+        gl: &WebGl2RenderingContext,
+        highlight_program: &mut Option<ShaderProgram>,
+        highlight_stencil_program: &mut Option<ShaderProgram>,
+        highlight_buffer: &mut Option<WebGlBuffer>,
+        highlight_vertex_array: &mut Option<WebGlVertexArrayObject>,
+    ) {
+        if let Some(program) = highlight_program.take() {
+            gl.delete_program(Some(&program.program));
+        }
+        if let Some(program) = highlight_stencil_program.take() {
+            gl.delete_program(Some(&program.program));
+        }
+        if let Some(buffer) = highlight_buffer.take() {
+            gl.delete_buffer(Some(&buffer));
+        }
+        if let Some(vertex_array) = highlight_vertex_array.take() {
+            gl.delete_vertex_array(Some(&vertex_array));
+        }
+    }
+
+    fn draw_highlight_vertices(
+        &self,
+        program: &ShaderProgram,
+        vertices: &[f32],
+        transform: &[f32; 9],
+    ) -> Result<(), JsValue> {
+        if vertices.len() < 6 {
+            return Ok(());
+        }
+        if !vertices.len().is_multiple_of(2) {
+            return Err(JsValue::from_str(
+                "Highlight vertex buffer has an odd coordinate count",
+            ));
+        }
+        let vertex_count = vertices.len() / 2;
+        if !vertex_count.is_multiple_of(3) {
+            return Err(JsValue::from_str(
+                "Highlight vertex count is not divisible by 3",
+            ));
+        }
+        let vertex_count = Self::checked_usize_to_i32("highlight vertex count", vertex_count)?;
+
+        self.gl.use_program(Some(&program.program));
+        self.gl.uniform_matrix3fv_with_f32_array(
+            program.uniforms.get("transform"),
+            false,
+            transform,
+        );
+        self.gl
+            .bind_vertex_array(self.highlight_vertex_array.as_ref());
+        self.gl
+            .bind_buffer(ARRAY_BUFFER, self.highlight_buffer.as_ref());
+        Self::upload_f32_slice_to_bound_buffer_with_usage(&self.gl, vertices, STREAM_DRAW);
+        let position = Self::shader_attribute(program, "position")?;
+        self.gl.enable_vertex_attrib_array(position);
+        self.gl
+            .vertex_attrib_pointer_with_i32(position, 2, FLOAT, false, 0, 0);
+        self.gl.vertex_attrib_divisor(position, 0);
+        self.gl.draw_arrays(TRIANGLES, 0, vertex_count);
+        Ok(())
+    }
+
+    fn draw_highlight_path_regions(
+        &self,
+        path_regions: &PathRegions,
+        transform: &[f32; 9],
+        highlight_program: &ShaderProgram,
+        stencil_program: &ShaderProgram,
+    ) -> Result<(), JsValue> {
+        let region_count = path_regions.region_count();
+        if region_count == 0 {
+            return Ok(());
+        }
+
+        Self::validate_path_region_data(path_regions, 0)?;
+        let mut guard = BufferCacheBuildGuard::new(&self.gl);
+        Self::create_path_region_gpu_cache(
+            &self.gl,
+            &self.programs,
+            &mut guard.cache,
+            path_regions,
+        )?;
+        let buffer_cache = guard.commit();
+        let solid_color = [1.0, 1.0, 1.0, 1.0];
+
+        let result = (|| -> Result<(), JsValue> {
+            for region_idx in 0..region_count {
+                self.gl.color_mask(false, false, false, false);
+                self.gl.stencil_func(ALWAYS, 0, 0xff);
+                self.gl.stencil_op(KEEP, KEEP, INVERT);
+
+                let wedge_start = Self::checked_u32_to_i32(
+                    "highlight path wedge vertex start",
+                    path_regions.wedge_vertex_offsets[region_idx],
+                )?;
+                let wedge_end = Self::checked_u32_to_i32(
+                    "highlight path wedge vertex end",
+                    path_regions.wedge_vertex_offsets[region_idx + 1],
+                )?;
+                if wedge_end > wedge_start {
+                    self.draw_path_solid_range(
+                        transform,
+                        &solid_color,
+                        buffer_cache.path_wedge_vao.as_ref(),
+                        wedge_start,
+                        wedge_end - wedge_start,
+                    )?;
+                }
+
+                let sector_start = Self::checked_u32_to_i32(
+                    "highlight path sector vertex start",
+                    path_regions.sector_vertex_offsets[region_idx],
+                )?;
+                let sector_end = Self::checked_u32_to_i32(
+                    "highlight path sector vertex end",
+                    path_regions.sector_vertex_offsets[region_idx + 1],
+                )?;
+                if sector_end > sector_start {
+                    self.draw_path_sector_range(
+                        transform,
+                        &buffer_cache,
+                        sector_start,
+                        sector_end - sector_start,
+                    )?;
+                }
+
+                self.gl.color_mask(true, true, true, true);
+                self.gl.stencil_func(NOTEQUAL, 0, 0xff);
+                self.gl.stencil_op(KEEP, KEEP, KEEP);
+                let clear_start = region_idx.checked_mul(12).ok_or_else(|| {
+                    JsValue::from_str("highlight path clear vertex start overflows")
+                })?;
+                let clear_end = clear_start + 12;
+                self.draw_highlight_vertices(
+                    highlight_program,
+                    &path_regions.clear_vertices[clear_start..clear_end],
+                    transform,
+                )?;
+
+                self.gl.color_mask(false, false, false, false);
+                self.gl.stencil_func(ALWAYS, 0, 0xff);
+                self.gl.stencil_op(ZERO, ZERO, ZERO);
+                let cover_start = region_idx.checked_mul(12).ok_or_else(|| {
+                    JsValue::from_str("highlight path cover vertex start overflows")
+                })?;
+                let cover_end = cover_start + 12;
+                self.draw_highlight_vertices(
+                    stencil_program,
+                    &path_regions.cover_vertices[cover_start..cover_end],
+                    transform,
+                )?;
+            }
+
+            Ok(())
+        })();
+
+        Self::delete_buffer_cache(&self.gl, buffer_cache);
+        result
+    }
+
+    fn bounds_rect_triangles(bounds: &Boundary) -> [f32; 12] {
+        [
+            bounds.min_x(),
+            bounds.min_y(),
+            bounds.max_x(),
+            bounds.min_y(),
+            bounds.min_x(),
+            bounds.max_y(),
+            bounds.min_x(),
+            bounds.max_y(),
+            bounds.max_x(),
+            bounds.min_y(),
+            bounds.max_x(),
+            bounds.max_y(),
+        ]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_interaction_highlight(
+        &mut self,
+        feature: &InteractionFeature,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<(), JsValue> {
+        Self::validate_finite_value("highlight zoom_x", zoom_x)?;
+        Self::validate_finite_value("highlight zoom_y", zoom_y)?;
+        Self::validate_finite_value("highlight offset_x", offset_x)?;
+        Self::validate_finite_value("highlight offset_y", offset_y)?;
+        Self::validate_finite_value("highlight bounds.min_x", feature.bounds.min_x())?;
+        Self::validate_finite_value("highlight bounds.max_x", feature.bounds.max_x())?;
+        Self::validate_finite_value("highlight bounds.min_y", feature.bounds.min_y())?;
+        Self::validate_finite_value("highlight bounds.max_y", feature.bounds.max_y())?;
+
+        let batches = feature.highlight_batches();
+        let has_primitive_batches = batches.iter().any(|batch| batch.vertices.len() >= 6);
+        let has_path_regions = feature.path_regions.has_geometry();
+        if !has_primitive_batches && !has_path_regions {
+            return Ok(());
+        }
+
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        if width == 0 || height == 0 {
+            return Err(JsValue::from_str(
+                "Cannot render highlight to a zero-sized canvas",
+            ));
+        }
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let transform = self.camera.get_transform_matrix(width, height);
+        let bounds_vertices = Self::bounds_rect_triangles(&feature.bounds);
+        self.ensure_highlight_resources()?;
+
+        let stencil_bits = self
+            .gl
+            .get_parameter(WebGl2RenderingContext::STENCIL_BITS)?
+            .as_f64()
+            .unwrap_or(0.0) as i32;
+
+        self.gl
+            .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        self.gl.viewport(0, 0, width_i32, height_i32);
+        self.gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+        self.gl.disable(WebGl2RenderingContext::CULL_FACE);
+        self.gl.color_mask(true, true, true, true);
+
+        let render_result = (|| -> Result<(), JsValue> {
+            if stencil_bits <= 0 {
+                // Accurate dark/clear clipping needs stencil. Without it, skip the
+                // highlight instead of drawing cleared holes as selected.
+                return Ok(());
+            }
+
+            let stencil_program = self
+                .highlight_stencil_program
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("Highlight stencil program unavailable"))?;
+            let highlight_program = self
+                .highlight_program
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("Highlight program unavailable"))?;
+
+            if has_primitive_batches {
+                self.gl.clear_stencil(0);
+                self.gl.stencil_mask(0xff);
+                self.gl.clear(STENCIL_BUFFER_BIT);
+                self.gl.enable(STENCIL_TEST);
+                self.gl.disable(BLEND);
+                self.gl.color_mask(false, false, false, false);
+                self.gl.stencil_op(KEEP, KEEP, REPLACE);
+
+                for batch in &batches {
+                    let stencil_value = if batch.clear { 0 } else { 1 };
+                    self.gl.stencil_func(ALWAYS, stencil_value, 0xff);
+                    self.draw_highlight_vertices(stencil_program, &batch.vertices, &transform)?;
+                }
+
+                self.gl.color_mask(true, true, true, true);
+                self.gl.enable(BLEND);
+                self.gl.blend_equation(FUNC_ADD);
+                self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+                self.gl.stencil_func(EQUAL, 1, 0xff);
+                self.gl.stencil_mask(0x00);
+                self.gl.stencil_op(KEEP, KEEP, KEEP);
+                self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
+            }
+
+            if has_path_regions {
+                self.gl.clear_stencil(0);
+                self.gl.stencil_mask(0xff);
+                self.gl.clear(STENCIL_BUFFER_BIT);
+                self.gl.enable(STENCIL_TEST);
+                self.gl.enable(BLEND);
+                self.gl.blend_equation(FUNC_ADD);
+                self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+                self.draw_highlight_path_regions(
+                    &feature.path_regions,
+                    &transform,
+                    highlight_program,
+                    stencil_program,
+                )?;
+            }
+            Ok(())
+        })();
+
+        self.gl.disable(STENCIL_TEST);
+        self.gl.disable(BLEND);
+        self.gl.stencil_mask(0xff);
+        self.gl.color_mask(true, true, true, true);
+        self.gl.bind_buffer(ARRAY_BUFFER, None);
+        self.gl.bind_vertex_array(None);
+        self.gl.blend_equation(FUNC_ADD);
+        self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+
+        render_result
     }
 
     /// Draw instanced triangles
@@ -4346,6 +4735,13 @@ impl Renderer {
 
         old_gl.delete_buffer(Some(&old_quad_buffer));
         Self::delete_shader_programs(&old_gl, &old_programs);
+        Self::delete_highlight_resources_from(
+            &old_gl,
+            &mut self.highlight_program,
+            &mut self.highlight_stencil_program,
+            &mut self.highlight_buffer,
+            &mut self.highlight_vertex_array,
+        );
         self.gl = gl;
 
         Ok(())
@@ -4355,6 +4751,7 @@ impl Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         self.clear_all();
+        self.delete_highlight_resources();
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
     }

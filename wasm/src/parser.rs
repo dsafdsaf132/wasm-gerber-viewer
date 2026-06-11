@@ -15,6 +15,7 @@ use state::{
 };
 
 use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive, RegionContour};
+use crate::interaction::InteractionLayer;
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -30,6 +31,11 @@ pub struct PolarityLayer {
     pub(crate) polarity: Polarity,
     pub(crate) primitives: Vec<Primitive>,
     pub(crate) path_regions: PathRegions,
+}
+
+pub struct ParsedGerberLayer {
+    pub render_layers: Vec<GerberData>,
+    pub interaction_layer: Option<InteractionLayer>,
 }
 
 fn collect_lines(data: &str) -> Result<Vec<&str>, JsValue> {
@@ -820,10 +826,19 @@ pub struct GerberParser {
     pub current_primitives: Vec<Primitive>, // Accumulating primitives for current polarity
     pub current_path_regions: PathRegions,
     pub region_contours: Vec<RegionContour>, // Contours collected in Region mode
+    pub interaction_layer: Option<InteractionLayer>,
 }
 
 impl GerberParser {
     pub fn with_options(preserve_arc_regions: bool, arc_tessellation_quality: u32) -> Self {
+        Self::with_options_and_interactions(preserve_arc_regions, arc_tessellation_quality, false)
+    }
+
+    pub fn with_options_and_interactions(
+        preserve_arc_regions: bool,
+        arc_tessellation_quality: u32,
+        collect_interactions: bool,
+    ) -> Self {
         GerberParser {
             apertures: HashMap::new(),
             macros: HashMap::new(),
@@ -834,6 +849,7 @@ impl GerberParser {
             current_primitives: Vec::new(),
             current_path_regions: PathRegions::empty(),
             region_contours: Vec::new(),
+            interaction_layer: collect_interactions.then(InteractionLayer::new),
         }
     }
 
@@ -867,6 +883,7 @@ impl GerberParser {
                     &mut self.polarity_layers,
                     self.preserve_arc_regions,
                     self.arc_tessellation_quality,
+                    self.interaction_layer.is_some(),
                 )?;
             } else if line_ref.starts_with("G04") {
                 // Comment line, skip
@@ -877,6 +894,7 @@ impl GerberParser {
                 || line_ref.starts_with('I')
                 || line_ref.starts_with('J')
             {
+                let collect_interactions = self.interaction_layer.is_some();
                 parse_graphic_command(
                     line_ref,
                     &mut self.current_state,
@@ -885,8 +903,10 @@ impl GerberParser {
                     &mut self.region_contours,
                     &mut self.current_path_regions,
                     &mut self.polarity_layers,
+                    self.interaction_layer.as_mut(),
                     self.preserve_arc_regions,
                     self.arc_tessellation_quality,
+                    collect_interactions,
                 )
                 .map_err(|message| JsValue::from_str(&message))?;
             }
@@ -926,6 +946,14 @@ impl GerberParser {
         }
 
         Ok(gerber_data_layers)
+    }
+
+    pub fn parse_payload(&mut self, data: &str) -> Result<ParsedGerberLayer, JsValue> {
+        let render_layers = self.parse(data)?;
+        Ok(ParsedGerberLayer {
+            render_layers,
+            interaction_layer: take(&mut self.interaction_layer),
+        })
     }
 
     /// Convert a vector of primitives to GerberData
@@ -980,6 +1008,7 @@ fn parse_command(
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
+    collect_interactions: bool,
 ) -> Result<(), JsValue> {
     let line = if !line_ref.ends_with('%') {
         let mut buffer = String::new();
@@ -1006,7 +1035,13 @@ fn parse_command(
     if line.starts_with("%AM") {
         parse_macro(&line, macros);
     } else if line.starts_with("%ADD") {
-        parse_aperture(&line, apertures, macros, state.unit_multiplier);
+        parse_aperture(
+            &line,
+            apertures,
+            macros,
+            state.unit_multiplier,
+            collect_interactions,
+        );
     } else if line.starts_with("%MO") {
         // Unit mode: %MOMM* or %MOIN*
         parse_mo(&line, state);
@@ -1044,6 +1079,7 @@ fn parse_command(
             polarity_layers,
             preserve_arc_regions,
             arc_tessellation_quality,
+            collect_interactions,
         )?;
     } else if line.starts_with("%LM") {
         // Layer mirroring: %LMN*, %LMX*, %LMY*, %LMXY*
@@ -1123,6 +1159,7 @@ fn parse_aperture_block(
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
+    collect_interactions: bool,
 ) -> Result<(), JsValue> {
     let Some(block_code) = parse_aperture_block_code(line) else {
         return Ok(());
@@ -1167,6 +1204,7 @@ fn parse_aperture_block(
                 &mut block_layers,
                 preserve_arc_regions,
                 arc_tessellation_quality,
+                collect_interactions,
             )?;
             if let Some(enclosing_state) = nested_block_state {
                 *state = enclosing_state;
@@ -1186,8 +1224,10 @@ fn parse_aperture_block(
                 &mut block_region_contours,
                 &mut block_path_regions,
                 &mut block_layers,
+                None,
                 preserve_arc_regions,
                 arc_tessellation_quality,
+                collect_interactions,
             )
             .map_err(|message| JsValue::from_str(&message))?;
         }
@@ -1221,6 +1261,19 @@ pub fn parse_gerber_with_options(
 ) -> Result<Vec<GerberData>, JsValue> {
     let mut parser = GerberParser::with_options(preserve_arc_regions, arc_tessellation_quality);
     parser.parse(data)
+}
+
+pub fn parse_gerber_payload_with_options(
+    data: &str,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+) -> Result<ParsedGerberLayer, JsValue> {
+    let mut parser = GerberParser::with_options_and_interactions(
+        preserve_arc_regions,
+        arc_tessellation_quality,
+        true,
+    );
+    parser.parse_payload(data)
 }
 
 #[cfg(test)]

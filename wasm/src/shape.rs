@@ -447,6 +447,7 @@ pub struct PathRegions {
     pub(crate) sector_vertex_offsets: Vec<u32>,
     pub(crate) cover_vertices: Vec<f32>,
     pub(crate) clear_vertices: Vec<f32>,
+    pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
 }
 
 impl PathRegions {
@@ -465,6 +466,7 @@ impl PathRegions {
             sector_vertex_offsets: normalize_offsets(sector_vertex_offsets),
             cover_vertices,
             clear_vertices,
+            pick_contours: Vec::new(),
         }
     }
 
@@ -476,6 +478,7 @@ impl PathRegions {
             sector_vertex_offsets: vec![0],
             cover_vertices: Vec::new(),
             clear_vertices: Vec::new(),
+            pick_contours: Vec::new(),
         }
     }
 
@@ -498,6 +501,7 @@ impl PathRegions {
         self.sector_vertices.extend(other.sector_vertices);
         self.cover_vertices.extend(other.cover_vertices);
         self.clear_vertices.extend(other.clear_vertices);
+        self.pick_contours.extend(other.pick_contours);
 
         for offset in other.wedge_vertex_offsets.iter().skip(1) {
             self.wedge_vertex_offsets.push(wedge_base + offset);
@@ -512,6 +516,7 @@ impl PathRegions {
         self.sector_vertices = Vec::new();
         self.cover_vertices = Vec::new();
         self.clear_vertices = Vec::new();
+        self.pick_contours = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
@@ -526,6 +531,14 @@ impl PathRegions {
 
         translate_point_pairs(&mut self.cover_vertices, dx, dy);
         translate_point_pairs(&mut self.clear_vertices, dx, dy);
+        for region in &mut self.pick_contours {
+            for contour in region {
+                for point in contour {
+                    point[0] += dx;
+                    point[1] += dy;
+                }
+            }
+        }
     }
 
     pub(crate) fn transform_for_flash(
@@ -579,6 +592,18 @@ impl PathRegions {
             );
             point[0] = x;
             point[1] = y;
+        }
+
+        for region in &mut self.pick_contours {
+            for contour in region {
+                for point in contour {
+                    let (x, y) = transformed_point_for_flash(
+                        point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+                    );
+                    point[0] = x;
+                    point[1] = y;
+                }
+            }
         }
     }
 
@@ -701,6 +726,7 @@ fn transform_arc_angles(
 
 /// Boundary information for the entire Gerber layer
 #[wasm_bindgen]
+#[derive(Clone, Debug)]
 pub struct Boundary {
     pub(crate) min_x: f32,
     pub(crate) max_x: f32,
@@ -745,6 +771,13 @@ impl Boundary {
         self.max_x += dx;
         self.min_y += dy;
         self.max_y += dy;
+    }
+
+    pub(crate) fn include_boundary(&mut self, other: &Boundary) {
+        self.min_x = self.min_x.min(other.min_x);
+        self.max_x = self.max_x.max(other.max_x);
+        self.min_y = self.min_y.min(other.min_y);
+        self.max_y = self.max_y.max(other.max_y);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {

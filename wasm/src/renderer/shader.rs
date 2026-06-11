@@ -9,17 +9,21 @@ pub const TRIANGLES: u32 = WebGl2RenderingContext::TRIANGLES;
 pub const FLOAT: u32 = WebGl2RenderingContext::FLOAT;
 pub const ARRAY_BUFFER: u32 = WebGl2RenderingContext::ARRAY_BUFFER;
 pub const STATIC_DRAW: u32 = WebGl2RenderingContext::STATIC_DRAW;
+pub const STREAM_DRAW: u32 = WebGl2RenderingContext::STREAM_DRAW;
 pub const VERTEX_SHADER: u32 = WebGl2RenderingContext::VERTEX_SHADER;
 pub const FRAGMENT_SHADER: u32 = WebGl2RenderingContext::FRAGMENT_SHADER;
 pub const BLEND: u32 = WebGl2RenderingContext::BLEND;
 pub const ONE_MINUS_SRC_ALPHA: u32 = WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA;
 pub const ONE: u32 = WebGl2RenderingContext::ONE;
+pub const SRC_ALPHA: u32 = WebGl2RenderingContext::SRC_ALPHA;
 pub const FUNC_ADD: u32 = WebGl2RenderingContext::FUNC_ADD;
 pub const ZERO: u32 = WebGl2RenderingContext::ZERO;
 pub const STENCIL_TEST: u32 = WebGl2RenderingContext::STENCIL_TEST;
 pub const ALWAYS: u32 = WebGl2RenderingContext::ALWAYS;
+pub const EQUAL: u32 = WebGl2RenderingContext::EQUAL;
 pub const NOTEQUAL: u32 = WebGl2RenderingContext::NOTEQUAL;
 pub const KEEP: u32 = WebGl2RenderingContext::KEEP;
+pub const REPLACE: u32 = WebGl2RenderingContext::REPLACE;
 pub const INVERT: u32 = WebGl2RenderingContext::INVERT;
 
 // Shader sources
@@ -64,6 +68,13 @@ pub const PATH_SOLID_FRAGMENT_SHADER: &str = include_str!("shaders/path_solid.fr
 pub const PATH_SECTOR_VERTEX_SHADER: &str = include_str!("shaders/path_sector.vert.glsl");
 
 pub const PATH_SECTOR_FRAGMENT_SHADER: &str = include_str!("shaders/path_sector.frag.glsl");
+
+pub const HIGHLIGHT_VERTEX_SHADER: &str = include_str!("shaders/highlight.vert.glsl");
+
+pub const HIGHLIGHT_FRAGMENT_SHADER: &str = include_str!("shaders/highlight.frag.glsl");
+
+pub const HIGHLIGHT_STENCIL_FRAGMENT_SHADER: &str =
+    include_str!("shaders/highlight_stencil.frag.glsl");
 
 /// Shader program with uniform locations
 pub struct ShaderProgram {
@@ -246,7 +257,7 @@ impl ShaderPrograms {
 }
 
 /// Compile a shader program
-fn compile_program(
+pub(crate) fn compile_program(
     gl: &WebGl2RenderingContext,
     vertex_src: &str,
     fragment_src: &str,

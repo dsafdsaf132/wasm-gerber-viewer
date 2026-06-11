@@ -1,3 +1,7 @@
+use crate::interaction::{
+    aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
+    InteractionFeature, InteractionLayer,
+};
 use crate::parse_common::{parse_coordinate_number, parse_g_code, read_word_value};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
 use crate::shape::PathRegions;
@@ -965,7 +969,11 @@ pub fn convert_coordinate(
     )
     .unwrap_or(0.0);
 
-    result.is_finite().then_some(result).unwrap_or(0.0)
+    if result.is_finite() {
+        result
+    } else {
+        0.0
+    }
 }
 
 /// Flash aperture at given position without Step and Repeat
@@ -1200,6 +1208,78 @@ fn flash_block_aperture(
                         primitives: transformed,
                         path_regions: transformed_path_regions,
                     });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn record_block_flash_interaction(
+    interaction_layer: Option<&mut InteractionLayer>,
+    block_layers: &[PolarityLayer],
+    aperture_code: &str,
+    aperture: &Aperture,
+    state: &ParserState,
+    x: f32,
+    y: f32,
+) -> Result<(), String> {
+    let Some(interaction_layer) = interaction_layer else {
+        return Ok(());
+    };
+
+    let properties = InteractionFeature::gerber_properties(aperture);
+    for sy in 0..state.sr_y {
+        for sx in 0..state.sr_x {
+            let flash_x = x + sx as f32 * state.sr_i;
+            let flash_y = y + sy as f32 * state.sr_j;
+
+            for block_layer in block_layers {
+                let mut transformed = Vec::new();
+                try_reserve_primitives(
+                    &mut transformed,
+                    block_layer.primitives.len(),
+                    "aperture block interaction",
+                )?;
+
+                for primitive in &block_layer.primitives {
+                    transformed.push(transform_primitive_for_flash(
+                        primitive,
+                        flash_x,
+                        flash_y,
+                        state.layer_scale,
+                        state.mirror_x,
+                        state.mirror_y,
+                        state.layer_rotation,
+                    ));
+                }
+
+                let mut transformed_path_regions = block_layer.path_regions.clone();
+                transformed_path_regions.transform_for_flash(
+                    state.layer_scale,
+                    state.mirror_x,
+                    state.mirror_y,
+                    state.layer_rotation,
+                    flash_x,
+                    flash_y,
+                );
+
+                if transformed.is_empty() && !transformed_path_regions.has_geometry() {
+                    continue;
+                }
+
+                if let Some(feature) = InteractionFeature::from_geometry(
+                    FeatureKind::Flash,
+                    aperture_name(aperture_code),
+                    aperture_type(aperture),
+                    aperture.macro_name.clone(),
+                    toggled_block_polarity(block_layer.polarity, state.polarity),
+                    transformed,
+                    transformed_path_regions,
+                    properties.clone(),
+                ) {
+                    interaction_layer.push(feature);
                 }
             }
         }
@@ -1667,6 +1747,8 @@ fn region_arc_tessellation_max_angle_step(quality: u32) -> f32 {
 pub fn build_path_regions(
     region_contours: &[RegionContour],
     state: &ParserState,
+    arc_tessellation_quality: u32,
+    collect_pick_contours: bool,
 ) -> Result<PathRegions, String> {
     let mut path_regions = PathRegions::empty();
 
@@ -1674,7 +1756,14 @@ pub fn build_path_regions(
         for sx in 0..state.sr_x {
             let offset_x = sx as f32 * state.sr_i;
             let offset_y = sy as f32 * state.sr_j;
-            append_path_region(&mut path_regions, region_contours, offset_x, offset_y)?;
+            append_path_region(
+                &mut path_regions,
+                region_contours,
+                offset_x,
+                offset_y,
+                arc_tessellation_quality,
+                collect_pick_contours,
+            )?;
         }
     }
 
@@ -1686,6 +1775,8 @@ fn append_path_region(
     region_contours: &[RegionContour],
     offset_x: f32,
     offset_y: f32,
+    arc_tessellation_quality: u32,
+    collect_pick_contours: bool,
 ) -> Result<(), String> {
     let Some((min_x, max_x, min_y, max_y)) =
         path_region_bounds(region_contours, offset_x, offset_y)
@@ -1712,6 +1803,15 @@ fn append_path_region(
         append_contour_segments(path_regions, contour, reference, offset_x, offset_y)?;
     }
 
+    if collect_pick_contours {
+        path_regions.pick_contours.push(path_region_pick_contours(
+            region_contours,
+            offset_x,
+            offset_y,
+            arc_tessellation_quality,
+        )?);
+    }
+
     path_regions
         .wedge_vertex_offsets
         .push((path_regions.wedge_vertices.len() / 2) as u32);
@@ -1720,6 +1820,49 @@ fn append_path_region(
         .push((path_regions.sector_vertices.len() / 7) as u32);
 
     Ok(())
+}
+
+fn path_region_pick_contours(
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+    arc_tessellation_quality: u32,
+) -> Result<Vec<Vec<[f32; 2]>>, String> {
+    let flattened_contours;
+    let contour_iter: Box<dyn Iterator<Item = &[[f32; 2]]> + '_> =
+        if region_contours_have_arcs(region_contours) {
+            flattened_contours =
+                flatten_region_contours(region_contours, arc_tessellation_quality)?;
+            Box::new(flattened_contours.iter().map(Vec::as_slice))
+        } else {
+            Box::new(region_contours_to_point_slices(region_contours))
+        };
+
+    let mut contours = Vec::new();
+    try_reserve_values(
+        &mut contours,
+        region_contours.len(),
+        "path region pick contours",
+    )?;
+    for contour in contour_iter {
+        if contour.len() < 3 {
+            continue;
+        }
+        let mut transformed = Vec::new();
+        try_reserve_values(
+            &mut transformed,
+            contour.len(),
+            "path region pick contour points",
+        )?;
+        transformed.extend(
+            contour
+                .iter()
+                .map(|point| [point[0] + offset_x, point[1] + offset_y]),
+        );
+        contours.push(transformed);
+    }
+
+    Ok(contours)
 }
 
 fn append_contour_segments(
@@ -2085,6 +2228,44 @@ fn append_region_segment(
     Ok(())
 }
 
+fn record_primitive_delta(
+    interaction_layer: Option<&mut InteractionLayer>,
+    kind: FeatureKind,
+    aperture_code: &str,
+    aperture: Option<&Aperture>,
+    polarity: Polarity,
+    primitives: &[Primitive],
+    start_index: usize,
+) {
+    let Some(interaction_layer) = interaction_layer else {
+        return;
+    };
+    if start_index >= primitives.len() {
+        return;
+    }
+
+    let delta = &primitives[start_index..];
+    let feature = if let Some(aperture) = aperture {
+        feature_from_primitive_delta(kind, aperture_code, aperture, polarity, delta)
+    } else {
+        InteractionFeature::from_primitives(
+            kind,
+            aperture_name(aperture_code),
+            aperture
+                .map(aperture_type)
+                .unwrap_or_else(|| "region".to_string()),
+            None,
+            polarity,
+            delta.to_vec(),
+            FeatureProperties::default(),
+        )
+    };
+
+    if let Some(feature) = feature {
+        interaction_layer.push(feature);
+    }
+}
+
 /// Parse graphic commands - process G/D/XY codes
 /// Example: G01X1000Y2000D01* (draw line), X1000Y2000D03* (flash), etc.
 pub fn parse_graphic_command(
@@ -2095,8 +2276,10 @@ pub fn parse_graphic_command(
     region_contours: &mut Vec<RegionContour>,
     path_regions: &mut PathRegions,
     polarity_layers: &mut Vec<PolarityLayer>,
+    mut interaction_layer: Option<&mut InteractionLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
+    collect_interactions: bool,
 ) -> Result<(), String> {
     let clean_line = line.trim_end_matches('*');
 
@@ -2144,9 +2327,30 @@ pub fn parse_graphic_command(
 
                     if preserve_arc_regions && region_contours_have_arcs(region_contours) {
                         flush_primitives_to_layer(primitives, state.polarity, polarity_layers)?;
-                        path_regions.append(build_path_regions(region_contours, state)?);
+                        let region_path_regions = build_path_regions(
+                            region_contours,
+                            state,
+                            arc_tessellation_quality,
+                            collect_interactions,
+                        )?;
+                        path_regions.append(region_path_regions.clone());
+                        if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
+                            if let Some(feature) = InteractionFeature::from_geometry(
+                                FeatureKind::Region,
+                                None,
+                                "region".to_string(),
+                                None,
+                                state.polarity,
+                                Vec::new(),
+                                region_path_regions,
+                                FeatureProperties::default(),
+                            ) {
+                                interaction_layer.push(feature);
+                            }
+                        }
                     } else {
                         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+                        let primitive_start = primitives.len();
                         // Triangulate region and add to primitives with Step and Repeat
                         // Regions are always positive (add material)
                         let flattened_contours;
@@ -2198,6 +2402,15 @@ pub fn parse_graphic_command(
                                 }
                             }
                         }
+                        record_primitive_delta(
+                            interaction_layer.as_deref_mut(),
+                            FeatureKind::Region,
+                            "",
+                            None,
+                            state.polarity,
+                            primitives,
+                            primitive_start,
+                        );
                     }
 
                     region_contours.clear();
@@ -2304,7 +2517,25 @@ pub fn parse_graphic_command(
                         }
                     } else {
                         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+                        let primitive_start = primitives.len();
                         execute_interpolation(state, apertures, primitives, x, y, i, j)?;
+                        let aperture = apertures.get(&state.current_aperture);
+                        let kind = if state.interpolation_mode == "clockwise"
+                            || state.interpolation_mode == "counterclockwise"
+                        {
+                            FeatureKind::ArcDraw
+                        } else {
+                            FeatureKind::Draw
+                        };
+                        record_primitive_delta(
+                            interaction_layer.as_deref_mut(),
+                            kind,
+                            &state.current_aperture,
+                            aperture,
+                            state.polarity,
+                            primitives,
+                            primitive_start,
+                        );
                     }
                 }
                 2 => {
@@ -2329,7 +2560,32 @@ pub fn parse_graphic_command(
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
                     flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+                    let primitive_start = primitives.len();
                     flash_aperture(state, apertures, primitives, polarity_layers, x, y)?;
+                    let aperture = apertures.get(&state.current_aperture);
+                    if let Some(aperture) = aperture {
+                        if let Some(block_layers) = aperture.block_layers.as_ref() {
+                            record_block_flash_interaction(
+                                interaction_layer.as_deref_mut(),
+                                block_layers,
+                                &state.current_aperture,
+                                aperture,
+                                state,
+                                x,
+                                y,
+                            )?;
+                        } else {
+                            record_primitive_delta(
+                                interaction_layer.as_deref_mut(),
+                                FeatureKind::Flash,
+                                &state.current_aperture,
+                                Some(aperture),
+                                state.polarity,
+                                primitives,
+                                primitive_start,
+                            );
+                        }
+                    }
                 }
                 _ if d_code >= 10 => {
                     // D10+: Aperture selection
@@ -2346,7 +2602,25 @@ pub fn parse_graphic_command(
             }
         } else {
             flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+            let primitive_start = primitives.len();
             execute_interpolation(state, apertures, primitives, x, y, i, j)?;
+            let aperture = apertures.get(&state.current_aperture);
+            let kind = if state.interpolation_mode == "clockwise"
+                || state.interpolation_mode == "counterclockwise"
+            {
+                FeatureKind::ArcDraw
+            } else {
+                FeatureKind::Draw
+            };
+            record_primitive_delta(
+                interaction_layer,
+                kind,
+                &state.current_aperture,
+                aperture,
+                state.polarity,
+                primitives,
+                primitive_start,
+            );
         }
     } else {
         // No drawing operation

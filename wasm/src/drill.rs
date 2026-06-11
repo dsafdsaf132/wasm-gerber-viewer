@@ -1,8 +1,10 @@
+use crate::interaction::{drill_hit_feature, drill_slot_feature, InteractionLayer};
 use crate::parse_common::{
     find_g_code_index, line_has_g_code, parse_coordinate_number as parse_common_coordinate_number,
     parse_decimal_number as parse_common_decimal_number, parse_g_code, read_number,
     CoordinateFormat, ZeroSuppression,
 };
+use crate::parser::geometry::Primitive;
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -145,6 +147,7 @@ pub struct DrillParseResult {
     pub fill_layer: GerberData,
     pub outline_layer: GerberData,
     pub metadata: DrillMetadata,
+    pub interaction_layer: Option<InteractionLayer>,
 }
 
 #[derive(Default)]
@@ -373,10 +376,16 @@ struct DrillParser {
     outline_width_mm: f32,
     offset_x: f32,
     offset_y: f32,
+    interaction_layer: Option<InteractionLayer>,
 }
 
 impl DrillParser {
-    fn new(outline_width_mm: f32, offset_x: f32, offset_y: f32) -> Result<Self, JsValue> {
+    fn new(
+        outline_width_mm: f32,
+        offset_x: f32,
+        offset_y: f32,
+        collect_interactions: bool,
+    ) -> Result<Self, JsValue> {
         if !offset_x.is_finite() || !offset_y.is_finite() {
             return Err(JsValue::from_str("Drill layer offset must be finite"));
         }
@@ -400,6 +409,7 @@ impl DrillParser {
             outline_width_mm: outline_width_mm.max(0.0),
             offset_x,
             offset_y,
+            interaction_layer: collect_interactions.then(InteractionLayer::new),
         })
     }
 
@@ -447,6 +457,7 @@ impl DrillParser {
                 hit_count,
                 slot_count,
             },
+            interaction_layer: self.interaction_layer,
         })
     }
 
@@ -797,6 +808,11 @@ impl DrillParser {
         self.outline
             .push_circle(x, y, radius + self.outline_width_mm);
         self.fill.push_circle(x, y, radius);
+        if let Some(interaction_layer) = &mut self.interaction_layer {
+            if let Some(feature) = drill_hit_feature(code, diameter_mm, x, y) {
+                interaction_layer.push(feature);
+            }
+        }
         if let Some(tool) = self.tools.get_mut(&code) {
             tool.hit_count = tool.hit_count.saturating_add(1);
         }
@@ -841,6 +857,42 @@ impl DrillParser {
             .push_line(start_x, start_y, end_x, end_y, diameter_mm);
         self.fill.push_circle(start_x, start_y, fill_radius);
         self.fill.push_circle(end_x, end_y, fill_radius);
+        if let Some(interaction_layer) = &mut self.interaction_layer {
+            if let Some(feature) = drill_slot_feature(
+                code,
+                diameter_mm,
+                vec![
+                    Primitive::Line {
+                        start_x,
+                        start_y,
+                        end_x,
+                        end_y,
+                        width: diameter_mm,
+                        exposure: 1.0,
+                    },
+                    Primitive::Circle {
+                        x: start_x,
+                        y: start_y,
+                        radius: fill_radius,
+                        exposure: 1.0,
+                        hole_x: 0.0,
+                        hole_y: 0.0,
+                        hole_radius: 0.0,
+                    },
+                    Primitive::Circle {
+                        x: end_x,
+                        y: end_y,
+                        radius: fill_radius,
+                        exposure: 1.0,
+                        hole_x: 0.0,
+                        hole_y: 0.0,
+                        hole_radius: 0.0,
+                    },
+                ],
+            ) {
+                interaction_layer.push(feature);
+            }
+        }
         if let Some(tool) = self.tools.get_mut(&code) {
             tool.slot_count = tool.slot_count.saturating_add(1);
         }
@@ -889,6 +941,48 @@ impl DrillParser {
             arc.sweep_angle,
             diameter_mm,
         );
+        if let Some(interaction_layer) = &mut self.interaction_layer {
+            let start_x = self.current_x + self.offset_x;
+            let start_y = self.current_y + self.offset_y;
+            let end_x = end_x + self.offset_x;
+            let end_y = end_y + self.offset_y;
+            let fill_radius = diameter_mm * 0.5;
+            if let Some(feature) = drill_slot_feature(
+                code,
+                diameter_mm,
+                vec![
+                    Primitive::Arc {
+                        x: center_x,
+                        y: center_y,
+                        radius: arc.radius,
+                        start_angle: arc.start_angle,
+                        end_angle: arc.start_angle + arc.sweep_angle,
+                        thickness: diameter_mm,
+                        exposure: 1.0,
+                    },
+                    Primitive::Circle {
+                        x: start_x,
+                        y: start_y,
+                        radius: fill_radius,
+                        exposure: 1.0,
+                        hole_x: 0.0,
+                        hole_y: 0.0,
+                        hole_radius: 0.0,
+                    },
+                    Primitive::Circle {
+                        x: end_x,
+                        y: end_y,
+                        radius: fill_radius,
+                        exposure: 1.0,
+                        hole_x: 0.0,
+                        hole_y: 0.0,
+                        hole_radius: 0.0,
+                    },
+                ],
+            ) {
+                interaction_layer.push(feature);
+            }
+        }
         if let Some(tool) = self.tools.get_mut(&code) {
             tool.slot_count = tool.slot_count.saturating_add(1);
         }
@@ -910,7 +1004,16 @@ pub fn parse_drill_with_offset(
     offset_x: f32,
     offset_y: f32,
 ) -> Result<DrillParseResult, JsValue> {
-    DrillParser::new(outline_width_mm, offset_x, offset_y)?.parse(content)
+    DrillParser::new(outline_width_mm, offset_x, offset_y, false)?.parse(content)
+}
+
+pub fn parse_drill_with_offset_and_interactions(
+    content: &str,
+    outline_width_mm: f32,
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<DrillParseResult, JsValue> {
+    DrillParser::new(outline_width_mm, offset_x, offset_y, true)?.parse(content)
 }
 
 fn set_property(object: &Object, key: &str, value: JsValue) -> Result<(), JsValue> {

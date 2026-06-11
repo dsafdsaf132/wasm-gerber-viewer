@@ -14,6 +14,32 @@ struct TriangleTemplateTransformKey {
     layer_rotation: u32,
 }
 
+/// Aperture shape metadata used by optional interaction indexing.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApertureKind {
+    Circle,
+    Rectangle,
+    Obround,
+    Polygon,
+    Macro,
+    Block,
+    Unknown,
+}
+
+impl ApertureKind {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            ApertureKind::Circle => "circle",
+            ApertureKind::Rectangle => "rectangle",
+            ApertureKind::Obround => "obround",
+            ApertureKind::Polygon => "polygon",
+            ApertureKind::Macro => "macro",
+            ApertureKind::Block => "block",
+            ApertureKind::Unknown => "unknown",
+        }
+    }
+}
+
 /// Aperture definition (Circle, Rectangle, Obround, Polygon, or Macro reference)
 #[derive(Clone, Debug)]
 pub struct Aperture {
@@ -24,6 +50,13 @@ pub struct Aperture {
     pub triangle_template: Option<Rc<Vec<f32>>>,
     triangle_template_cache: RefCell<HashMap<TriangleTemplateTransformKey, Rc<Vec<f32>>>>,
     pub is_solid_circle: bool,
+    pub kind: ApertureKind,
+    pub macro_name: Option<String>,
+    pub width: f32,
+    pub height: f32,
+    pub hole_diameter: f32,
+    pub vertices: u32,
+    pub rotation: f32,
 }
 
 impl Aperture {
@@ -36,6 +69,13 @@ impl Aperture {
             triangle_template: None,
             triangle_template_cache: RefCell::new(HashMap::new()),
             is_solid_circle: false,
+            kind: ApertureKind::Unknown,
+            macro_name: None,
+            width: 0.0,
+            height: 0.0,
+            hole_diameter: 0.0,
+            vertices: 0,
+            rotation: 0.0,
         }
     }
 
@@ -52,6 +92,13 @@ impl Aperture {
             triangle_template: None,
             triangle_template_cache: RefCell::new(HashMap::new()),
             is_solid_circle: false,
+            kind: ApertureKind::Block,
+            macro_name: None,
+            width: 0.0,
+            height: 0.0,
+            hole_diameter: 0.0,
+            vertices: 0,
+            rotation: 0.0,
         }
     }
 
@@ -160,6 +207,83 @@ fn build_triangle_template(primitives: &[Primitive]) -> Option<Rc<Vec<f32>>> {
     Some(Rc::new(vertices))
 }
 
+fn primitive_bounds(primitives: &[Primitive]) -> Option<(f32, f32, f32, f32)> {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for primitive in primitives {
+        match primitive {
+            Primitive::Triangle { vertices, .. } => {
+                for vertex in vertices {
+                    min_x = min_x.min(vertex[0]);
+                    max_x = max_x.max(vertex[0]);
+                    min_y = min_y.min(vertex[1]);
+                    max_y = max_y.max(vertex[1]);
+                }
+            }
+            Primitive::Circle { x, y, radius, .. } => {
+                min_x = min_x.min(*x - *radius);
+                max_x = max_x.max(*x + *radius);
+                min_y = min_y.min(*y - *radius);
+                max_y = max_y.max(*y + *radius);
+            }
+            Primitive::Arc {
+                x,
+                y,
+                radius,
+                thickness,
+                ..
+            } => {
+                let outer = *radius + *thickness * 0.5;
+                min_x = min_x.min(*x - outer);
+                max_x = max_x.max(*x + outer);
+                min_y = min_y.min(*y - outer);
+                max_y = max_y.max(*y + outer);
+            }
+            Primitive::Thermal {
+                x,
+                y,
+                outer_diameter,
+                ..
+            } => {
+                let radius = *outer_diameter * 0.5;
+                min_x = min_x.min(*x - radius);
+                max_x = max_x.max(*x + radius);
+                min_y = min_y.min(*y - radius);
+                max_y = max_y.max(*y + radius);
+            }
+            Primitive::Line {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                width,
+                ..
+            } => {
+                let radius = *width * 0.5;
+                min_x = min_x.min(start_x.min(*end_x) - radius);
+                max_x = max_x.max(start_x.max(*end_x) + radius);
+                min_y = min_y.min(start_y.min(*end_y) - radius);
+                max_y = max_y.max(start_y.max(*end_y) + radius);
+            }
+            Primitive::TriangleTemplateFlash { template, x, y } => {
+                for point in template.chunks_exact(2) {
+                    let px = point[0] + *x;
+                    let py = point[1] + *y;
+                    min_x = min_x.min(px);
+                    max_x = max_x.max(px);
+                    min_y = min_y.min(py);
+                    max_y = max_y.max(py);
+                }
+            }
+        }
+    }
+
+    min_x.is_finite().then_some((min_x, max_x, min_y, max_y))
+}
+
 /// Parse Aperture definition - %ADD{code}{shape}{params}*%
 /// Example: %ADD10C,0.20*% (circle), %ADD20R,0.5X0.3*% (rectangle), %ADD30TESTMACRO*1.5*%
 pub fn parse_aperture(
@@ -167,6 +291,7 @@ pub fn parse_aperture(
     apertures: &mut HashMap<String, Aperture>,
     macros: &HashMap<String, ApertureMacro>,
     unit_multiplier: f32,
+    collect_metadata: bool,
 ) {
     // Format: %ADD{code}{shape},{params}*%
     // Remove %ADD and %
@@ -219,6 +344,12 @@ pub fn parse_aperture(
 
                     aperture.radius = diameter_mm / 2.0;
                     aperture.is_solid_circle = hole_diameter_mm == 0.0;
+                    if collect_metadata {
+                        aperture.kind = ApertureKind::Circle;
+                        aperture.width = diameter_mm;
+                        aperture.height = diameter_mm;
+                        aperture.hole_diameter = hole_diameter_mm;
+                    }
                     aperture.primitives.push(Primitive::Circle {
                         x: 0.0,
                         y: 0.0,
@@ -249,6 +380,12 @@ pub fn parse_aperture(
                         };
 
                         aperture.radius = width_mm.max(height_mm) / 2.0;
+                        if collect_metadata {
+                            aperture.kind = ApertureKind::Rectangle;
+                            aperture.width = width_mm;
+                            aperture.height = height_mm;
+                            aperture.hole_diameter = hole_diameter_mm;
+                        }
                         // Split Rectangle into two triangles
                         let half_width = width_mm / 2.0;
                         let half_height = height_mm / 2.0;
@@ -298,6 +435,12 @@ pub fn parse_aperture(
                         let radius = short_side / 2.0;
 
                         aperture.radius = radius;
+                        if collect_metadata {
+                            aperture.kind = ApertureKind::Obround;
+                            aperture.width = width_mm;
+                            aperture.height = height_mm;
+                            aperture.hole_diameter = hole_diameter_mm;
+                        }
 
                         if width_mm > height_mm {
                             // If width is greater - circles on the left and right, rectangle in the middle
@@ -430,6 +573,14 @@ pub fn parse_aperture(
                         };
 
                         aperture.radius = diameter_mm / 2.0;
+                        if collect_metadata {
+                            aperture.kind = ApertureKind::Polygon;
+                            aperture.width = diameter_mm;
+                            aperture.height = diameter_mm;
+                            aperture.hole_diameter = hole_diameter_mm;
+                            aperture.vertices = num_vertices.max(0.0) as u32;
+                            aperture.rotation = rotation_radians;
+                        }
                         let radius = diameter_mm / 2.0;
                         let num_vertices = num_vertices as u32;
                         let angle_step = 2.0 * std::f32::consts::PI / num_vertices as f32;
@@ -487,6 +638,17 @@ pub fn parse_aperture(
                     scale_primitive(primitive, unit_multiplier);
                 }
                 aperture.radius = 0.0; // For macros, the radius depends on the parameters
+                if collect_metadata {
+                    aperture.kind = ApertureKind::Macro;
+                    aperture.macro_name = Some(shape.clone());
+                    if let Some((min_x, max_x, min_y, max_y)) =
+                        primitive_bounds(&aperture.primitives)
+                    {
+                        aperture.width = max_x - min_x;
+                        aperture.height = max_y - min_y;
+                        aperture.radius = aperture.width.max(aperture.height) / 2.0;
+                    }
+                }
             }
         }
     }

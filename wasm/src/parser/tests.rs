@@ -1,5 +1,5 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
-use super::{format_count, parse_gerber, parse_gerber_with_options};
+use super::{format_count, parse_gerber, parse_gerber_with_options, GerberParser};
 use crate::shape::GerberData;
 use std::collections::HashMap;
 
@@ -480,10 +480,39 @@ M02*",
     assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 6]);
     assert_eq!(layer.path_regions.cover_vertices.len(), 12);
     assert_eq!(layer.path_regions.clear_vertices.len(), 12);
+    assert!(layer.path_regions.pick_contours.is_empty());
     assert_approx_eq(layer.boundary.min_x, -1.0);
     assert_approx_eq(layer.boundary.max_x, 1.0);
     assert_approx_eq(layer.boundary.min_y, 0.0);
     assert_approx_eq(layer.boundary.max_y, 1.0);
+}
+
+#[test]
+fn preserved_region_arc_interaction_uses_path_regions() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+        )
+        .expect("region arc interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    assert_eq!(interaction_layer.features.len(), 1);
+    let feature = &interaction_layer.features[0];
+    assert!(feature.primitives.is_empty());
+    assert_eq!(feature.path_regions.region_count(), 1);
+    assert_eq!(feature.path_regions.pick_contours.len(), 1);
 }
 
 #[test]
@@ -555,6 +584,39 @@ M02*",
     assert_eq!(layers.len(), 1);
     assert!(layers[0].triangles.vertices.is_empty());
     assert_eq!(layers[0].path_regions.region_count(), 1);
+    assert!(layers[0].path_regions.pick_contours.is_empty());
+}
+
+#[test]
+fn aperture_block_path_region_flash_is_interactive() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("aperture block arc region interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    assert_eq!(interaction_layer.features.len(), 1);
+    let feature = &interaction_layer.features[0];
+    assert!(feature.primitives.is_empty());
+    assert_eq!(feature.path_regions.region_count(), 1);
+    assert_eq!(feature.path_regions.pick_contours.len(), 1);
 }
 
 #[test]

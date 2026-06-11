@@ -1,12 +1,18 @@
 mod drill;
+mod interaction;
 mod parse_common;
 mod parser;
 mod renderer;
 mod shape;
 mod util;
 
-use crate::drill::{parse_drill_with_offset, DrillParseResult};
-use crate::parser::parse_gerber_with_options;
+use crate::drill::{
+    parse_drill_with_offset, parse_drill_with_offset_and_interactions, DrillParseResult,
+};
+use crate::interaction::InteractionLayer;
+use crate::parser::{
+    parse_gerber_payload_with_options, parse_gerber_with_options, ParsedGerberLayer,
+};
 use crate::renderer::Renderer;
 use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::util::format_bytes;
@@ -68,6 +74,40 @@ fn parse_layer_data(
     }
 
     Ok(non_empty_layers)
+}
+
+fn parse_layer_payload_data(
+    content: &str,
+    offset_x: f32,
+    offset_y: f32,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+) -> Result<ParsedGerberLayer, JsValue> {
+    if !offset_x.is_finite() || !offset_y.is_finite() {
+        return Err(JsValue::from_str("Layer offset must be finite"));
+    }
+
+    let mut payload =
+        parse_gerber_payload_with_options(content, preserve_arc_regions, arc_tessellation_quality)?;
+
+    if offset_x != 0.0 || offset_y != 0.0 {
+        for layer in &mut payload.render_layers {
+            layer.translate(offset_x, offset_y);
+        }
+        if let Some(interaction_layer) = &mut payload.interaction_layer {
+            interaction_layer.translate(offset_x, offset_y);
+        }
+    }
+
+    payload.render_layers.retain(|layer| layer.has_geometry());
+
+    if payload.render_layers.is_empty() {
+        return Err(JsValue::from_str(
+            "File does not contain valid Gerber data (no geometry found)",
+        ));
+    }
+
+    Ok(payload)
 }
 
 #[wasm_bindgen]
@@ -137,6 +177,8 @@ pub struct GerberProcessor {
     minimum_feature_pixels: f32,
     drill_outline_pixels: f32,
     drill_outline_layer_ids: Vec<u32>,
+    interaction_enabled: bool,
+    interaction_layers: Vec<Option<InteractionLayer>>,
 }
 
 impl Default for GerberProcessor {
@@ -148,6 +190,8 @@ impl Default for GerberProcessor {
             minimum_feature_pixels: 0.0,
             drill_outline_pixels: 0.0,
             drill_outline_layer_ids: Vec::new(),
+            interaction_enabled: false,
+            interaction_layers: Vec::new(),
         }
     }
 }
@@ -180,29 +224,49 @@ impl GerberProcessor {
         }
     }
 
+    fn add_parsed_layer_payload(&mut self, payload: ParsedGerberLayer) -> Result<u32, JsValue> {
+        let interaction_layer = payload.interaction_layer;
+        let layer_id = self.add_parsed_layers(payload.render_layers)?;
+        self.set_interaction_layer(layer_id as usize, interaction_layer);
+        Ok(layer_id)
+    }
+
     fn add_drill_parse_result(&mut self, drill: DrillParseResult) -> Result<JsValue, JsValue> {
-        if !drill.fill_layer.has_geometry() {
+        let DrillParseResult {
+            outline_layer,
+            fill_layer,
+            metadata,
+            interaction_layer,
+        } = drill;
+
+        if !fill_layer.has_geometry() {
             return Err(JsValue::from_str(
                 "File does not contain valid drill data (no holes found)",
             ));
         }
 
-        let Some(renderer) = &mut self.renderer else {
-            return Err(JsValue::from_str(
-                "Renderer not initialized. Call init() first.",
-            ));
+        let (outline_layer_id, fill_layer_id) = {
+            let Some(renderer) = &mut self.renderer else {
+                return Err(JsValue::from_str(
+                    "Renderer not initialized. Call init() first.",
+                ));
+            };
+
+            let outline_layer_id = renderer.add_layer(vec![outline_layer])?;
+            renderer.set_layer_inner_outline(outline_layer_id, self.drill_outline_pixels, 0.0)?;
+            let fill_layer_id = match renderer.add_layer(vec![fill_layer]) {
+                Ok(layer_id) => layer_id,
+                Err(error) => {
+                    let _ = renderer.remove_layer(outline_layer_id);
+                    return Err(error);
+                }
+            };
+            (outline_layer_id, fill_layer_id)
         };
 
-        let outline_layer_id = renderer.add_layer(vec![drill.outline_layer])?;
-        renderer.set_layer_inner_outline(outline_layer_id, self.drill_outline_pixels, 0.0)?;
-        let fill_layer_id = match renderer.add_layer(vec![drill.fill_layer]) {
-            Ok(layer_id) => layer_id,
-            Err(error) => {
-                let _ = renderer.remove_layer(outline_layer_id);
-                return Err(error);
-            }
-        };
         self.drill_outline_layer_ids.push(outline_layer_id as u32);
+        self.set_interaction_layer(outline_layer_id, interaction_layer);
+        self.set_interaction_layer(fill_layer_id, None);
 
         let object = Object::new();
         Reflect::set(
@@ -215,13 +279,30 @@ impl GerberProcessor {
             &JsValue::from_str("fillLayerId"),
             &JsValue::from_f64(fill_layer_id as f64),
         )?;
-        Reflect::set(
-            &object,
-            &JsValue::from_str("metadata"),
-            &drill.metadata.to_js()?,
-        )?;
+        Reflect::set(&object, &JsValue::from_str("metadata"), &metadata.to_js()?)?;
 
         Ok(object.into())
+    }
+
+    fn set_interaction_layer(
+        &mut self,
+        layer_id: usize,
+        interaction_layer: Option<InteractionLayer>,
+    ) {
+        if !self.interaction_enabled {
+            return;
+        }
+
+        if self.interaction_layers.len() <= layer_id {
+            self.interaction_layers.resize_with(layer_id + 1, || None);
+        }
+        self.interaction_layers[layer_id] = interaction_layer;
+    }
+
+    fn remove_interaction_layer(&mut self, layer_id: usize) {
+        if let Some(slot) = self.interaction_layers.get_mut(layer_id) {
+            *slot = None;
+        }
     }
 }
 
@@ -310,6 +391,13 @@ impl GerberProcessor {
         }
     }
 
+    pub fn set_interactions_enabled(&mut self, enabled: bool) {
+        self.interaction_enabled = enabled;
+        if !enabled {
+            self.interaction_layers.clear();
+        }
+    }
+
     pub fn set_layer_inner_outline(
         &mut self,
         layer_id: u32,
@@ -378,6 +466,17 @@ impl GerberProcessor {
     /// # Returns
     /// * Layer ID (u32) for tracking this layer
     pub fn add_layer(&mut self, content: String) -> Result<u32, JsValue> {
+        if self.interaction_enabled {
+            let payload = parse_layer_payload_data(
+                &content,
+                0.0,
+                0.0,
+                self.preserve_arc_regions,
+                self.arc_tessellation_quality,
+            )?;
+            return self.add_parsed_layer_payload(payload);
+        }
+
         let gerber_data_layers = parse_layer_data(
             &content,
             0.0,
@@ -403,6 +502,17 @@ impl GerberProcessor {
         offset_x: f32,
         offset_y: f32,
     ) -> Result<u32, JsValue> {
+        if self.interaction_enabled {
+            let payload = parse_layer_payload_data(
+                &content,
+                offset_x,
+                offset_y,
+                self.preserve_arc_regions,
+                self.arc_tessellation_quality,
+            )?;
+            return self.add_parsed_layer_payload(payload);
+        }
+
         let gerber_data_layers = parse_layer_data(
             &content,
             offset_x,
@@ -415,7 +525,11 @@ impl GerberProcessor {
 
     /// Add an Excellon / NC Drill file as a drill overlay.
     pub fn add_drill_layer(&mut self, content: String) -> Result<JsValue, JsValue> {
-        let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, 0.0, 0.0)?;
+        let drill = if self.interaction_enabled {
+            parse_drill_with_offset_and_interactions(&content, DRILL_OUTLINE_WIDTH_MM, 0.0, 0.0)?
+        } else {
+            parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, 0.0, 0.0)?
+        };
         self.add_drill_parse_result(drill)
     }
 
@@ -425,7 +539,16 @@ impl GerberProcessor {
         offset_x: f32,
         offset_y: f32,
     ) -> Result<JsValue, JsValue> {
-        let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?;
+        let drill = if self.interaction_enabled {
+            parse_drill_with_offset_and_interactions(
+                &content,
+                DRILL_OUTLINE_WIDTH_MM,
+                offset_x,
+                offset_y,
+            )?
+        } else {
+            parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?
+        };
         self.add_drill_parse_result(drill)
     }
 
@@ -438,7 +561,8 @@ impl GerberProcessor {
     /// Add a worker-produced render payload directly to WebGL buffers.
     pub fn add_render_payload(&mut self, render_payload: JsValue) -> Result<u32, JsValue> {
         if let Some(renderer) = &mut self.renderer {
-            Ok(renderer.add_layer_from_render_payload(&render_payload)? as u32)
+            let layer_id = renderer.add_layer_from_render_payload(&render_payload)?;
+            Ok(layer_id as u32)
         } else {
             Err(JsValue::from_str(
                 "Renderer not initialized. Call init() first.",
@@ -458,6 +582,7 @@ impl GerberProcessor {
             renderer.remove_layer(layer_id as usize)?;
             self.drill_outline_layer_ids
                 .retain(|&outline_layer_id| outline_layer_id != layer_id);
+            self.remove_interaction_layer(layer_id as usize);
             Ok("remove_done".to_string())
         } else {
             Err(JsValue::from_str(
@@ -474,6 +599,7 @@ impl GerberProcessor {
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_all();
             self.drill_outline_layer_ids.clear();
+            self.interaction_layers.clear();
             Ok("clear_done".to_string())
         } else {
             Err(JsValue::from_str(
@@ -596,6 +722,65 @@ impl GerberProcessor {
                 clear_canvas,
             )?;
             Ok("render_done".to_string())
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
+    pub fn pick_interaction_feature(
+        &self,
+        layer_ids: &[u32],
+        x: f32,
+        y: f32,
+        tolerance: f32,
+    ) -> Result<JsValue, JsValue> {
+        if !self.interaction_enabled {
+            return Ok(JsValue::NULL);
+        }
+        if !x.is_finite() || !y.is_finite() || !tolerance.is_finite() {
+            return Err(JsValue::from_str("Pick coordinates must be finite"));
+        }
+
+        for &layer_id in layer_ids.iter().rev() {
+            let Some(Some(interaction_layer)) = self.interaction_layers.get(layer_id as usize)
+            else {
+                continue;
+            };
+            if let Some((feature_id, feature)) = interaction_layer.pick(x, y, tolerance) {
+                return feature.info_to_js(layer_id, feature_id);
+            }
+        }
+
+        Ok(JsValue::NULL)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_interaction_highlight(
+        &mut self,
+        layer_id: u32,
+        feature_id: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<String, JsValue> {
+        if !self.interaction_enabled {
+            return Ok("highlight_skipped".to_string());
+        }
+
+        let feature = self
+            .interaction_layers
+            .get(layer_id as usize)
+            .and_then(Option::as_ref)
+            .and_then(|layer| layer.features.get(feature_id as usize))
+            .cloned()
+            .ok_or_else(|| JsValue::from_str("Interaction feature not found"))?;
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.render_interaction_highlight(&feature, zoom_x, zoom_y, offset_x, offset_y)?;
+            Ok("highlight_done".to_string())
         } else {
             Err(JsValue::from_str(
                 "Renderer not initialized. Call init() first.",
