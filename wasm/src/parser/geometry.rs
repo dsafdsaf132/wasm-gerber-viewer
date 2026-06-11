@@ -1272,7 +1272,7 @@ fn record_block_flash_interaction(
                 if let Some(feature) = InteractionFeature::from_geometry(
                     FeatureKind::Flash,
                     aperture_name(aperture_code),
-                    aperture_type(aperture),
+                    Some(aperture_type(aperture)),
                     aperture.macro_name.clone(),
                     toggled_block_polarity(block_layer.polarity, state.polarity),
                     transformed,
@@ -2251,9 +2251,7 @@ fn record_primitive_delta(
         InteractionFeature::from_primitives(
             kind,
             aperture_name(aperture_code),
-            aperture
-                .map(aperture_type)
-                .unwrap_or_else(|| "region".to_string()),
+            aperture.map(aperture_type),
             None,
             polarity,
             delta.to_vec(),
@@ -2338,7 +2336,7 @@ pub fn parse_graphic_command(
                             if let Some(feature) = InteractionFeature::from_geometry(
                                 FeatureKind::Region,
                                 None,
-                                "region".to_string(),
+                                None,
                                 None,
                                 state.polarity,
                                 Vec::new(),

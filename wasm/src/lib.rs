@@ -304,6 +304,67 @@ impl GerberProcessor {
             *slot = None;
         }
     }
+
+    fn pick_interaction_feature_internal(
+        &self,
+        layer_ids: &[u32],
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        after: Option<(u32, usize)>,
+    ) -> Result<JsValue, JsValue> {
+        if !self.interaction_enabled {
+            return Ok(JsValue::NULL);
+        }
+        if !x.is_finite() || !y.is_finite() || !tolerance.is_finite() {
+            return Err(JsValue::from_str("Pick coordinates must be finite"));
+        }
+
+        let mut first_hit = None;
+        let mut found_after = after.is_none();
+
+        for &layer_id in layer_ids.iter().rev() {
+            let Some(Some(interaction_layer)) = self.interaction_layers.get(layer_id as usize)
+            else {
+                continue;
+            };
+
+            if let Some((after_layer_id, after_feature_id)) = after {
+                if layer_id == after_layer_id && !found_after {
+                    if first_hit.is_none() {
+                        first_hit = interaction_layer
+                            .pick(x, y, tolerance)
+                            .map(|(feature_id, feature)| (layer_id, feature_id, feature));
+                    }
+
+                    let (hit, saw_after) =
+                        interaction_layer.pick_after(x, y, tolerance, Some(after_feature_id));
+                    if let Some((feature_id, feature)) = hit {
+                        return feature.info_to_js(layer_id, feature_id);
+                    }
+                    if saw_after {
+                        found_after = true;
+                    }
+                    continue;
+                }
+            }
+
+            if let Some((feature_id, feature)) = interaction_layer.pick(x, y, tolerance) {
+                if first_hit.is_none() {
+                    first_hit = Some((layer_id, feature_id, feature));
+                }
+                if found_after {
+                    return feature.info_to_js(layer_id, feature_id);
+                }
+            }
+        }
+
+        if let Some((layer_id, feature_id, feature)) = first_hit {
+            return feature.info_to_js(layer_id, feature_id);
+        }
+
+        Ok(JsValue::NULL)
+    }
 }
 
 #[wasm_bindgen]
@@ -736,24 +797,25 @@ impl GerberProcessor {
         y: f32,
         tolerance: f32,
     ) -> Result<JsValue, JsValue> {
-        if !self.interaction_enabled {
-            return Ok(JsValue::NULL);
-        }
-        if !x.is_finite() || !y.is_finite() || !tolerance.is_finite() {
-            return Err(JsValue::from_str("Pick coordinates must be finite"));
-        }
+        self.pick_interaction_feature_internal(layer_ids, x, y, tolerance, None)
+    }
 
-        for &layer_id in layer_ids.iter().rev() {
-            let Some(Some(interaction_layer)) = self.interaction_layers.get(layer_id as usize)
-            else {
-                continue;
-            };
-            if let Some((feature_id, feature)) = interaction_layer.pick(x, y, tolerance) {
-                return feature.info_to_js(layer_id, feature_id);
-            }
-        }
-
-        Ok(JsValue::NULL)
+    pub fn pick_interaction_feature_after(
+        &self,
+        layer_ids: &[u32],
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        after_layer_id: u32,
+        after_feature_id: u32,
+    ) -> Result<JsValue, JsValue> {
+        self.pick_interaction_feature_internal(
+            layer_ids,
+            x,
+            y,
+            tolerance,
+            Some((after_layer_id, after_feature_id as usize)),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

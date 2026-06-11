@@ -64,7 +64,12 @@ const PTH_DRILL_TYPE = "pth";
 const NPTH_DRILL_TYPE = "npth";
 const DEFAULT_PTH_DRILL_COLOR = [1.0, 1.0, 0.0];
 const DEFAULT_NPTH_DRILL_COLOR = [1.0, 1.0, 1.0];
-const POINTER_TAP_MAX_MOVEMENT_PX = 6;
+const POINTER_TAP_MAX_MOVEMENT_VIEWPORT_RATIO = 0.006;
+const TOUCH_TAP_MAX_MOVEMENT_VIEWPORT_RATIO = 0.024;
+const FEATURE_PICK_MOUSE_VIEWPORT_RATIO = 0.008;
+const FEATURE_PICK_TOUCH_VIEWPORT_RATIO = 0.032;
+const FEATURE_CYCLE_MOUSE_VIEWPORT_RATIO = 0.006;
+const FEATURE_CYCLE_TOUCH_VIEWPORT_RATIO = 0.025;
 
 class ParseWorkerUnavailableError extends Error {
   constructor(message) {
@@ -234,7 +239,11 @@ function formatSelectedFeatureSummary(selection, { unit = "mm" } = {}) {
 
   parts.push(formatFeatureTypeLabel(feature, layer));
 
-  if (!isDrillLayer(layer) && feature.apertureType) {
+  if (
+    !isDrillLayer(layer) &&
+    feature.featureType !== "region" &&
+    feature.apertureType
+  ) {
     parts.push(formatApertureTypeLabel(feature));
   }
 
@@ -645,6 +654,7 @@ export class GerberViewer {
     this.lastMousePos = { x: 0, y: 0 };
     this.mouseDownPos = { x: 0, y: 0 };
     this.selectedFeature = null;
+    this.lastFeaturePick = null;
 
     // Touch interaction
     this.isTouching = false;
@@ -3568,6 +3578,7 @@ export class GerberViewer {
     this.camera.offsetY =
       fitView.targetY - fitView.centerY * this.getViewScaleY();
 
+    this.resetSelectionCycle();
     this.requestRender();
     this.updateUiState();
   }
@@ -3645,6 +3656,7 @@ export class GerberViewer {
       maxZoom: this.maxZoom,
     });
     if (didZoom) {
+      this.resetSelectionCycle();
       this.requestRender();
     }
   }
@@ -3755,12 +3767,16 @@ export class GerberViewer {
     const totalDeltaY = e.clientY - this.mouseDownPos.y;
     if (
       e.type === "mouseup" &&
-      Math.hypot(totalDeltaX, totalDeltaY) <= POINTER_TAP_MAX_MOVEMENT_PX
+      Math.hypot(totalDeltaX, totalDeltaY) <=
+        this.getViewportRelativeDistance(POINTER_TAP_MAX_MOVEMENT_VIEWPORT_RATIO)
     ) {
-      this.selectFeatureAtCanvasPoint(e.clientX, e.clientY);
+      this.selectFeatureAtCanvasPoint(e.clientX, e.clientY, {
+        inputType: "mouse",
+      });
       return;
     }
 
+    this.resetSelectionCycle();
     panCameraByScreenDelta({
       deltaX,
       deltaY,
@@ -3771,7 +3787,7 @@ export class GerberViewer {
     this.requestRender();
   }
 
-  selectFeatureAtCanvasPoint(clientX, clientY) {
+  selectFeatureAtCanvasPoint(clientX, clientY, { inputType = "mouse" } = {}) {
     const point = this.canvasPointToWorld(clientX, clientY);
     if (
       !point ||
@@ -3782,25 +3798,85 @@ export class GerberViewer {
       return;
     }
 
-    const hit = this.wasmProcessor.pick_interaction_feature(
-      this.getVisibleInteractionLayerIds(),
-      point.x,
-      point.y,
-      this.getFeatureHitToleranceWorld(clientX, clientY),
-    );
+    const layerIds = this.getVisibleInteractionLayerIds();
+    const tolerance = this.getFeatureHitToleranceWorld(clientX, clientY, inputType);
+    const shouldCycle = this.shouldCycleFeatureSelection(clientX, clientY, inputType);
+    const hit =
+      shouldCycle &&
+      typeof this.wasmProcessor.pick_interaction_feature_after === "function"
+        ? this.wasmProcessor.pick_interaction_feature_after(
+            layerIds,
+            point.x,
+            point.y,
+            tolerance,
+            this.selectedFeature.layerId,
+            this.selectedFeature.featureId,
+          )
+        : this.wasmProcessor.pick_interaction_feature(
+            layerIds,
+            point.x,
+            point.y,
+            tolerance,
+          );
     this.selectedFeature = hit ? this.attachLayerToSelectedFeature(hit) : null;
+    if (this.selectedFeature) {
+      this.lastFeaturePick = { x: clientX, y: clientY, inputType };
+    } else {
+      this.resetSelectionCycle();
+    }
     this.updateUiState();
     this.renderMeasurements();
     this.requestRender();
   }
 
-  clearSelectedFeature({ refresh = true } = {}) {
-    if (!this.selectedFeature) return;
+  clearSelectedFeature({ refresh = true, resetCycle = true } = {}) {
+    if (!this.selectedFeature) {
+      if (resetCycle) {
+        this.resetSelectionCycle();
+      }
+      return;
+    }
     this.selectedFeature = null;
+    if (resetCycle) {
+      this.resetSelectionCycle();
+    }
     if (!refresh) return;
     this.updateUiState();
     this.renderMeasurements();
     this.requestRender();
+  }
+
+  resetSelectionCycle() {
+    this.lastFeaturePick = null;
+  }
+
+  getViewportRelativeDistance(ratio) {
+    const rect = this.canvas.getBoundingClientRect();
+    const basis = Math.min(rect.width, rect.height);
+    if (!Number.isFinite(basis) || basis <= 0) {
+      return 0;
+    }
+    return basis * ratio;
+  }
+
+  shouldCycleFeatureSelection(clientX, clientY, inputType) {
+    if (!this.selectedFeature || !this.lastFeaturePick) {
+      return false;
+    }
+    if (this.lastFeaturePick.inputType !== inputType) {
+      return false;
+    }
+
+    const radius = inputType === "touch"
+      ? this.getViewportRelativeDistance(FEATURE_CYCLE_TOUCH_VIEWPORT_RATIO)
+      : this.getViewportRelativeDistance(FEATURE_CYCLE_MOUSE_VIEWPORT_RATIO);
+    return (
+      radius > 0 &&
+      Math.hypot(
+        clientX - this.lastFeaturePick.x,
+        clientY - this.lastFeaturePick.y,
+      ) <= radius
+    );
   }
 
   clearSelectedFeatureForHiddenLayer(layer) {
@@ -3867,9 +3943,12 @@ export class GerberViewer {
     return isDrillLayer(layer) ? layer?.outlineLayerId : layer?.layerId;
   }
 
-  getFeatureHitToleranceWorld(clientX, clientY) {
+  getFeatureHitToleranceWorld(clientX, clientY, inputType = "mouse") {
     const point = this.canvasPointToWorld(clientX, clientY);
-    const offsetPoint = this.canvasPointToWorld(clientX + 8, clientY);
+    const radius = inputType === "touch"
+      ? this.getViewportRelativeDistance(FEATURE_PICK_TOUCH_VIEWPORT_RATIO)
+      : this.getViewportRelativeDistance(FEATURE_PICK_MOUSE_VIEWPORT_RATIO);
+    const offsetPoint = this.canvasPointToWorld(clientX + radius, clientY);
     if (!point || !offsetPoint) {
       return 0.05;
     }
@@ -3897,6 +3976,7 @@ export class GerberViewer {
 
     if (this.touches.length === 2) {
       this.cancelTouchTapTracking();
+      this.resetSelectionCycle();
       this.touchGestureWasMultitouch = true;
       // Two-finger gesture: pinch-to-zoom
       this.initialPinchDistance = this.calculateTouchDistance(
@@ -3916,6 +3996,7 @@ export class GerberViewer {
       };
     } else {
       this.cancelTouchTapTracking();
+      this.resetSelectionCycle();
       this.touchGestureWasMultitouch = true;
     }
   }
@@ -3944,6 +4025,7 @@ export class GerberViewer {
 
     if (this.touches.length === 2) {
       this.cancelTouchTapTracking();
+      this.resetSelectionCycle();
       this.touchGestureWasMultitouch = true;
       // Two-finger gesture: pinch-to-zoom + pan
       const currentDistance = this.calculateTouchDistance(
@@ -3990,6 +4072,7 @@ export class GerberViewer {
         return;
       }
 
+      this.resetSelectionCycle();
       const deltaX = currentPos.x - this.lastTouchCenter.x;
       const deltaY = currentPos.y - this.lastTouchCenter.y;
       panCameraByScreenDelta({
@@ -4003,6 +4086,7 @@ export class GerberViewer {
       this.requestRender();
     } else if (this.touches.length > 2) {
       this.cancelTouchTapTracking();
+      this.resetSelectionCycle();
       this.touchGestureWasMultitouch = true;
     }
   }
@@ -4046,6 +4130,7 @@ export class GerberViewer {
       this.isTouching = false;
     } else if (this.touches.length === 1) {
       this.cancelTouchTapTracking();
+      this.resetSelectionCycle();
       this.touchGestureWasMultitouch = true;
       // Transitioned from multi-touch to single touch
       this.lastTouchCenter = {
@@ -4085,7 +4170,7 @@ export class GerberViewer {
       Math.hypot(
         point.x - this.touchStartPoint.x,
         point.y - this.touchStartPoint.y,
-      ) > POINTER_TAP_MAX_MOVEMENT_PX
+      ) > this.getViewportRelativeDistance(TOUCH_TAP_MAX_MOVEMENT_VIEWPORT_RATIO)
     ) {
       this.touchTapCandidate = false;
     }
@@ -4112,7 +4197,7 @@ export class GerberViewer {
       x: endedTouch.clientX,
       y: endedTouch.clientY,
     };
-    this.selectFeatureAtCanvasPoint(point.x, point.y);
+    this.selectFeatureAtCanvasPoint(point.x, point.y, { inputType: "touch" });
     return true;
   }
 
@@ -4229,7 +4314,7 @@ export class GerberViewer {
         if (
           this.selectedFeature?.layerId === this.getLayerInteractionLayerId(layer)
         ) {
-          this.selectedFeature = null;
+          this.clearSelectedFeature({ refresh: false });
         }
         if (this.layers.length === 0) {
           this.fitViewZoom = null;
@@ -4267,7 +4352,7 @@ export class GerberViewer {
       }
 
       this.layers = [];
-      this.selectedFeature = null;
+      this.clearSelectedFeature({ refresh: false });
       this.nextColorIndex = 0;
       this.nextLayerDomId = 0;
       this.fitViewZoom = null;

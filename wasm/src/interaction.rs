@@ -23,7 +23,7 @@ pub struct InteractionLayer {
 pub struct InteractionFeature {
     pub kind: FeatureKind,
     pub aperture: Option<String>,
-    pub aperture_type: String,
+    pub aperture_type: Option<String>,
     pub macro_name: Option<String>,
     pub polarity: Polarity,
     pub primitives: Vec<Primitive>,
@@ -92,8 +92,20 @@ impl InteractionLayer {
     }
 
     pub fn pick(&self, x: f32, y: f32, tolerance: f32) -> Option<(usize, &InteractionFeature)> {
+        self.pick_after(x, y, tolerance, None).0
+    }
+
+    pub fn pick_after(
+        &self,
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        after_feature_id: Option<usize>,
+    ) -> (Option<(usize, &InteractionFeature)>, bool) {
         let point = [x, y];
         let tolerance = tolerance.max(0.0);
+        let mut return_next_hit = after_feature_id.is_none();
+        let mut saw_after_feature = false;
 
         for (feature_id, feature) in self.features.iter().enumerate().rev() {
             if !bounds_contains(&feature.bounds, point, tolerance) {
@@ -101,13 +113,19 @@ impl InteractionLayer {
             }
             if feature.hit(point, tolerance) {
                 if feature.polarity == Polarity::Negative {
-                    return None;
+                    return (None, saw_after_feature);
                 }
-                return Some((feature_id, feature));
+                if return_next_hit {
+                    return (Some((feature_id, feature)), saw_after_feature);
+                }
+                if Some(feature_id) == after_feature_id {
+                    saw_after_feature = true;
+                    return_next_hit = true;
+                }
             }
         }
 
-        None
+        (None, saw_after_feature)
     }
 }
 
@@ -115,7 +133,7 @@ impl InteractionFeature {
     pub fn from_primitives(
         kind: FeatureKind,
         aperture: Option<String>,
-        aperture_type: String,
+        aperture_type: Option<String>,
         macro_name: Option<String>,
         polarity: Polarity,
         primitives: Vec<Primitive>,
@@ -136,7 +154,7 @@ impl InteractionFeature {
     pub fn from_geometry(
         kind: FeatureKind,
         aperture: Option<String>,
-        aperture_type: String,
+        aperture_type: Option<String>,
         macro_name: Option<String>,
         polarity: Polarity,
         primitives: Vec<Primitive>,
@@ -202,11 +220,9 @@ impl InteractionFeature {
         if let Some(aperture) = &self.aperture {
             set_property(&object, "aperture", JsValue::from_str(aperture))?;
         }
-        set_property(
-            &object,
-            "apertureType",
-            JsValue::from_str(&self.aperture_type),
-        )?;
+        if let Some(aperture_type) = &self.aperture_type {
+            set_property(&object, "apertureType", JsValue::from_str(aperture_type))?;
+        }
         if let Some(macro_name) = &self.macro_name {
             set_property(&object, "macroName", JsValue::from_str(macro_name))?;
         }
@@ -308,7 +324,7 @@ pub fn feature_from_primitive_delta(
     InteractionFeature::from_primitives(
         kind,
         aperture_name(aperture_code),
-        aperture_type(aperture),
+        Some(aperture_type(aperture)),
         aperture.macro_name.clone(),
         polarity,
         primitives.to_vec(),
@@ -326,7 +342,7 @@ pub fn drill_hit_feature(
     InteractionFeature::from_primitives(
         FeatureKind::DrillHit,
         Some(format!("T{tool_code:02}")),
-        "drill".to_string(),
+        None,
         None,
         Polarity::Positive,
         vec![Primitive::Circle {
@@ -350,7 +366,7 @@ pub fn drill_slot_feature(
     InteractionFeature::from_primitives(
         FeatureKind::DrillSlot,
         Some(format!("T{tool_code:02}")),
-        "drill".to_string(),
+        None,
         None,
         Polarity::Positive,
         primitives,
@@ -967,4 +983,85 @@ fn set_property(object: &Object, key: &str, value: JsValue) -> Result<(), JsValu
     Reflect::set(object, &JsValue::from_str(key), &value)
         .map(|_| ())
         .map_err(|_| JsValue::from_str(&format!("Failed to set interaction field `{key}`")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn circle_feature(x: f32, radius: f32, polarity: Polarity) -> InteractionFeature {
+        InteractionFeature::from_primitives(
+            FeatureKind::Flash,
+            Some("D10".to_string()),
+            Some("circle".to_string()),
+            None,
+            polarity,
+            vec![Primitive::Circle {
+                x,
+                y: 0.0,
+                radius,
+                exposure: 1.0,
+                hole_x: 0.0,
+                hole_y: 0.0,
+                hole_radius: 0.0,
+            }],
+            FeatureProperties::default(),
+        )
+        .expect("circle feature should have bounds")
+    }
+
+    #[test]
+    fn pick_after_returns_next_hit_in_render_order() {
+        let mut layer = InteractionLayer::new();
+        layer.push(circle_feature(0.0, 2.0, Polarity::Positive));
+        layer.push(circle_feature(0.0, 2.0, Polarity::Positive));
+        layer.push(circle_feature(0.0, 2.0, Polarity::Positive));
+
+        let (hit, saw_after) = layer.pick_after(0.0, 0.0, 0.0, None);
+        assert_eq!(hit.map(|(feature_id, _)| feature_id), Some(2));
+        assert!(!saw_after);
+
+        let (hit, saw_after) = layer.pick_after(0.0, 0.0, 0.0, Some(2));
+        assert_eq!(hit.map(|(feature_id, _)| feature_id), Some(1));
+        assert!(saw_after);
+
+        let (hit, saw_after) = layer.pick_after(0.0, 0.0, 0.0, Some(0));
+        assert!(hit.is_none());
+        assert!(saw_after);
+    }
+
+    #[test]
+    fn pick_after_stops_at_hit_clear_feature() {
+        let mut layer = InteractionLayer::new();
+        layer.push(circle_feature(0.0, 2.0, Polarity::Positive));
+        layer.push(circle_feature(0.0, 2.0, Polarity::Negative));
+
+        let (hit, saw_after) = layer.pick_after(0.0, 0.0, 0.0, None);
+        assert!(hit.is_none());
+        assert!(!saw_after);
+    }
+
+    #[test]
+    fn non_aperture_features_do_not_report_aperture_type() {
+        let region = InteractionFeature::from_primitives(
+            FeatureKind::Region,
+            None,
+            None,
+            None,
+            Polarity::Positive,
+            vec![Primitive::Triangle {
+                vertices: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                exposure: 1.0,
+                hole_x: 0.0,
+                hole_y: 0.0,
+                hole_radius: 0.0,
+            }],
+            FeatureProperties::default(),
+        )
+        .expect("region feature should have bounds");
+        let drill = drill_hit_feature(1, 0.5, 0.0, 0.0).expect("drill hit should have bounds");
+
+        assert!(region.aperture_type.is_none());
+        assert!(drill.aperture_type.is_none());
+    }
 }
