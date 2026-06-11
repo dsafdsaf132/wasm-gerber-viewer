@@ -14,6 +14,7 @@ export class DrawerController {
     this.resizeHandle = resizeHandle;
     this.toggleButton = toggleButton;
     this.dropZone = dropZone;
+    this.workspace = drawer.closest(".workspace");
     this.refreshIcons = refreshIcons;
     this.captureViewState = captureViewState;
     this.onResizeEnd = onResizeEnd;
@@ -69,11 +70,13 @@ export class DrawerController {
     if (this.isMobileLayout()) {
       this.drawer.classList.add("collapsed");
     }
+    this.syncPanelStateClasses();
     this.updateCanvasReservationForState();
     this.updateToggleState();
   }
 
-  syncLayout() {
+  syncLayout({ commitLayout = true } = {}) {
+    this.syncPanelStateClasses();
     if (this.drawer.classList.contains("collapsed")) {
       this.syncCollapsedLayout();
       this.updateCanvasReservationForState();
@@ -81,9 +84,17 @@ export class DrawerController {
     }
 
     if (this.isMobileLayout()) {
-      this.setHeight(this.currentHeight);
+      this.setHeight(this.currentHeight, {
+        commitLayout,
+        reserveCanvas: true,
+        trackPending: false,
+      });
     } else {
-      this.setWidth(this.currentWidth);
+      this.setWidth(this.currentWidth, {
+        commitLayout,
+        reserveCanvas: true,
+        trackPending: false,
+      });
     }
   }
 
@@ -100,6 +111,16 @@ export class DrawerController {
 
   isMobileLayout() {
     return this.window.matchMedia("(max-width: 760px)").matches;
+  }
+
+  syncPanelStateClasses() {
+    if (!this.workspace) {
+      return;
+    }
+
+    const isCollapsed = this.drawer.classList.contains("collapsed");
+    this.workspace.classList.toggle("panel-collapsed", isCollapsed);
+    this.workspace.classList.toggle("panel-open", !isCollapsed);
   }
 
   getCssPixelValue(propertyName, fallback) {
@@ -146,7 +167,14 @@ export class DrawerController {
     return Math.min(this.getMaxWidth(), Math.max(this.minWidth, width));
   }
 
-  setWidth(width, { commitLayout = true } = {}) {
+  setWidth(
+    width,
+    {
+      commitLayout = true,
+      reserveCanvas = commitLayout,
+      trackPending = !commitLayout,
+    } = {},
+  ) {
     const clampedWidth = this.clampWidth(width);
     this.dropZone.style.setProperty("--panel-overlay-width", `${clampedWidth}px`);
     if (commitLayout) {
@@ -158,7 +186,15 @@ export class DrawerController {
         `${clampedWidth}px`,
       );
     } else {
-      this.pendingWidth = clampedWidth;
+      if (trackPending) {
+        this.pendingWidth = clampedWidth;
+      }
+      if (reserveCanvas) {
+        this.dropZone.style.setProperty(
+          "--canvas-reserved-width",
+          `${clampedWidth}px`,
+        );
+      }
     }
     this.drawer.style.height = "";
     this.drawer.style.width = `${clampedWidth}px`;
@@ -167,9 +203,24 @@ export class DrawerController {
   getMaxHeight() {
     const viewportLimit = Math.max(
       1,
-      Math.floor(this.window.innerHeight * this.mobileMaxHeightRatio),
+      Math.floor(this.getViewportHeight() * this.mobileMaxHeightRatio),
     );
     return Math.min(this.maxHeight, viewportLimit);
+  }
+
+  getViewportHeight() {
+    const visualViewportHeight = this.window.visualViewport?.height;
+    return Number.isFinite(visualViewportHeight)
+      ? visualViewportHeight
+      : this.window.innerHeight;
+  }
+
+  getViewportBottom() {
+    const visualViewport = this.window.visualViewport;
+    if (visualViewport && Number.isFinite(visualViewport.height)) {
+      return visualViewport.offsetTop + visualViewport.height;
+    }
+    return this.window.innerHeight;
   }
 
   clampHeight(height) {
@@ -182,7 +233,14 @@ export class DrawerController {
     return Math.min(maxHeight, Math.max(minHeight, height));
   }
 
-  setHeight(height, { commitLayout = true } = {}) {
+  setHeight(
+    height,
+    {
+      commitLayout = true,
+      reserveCanvas = commitLayout,
+      trackPending = !commitLayout,
+    } = {},
+  ) {
     const clampedHeight = this.clampHeight(height);
     this.dropZone.style.setProperty("--panel-overlay-height", `${clampedHeight}px`);
     if (commitLayout) {
@@ -194,7 +252,15 @@ export class DrawerController {
         `${clampedHeight}px`,
       );
     } else {
-      this.pendingHeight = clampedHeight;
+      if (trackPending) {
+        this.pendingHeight = clampedHeight;
+      }
+      if (reserveCanvas) {
+        this.dropZone.style.setProperty(
+          "--canvas-reserved-height",
+          `${clampedHeight}px`,
+        );
+      }
     }
     this.drawer.style.width = "";
     this.drawer.style.height = `${clampedHeight}px`;
@@ -218,7 +284,7 @@ export class DrawerController {
 
     if (this.isMobileLayout()) {
       const clientY = event.touches ? event.touches[0].clientY : event.clientY;
-      this.previewResize(this.window.innerHeight - clientY, "height");
+      this.previewResize(this.getViewportBottom() - clientY, "height");
       return;
     }
 
@@ -244,6 +310,7 @@ export class DrawerController {
     }
 
     this.drawer.classList.remove("collapsed");
+    this.syncPanelStateClasses();
     if (axis === "height") {
       this.setHeight(rawSize, { commitLayout: false });
     } else {
@@ -256,6 +323,7 @@ export class DrawerController {
 
   collapsePreview(axis, collapsedSize) {
     this.drawer.classList.add("collapsed");
+    this.syncPanelStateClasses();
     if (axis === "height") {
       this.pendingHeight = null;
       this.dropZone.style.setProperty(
@@ -307,6 +375,7 @@ export class DrawerController {
 
     if (shouldOpen) {
       this.drawer.classList.remove("collapsed");
+      this.syncPanelStateClasses();
       if (this.isMobileLayout()) {
         this.setHeight(this.currentHeight);
       } else {
@@ -315,6 +384,7 @@ export class DrawerController {
     } else {
       this.captureCurrentSize();
       this.drawer.classList.add("collapsed");
+      this.syncPanelStateClasses();
     }
 
     this.updateCanvasReservationForState();

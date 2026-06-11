@@ -1,5 +1,6 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
 use super::{format_count, parse_gerber, parse_gerber_with_options, GerberParser};
+use crate::interaction::FeatureKind;
 use crate::shape::GerberData;
 use std::collections::HashMap;
 
@@ -553,6 +554,56 @@ M02*",
             .as_deref(),
         Some("G03")
     );
+}
+
+#[test]
+fn zero_length_d01_interaction_reports_flash() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10R,1.0X0.5*%
+D10*
+X000000Y000000D02*
+X000000Y000000D01*
+M02*",
+        )
+        .expect("zero-length D01 interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    assert_eq!(interaction_layer.features.len(), 1);
+    assert_eq!(interaction_layer.features[0].kind, FeatureKind::Flash);
+}
+
+#[test]
+fn step_repeat_d03_interactions_are_split_per_copy() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.5*%
+%SRX2Y1I2.0J0.0*%
+D10*
+X000000Y000000D03*
+%SR*%
+M02*",
+        )
+        .expect("step-repeat flash interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    assert_eq!(interaction_layer.features.len(), 2);
+    let first = &interaction_layer.features[0].bounds;
+    let second = &interaction_layer.features[1].bounds;
+    assert_approx_eq((first.min_x() + first.max_x()) * 0.5, 0.0);
+    assert_approx_eq((second.min_x() + second.max_x()) * 0.5, 2.0);
 }
 
 #[test]

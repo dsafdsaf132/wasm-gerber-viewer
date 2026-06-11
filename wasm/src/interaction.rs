@@ -631,12 +631,18 @@ fn primitive_hit(primitive: &Primitive, point: [f32; 2], tolerance: f32) -> bool
             y,
             outer_diameter,
             inner_diameter,
+            gap_thickness,
+            rotation,
             ..
-        } => {
-            let distance = ((point[0] - *x).powi(2) + (point[1] - *y).powi(2)).sqrt();
-            distance <= *outer_diameter * 0.5 + tolerance
-                && distance >= (*inner_diameter * 0.5 - tolerance).max(0.0)
-        }
+        } => thermal_hit(
+            point,
+            [*x, *y],
+            *outer_diameter,
+            *inner_diameter,
+            *gap_thickness,
+            *rotation,
+            tolerance,
+        ),
         Primitive::TriangleTemplateFlash { template, x, y } => {
             for triangle in template.chunks_exact(6) {
                 let vertices = [
@@ -779,6 +785,39 @@ fn append_primitive_highlight_batches(batches: &mut Vec<HighlightBatch>, primiti
         }
         _ => {}
     }
+
+    if let Primitive::Thermal {
+        x,
+        y,
+        outer_diameter,
+        inner_diameter,
+        gap_thickness,
+        rotation,
+        ..
+    } = primitive
+    {
+        if *inner_diameter > 0.0 {
+            let mut clear_vertices = Vec::new();
+            append_circle(
+                &mut clear_vertices,
+                [*x, *y],
+                *inner_diameter * 0.5,
+                CIRCLE_SEGMENTS,
+            );
+            append_highlight_batch(batches, clear_vertices, true);
+        }
+        if *gap_thickness > 0.0 && *outer_diameter > 0.0 {
+            let mut clear_vertices = Vec::new();
+            append_thermal_gap_rectangles(
+                &mut clear_vertices,
+                [*x, *y],
+                *outer_diameter,
+                *gap_thickness,
+                *rotation,
+            );
+            append_highlight_batch(batches, clear_vertices, true);
+        }
+    }
 }
 
 fn append_highlight_batch(batches: &mut Vec<HighlightBatch>, vertices: Vec<f32>, clear: bool) {
@@ -874,6 +913,84 @@ fn append_capsule(vertices: &mut Vec<f32>, start: [f32; 2], end: [f32; 2], radiu
     );
     append_circle(vertices, start, radius, 24);
     append_circle(vertices, end, radius, 24);
+}
+
+fn thermal_hit(
+    point: [f32; 2],
+    center: [f32; 2],
+    outer_diameter: f32,
+    inner_diameter: f32,
+    gap_thickness: f32,
+    rotation: f32,
+    tolerance: f32,
+) -> bool {
+    if outer_diameter <= 0.0 {
+        return false;
+    }
+
+    let dx = point[0] - center[0];
+    let dy = point[1] - center[1];
+    let distance = (dx * dx + dy * dy).sqrt();
+    let outer_radius = outer_diameter * 0.5;
+    let inner_radius = (inner_diameter * 0.5).max(0.0);
+    if distance > outer_radius + tolerance || distance < (inner_radius - tolerance).max(0.0) {
+        return false;
+    }
+
+    let half_gap = (gap_thickness * 0.5).max(0.0);
+    if half_gap <= tolerance {
+        return true;
+    }
+
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let local_x = dx * cos_r + dy * sin_r;
+    let local_y = -dx * sin_r + dy * cos_r;
+    local_x.abs() >= half_gap - tolerance && local_y.abs() >= half_gap - tolerance
+}
+
+fn append_thermal_gap_rectangles(
+    vertices: &mut Vec<f32>,
+    center: [f32; 2],
+    outer_diameter: f32,
+    gap_thickness: f32,
+    rotation: f32,
+) {
+    let outer_radius = outer_diameter * 0.5;
+    let half_gap = gap_thickness * 0.5;
+    if outer_radius <= 0.0 || half_gap <= 0.0 {
+        return;
+    }
+
+    append_rotated_rect(vertices, center, half_gap, outer_radius, rotation);
+    append_rotated_rect(vertices, center, outer_radius, half_gap, rotation);
+}
+
+fn append_rotated_rect(
+    vertices: &mut Vec<f32>,
+    center: [f32; 2],
+    half_width: f32,
+    half_height: f32,
+    rotation: f32,
+) {
+    let local = [
+        [-half_width, -half_height],
+        [half_width, -half_height],
+        [half_width, half_height],
+        [-half_width, half_height],
+    ];
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    let mut points = [[0.0; 2]; 4];
+    for (idx, point) in local.iter().enumerate() {
+        points[idx] = [
+            center[0] + point[0] * cos_r - point[1] * sin_r,
+            center[1] + point[0] * sin_r + point[1] * cos_r,
+        ];
+    }
+
+    push_triangle(vertices, points[0], points[1], points[2]);
+    push_triangle(vertices, points[0], points[2], points[3]);
 }
 
 fn append_circle(vertices: &mut Vec<f32>, center: [f32; 2], radius: f32, segments: usize) {
@@ -1046,6 +1163,27 @@ mod tests {
         .expect("circle feature should have bounds")
     }
 
+    fn thermal_feature(rotation: f32) -> InteractionFeature {
+        InteractionFeature::from_primitives(
+            FeatureKind::Flash,
+            Some("D10".to_string()),
+            Some("macro".to_string()),
+            Some("THERM".to_string()),
+            Polarity::Positive,
+            vec![Primitive::Thermal {
+                x: 0.0,
+                y: 0.0,
+                outer_diameter: 2.0,
+                inner_diameter: 0.5,
+                gap_thickness: 0.4,
+                rotation,
+                exposure: 1.0,
+            }],
+            FeatureProperties::default(),
+        )
+        .expect("thermal feature should have bounds")
+    }
+
     #[test]
     fn pick_after_returns_next_hit_in_render_order() {
         let mut layer = InteractionLayer::new();
@@ -1099,5 +1237,26 @@ mod tests {
 
         assert!(region.aperture_type.is_none());
         assert!(drill.aperture_type.is_none());
+    }
+
+    #[test]
+    fn thermal_hit_respects_inner_hole_and_rotated_gaps() {
+        let feature = thermal_feature(0.0);
+        assert!(feature.hit([0.5, 0.5], 0.0));
+        assert!(!feature.hit([0.0, 0.5], 0.0));
+        assert!(!feature.hit([0.1, 0.1], 0.0));
+
+        let rotated = thermal_feature(std::f32::consts::FRAC_PI_4);
+        assert!(!rotated.hit([0.5, 0.5], 0.0));
+        assert!(rotated.hit([0.7, 0.0], 0.0));
+    }
+
+    #[test]
+    fn thermal_highlight_batches_clear_hole_and_gaps() {
+        let batches = thermal_feature(0.0).highlight_batches();
+        assert_eq!(batches.len(), 2);
+        assert!(!batches[0].clear);
+        assert!(batches[1].clear);
+        assert!(batches[1].vertices.len() > CIRCLE_SEGMENTS * 6);
     }
 }

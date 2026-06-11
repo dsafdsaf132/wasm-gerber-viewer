@@ -2281,6 +2281,80 @@ fn record_primitive_delta(
     }
 }
 
+fn record_flash_interactions(
+    interaction_layer: Option<&mut InteractionLayer>,
+    aperture_code: &str,
+    aperture: &Aperture,
+    state: &ParserState,
+    x: f32,
+    y: f32,
+) -> Result<(), String> {
+    let Some(interaction_layer) = interaction_layer else {
+        return Ok(());
+    };
+
+    let properties = InteractionFeature::gerber_properties_with_transform(
+        aperture,
+        state.layer_scale,
+        state.layer_rotation,
+    );
+    for sy in 0..state.sr_y {
+        for sx in 0..state.sr_x {
+            let flash_x = x + sx as f32 * state.sr_i;
+            let flash_y = y + sy as f32 * state.sr_j;
+            let mut primitives = Vec::new();
+            flash_aperture_no_sr(
+                aperture,
+                &mut primitives,
+                flash_x,
+                flash_y,
+                state.layer_scale,
+                state.mirror_x,
+                state.mirror_y,
+                state.layer_rotation,
+            )?;
+
+            if let Some(feature) = feature_from_primitive_delta(
+                FeatureKind::Flash,
+                aperture_code,
+                aperture,
+                state.polarity,
+                &primitives,
+                properties.clone(),
+            ) {
+                interaction_layer.push(feature);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn interpolation_feature_kind(
+    state: &ParserState,
+    end_x: f32,
+    end_y: f32,
+    i: f32,
+    j: f32,
+) -> (FeatureKind, Option<&'static str>) {
+    let is_arc =
+        state.interpolation_mode == "clockwise" || state.interpolation_mode == "counterclockwise";
+    if points_coincide(state.x, state.y, end_x, end_y)
+        && (!is_arc || !arc_center_offset_present(i, j))
+    {
+        return (FeatureKind::Flash, None);
+    }
+
+    if is_arc {
+        (
+            FeatureKind::ArcDraw,
+            arc_command_for_interpolation(&state.interpolation_mode),
+        )
+    } else {
+        (FeatureKind::Draw, None)
+    }
+}
+
 fn arc_command_for_interpolation(interpolation_mode: &str) -> Option<&'static str> {
     match interpolation_mode {
         "clockwise" => Some("G02"),
@@ -2546,13 +2620,7 @@ pub fn parse_graphic_command(
                         let primitive_start = primitives.len();
                         execute_interpolation(state, apertures, primitives, x, y, i, j)?;
                         let aperture = apertures.get(&state.current_aperture);
-                        let kind = if state.interpolation_mode == "clockwise"
-                            || state.interpolation_mode == "counterclockwise"
-                        {
-                            FeatureKind::ArcDraw
-                        } else {
-                            FeatureKind::Draw
-                        };
+                        let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
                         record_primitive_delta(
                             interaction_layer.as_deref_mut(),
                             kind,
@@ -2563,7 +2631,7 @@ pub fn parse_graphic_command(
                             primitive_start,
                             state.layer_scale,
                             state.layer_rotation,
-                            arc_command_for_interpolation(&state.interpolation_mode),
+                            arc_command,
                         );
                     }
                 }
@@ -2589,7 +2657,6 @@ pub fn parse_graphic_command(
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
                     flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
-                    let primitive_start = primitives.len();
                     flash_aperture(state, apertures, primitives, polarity_layers, x, y)?;
                     let aperture = apertures.get(&state.current_aperture);
                     if let Some(aperture) = aperture {
@@ -2604,18 +2671,14 @@ pub fn parse_graphic_command(
                                 y,
                             )?;
                         } else {
-                            record_primitive_delta(
+                            record_flash_interactions(
                                 interaction_layer.as_deref_mut(),
-                                FeatureKind::Flash,
                                 &state.current_aperture,
-                                Some(aperture),
-                                state.polarity,
-                                primitives,
-                                primitive_start,
-                                state.layer_scale,
-                                state.layer_rotation,
-                                None,
-                            );
+                                aperture,
+                                state,
+                                x,
+                                y,
+                            )?;
                         }
                     }
                 }
@@ -2637,13 +2700,7 @@ pub fn parse_graphic_command(
             let primitive_start = primitives.len();
             execute_interpolation(state, apertures, primitives, x, y, i, j)?;
             let aperture = apertures.get(&state.current_aperture);
-            let kind = if state.interpolation_mode == "clockwise"
-                || state.interpolation_mode == "counterclockwise"
-            {
-                FeatureKind::ArcDraw
-            } else {
-                FeatureKind::Draw
-            };
+            let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
             record_primitive_delta(
                 interaction_layer,
                 kind,
@@ -2654,7 +2711,7 @@ pub fn parse_graphic_command(
                 primitive_start,
                 state.layer_scale,
                 state.layer_rotation,
-                arc_command_for_interpolation(&state.interpolation_mode),
+                arc_command,
             );
         }
     } else {

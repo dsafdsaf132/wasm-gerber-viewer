@@ -25,6 +25,7 @@
   --panel-bottom-collapse-threshold: 200px;
   --toolbar-height: 58px;
   --status-height: 34px;
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
   --radius: 8px;
 }
 
@@ -62,6 +63,7 @@ button {
 .app-shell {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   display: grid;
   grid-template-rows: var(--toolbar-height) minmax(0, 1fr);
   background: var(--bg);
@@ -469,8 +471,18 @@ button {
   right: var(--panel-overlay-width);
 }
 
+.workspace.panel-open .empty-state,
+.workspace.panel-open .canvas-status {
+  right: var(--panel-overlay-width);
+}
+
 .workspace:has(.side-panel.collapsed) .empty-state,
 .workspace:has(.side-panel.collapsed) .canvas-status {
+  right: var(--panel-collapsed-width);
+}
+
+.workspace.panel-collapsed .empty-state,
+.workspace.panel-collapsed .canvas-status {
   right: var(--panel-collapsed-width);
 }
 
@@ -1464,8 +1476,20 @@ button {
     bottom: var(--panel-overlay-height);
   }
 
+  .workspace.panel-open .empty-state,
+  .workspace.panel-open .canvas-status {
+    right: 0;
+    bottom: var(--panel-overlay-height);
+  }
+
   .workspace:has(.side-panel.collapsed) .empty-state,
   .workspace:has(.side-panel.collapsed) .canvas-status {
+    right: 0;
+    bottom: var(--panel-collapsed-height);
+  }
+
+  .workspace.panel-collapsed .empty-state,
+  .workspace.panel-collapsed .canvas-status {
     right: 0;
     bottom: var(--panel-collapsed-height);
   }
@@ -1479,6 +1503,8 @@ button {
     width: auto !important;
     height: var(--panel-height);
     max-height: min(72vh, 560px);
+    max-height: min(72dvh, 560px);
+    padding-bottom: var(--safe-area-bottom);
     z-index: 30;
     border-left: 0;
     border-top: 1px solid var(--line);

@@ -782,13 +782,15 @@ export class GerberViewer {
 
     // Resize Canvas
     this.resizeCanvas();
-    window.addEventListener("resize", () => {
+    const handleViewportResize = () => {
       this.resizeCanvas();
       this.drawerController.updateToggleState();
       if (this.screenshotDialog.open) {
         this.updateScreenshotResolutionPreview();
       }
-    });
+    };
+    window.addEventListener("resize", handleViewportResize);
+    window.visualViewport?.addEventListener("resize", handleViewportResize);
 
     this.setupEventListeners();
 
@@ -914,8 +916,12 @@ export class GerberViewer {
     }
   }
 
-  resizeCanvas({ allowProcessorResize = false, preserveViewState = null } = {}) {
-    this.drawerController.syncLayout();
+  resizeCanvas({
+    allowProcessorResize = false,
+    preserveViewState = null,
+    commitDrawerLayout = false,
+  } = {}) {
+    this.drawerController.syncLayout({ commitLayout: commitDrawerLayout });
 
     const rect = this.canvas.getBoundingClientRect();
     const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
