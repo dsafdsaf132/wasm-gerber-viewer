@@ -607,6 +607,36 @@ M02*",
 }
 
 #[test]
+fn step_repeat_d01_interactions_are_split_per_copy() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.5*%
+%SRX2Y1I2.0J0.0*%
+D10*
+X000000Y000000D02*
+X010000Y000000D01*
+%SR*%
+M02*",
+        )
+        .expect("step-repeat draw interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    assert_eq!(interaction_layer.features.len(), 2);
+    assert_eq!(interaction_layer.features[0].kind, FeatureKind::Draw);
+    assert_eq!(interaction_layer.features[1].kind, FeatureKind::Draw);
+    let first = &interaction_layer.features[0].bounds;
+    let second = &interaction_layer.features[1].bounds;
+    assert_approx_eq((first.min_x() + first.max_x()) * 0.5, 0.5);
+    assert_approx_eq((second.min_x() + second.max_x()) * 0.5, 2.5);
+}
+
+#[test]
 fn interaction_aperture_properties_use_effective_scale_and_rotation() {
     let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
     let payload = parser
@@ -634,6 +664,33 @@ M02*",
         properties.rotation.expect("rotation should be reported"),
         std::f32::consts::FRAC_PI_2,
     );
+}
+
+#[test]
+fn interaction_aperture_rotation_reflects_mirroring_before_layer_rotation() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10P,1.0X5X45*%
+%LMX*%
+%LR90*%
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("mirrored rotated polygon interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let rotation = interaction_layer.features[0]
+        .properties
+        .rotation
+        .expect("polygon rotation should be reported");
+    assert_approx_eq(rotation, -std::f32::consts::FRAC_PI_4 * 3.0);
 }
 
 #[test]

@@ -179,6 +179,8 @@ impl InteractionFeature {
     pub fn gerber_properties_with_transform(
         aperture: &Aperture,
         layer_scale: f32,
+        mirror_x: bool,
+        mirror_y: bool,
         layer_rotation: f32,
     ) -> FeatureProperties {
         let primitive_count = u32::try_from(aperture.primitives.len()).ok();
@@ -186,7 +188,12 @@ impl InteractionFeature {
         let width = aperture.width * scale;
         let height = aperture.height * scale;
         let rotation = if aperture_has_orientation(aperture) {
-            normalize_rotation(aperture.rotation + layer_rotation)
+            normalize_rotation(transform_aperture_rotation(
+                aperture.rotation,
+                mirror_x,
+                mirror_y,
+                layer_rotation,
+            ))
         } else {
             None
         };
@@ -335,6 +342,21 @@ fn aperture_has_orientation(aperture: &Aperture) -> bool {
         aperture.kind.as_str(),
         "rectangle" | "obround" | "polygon" | "macro" | "block"
     )
+}
+
+fn transform_aperture_rotation(
+    mut rotation: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    layer_rotation: f32,
+) -> f32 {
+    if mirror_x {
+        rotation = std::f32::consts::PI - rotation;
+    }
+    if mirror_y {
+        rotation = -rotation;
+    }
+    rotation + layer_rotation
 }
 
 fn normalize_rotation(rotation: f32) -> Option<f32> {

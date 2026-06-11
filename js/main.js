@@ -4204,7 +4204,12 @@ export class GerberViewer {
       return false;
     }
 
-    const point = this.touchTapPoint ?? {
+    this.updateTouchTapTracking(endedTouch);
+    if (!this.touchTapCandidate) {
+      return false;
+    }
+
+    const point = {
       x: endedTouch.clientX,
       y: endedTouch.clientY,
     };
