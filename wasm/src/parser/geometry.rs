@@ -1229,7 +1229,11 @@ fn record_block_flash_interaction(
         return Ok(());
     };
 
-    let properties = InteractionFeature::gerber_properties(aperture);
+    let properties = InteractionFeature::gerber_properties_with_transform(
+        aperture,
+        state.layer_scale,
+        state.layer_rotation,
+    );
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {
             let flash_x = x + sx as f32 * state.sr_i;
@@ -2236,6 +2240,9 @@ fn record_primitive_delta(
     polarity: Polarity,
     primitives: &[Primitive],
     start_index: usize,
+    layer_scale: f32,
+    layer_rotation: f32,
+    arc_command: Option<&str>,
 ) {
     let Some(interaction_layer) = interaction_layer else {
         return;
@@ -2246,8 +2253,18 @@ fn record_primitive_delta(
 
     let delta = &primitives[start_index..];
     let feature = if let Some(aperture) = aperture {
-        feature_from_primitive_delta(kind, aperture_code, aperture, polarity, delta)
+        let mut properties = InteractionFeature::gerber_properties_with_transform(
+            aperture,
+            layer_scale,
+            layer_rotation,
+        );
+        properties.arc_command = arc_command.map(str::to_string);
+        feature_from_primitive_delta(kind, aperture_code, aperture, polarity, delta, properties)
     } else {
+        let properties = FeatureProperties {
+            arc_command: arc_command.map(str::to_string),
+            ..FeatureProperties::default()
+        };
         InteractionFeature::from_primitives(
             kind,
             aperture_name(aperture_code),
@@ -2255,12 +2272,20 @@ fn record_primitive_delta(
             None,
             polarity,
             delta.to_vec(),
-            FeatureProperties::default(),
+            properties,
         )
     };
 
     if let Some(feature) = feature {
         interaction_layer.push(feature);
+    }
+}
+
+fn arc_command_for_interpolation(interpolation_mode: &str) -> Option<&'static str> {
+    match interpolation_mode {
+        "clockwise" => Some("G02"),
+        "counterclockwise" => Some("G03"),
+        _ => None,
     }
 }
 
@@ -2408,6 +2433,9 @@ pub fn parse_graphic_command(
                             state.polarity,
                             primitives,
                             primitive_start,
+                            state.layer_scale,
+                            state.layer_rotation,
+                            None,
                         );
                     }
 
@@ -2533,6 +2561,9 @@ pub fn parse_graphic_command(
                             state.polarity,
                             primitives,
                             primitive_start,
+                            state.layer_scale,
+                            state.layer_rotation,
+                            arc_command_for_interpolation(&state.interpolation_mode),
                         );
                     }
                 }
@@ -2581,6 +2612,9 @@ pub fn parse_graphic_command(
                                 state.polarity,
                                 primitives,
                                 primitive_start,
+                                state.layer_scale,
+                                state.layer_rotation,
+                                None,
                             );
                         }
                     }
@@ -2618,6 +2652,9 @@ pub fn parse_graphic_command(
                 state.polarity,
                 primitives,
                 primitive_start,
+                state.layer_scale,
+                state.layer_rotation,
+                arc_command_for_interpolation(&state.interpolation_mode),
             );
         }
     } else {

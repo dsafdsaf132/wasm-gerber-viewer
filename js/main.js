@@ -261,8 +261,13 @@ function formatFeatureTypeLabel(feature, layer) {
       return "Aperture flash";
     case "aperture-draw":
       return "Aperture draw";
-    case "arc-draw":
+    case "arc-draw": {
+      const arcCommand = feature.properties?.arcCommand;
+      if (arcCommand === "G02" || arcCommand === "G03") {
+        return `${arcCommand} arc draw`;
+      }
       return "Arc draw";
+    }
     case "region":
       return "Region";
     case "drill-hit":
@@ -305,7 +310,7 @@ function formatFeaturePropertyParts(feature, unit) {
   }
 
   if (Number.isFinite(rotation) && rotation !== 0) {
-    parts.push(`rot ${((rotation * 180) / Math.PI).toFixed(2)} deg`);
+    parts.push(`rot ${((-rotation * 180) / Math.PI).toFixed(2)} deg`);
   }
   if (Number.isFinite(vertices) && vertices > 0) {
     parts.push(`${Math.trunc(vertices)} vertices`);

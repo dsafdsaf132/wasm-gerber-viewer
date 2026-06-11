@@ -516,6 +516,122 @@ M02*",
 }
 
 #[test]
+fn arc_draw_interactions_report_g02_and_g03_commands() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+G75*
+X010000Y000000D02*
+G02*
+X-010000Y000000I-010000J000000D01*
+G03*
+X010000Y000000I010000J000000D01*
+M02*",
+        )
+        .expect("arc draw interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    assert_eq!(interaction_layer.features.len(), 2);
+    assert_eq!(
+        interaction_layer.features[0]
+            .properties
+            .arc_command
+            .as_deref(),
+        Some("G02")
+    );
+    assert_eq!(
+        interaction_layer.features[1]
+            .properties
+            .arc_command
+            .as_deref(),
+        Some("G03")
+    );
+}
+
+#[test]
+fn interaction_aperture_properties_use_effective_scale_and_rotation() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD24R,1.0X0.5*%
+%LS2.0*%
+%LR90*%
+D24*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("scaled rotated aperture interaction payload should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let properties = &interaction_layer.features[0].properties;
+    assert_eq!(properties.diameter, None);
+    assert_approx_eq(properties.width.expect("width should be reported"), 2.0);
+    assert_approx_eq(properties.height.expect("height should be reported"), 1.0);
+    assert_approx_eq(
+        properties.rotation.expect("rotation should be reported"),
+        std::f32::consts::FRAC_PI_2,
+    );
+}
+
+#[test]
+fn non_circle_apertures_do_not_report_diameter_properties() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let polygon_payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10P,1.0X5X45*%
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("polygon aperture interaction payload should parse");
+    let polygon_layer = polygon_payload
+        .interaction_layer
+        .expect("polygon interaction layer should be collected");
+    let polygon_properties = &polygon_layer.features[0].properties;
+    assert_eq!(polygon_properties.diameter, None);
+    assert_eq!(polygon_properties.vertices, Some(5));
+    assert_approx_eq(
+        polygon_properties
+            .rotation
+            .expect("polygon rotation should be reported"),
+        std::f32::consts::FRAC_PI_4,
+    );
+
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let macro_payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%AMROUND*1,1,1.0,0,0,0*%
+%ADD10ROUND*%
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("macro aperture interaction payload should parse");
+    let macro_layer = macro_payload
+        .interaction_layer
+        .expect("macro interaction layer should be collected");
+    assert_eq!(macro_layer.features[0].properties.diameter, None);
+}
+
+#[test]
 fn region_arc_can_be_flattened_for_legacy_triangles() {
     let layers = parse_gerber_with_options(
         "\

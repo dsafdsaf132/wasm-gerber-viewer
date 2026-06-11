@@ -64,6 +64,7 @@ pub struct FeatureProperties {
     pub vertices: Option<u32>,
     pub tool_code: Option<u32>,
     pub primitive_count: Option<u32>,
+    pub arc_command: Option<String>,
 }
 
 impl InteractionLayer {
@@ -175,17 +176,29 @@ impl InteractionFeature {
         })
     }
 
-    pub fn gerber_properties(aperture: &Aperture) -> FeatureProperties {
+    pub fn gerber_properties_with_transform(
+        aperture: &Aperture,
+        layer_scale: f32,
+        layer_rotation: f32,
+    ) -> FeatureProperties {
         let primitive_count = u32::try_from(aperture.primitives.len()).ok();
+        let scale = layer_scale.abs();
+        let width = aperture.width * scale;
+        let height = aperture.height * scale;
+        let rotation = if aperture_has_orientation(aperture) {
+            normalize_rotation(aperture.rotation + layer_rotation)
+        } else {
+            None
+        };
         FeatureProperties {
-            diameter: (aperture.width > 0.0 && (aperture.width - aperture.height).abs() < 1.0e-6)
-                .then_some(aperture.width),
-            width: (aperture.width > 0.0).then_some(aperture.width),
-            height: (aperture.height > 0.0).then_some(aperture.height),
-            rotation: (aperture.rotation != 0.0).then_some(aperture.rotation),
+            diameter: (aperture.kind.as_str() == "circle" && width > 0.0).then_some(width),
+            width: (width > 0.0).then_some(width),
+            height: (height > 0.0).then_some(height),
+            rotation,
             vertices: (aperture.vertices > 0).then_some(aperture.vertices),
             tool_code: None,
             primitive_count,
+            arc_command: None,
         }
     }
 
@@ -302,6 +315,9 @@ impl FeatureProperties {
         if let Some(value) = self.primitive_count {
             set_property(&object, "primitiveCount", JsValue::from_f64(value as f64))?;
         }
+        if let Some(value) = &self.arc_command {
+            set_property(&object, "arcCommand", JsValue::from_str(value))?;
+        }
         Ok(object.into())
     }
 }
@@ -314,12 +330,32 @@ pub fn aperture_type(aperture: &Aperture) -> String {
     aperture.kind.as_str().to_string()
 }
 
+fn aperture_has_orientation(aperture: &Aperture) -> bool {
+    matches!(
+        aperture.kind.as_str(),
+        "rectangle" | "obround" | "polygon" | "macro" | "block"
+    )
+}
+
+fn normalize_rotation(rotation: f32) -> Option<f32> {
+    const EPSILON: f32 = 1.0e-6;
+    let full_turn = std::f32::consts::PI * 2.0;
+    let mut normalized = rotation % full_turn;
+    if normalized <= -std::f32::consts::PI {
+        normalized += full_turn;
+    } else if normalized > std::f32::consts::PI {
+        normalized -= full_turn;
+    }
+    (normalized.abs() > EPSILON).then_some(normalized)
+}
+
 pub fn feature_from_primitive_delta(
     kind: FeatureKind,
     aperture_code: &str,
     aperture: &Aperture,
     polarity: Polarity,
     primitives: &[Primitive],
+    properties: FeatureProperties,
 ) -> Option<InteractionFeature> {
     InteractionFeature::from_primitives(
         kind,
@@ -328,7 +364,7 @@ pub fn feature_from_primitive_delta(
         aperture.macro_name.clone(),
         polarity,
         primitives.to_vec(),
-        InteractionFeature::gerber_properties(aperture),
+        properties,
     )
 }
 
