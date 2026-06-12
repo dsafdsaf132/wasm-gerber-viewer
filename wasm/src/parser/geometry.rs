@@ -2261,20 +2261,20 @@ fn record_primitive_delta(
             mirror_y,
             layer_rotation,
         );
-        properties.arc_command = arc_command.map(str::to_string);
+        properties.arc_command = arc_command.map(Rc::<str>::from);
         feature_from_primitive_delta(kind, aperture_code, aperture, polarity, delta, properties)
     } else {
         let properties = FeatureProperties {
-            arc_command: arc_command.map(str::to_string),
+            arc_command: arc_command.map(Rc::<str>::from),
             ..FeatureProperties::default()
         };
-        InteractionFeature::from_primitives(
+        InteractionFeature::from_primitive_slice(
             kind,
             aperture_name(aperture_code),
             aperture.map(aperture_type),
             None,
             polarity,
-            delta.to_vec(),
+            delta,
             properties,
         )
     };
@@ -2381,7 +2381,7 @@ fn record_interpolation_interactions(
         state.mirror_y,
         state.layer_rotation,
     );
-    properties.arc_command = arc_command.map(str::to_string);
+    properties.arc_command = arc_command.map(Rc::<str>::from);
 
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {

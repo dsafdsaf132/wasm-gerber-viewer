@@ -2643,7 +2643,8 @@ impl Renderer {
 
         let batches = feature.highlight_batches();
         let has_primitive_batches = batches.iter().any(|batch| batch.vertices.len() >= 6);
-        let has_path_regions = feature.path_regions.has_geometry();
+        let path_regions = feature.path_regions.as_deref();
+        let has_path_regions = path_regions.is_some_and(PathRegions::has_geometry);
         if !has_primitive_batches && !has_path_regions {
             return Ok(());
         }
@@ -2715,7 +2716,7 @@ impl Renderer {
                 self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
             }
 
-            if has_path_regions {
+            if let Some(path_regions) = path_regions {
                 self.gl.clear_stencil(0);
                 self.gl.stencil_mask(0xff);
                 self.gl.clear(STENCIL_BUFFER_BIT);
@@ -2724,7 +2725,7 @@ impl Renderer {
                 self.gl.blend_equation(FUNC_ADD);
                 self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
                 self.draw_highlight_path_regions(
-                    &feature.path_regions,
+                    path_regions,
                     &transform,
                     highlight_program,
                     stencil_program,

@@ -2,6 +2,8 @@ use crate::parser::geometry::{offset_primitive_by, Primitive};
 use crate::parser::{Aperture, Polarity};
 use crate::shape::{Boundary, PathRegions};
 use js_sys::{Object, Reflect};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 const CIRCLE_SEGMENTS: usize = 48;
@@ -17,22 +19,98 @@ pub struct HighlightBatch {
 #[derive(Clone, Debug, Default)]
 pub struct InteractionLayer {
     pub features: Vec<InteractionFeature>,
+    string_pool: HashSet<Rc<str>>,
+    descriptor_pool: HashMap<FeatureDescriptorKey, Rc<FeatureDescriptor>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct InteractionFeature {
-    pub kind: FeatureKind,
-    pub aperture: Option<String>,
-    pub aperture_type: Option<String>,
-    pub macro_name: Option<String>,
-    pub polarity: Polarity,
-    pub primitives: Vec<Primitive>,
-    pub path_regions: PathRegions,
+    pub descriptor: Rc<FeatureDescriptor>,
+    pub primitives: FeaturePrimitives,
+    pub path_regions: Option<Box<PathRegions>>,
     pub bounds: Boundary,
+}
+
+#[derive(Clone, Debug)]
+pub struct FeaturePrimitives {
+    storage: FeaturePrimitiveStorage,
+}
+
+#[derive(Clone, Debug)]
+enum FeaturePrimitiveStorage {
+    Empty,
+    Triangle(Box<Primitive>),
+    Circle {
+        x: f32,
+        y: f32,
+        radius: f32,
+        exposure: f32,
+        hole_x: f32,
+        hole_y: f32,
+        hole_radius: f32,
+    },
+    Arc {
+        x: f32,
+        y: f32,
+        radius: f32,
+        start_angle: f32,
+        end_angle: f32,
+        thickness: f32,
+        exposure: f32,
+    },
+    Thermal {
+        x: f32,
+        y: f32,
+        outer_diameter: f32,
+        inner_diameter: f32,
+        gap_thickness: f32,
+        rotation: f32,
+        exposure: f32,
+    },
+    TriangleTemplateFlash {
+        template: Rc<Vec<f32>>,
+        x: f32,
+        y: f32,
+    },
+    Line {
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        width: f32,
+        exposure: f32,
+    },
+    Multiple(Box<[Primitive]>),
+}
+
+#[derive(Clone, Debug)]
+pub struct FeatureDescriptor {
+    pub kind: FeatureKind,
+    pub aperture: Option<Rc<str>>,
+    pub aperture_type: Option<Rc<str>>,
+    pub macro_name: Option<Rc<str>>,
+    pub polarity: Polarity,
     pub properties: FeatureProperties,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct FeatureDescriptorKey {
+    kind: FeatureKind,
+    polarity_negative: bool,
+    aperture: Option<Rc<str>>,
+    aperture_type: Option<Rc<str>>,
+    macro_name: Option<Rc<str>>,
+    diameter: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
+    rotation: Option<u32>,
+    vertices: Option<u32>,
+    tool_code: Option<u32>,
+    primitive_count: Option<u32>,
+    arc_command: Option<Rc<str>>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum FeatureKind {
     Flash,
     Draw,
@@ -55,6 +133,26 @@ impl FeatureKind {
     }
 }
 
+impl FeatureDescriptorKey {
+    fn from_descriptor(descriptor: &FeatureDescriptor) -> Self {
+        Self {
+            kind: descriptor.kind.clone(),
+            polarity_negative: descriptor.polarity == Polarity::Negative,
+            aperture: descriptor.aperture.clone(),
+            aperture_type: descriptor.aperture_type.clone(),
+            macro_name: descriptor.macro_name.clone(),
+            diameter: descriptor.properties.diameter.map(f32::to_bits),
+            width: descriptor.properties.width.map(f32::to_bits),
+            height: descriptor.properties.height.map(f32::to_bits),
+            rotation: descriptor.properties.rotation.map(f32::to_bits),
+            vertices: descriptor.properties.vertices,
+            tool_code: descriptor.properties.tool_code,
+            primitive_count: descriptor.properties.primitive_count,
+            arc_command: descriptor.properties.arc_command.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FeatureProperties {
     pub diameter: Option<f32>,
@@ -64,18 +162,59 @@ pub struct FeatureProperties {
     pub vertices: Option<u32>,
     pub tool_code: Option<u32>,
     pub primitive_count: Option<u32>,
-    pub arc_command: Option<String>,
+    pub arc_command: Option<Rc<str>>,
 }
 
 impl InteractionLayer {
     pub fn new() -> Self {
         Self {
             features: Vec::new(),
+            string_pool: HashSet::new(),
+            descriptor_pool: HashMap::new(),
         }
     }
 
-    pub fn push(&mut self, feature: InteractionFeature) {
+    pub fn push(&mut self, mut feature: InteractionFeature) {
+        self.intern_feature_descriptor(&mut feature);
         self.features.push(feature);
+    }
+
+    fn intern_feature_descriptor(&mut self, feature: &mut InteractionFeature) {
+        let descriptor = &feature.descriptor;
+        let mut properties = descriptor.properties.clone();
+        properties.arc_command = self.intern_option(properties.arc_command.take());
+        let descriptor = FeatureDescriptor {
+            kind: descriptor.kind.clone(),
+            aperture: self.intern_option(descriptor.aperture.clone()),
+            aperture_type: self.intern_option(descriptor.aperture_type.clone()),
+            macro_name: self.intern_option(descriptor.macro_name.clone()),
+            polarity: descriptor.polarity,
+            properties,
+        };
+        let key = FeatureDescriptorKey::from_descriptor(&descriptor);
+
+        if let Some(existing) = self.descriptor_pool.get(&key) {
+            feature.descriptor = Rc::clone(existing);
+            return;
+        }
+
+        let descriptor = Rc::new(descriptor);
+        self.descriptor_pool.insert(key, Rc::clone(&descriptor));
+        feature.descriptor = descriptor;
+    }
+
+    fn intern_option(&mut self, value: Option<Rc<str>>) -> Option<Rc<str>> {
+        value.map(|value| self.intern(value.as_ref()))
+    }
+
+    fn intern(&mut self, value: &str) -> Rc<str> {
+        if let Some(existing) = self.string_pool.get(value) {
+            return Rc::clone(existing);
+        }
+
+        let shared = Rc::<str>::from(value);
+        self.string_pool.insert(Rc::clone(&shared));
+        shared
     }
 
     pub fn translate(&mut self, dx: f32, dy: f32) {
@@ -85,10 +224,10 @@ impl InteractionLayer {
 
         for feature in &mut self.features {
             feature.bounds.translate(dx, dy);
-            for primitive in &mut feature.primitives {
-                *primitive = offset_primitive_by(primitive, dx, dy);
+            feature.primitives.translate(dx, dy);
+            if let Some(path_regions) = &mut feature.path_regions {
+                path_regions.translate(dx, dy);
             }
-            feature.path_regions.translate(dx, dy);
         }
     }
 
@@ -113,7 +252,7 @@ impl InteractionLayer {
                 continue;
             }
             if feature.hit(point, tolerance) {
-                if feature.polarity == Polarity::Negative {
+                if feature.descriptor.polarity == Polarity::Negative {
                     return (None, saw_after_feature);
                 }
                 if return_next_hit {
@@ -130,6 +269,266 @@ impl InteractionLayer {
     }
 }
 
+impl FeaturePrimitives {
+    fn from_vec(mut primitives: Vec<Primitive>) -> Self {
+        let storage = match primitives.len() {
+            0 => FeaturePrimitiveStorage::Empty,
+            1 => primitive_to_storage(
+                primitives
+                    .pop()
+                    .expect("single primitive storage should contain one primitive"),
+            ),
+            _ => FeaturePrimitiveStorage::Multiple(primitives.into_boxed_slice()),
+        };
+        Self { storage }
+    }
+
+    fn from_slice(primitives: &[Primitive]) -> Self {
+        let storage = match primitives {
+            [] => FeaturePrimitiveStorage::Empty,
+            [primitive] => primitive_to_storage(primitive.clone()),
+            _ => FeaturePrimitiveStorage::Multiple(primitives.to_vec().into_boxed_slice()),
+        };
+        Self { storage }
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        matches!(self.storage, FeaturePrimitiveStorage::Empty)
+    }
+
+    fn for_each(&self, mut visit: impl FnMut(&Primitive)) {
+        match &self.storage {
+            FeaturePrimitiveStorage::Empty => {}
+            FeaturePrimitiveStorage::Triangle(primitive) => visit(primitive),
+            FeaturePrimitiveStorage::Circle {
+                x,
+                y,
+                radius,
+                exposure,
+                hole_x,
+                hole_y,
+                hole_radius,
+            } => {
+                let primitive = Primitive::Circle {
+                    x: *x,
+                    y: *y,
+                    radius: *radius,
+                    exposure: *exposure,
+                    hole_x: *hole_x,
+                    hole_y: *hole_y,
+                    hole_radius: *hole_radius,
+                };
+                visit(&primitive);
+            }
+            FeaturePrimitiveStorage::Arc {
+                x,
+                y,
+                radius,
+                start_angle,
+                end_angle,
+                thickness,
+                exposure,
+            } => {
+                let primitive = Primitive::Arc {
+                    x: *x,
+                    y: *y,
+                    radius: *radius,
+                    start_angle: *start_angle,
+                    end_angle: *end_angle,
+                    thickness: *thickness,
+                    exposure: *exposure,
+                };
+                visit(&primitive);
+            }
+            FeaturePrimitiveStorage::Thermal {
+                x,
+                y,
+                outer_diameter,
+                inner_diameter,
+                gap_thickness,
+                rotation,
+                exposure,
+            } => {
+                let primitive = Primitive::Thermal {
+                    x: *x,
+                    y: *y,
+                    outer_diameter: *outer_diameter,
+                    inner_diameter: *inner_diameter,
+                    gap_thickness: *gap_thickness,
+                    rotation: *rotation,
+                    exposure: *exposure,
+                };
+                visit(&primitive);
+            }
+            FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y } => {
+                let primitive = Primitive::TriangleTemplateFlash {
+                    template: Rc::clone(template),
+                    x: *x,
+                    y: *y,
+                };
+                visit(&primitive);
+            }
+            FeaturePrimitiveStorage::Line {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                width,
+                exposure,
+            } => {
+                let primitive = Primitive::Line {
+                    start_x: *start_x,
+                    start_y: *start_y,
+                    end_x: *end_x,
+                    end_y: *end_y,
+                    width: *width,
+                    exposure: *exposure,
+                };
+                visit(&primitive);
+            }
+            FeaturePrimitiveStorage::Multiple(primitives) => {
+                for primitive in primitives.iter() {
+                    visit(primitive);
+                }
+            }
+        }
+    }
+
+    fn translate(&mut self, dx: f32, dy: f32) {
+        match &mut self.storage {
+            FeaturePrimitiveStorage::Empty => {}
+            FeaturePrimitiveStorage::Triangle(primitive) => {
+                **primitive = offset_primitive_by(primitive, dx, dy);
+            }
+            FeaturePrimitiveStorage::Circle {
+                x,
+                y,
+                hole_x,
+                hole_y,
+                ..
+            } => {
+                *x += dx;
+                *y += dy;
+                *hole_x += dx;
+                *hole_y += dy;
+            }
+            FeaturePrimitiveStorage::Thermal { x, y, .. }
+            | FeaturePrimitiveStorage::TriangleTemplateFlash { x, y, .. }
+            | FeaturePrimitiveStorage::Arc { x, y, .. } => {
+                *x += dx;
+                *y += dy;
+            }
+            FeaturePrimitiveStorage::Line {
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                ..
+            } => {
+                *start_x += dx;
+                *start_y += dy;
+                *end_x += dx;
+                *end_y += dy;
+            }
+            FeaturePrimitiveStorage::Multiple(primitives) => {
+                for primitive in primitives.iter_mut() {
+                    *primitive = offset_primitive_by(primitive, dx, dy);
+                }
+            }
+        }
+    }
+
+    fn append_highlight_batches(&self, batches: &mut Vec<HighlightBatch>) {
+        self.for_each(|primitive| append_primitive_highlight_batches(batches, primitive));
+    }
+
+    fn hit(&self, point: [f32; 2], tolerance: f32) -> bool {
+        let mut is_hit = false;
+        self.for_each(|primitive| {
+            if primitive_hit(primitive, point, tolerance) {
+                is_hit = primitive_exposure(primitive) >= 0.5;
+            }
+        });
+        is_hit
+    }
+}
+
+fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
+    match primitive {
+        Primitive::Triangle { .. } => FeaturePrimitiveStorage::Triangle(Box::new(primitive)),
+        Primitive::Circle {
+            x,
+            y,
+            radius,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+        } => FeaturePrimitiveStorage::Circle {
+            x,
+            y,
+            radius,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+        },
+        Primitive::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            exposure,
+        } => FeaturePrimitiveStorage::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            exposure,
+        },
+        Primitive::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            exposure,
+        } => FeaturePrimitiveStorage::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            exposure,
+        },
+        Primitive::TriangleTemplateFlash { template, x, y } => {
+            FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y }
+        }
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+        } => FeaturePrimitiveStorage::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+        },
+    }
+}
+
 impl InteractionFeature {
     pub fn from_primitives(
         kind: FeatureKind,
@@ -140,16 +539,41 @@ impl InteractionFeature {
         primitives: Vec<Primitive>,
         properties: FeatureProperties,
     ) -> Option<Self> {
-        Self::from_geometry(
+        let bounds = primitive_bounds(&primitives)?;
+        Some(Self::from_parts(
             kind,
             aperture,
             aperture_type,
             macro_name,
             polarity,
-            primitives,
-            PathRegions::empty(),
+            FeaturePrimitives::from_vec(primitives),
+            None,
+            bounds,
             properties,
-        )
+        ))
+    }
+
+    pub fn from_primitive_slice(
+        kind: FeatureKind,
+        aperture: Option<String>,
+        aperture_type: Option<String>,
+        macro_name: Option<String>,
+        polarity: Polarity,
+        primitives: &[Primitive],
+        properties: FeatureProperties,
+    ) -> Option<Self> {
+        let bounds = primitive_bounds(primitives)?;
+        Some(Self::from_parts(
+            kind,
+            aperture,
+            aperture_type,
+            macro_name,
+            polarity,
+            FeaturePrimitives::from_slice(primitives),
+            None,
+            bounds,
+            properties,
+        ))
     }
 
     pub fn from_geometry(
@@ -163,17 +587,45 @@ impl InteractionFeature {
         properties: FeatureProperties,
     ) -> Option<Self> {
         let bounds = combined_bounds(&primitives, &path_regions)?;
-        Some(Self {
+        let path_regions =
+            path_regions_has_interaction_geometry(&path_regions).then(|| Box::new(path_regions));
+        Some(Self::from_parts(
             kind,
             aperture,
             aperture_type,
             macro_name,
             polarity,
-            primitives,
+            FeaturePrimitives::from_vec(primitives),
             path_regions,
             bounds,
             properties,
-        })
+        ))
+    }
+
+    fn from_parts(
+        kind: FeatureKind,
+        aperture: Option<String>,
+        aperture_type: Option<String>,
+        macro_name: Option<String>,
+        polarity: Polarity,
+        primitives: FeaturePrimitives,
+        path_regions: Option<Box<PathRegions>>,
+        bounds: Boundary,
+        properties: FeatureProperties,
+    ) -> Self {
+        Self {
+            descriptor: Rc::new(FeatureDescriptor {
+                kind,
+                aperture: shared_string_option(aperture),
+                aperture_type: shared_string_option(aperture_type),
+                macro_name: shared_string_option(macro_name),
+                polarity,
+                properties,
+            }),
+            primitives,
+            path_regions,
+            bounds,
+        }
     }
 
     pub fn gerber_properties_with_transform(
@@ -226,48 +678,47 @@ impl InteractionFeature {
         set_property(
             &object,
             "featureType",
-            JsValue::from_str(self.kind.as_str()),
+            JsValue::from_str(self.descriptor.kind.as_str()),
         )?;
         set_property(
             &object,
             "polarity",
-            JsValue::from_str(if self.polarity == Polarity::Negative {
+            JsValue::from_str(if self.descriptor.polarity == Polarity::Negative {
                 "clear"
             } else {
                 "dark"
             }),
         )?;
-        if let Some(aperture) = &self.aperture {
-            set_property(&object, "aperture", JsValue::from_str(aperture))?;
+        if let Some(aperture) = &self.descriptor.aperture {
+            set_property(&object, "aperture", JsValue::from_str(aperture.as_ref()))?;
         }
-        if let Some(aperture_type) = &self.aperture_type {
-            set_property(&object, "apertureType", JsValue::from_str(aperture_type))?;
+        if let Some(aperture_type) = &self.descriptor.aperture_type {
+            set_property(
+                &object,
+                "apertureType",
+                JsValue::from_str(aperture_type.as_ref()),
+            )?;
         }
-        if let Some(macro_name) = &self.macro_name {
-            set_property(&object, "macroName", JsValue::from_str(macro_name))?;
+        if let Some(macro_name) = &self.descriptor.macro_name {
+            set_property(&object, "macroName", JsValue::from_str(macro_name.as_ref()))?;
         }
         set_property(&object, "bounds", self.bounds_to_js()?)?;
-        set_property(&object, "properties", self.properties.to_js()?)?;
+        set_property(&object, "properties", self.descriptor.properties.to_js()?)?;
         Ok(object.into())
     }
 
     pub fn highlight_batches(&self) -> Vec<HighlightBatch> {
         let mut batches = Vec::new();
-        for primitive in &self.primitives {
-            append_primitive_highlight_batches(&mut batches, primitive);
-        }
+        self.primitives.append_highlight_batches(&mut batches);
         batches
     }
 
     fn hit(&self, point: [f32; 2], tolerance: f32) -> bool {
-        let mut is_hit = false;
-        for primitive in &self.primitives {
-            if primitive_hit(primitive, point, tolerance) {
-                is_hit = primitive_exposure(primitive) >= 0.5;
+        let mut is_hit = self.primitives.hit(point, tolerance);
+        if let Some(path_regions) = &self.path_regions {
+            if path_regions_hit(path_regions, point, tolerance) {
+                is_hit = true;
             }
-        }
-        if path_regions_hit(&self.path_regions, point, tolerance) {
-            is_hit = true;
         }
         is_hit
     }
@@ -323,7 +774,7 @@ impl FeatureProperties {
             set_property(&object, "primitiveCount", JsValue::from_f64(value as f64))?;
         }
         if let Some(value) = &self.arc_command {
-            set_property(&object, "arcCommand", JsValue::from_str(value))?;
+            set_property(&object, "arcCommand", JsValue::from_str(value.as_ref()))?;
         }
         Ok(object.into())
     }
@@ -335,6 +786,10 @@ pub fn aperture_name(code: &str) -> Option<String> {
 
 pub fn aperture_type(aperture: &Aperture) -> String {
     aperture.kind.as_str().to_string()
+}
+
+fn shared_string_option(value: Option<String>) -> Option<Rc<str>> {
+    value.map(|value| Rc::<str>::from(value.as_str()))
 }
 
 fn aperture_has_orientation(aperture: &Aperture) -> bool {
@@ -379,13 +834,13 @@ pub fn feature_from_primitive_delta(
     primitives: &[Primitive],
     properties: FeatureProperties,
 ) -> Option<InteractionFeature> {
-    InteractionFeature::from_primitives(
+    InteractionFeature::from_primitive_slice(
         kind,
         aperture_name(aperture_code),
         Some(aperture_type(aperture)),
         aperture.macro_name.clone(),
         polarity,
-        primitives.to_vec(),
+        primitives,
         properties,
     )
 }
@@ -476,6 +931,10 @@ fn path_regions_bounds(path_regions: &PathRegions) -> Option<Boundary> {
     min_x
         .is_finite()
         .then_some(Boundary::new(min_x, max_x, min_y, max_y))
+}
+
+fn path_regions_has_interaction_geometry(path_regions: &PathRegions) -> bool {
+    path_regions.has_geometry() || !path_regions.pick_contours.is_empty()
 }
 
 fn include_primitive_bounds(
@@ -1257,8 +1716,8 @@ mod tests {
         .expect("region feature should have bounds");
         let drill = drill_hit_feature(1, 0.5, 0.0, 0.0).expect("drill hit should have bounds");
 
-        assert!(region.aperture_type.is_none());
-        assert!(drill.aperture_type.is_none());
+        assert!(region.descriptor.aperture_type.is_none());
+        assert!(drill.descriptor.aperture_type.is_none());
     }
 
     #[test]

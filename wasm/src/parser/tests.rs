@@ -512,8 +512,12 @@ M02*",
     assert_eq!(interaction_layer.features.len(), 1);
     let feature = &interaction_layer.features[0];
     assert!(feature.primitives.is_empty());
-    assert_eq!(feature.path_regions.region_count(), 1);
-    assert_eq!(feature.path_regions.pick_contours.len(), 1);
+    let path_regions = feature
+        .path_regions
+        .as_deref()
+        .expect("region interaction should keep path regions");
+    assert_eq!(path_regions.region_count(), 1);
+    assert_eq!(path_regions.pick_contours.len(), 1);
 }
 
 #[test]
@@ -542,6 +546,7 @@ M02*",
     assert_eq!(interaction_layer.features.len(), 2);
     assert_eq!(
         interaction_layer.features[0]
+            .descriptor
             .properties
             .arc_command
             .as_deref(),
@@ -549,6 +554,7 @@ M02*",
     );
     assert_eq!(
         interaction_layer.features[1]
+            .descriptor
             .properties
             .arc_command
             .as_deref(),
@@ -576,7 +582,10 @@ M02*",
         .interaction_layer
         .expect("interaction layer should be collected");
     assert_eq!(interaction_layer.features.len(), 1);
-    assert_eq!(interaction_layer.features[0].kind, FeatureKind::Flash);
+    assert_eq!(
+        interaction_layer.features[0].descriptor.kind,
+        FeatureKind::Flash
+    );
 }
 
 #[test]
@@ -628,8 +637,14 @@ M02*",
         .interaction_layer
         .expect("interaction layer should be collected");
     assert_eq!(interaction_layer.features.len(), 2);
-    assert_eq!(interaction_layer.features[0].kind, FeatureKind::Draw);
-    assert_eq!(interaction_layer.features[1].kind, FeatureKind::Draw);
+    assert_eq!(
+        interaction_layer.features[0].descriptor.kind,
+        FeatureKind::Draw
+    );
+    assert_eq!(
+        interaction_layer.features[1].descriptor.kind,
+        FeatureKind::Draw
+    );
     let first = &interaction_layer.features[0].bounds;
     let second = &interaction_layer.features[1].bounds;
     assert_approx_eq((first.min_x() + first.max_x()) * 0.5, 0.5);
@@ -656,7 +671,7 @@ M02*",
     let interaction_layer = payload
         .interaction_layer
         .expect("interaction layer should be collected");
-    let properties = &interaction_layer.features[0].properties;
+    let properties = &interaction_layer.features[0].descriptor.properties;
     assert_eq!(properties.diameter, None);
     assert_approx_eq(properties.width.expect("width should be reported"), 2.0);
     assert_approx_eq(properties.height.expect("height should be reported"), 1.0);
@@ -687,6 +702,7 @@ M02*",
         .interaction_layer
         .expect("interaction layer should be collected");
     let rotation = interaction_layer.features[0]
+        .descriptor
         .properties
         .rotation
         .expect("polygon rotation should be reported");
@@ -710,7 +726,7 @@ M02*",
     let polygon_layer = polygon_payload
         .interaction_layer
         .expect("polygon interaction layer should be collected");
-    let polygon_properties = &polygon_layer.features[0].properties;
+    let polygon_properties = &polygon_layer.features[0].descriptor.properties;
     assert_eq!(polygon_properties.diameter, None);
     assert_eq!(polygon_properties.vertices, Some(5));
     assert_approx_eq(
@@ -736,7 +752,7 @@ M02*",
     let macro_layer = macro_payload
         .interaction_layer
         .expect("macro interaction layer should be collected");
-    assert_eq!(macro_layer.features[0].properties.diameter, None);
+    assert_eq!(macro_layer.features[0].descriptor.properties.diameter, None);
 }
 
 #[test]
@@ -839,8 +855,12 @@ M02*",
     assert_eq!(interaction_layer.features.len(), 1);
     let feature = &interaction_layer.features[0];
     assert!(feature.primitives.is_empty());
-    assert_eq!(feature.path_regions.region_count(), 1);
-    assert_eq!(feature.path_regions.pick_contours.len(), 1);
+    let path_regions = feature
+        .path_regions
+        .as_deref()
+        .expect("aperture block region interaction should keep path regions");
+    assert_eq!(path_regions.region_count(), 1);
+    assert_eq!(path_regions.pick_contours.len(), 1);
 }
 
 #[test]

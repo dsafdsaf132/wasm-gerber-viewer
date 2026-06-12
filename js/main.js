@@ -49,6 +49,12 @@ const MAX_PARSE_MEMORY_BUDGET_BYTES = 1536 * BYTES_PER_MIB;
 const PARSE_MEMORY_ESTIMATE_MULTIPLIER = 16;
 const PARSE_MEMORY_HEADROOM_RATIO = 0.5;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
+const MIN_PROCESSOR_LAYER_MEMORY_BYTES = 16 * BYTES_PER_MIB;
+const DEFAULT_WASM_PROCESSOR_MEMORY_BUDGET_BYTES = 2 * 1024 * BYTES_PER_MIB;
+const MIN_WASM_PROCESSOR_MEMORY_BUDGET_BYTES = 512 * BYTES_PER_MIB;
+const MAX_WASM_PROCESSOR_MEMORY_BUDGET_BYTES = 3 * 1024 * BYTES_PER_MIB;
+const RENDER_ONLY_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER = 12;
+const INTERACTION_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER = 18;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
   low: 0,
@@ -104,6 +110,17 @@ class ParseWorkerUnavailableError extends Error {
 
 function isParseWorkerUnavailableError(error) {
   return error instanceof ParseWorkerUnavailableError;
+}
+
+class WasmMemoryBudgetError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "WasmMemoryBudgetError";
+  }
+}
+
+function isWasmMemoryBudgetError(error) {
+  return error instanceof WasmMemoryBudgetError;
 }
 
 function isParseWorkerCapabilityErrorMessage(message) {
@@ -376,6 +393,26 @@ function estimateLayerParseMemoryBytes(source) {
   );
 }
 
+function estimateLayerProcessorMemoryBytes(source, interactionsEnabled) {
+  const multiplier = interactionsEnabled
+    ? INTERACTION_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER
+    : RENDER_ONLY_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER;
+  return Math.max(
+    getLayerSourceSizeBytes(source) * multiplier,
+    MIN_PROCESSOR_LAYER_MEMORY_BYTES,
+  );
+}
+
+function estimateContentProcessorMemoryBytes(content, interactionsEnabled) {
+  const multiplier = interactionsEnabled
+    ? INTERACTION_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER
+    : RENDER_ONLY_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER;
+  return Math.max(
+    getUtf8ByteLength(content) * multiplier,
+    MIN_PROCESSOR_LAYER_MEMORY_BYTES,
+  );
+}
+
 function getBrowserAvailableHeapBytes() {
   const memory = globalThis.performance?.memory;
   const heapLimit = Number(memory?.jsHeapSizeLimit);
@@ -410,6 +447,20 @@ function getParseMemoryBudgetBytes() {
   return Math.min(
     Math.max(rawBudget, MIN_PARSE_MEMORY_BUDGET_BYTES),
     MAX_PARSE_MEMORY_BUDGET_BYTES,
+  );
+}
+
+function getWasmProcessorMemoryBudgetBytes() {
+  const deviceMemory = Number(globalThis.navigator?.deviceMemory);
+  const deviceBudget = Number.isFinite(deviceMemory) && deviceMemory > 0
+    ? deviceMemory * 1024 * BYTES_PER_MIB * 0.25
+    : DEFAULT_WASM_PROCESSOR_MEMORY_BUDGET_BYTES;
+  return Math.min(
+    Math.max(
+      Math.max(deviceBudget, DEFAULT_WASM_PROCESSOR_MEMORY_BUDGET_BYTES),
+      MIN_WASM_PROCESSOR_MEMORY_BUDGET_BYTES,
+    ),
+    MAX_WASM_PROCESSOR_MEMORY_BUDGET_BYTES,
   );
 }
 
@@ -2688,6 +2739,10 @@ export class GerberViewer {
     const results = [];
 
     for (const [index, source] of layerSources.entries()) {
+      if (this.wasmMemoryExhausted) {
+        results.push(...Array(layerSources.length - index).fill(false));
+        break;
+      }
       results.push(
         await this.loadLayerSourceSerially(source, {
           index,
@@ -3078,6 +3133,10 @@ export class GerberViewer {
         parsedLayer,
         sourceContent: content,
         offset: source.offset,
+        estimatedWasmMemoryBytes: estimateLayerProcessorMemoryBytes(
+          source,
+          this.interactionsEnabled,
+        ),
       };
     } catch (error) {
       if (isParseWorkerUnavailableError(error)) {
@@ -3130,9 +3189,21 @@ export class GerberViewer {
       });
 
       if (isDrillSource(source)) {
-        await this.addDrillLayer(name, content, { offset: source.offset });
+        await this.addDrillLayer(name, content, {
+          offset: source.offset,
+          estimatedWasmMemoryBytes: estimateLayerProcessorMemoryBytes(
+            source,
+            this.interactionsEnabled,
+          ),
+        });
       } else {
-        await this.addLayer(name, content, { offset: source.offset });
+        await this.addLayer(name, content, {
+          offset: source.offset,
+          estimatedWasmMemoryBytes: estimateLayerProcessorMemoryBytes(
+            source,
+            this.interactionsEnabled,
+          ),
+        });
       }
       this.updateLoadingModal({
         stage: "Loaded",
@@ -3191,6 +3262,7 @@ export class GerberViewer {
         {
           offset: parseResult.offset,
           sourceContent: parseResult.sourceContent,
+          estimatedWasmMemoryBytes: parseResult.estimatedWasmMemoryBytes,
         },
       );
       const completed = this.markLayerLoadComplete(progress);
@@ -3243,6 +3315,38 @@ export class GerberViewer {
     } catch (error) {
       throw new Error(getErrorMessage(error));
     }
+  }
+
+  getWasmProcessorMemoryEstimateBytes() {
+    const committedBytes = this.layers.reduce(
+      (total, layer) => total + (layer.estimatedWasmMemoryBytes ?? 0),
+      0,
+    );
+    const pendingBytes = (this.pendingLayerRecordsForRecovery ?? []).reduce(
+      (total, layer) => total + (layer?.estimatedWasmMemoryBytes ?? 0),
+      0,
+    );
+    return committedBytes + pendingBytes;
+  }
+
+  ensureWasmProcessorMemoryBudget(name, estimatedBytes) {
+    if (!Number.isFinite(estimatedBytes) || estimatedBytes <= 0) {
+      return;
+    }
+
+    const currentBytes = this.getWasmProcessorMemoryEstimateBytes();
+    const budgetBytes = getWasmProcessorMemoryBudgetBytes();
+    if (currentBytes + estimatedBytes <= budgetBytes) {
+      return;
+    }
+
+    this.wasmMemoryExhausted = true;
+    throw new WasmMemoryBudgetError(
+      `WASM memory budget reached before loading ${name}. ` +
+        `Loaded estimate ${formatFileSize(currentBytes)}, ` +
+        `next layer estimate ${formatFileSize(estimatedBytes)}, ` +
+        `budget ${formatFileSize(budgetBytes)}.`,
+    );
   }
 
   createLayerRecoverySnapshot(layer) {
@@ -3332,16 +3436,24 @@ export class GerberViewer {
     }
   }
 
-  disposeWasmProcessor() {
+  disposeWasmProcessor({ abandon = false } = {}) {
     if (!this.wasmProcessor) return;
 
     const processor = this.wasmProcessor;
     this.wasmProcessor = null;
-    this.disposeWasmProcessorInstance(processor, "processor");
+    this.disposeWasmProcessorInstance(processor, "processor", { abandon });
   }
 
-  disposeWasmProcessorInstance(processor, label = "processor") {
+  disposeWasmProcessorInstance(processor, label = "processor", { abandon = false } = {}) {
     if (!processor) return;
+    if (abandon) {
+      try {
+        processor.__destroy_into_raw?.();
+      } catch (error) {
+        console.warn(`[WASM] Failed to abandon ${label}:`, error);
+      }
+      return;
+    }
     if (typeof processor.free === "function") {
       try {
         processor.free();
@@ -3369,7 +3481,7 @@ export class GerberViewer {
     const recoveredPendingLayerIds = this.collectPendingLayerRecoveryIds();
     const layerSnapshot = this.snapshotLayersForRecovery();
     if (layerSnapshot.length === 0) {
-      this.disposeWasmProcessor();
+      this.disposeWasmProcessor({ abandon: true });
       this.createWebGlProcessor();
       this.clearSelectedFeature({ refresh: false });
       this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
@@ -3392,7 +3504,7 @@ export class GerberViewer {
     );
 
     try {
-      this.disposeWasmProcessor();
+      this.disposeWasmProcessor({ abandon: true });
       this.layers = [];
       this.clearSelectedFeature({ refresh: false });
       this.createWebGlProcessor();
@@ -3417,7 +3529,7 @@ export class GerberViewer {
         // The new processor also OOM'd during restore; create a fresh empty one
         // so subsequent callers don't encounter a trapped WASM module.
         this.layers = [];
-        this.disposeWasmProcessor();
+        this.disposeWasmProcessor({ abandon: true });
         this.createWebGlProcessor();
         this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
       }
@@ -3475,6 +3587,7 @@ export class GerberViewer {
       color: options.color ? [...options.color] : null,
       sourceContent: options.sourceContent,
       offset: normalizeLayerOffset(options.offset),
+      estimatedWasmMemoryBytes: options.estimatedWasmMemoryBytes ?? 0,
       bounds: {
         minX: bounds.min_x,
         maxX: bounds.max_x,
@@ -3544,6 +3657,11 @@ export class GerberViewer {
 
       // add layer to WASM processor and get layer ID
       this.ensureParserOptionsSupported({}, processor);
+      this.ensureWasmProcessorMemoryBudget(
+        name,
+        options.estimatedWasmMemoryBytes ??
+          estimateContentProcessorMemoryBytes(content, this.interactionsEnabled),
+      );
       this.reserveWasmInputCapacity(content);
       const offset = normalizeLayerOffset(options.offset);
       if (
@@ -3566,7 +3684,9 @@ export class GerberViewer {
         throw error;
       }
 
-      if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
+      if (isWasmMemoryBudgetError(error)) {
+        this.wasmMemoryExhausted = true;
+      } else if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
         this.wasmMemoryExhausted = true;
       }
@@ -3601,6 +3721,11 @@ export class GerberViewer {
         throw new Error("Drill rendering requires an updated WASM module");
       }
 
+      this.ensureWasmProcessorMemoryBudget(
+        name,
+        options.estimatedWasmMemoryBytes ??
+          estimateContentProcessorMemoryBytes(content, this.interactionsEnabled),
+      );
       this.reserveWasmInputCapacity(content);
       const offset = normalizeLayerOffset(options.offset);
       let result;
@@ -3640,13 +3765,16 @@ export class GerberViewer {
         drillMetadata: normalizeDrillMetadata(result?.metadata),
         sourceContent: options.sourceContent ?? content,
         offset,
+        estimatedWasmMemoryBytes: options.estimatedWasmMemoryBytes ?? 0,
         rawBounds,
         bounds: expandBounds(rawBounds, outlineStyle.worldMm),
       };
       this.applyDrillLayerOutlineStyle(layer, processor);
       return layer;
     } catch (error) {
-      if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
+      if (isWasmMemoryBudgetError(error)) {
+        this.wasmMemoryExhausted = true;
+      } else if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
         this.wasmMemoryExhausted = true;
       }
@@ -3684,6 +3812,16 @@ export class GerberViewer {
         throw new Error("WebGL renderer is not available");
       }
 
+      this.ensureWasmProcessorMemoryBudget(
+        name,
+        options.estimatedWasmMemoryBytes ??
+          (typeof options.sourceContent === "string"
+            ? estimateContentProcessorMemoryBytes(
+                options.sourceContent,
+                this.interactionsEnabled,
+              )
+            : 0),
+      );
       let layerId;
       if (typeof processor.add_render_payload === "function") {
         layerId = processor.add_render_payload(parsedLayer);
@@ -3699,7 +3837,9 @@ export class GerberViewer {
         throw error;
       }
 
-      if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
+      if (isWasmMemoryBudgetError(error)) {
+        this.wasmMemoryExhausted = true;
+      } else if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
         this.wasmMemoryExhausted = true;
       }
