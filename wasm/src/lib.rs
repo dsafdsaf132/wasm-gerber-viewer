@@ -631,6 +631,40 @@ impl GerberProcessor {
         }
     }
 
+    /// Build and store the interaction layer for an already-loaded render layer.
+    ///
+    /// Call this after `add_render_payload` to attach interaction data without
+    /// re-uploading render geometry. The gerber content is parsed a second time
+    /// but no GPU buffers are allocated.
+    pub fn build_layer_interactions(
+        &mut self,
+        layer_id: u32,
+        content: String,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<(), JsValue> {
+        if !self.interaction_enabled {
+            return Ok(());
+        }
+        let payload = parse_layer_payload_data(
+            &content,
+            offset_x,
+            offset_y,
+            self.preserve_arc_regions,
+            self.arc_tessellation_quality,
+        )?;
+        self.set_interaction_layer(layer_id as usize, payload.interaction_layer);
+        Ok(())
+    }
+
+    /// Return true if an interaction layer is already stored for this layer id.
+    pub fn has_interaction_layer(&self, layer_id: u32) -> bool {
+        self.interaction_layers
+            .get(layer_id as usize)
+            .and_then(Option::as_ref)
+            .is_some()
+    }
+
     /// Remove a layer from the renderer
     ///
     /// # Arguments

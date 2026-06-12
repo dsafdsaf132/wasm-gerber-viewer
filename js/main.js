@@ -1859,7 +1859,7 @@ export class GerberViewer {
           total: layerSnapshot.length,
         });
 
-        if (this.interactionsEnabled || layer.kind === DRILL_LAYER_KIND) {
+        if (layer.kind === DRILL_LAYER_KIND) {
           parsedLayers.push({ ...layer, parsedLayer: null });
         } else {
           try {
@@ -1911,13 +1911,6 @@ export class GerberViewer {
                   layerOptions,
                   stagedProcessor,
                 )
-              : this.interactionsEnabled
-                ? await this.createGerberLayerRecord(
-                    layer.name,
-                    layer.sourceContent,
-                    layerOptions,
-                    stagedProcessor,
-                  )
               : await this.createParsedLayerRecord(
                   layer.name,
                   layer.parsedLayer,
@@ -1934,6 +1927,8 @@ export class GerberViewer {
             total: parsedLayers.length,
           });
         }
+
+        await this.buildInteractionLayersProgressively(stagedProcessor, stagedLayers);
 
         const previousProcessor = this.wasmProcessor;
         this.wasmProcessor = stagedProcessor;
@@ -2496,6 +2491,7 @@ export class GerberViewer {
         return;
       }
 
+      const layersBefore = this.layers.length;
       const results = await this.loadLayerSources(layerSources, {
         title: "Loading remote file",
       });
@@ -2507,6 +2503,10 @@ export class GerberViewer {
         this.fitView();
         this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
       }
+      await this.buildInteractionLayersProgressively(
+        this.wasmProcessor,
+        this.layers.slice(layersBefore),
+      );
     } finally {
       this.hideLoadingModal();
     }
@@ -2553,6 +2553,7 @@ export class GerberViewer {
         const layerSources = await this.collectLayerSources(validFiles);
 
         if (layerSources.length > 0) {
+          const layersBefore = this.layers.length;
           const results = await this.loadLayerSources(layerSources, {
             title: "Loading files",
           });
@@ -2564,6 +2565,10 @@ export class GerberViewer {
             this.fitView();
             this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
           }
+          await this.buildInteractionLayersProgressively(
+            this.wasmProcessor,
+            this.layers.slice(layersBefore),
+          );
         }
       } finally {
         this.hideLoadingModal();
@@ -2579,7 +2584,7 @@ export class GerberViewer {
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     this.wasmMemoryExhausted = false;
     const total = layerSources.length;
-    if (layerSources.some(isDrillSource) || this.interactionsEnabled) {
+    if (layerSources.some(isDrillSource)) {
       return this.loadLayerSourcesSerially(layerSources, { title, total });
     }
 
@@ -3448,6 +3453,33 @@ export class GerberViewer {
   async addLayer(name, content, options = {}) {
     const layer = await this.createGerberLayerRecord(name, content, options);
     return this.commitLayerMetadata(layer);
+  }
+
+  async buildInteractionLayersProgressively(processor, layers) {
+    if (!this.interactionsEnabled) return;
+    if (!processor || typeof processor.build_layer_interactions !== "function") return;
+
+    for (const layer of layers) {
+      if (isDrillLayer(layer)) continue;
+      if (typeof layer.sourceContent !== "string") continue;
+      if (processor.has_interaction_layer?.(layer.layerId)) continue;
+
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      const offset = normalizeLayerOffset(layer.offset);
+      try {
+        processor.build_layer_interactions(
+          layer.layerId,
+          layer.sourceContent,
+          offset.x,
+          offset.y,
+        );
+      } catch (error) {
+        if (!isNoGeometryError(getErrorMessage(error))) {
+          console.warn(`[Interaction] Failed to build interactions for ${layer.name}:`, error);
+        }
+      }
+    }
   }
 
   async createGerberLayerRecord(
