@@ -42,12 +42,6 @@ const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
 const MAX_PARSE_WORKERS = 4;
 const BYTES_PER_MIB = 1024 * 1024;
 const UNKNOWN_LAYER_SOURCE_SIZE_BYTES = 16 * BYTES_PER_MIB;
-const MIN_PARSE_TASK_MEMORY_BYTES = 32 * BYTES_PER_MIB;
-const DEFAULT_PARSE_MEMORY_BUDGET_BYTES = 512 * BYTES_PER_MIB;
-const MIN_PARSE_MEMORY_BUDGET_BYTES = 128 * BYTES_PER_MIB;
-const MAX_PARSE_MEMORY_BUDGET_BYTES = 1536 * BYTES_PER_MIB;
-const PARSE_MEMORY_ESTIMATE_MULTIPLIER = 16;
-const PARSE_MEMORY_HEADROOM_RATIO = 0.5;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const MIN_PROCESSOR_LAYER_MEMORY_BYTES = 16 * BYTES_PER_MIB;
 const DEFAULT_WASM_PROCESSOR_MEMORY_BUDGET_BYTES = 2 * 1024 * BYTES_PER_MIB;
@@ -386,13 +380,6 @@ function getLayerSourceSizeBytes(source) {
     : UNKNOWN_LAYER_SOURCE_SIZE_BYTES;
 }
 
-function estimateLayerParseMemoryBytes(source) {
-  return Math.max(
-    getLayerSourceSizeBytes(source) * PARSE_MEMORY_ESTIMATE_MULTIPLIER,
-    MIN_PARSE_TASK_MEMORY_BYTES,
-  );
-}
-
 function estimateLayerProcessorMemoryBytes(source, interactionsEnabled) {
   const multiplier = interactionsEnabled
     ? INTERACTION_PROCESSOR_MEMORY_ESTIMATE_MULTIPLIER
@@ -410,43 +397,6 @@ function estimateContentProcessorMemoryBytes(content, interactionsEnabled) {
   return Math.max(
     getUtf8ByteLength(content) * multiplier,
     MIN_PROCESSOR_LAYER_MEMORY_BYTES,
-  );
-}
-
-function getBrowserAvailableHeapBytes() {
-  const memory = globalThis.performance?.memory;
-  const heapLimit = Number(memory?.jsHeapSizeLimit);
-  const usedHeap = Number(memory?.usedJSHeapSize);
-
-  if (!Number.isFinite(heapLimit) || !Number.isFinite(usedHeap)) {
-    return null;
-  }
-
-  return Math.max(0, heapLimit - usedHeap);
-}
-
-function getDeviceMemoryBudgetBytes() {
-  const deviceMemory = Number(globalThis.navigator?.deviceMemory);
-  if (!Number.isFinite(deviceMemory) || deviceMemory <= 0) {
-    return DEFAULT_PARSE_MEMORY_BUDGET_BYTES;
-  }
-
-  return deviceMemory * 1024 * BYTES_PER_MIB * 0.25;
-}
-
-function getParseMemoryBudgetBytes() {
-  const availableHeapBytes = getBrowserAvailableHeapBytes();
-  const rawBudget =
-    availableHeapBytes === null
-      ? getDeviceMemoryBudgetBytes()
-      : Math.min(
-          getDeviceMemoryBudgetBytes(),
-          availableHeapBytes * PARSE_MEMORY_HEADROOM_RATIO,
-        );
-
-  return Math.min(
-    Math.max(rawBudget, MIN_PARSE_MEMORY_BUDGET_BYTES),
-    MAX_PARSE_MEMORY_BUDGET_BYTES,
   );
 }
 
@@ -2797,7 +2747,6 @@ export class GerberViewer {
     let activeTasks = 0;
     let scheduledTasks = 0;
     let completedTasks = 0;
-    let activeMemoryBytes = 0;
     let isResolved = false;
 
     return new Promise((resolve, reject) => {
@@ -2875,17 +2824,13 @@ export class GerberViewer {
           return;
         }
         while (activeTasks < concurrency && scheduledTasks < total) {
-          const task = this.pickNextLayerParseTask(parseTasks, {
-            activeTasks,
-            activeMemoryBytes,
-          });
+          const task = this.pickNextLayerParseTask(parseTasks);
           if (!task) break;
 
           task.scheduled = true;
           scheduledTasks++;
-          const { index, source, estimatedMemoryBytes } = task;
+          const { index, source } = task;
           activeTasks++;
-          activeMemoryBytes += estimatedMemoryBytes;
 
           this.readAndParseLayerSource(source, {
             index,
@@ -2930,10 +2875,6 @@ export class GerberViewer {
             .finally(() => {
               activeTasks--;
               completedTasks++;
-              activeMemoryBytes = Math.max(
-                0,
-                activeMemoryBytes - estimatedMemoryBytes,
-              );
               if (isResolved) {
                 return;
               }
@@ -2953,39 +2894,12 @@ export class GerberViewer {
     return layerSources.map((source, index) => ({
       source,
       index,
-      estimatedMemoryBytes: estimateLayerParseMemoryBytes(source),
       scheduled: false,
     }));
   }
 
-  pickNextLayerParseTask(
-    parseTasks,
-    { activeTasks, activeMemoryBytes },
-  ) {
-    const candidates = parseTasks.filter((task) => !task.scheduled);
-    if (candidates.length === 0) {
-      return null;
-    }
-
-    const budgetBytes = getParseMemoryBudgetBytes();
-    const availableBytes = budgetBytes - activeMemoryBytes;
-    const fittingCandidates = candidates.filter(
-      (task) => task.estimatedMemoryBytes <= availableBytes,
-    );
-
-    if (fittingCandidates.length > 0) {
-      return fittingCandidates.sort(
-        (a, b) => b.estimatedMemoryBytes - a.estimatedMemoryBytes,
-      )[0];
-    }
-
-    if (activeTasks > 0) {
-      return null;
-    }
-
-    return candidates.sort(
-      (a, b) => a.estimatedMemoryBytes - b.estimatedMemoryBytes,
-    )[0];
+  pickNextLayerParseTask(parseTasks) {
+    return parseTasks.find((task) => !task.scheduled) ?? null;
   }
 
   createLayerLoadProgress(total) {
