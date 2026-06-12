@@ -33,6 +33,7 @@ Website:
 - NC drill overlay rendering support
 - Touch support for mobile devices
 - Multi-layer rendering with per-layer color and visibility control
+- Feature picking with selected-area highlighting
 - Horizontal/vertical flip controls
 - Ruler measurements with mm/inch unit switching
 - Screenshot export with resolution options, including ruler overlays

@@ -12,10 +12,11 @@ flowchart TD
   JS["JavaScript UI / workers"] --> API["wasm/src/lib.rs public API"]
   API --> InputKind{"Input path"}
 
-  InputKind -->|Gerber source| GerberParse["parse_gerber_layer*"]
+  InputKind -->|Gerber source| GerberParse["parse_gerber_layer* / parse_gerber_layer_payload_with_options"]
   GerberParse --> Parser["GerberParser"]
   Parser --> GerberData["GerberData vector<br/>polarity sublayers"]
   Parser --> MaybeInteraction["Optional InteractionLayer"]
+  MaybeInteraction --> CompactInteraction["Optional compact interaction payload"]
 
   InputKind -->|Drill source| DrillParse["parse_drill_layer"]
   DrillParse --> DrillResult["DrillParseResult"]
@@ -24,9 +25,10 @@ flowchart TD
   DrillResult --> DrillInteraction["Optional InteractionLayer"]
 
   InputKind -->|Worker payload| Payload["Render payload / restored GerberData"]
-
+  CompactInteraction --> InteractionPayload["Compact interaction payload"]
   GerberData --> AddParsed["GerberProcessor::add_parsed_layers"]
   Payload --> AddPayload["Renderer::add_layer_from_render_payload"]
+  InteractionPayload --> AddInteraction["GerberProcessor::add_interaction_payload"]
   DrillLayers --> AddDrill["GerberProcessor::add_drill_parse_result"]
 
   AddParsed --> Renderer["Renderer layer state + GPU resources"]
@@ -34,6 +36,7 @@ flowchart TD
   AddDrill --> Renderer
 
   MaybeInteraction --> InteractionStore["interaction_layers by renderer layer id"]
+  AddInteraction --> InteractionStore
   DrillInteraction --> InteractionStore
 
   Renderer --> RenderEntry["render / render_tile / render_pixels"]
@@ -50,7 +53,10 @@ Key APIs:
 - `init_panic_hook()`: installs browser-console panic reporting.
 - `reserve_input_capacity(byte_count)`: preflights large JS-to-WASM input
   copies with catchable allocation errors.
-- `parse_gerber_layer*()`: parses Gerber input and returns JS geometry payloads.
+- `parse_gerber_layer*()`: parses Gerber input and returns JS render geometry
+  payloads.
+- `parse_gerber_layer_payload_with_options()`: parses Gerber once and returns
+  both the render payload and a compact interaction payload.
 - `parse_drill_layer()`: parses Excellon/NC drill input into outline/fill
   payloads.
 - `GerberProcessor`: owns the stateful WebGL renderer, parser options, drill
@@ -64,6 +70,7 @@ Important functions:
 
 - `parse_gerber_with_options(content, preserve_arc_regions, arc_tessellation_quality)`
 - `parse_gerber_payload_with_options(...)`
+- public wrapper `parse_gerber_layer_payload_with_options(...)`
 - `GerberParser`
 
 The parser processes the file in object-stream order and emits polarity
@@ -79,6 +86,9 @@ High-level flow:
 5. Drop empty geometry batches.
 6. If interaction is enabled, build an `InteractionLayer` alongside render
    geometry.
+7. If the result must cross the JS/worker boundary, encode the
+   `InteractionLayer` as a compact table payload instead of expanding feature
+   metadata into JS objects.
 
 ### 3. Drill Parsing
 
@@ -110,9 +120,11 @@ Important types:
 - `Lines`, `Circles`, `Arcs`, `Thermals`, `TriangleTemplateInstances`.
 - `PathRegions`: region/path based geometry.
 
-`GerberData` also supports JS payload conversion. This lets a worker parse
-geometry in one WASM instance and pass a compact payload back to the main
-renderer instance.
+`GerberData` supports JS render-payload conversion. This lets a worker parse
+geometry in one WASM instance and pass render buffers back to the main renderer
+instance. Feature picking data uses a separate compact interaction payload from
+`wasm/src/interaction.rs` so aperture strings, descriptors, templates,
+primitives, and path-region data can remain table-based across the JS boundary.
 
 ### 5. Processor State
 
@@ -129,11 +141,15 @@ Layer-add flow:
 
 1. JS calls `add_layer`, `add_layer_with_offset`, `add_render_payload`, or
    `add_drill_layer`.
-2. Rust parses source text directly or restores `GerberData` from JS payloads.
+2. Rust parses source text directly or restores `GerberData` from render
+   payloads.
 3. `Renderer::add_layer()` or `Renderer::add_layer_from_render_payload()`
    creates renderer layer metadata and GPU resources.
-4. If interaction is enabled, the matching `InteractionLayer` is stored by
-   renderer layer id.
+4. If interaction is enabled during direct parsing, the matching
+   `InteractionLayer` is stored by renderer layer id.
+5. If parsing happened in a worker, JS calls `add_interaction_payload()` with
+   the renderer layer id so Rust can restore the compact interaction payload
+   into `interaction_layers`.
 
 ### 6. Interaction Pipeline
 
@@ -144,6 +160,20 @@ Important types:
 - `InteractionLayer`
 - `InteractionFeature`
 - `FeatureKind`
+
+Worker/main transfer flow:
+
+1. A worker calls `parse_gerber_layer_payload_with_options()`.
+2. Rust parses the file once, producing render geometry and an
+   `InteractionLayer`.
+3. The worker returns `renderPayload` plus `interactionPayload`.
+4. The interaction payload stores repeated data in shared string, descriptor,
+   template, primitive, and path-region tables.
+5. Main JS calls `add_render_payload()` first, then `add_interaction_payload()`
+   for the returned renderer layer id.
+
+This avoids reparsing the source on the main thread and avoids expanding
+repeated aperture metadata into per-feature JS objects.
 
 CPU picking flow:
 
@@ -232,7 +262,9 @@ Registration creates or prepares:
 
 `add_layer_from_render_payload()` is the worker-to-main-renderer path. It avoids
 reparsing source text in the main renderer when a worker has already produced a
-render payload.
+render payload. When feature picking is enabled, the caller pairs this with
+`add_interaction_payload()` so CPU picking data is restored without a second
+source parse.
 
 ### 3. Render Call Stack
 
