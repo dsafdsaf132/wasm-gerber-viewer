@@ -3038,6 +3038,9 @@ export class GerberViewer {
         current: index,
         total,
       });
+      // Yield one frame so the browser can repaint the progress modal before
+      // the synchronous WASM parse+interaction-build blocks the main thread.
+      await new Promise((resolve) => requestAnimationFrame(resolve));
 
       if (isDrillSource(source)) {
         await this.addDrillLayer(name, content, { offset: source.offset });
