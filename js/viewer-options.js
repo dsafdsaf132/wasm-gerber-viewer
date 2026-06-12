@@ -6,6 +6,7 @@ const DEFAULT_VIEWER_OPTIONS = {
   pthPlatingMicrometers: 20,
   renderingMode: "lazy",
   compositeMode: "blend",
+  interactionsEnabled: true,
 };
 
 const ARC_TESSELLATION_QUALITIES = new Set(["low", "normal", "high"]);
@@ -83,6 +84,10 @@ export class ViewerOptionsStore {
         compositeMode: COMPOSITE_MODES.has(stored.compositeMode)
           ? stored.compositeMode
           : DEFAULT_VIEWER_OPTIONS.compositeMode,
+        interactionsEnabled:
+          typeof stored.interactionsEnabled === "boolean"
+            ? stored.interactionsEnabled
+            : DEFAULT_VIEWER_OPTIONS.interactionsEnabled,
       };
     } catch {
       return this.getDefaults();

@@ -70,6 +70,12 @@ const COMPOSITE_MODE_VALUES = new Set([
   COMPOSITE_MODE_BLEND,
   COMPOSITE_MODE_STACK,
 ]);
+const INTERACTION_MODE_ON = "on";
+const INTERACTION_MODE_OFF = "off";
+const INTERACTION_MODE_VALUES = new Set([
+  INTERACTION_MODE_ON,
+  INTERACTION_MODE_OFF,
+]);
 const LAZY_WHEEL_RENDER_DELAY_MS = 140;
 const LAYER_TOUCH_DRAG_DELAY_MS = 500;
 const LAYER_TOUCH_DRAG_CANCEL_PX = 8;
@@ -748,6 +754,9 @@ export class GerberViewer {
     this.compositeMode = COMPOSITE_MODE_VALUES.has(storedCompositeMode)
       ? storedCompositeMode
       : COMPOSITE_MODE_BLEND;
+    this.interactionsOptionEnabled =
+      this.viewerOptionsStore.get("interactionsEnabled") !== false;
+    this.interactionsEnabled = this.interactionsOptionEnabled;
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -1129,6 +1138,14 @@ export class GerberViewer {
       });
     }
 
+    for (const input of this.getInteractionModeInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setInteractionMode(input.value);
+        }
+      });
+    }
+
     // Alpha slider
     this.alphaSlider.addEventListener("input", (e) => {
       const alpha = parseInt(e.target.value) / 100;
@@ -1428,6 +1445,10 @@ export class GerberViewer {
     return [this.compositeModeBlendInput, this.compositeModeStackInput];
   }
 
+  getInteractionModeInputs() {
+    return [this.interactionModeOnInput, this.interactionModeOffInput];
+  }
+
   syncRenderingModeControls() {
     const renderingModeDisabled =
       this.isRendererBusy() || this.isViewportGestureActive();
@@ -1444,6 +1465,8 @@ export class GerberViewer {
       input.checked = input.value === this.compositeMode;
       input.disabled = this.isRendererBusy();
     }
+
+    this.syncInteractionModeControls();
 
     this.regionArcExactInput.checked = this.preserveArcRegions;
     this.regionArcApproximateInput.checked = !this.preserveArcRegions;
@@ -1466,6 +1489,16 @@ export class GerberViewer {
     for (const input of this.getPthPlatingInputs()) {
       input.checked = Number(input.value) === this.pthPlatingMicrometers;
       input.disabled = this.isRendererBusy();
+    }
+  }
+
+  syncInteractionModeControls(rendererBusy = this.isRendererBusy()) {
+    const mode = this.interactionsOptionEnabled
+      ? INTERACTION_MODE_ON
+      : INTERACTION_MODE_OFF;
+    for (const input of this.getInteractionModeInputs()) {
+      input.checked = input.value === mode;
+      input.disabled = rendererBusy;
     }
   }
 
@@ -1523,6 +1556,38 @@ export class GerberViewer {
     this.viewerOptionsStore.set("compositeMode", this.compositeMode);
     this.syncOptionControls();
     this.requestRender();
+    this.updateUiState();
+  }
+
+  setInteractionMode(mode) {
+    if (!INTERACTION_MODE_VALUES.has(mode)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const nextEnabled = mode === INTERACTION_MODE_ON;
+    if (nextEnabled === this.interactionsOptionEnabled) {
+      return;
+    }
+
+    this.interactionsOptionEnabled = nextEnabled;
+    this.viewerOptionsStore.set(
+      "interactionsEnabled",
+      this.interactionsOptionEnabled,
+    );
+    this.syncOptionControls();
+    this.showNotification(
+      "Refresh required",
+      "info",
+      NOTIFICATION_DURATION_MS,
+      (messageElement) => {
+        messageElement.textContent = "Interaction setting will apply after refresh.";
+      },
+    );
     this.updateUiState();
   }
 
@@ -2002,6 +2067,7 @@ export class GerberViewer {
     for (const input of this.getCompositeModeInputs()) {
       input.disabled = rendererBusy;
     }
+    this.syncInteractionModeControls(rendererBusy);
     this.regionArcExactInput.disabled = rendererBusy;
     this.regionArcApproximateInput.disabled = rendererBusy;
     for (const input of this.getArcQualityInputs()) {

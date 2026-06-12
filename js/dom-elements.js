@@ -103,6 +103,8 @@ export function getViewerElements(documentRef = document) {
       documentRef,
       "composite-mode-stack",
     ),
+    interactionModeOnInput: requireElement(documentRef, "interaction-mode-on"),
+    interactionModeOffInput: requireElement(documentRef, "interaction-mode-off"),
     regionArcExactInput: requireElement(documentRef, "region-arc-exact"),
     regionArcApproximateInput: requireElement(
       documentRef,
