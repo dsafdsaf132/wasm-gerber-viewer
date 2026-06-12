@@ -366,6 +366,9 @@ export class ScreenshotExporter {
     const processor = new wasmModule.GerberProcessor();
     processor.init(gl);
     const parseOptions = this.getParseOptions?.() ?? {};
+    if (typeof processor.set_interactions_enabled === "function") {
+      processor.set_interactions_enabled(false);
+    }
     if (typeof processor.set_preserve_arc_regions === "function") {
       processor.set_preserve_arc_regions(
         parseOptions.preserveArcRegions !== false,
@@ -901,7 +904,7 @@ export class ScreenshotExporter {
     }
     if (screenshotRenderer.blendModes.some((mode) => mode !== 0)) {
       if (typeof screenshotRenderer.processor.render_tile_with_blend_modes !== "function") {
-        throw new Error("Drill screenshot rendering requires an updated WASM module.");
+        throw new Error("Stack compositing and drill screenshot rendering require an updated WASM module.");
       }
       screenshotRenderer.processor.render_tile_with_blend_modes(
         screenshotRenderer.activeLayerIds,

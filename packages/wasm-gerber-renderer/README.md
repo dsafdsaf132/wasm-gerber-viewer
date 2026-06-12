@@ -369,7 +369,7 @@ CLI options:
 - `--height <px>`: output height. Defaults to `800`.
 - `--padding <px>`: fit-to-view padding. Defaults to `0`.
 - `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
-- `--alpha <0-1>`: global Gerber layer opacity. Defaults to `0.7`; drill overlays render at full opacity.
+- `--alpha <0-1>`: Gerber layer opacity in `blend` mode. Defaults to `0.7`; `stack` mode uses full Gerber opacity unless a layer has explicit `alpha`, and drill overlays render at full opacity.
 - `--composite-mode <blend|stack>`: layer compositing mode. Defaults to `blend`.
 - `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.

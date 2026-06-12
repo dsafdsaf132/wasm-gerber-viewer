@@ -1585,7 +1585,7 @@ export class GerberViewer {
       "info",
       NOTIFICATION_DURATION_MS,
       (messageElement) => {
-        messageElement.textContent = "Interaction setting will apply after refresh.";
+        messageElement.textContent = "Interaction setting will apply after page reload.";
       },
     );
     this.updateUiState();
@@ -3778,7 +3778,7 @@ export class GerberViewer {
       // Render with active layers
       if (blendModes.some((mode) => mode !== 0)) {
         if (typeof this.wasmProcessor.render_with_clear_and_blend_modes !== "function") {
-          throw new Error("Drill fill rendering requires an updated WASM module");
+          throw new Error("Stack compositing and drill rendering require an updated WASM module");
         }
         this.wasmProcessor.render_with_clear_and_blend_modes(
           activeLayerIds,

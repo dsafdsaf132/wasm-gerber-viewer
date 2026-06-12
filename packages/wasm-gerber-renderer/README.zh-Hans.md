@@ -344,7 +344,7 @@ CLI 选项：
 - `--height <px>`：输出高度。默认 `800`。
 - `--padding <px>`：自适应视图时使用的像素内边距。默认 `0`。
 - `--background <color>`：hex 或 `rgb()`/`rgba()` 背景。不指定则为透明输出。
-- `--alpha <0-1>`：全局图层透明度。默认 `0.7`。
+- `--alpha <0-1>`：`blend` 模式下的 Gerber 图层透明度。默认 `0.7`；`stack` 模式下没有显式图层 `alpha` 的 Gerber 图层会以不透明方式渲染，钻孔叠加层也以不透明方式渲染。
 - `--composite-mode <blend|stack>`：图层合成模式。默认 `blend`。
 - `--minimum-feature-pixels <px>`：线段/圆弧的最小渲染宽度。默认 `1`。
 - `--max-render-target-bytes <size>`：每个渲染目标的内存上限。接受字节数或 `512m`、`2g` 这样的后缀。

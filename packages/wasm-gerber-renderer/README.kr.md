@@ -344,7 +344,7 @@ CLI 옵션:
 - `--height <px>`: 출력 높이입니다. 기본값은 `800`입니다.
 - `--padding <px>`: fit-to-view padding입니다. 기본값은 `0`입니다.
 - `--background <color>`: hex 또는 `rgb()`/`rgba()` 배경입니다. 생략하면 투명 출력입니다.
-- `--alpha <0-1>`: global layer opacity입니다. 기본값은 `0.7`입니다.
+- `--alpha <0-1>`: `blend` 모드의 Gerber layer opacity입니다. 기본값은 `0.7`입니다. `stack` 모드에서는 명시적인 layer `alpha`가 없는 Gerber layer를 불투명하게 렌더링하며 drill overlay도 불투명하게 렌더링합니다.
 - `--composite-mode <blend|stack>`: layer 합성 모드입니다. 기본값은 `blend`입니다.
 - `--minimum-feature-pixels <px>`: line/arc의 최소 렌더링 폭입니다. 기본값은 `1`입니다.
 - `--max-render-target-bytes <size>`: render target별 memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.

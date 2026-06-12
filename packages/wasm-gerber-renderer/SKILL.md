@@ -65,7 +65,7 @@ Useful CLI options:
 - `--output <path>` sets the PNG output path and is required for multiple inputs.
 - `--background <color>` accepts hex or `rgb()`/`rgba()`; omit for transparent output.
 - `--padding <px>` adds fit-to-view padding.
-- `--alpha <0-1>` sets global Gerber layer opacity; drill overlays render at full opacity.
+- `--alpha <0-1>` sets blend-mode Gerber layer opacity; stack mode defaults Gerber layers to full opacity, and drill overlays render at full opacity.
 - `--composite-mode <blend|stack>` sets additive blending or ordered stack compositing.
 - `--minimum-feature-pixels <px>` keeps thin lines/arcs visible.
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
@@ -277,7 +277,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 - `padding`: fit-to-view padding in pixels.
 - `flipX`, `flipY`: mirror the output around the frame center.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`.
-- `globalAlpha`: opacity for Gerber layers without explicit layer `alpha`.
+- `globalAlpha`: opacity for Gerber layers without explicit layer `alpha` in `blend` mode; `stack` defaults Gerber layers to full opacity.
 - `compositeMode`: `"blend"` for additive alpha blending or `"stack"` for ordered source-over compositing.
 - `minimumFeaturePixels`: minimum visible line/arc width.
 - `renderDrills`: render NC drill files as drill overlays; set `false` to skip them.
