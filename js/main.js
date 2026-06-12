@@ -64,7 +64,18 @@ const RENDERING_MODE_VALUES = new Set([
   RENDERING_MODE_LAZY,
   RENDERING_MODE_REALTIME,
 ]);
+const COMPOSITE_MODE_BLEND = "blend";
+const COMPOSITE_MODE_STACK = "stack";
+const COMPOSITE_MODE_VALUES = new Set([
+  COMPOSITE_MODE_BLEND,
+  COMPOSITE_MODE_STACK,
+]);
 const LAZY_WHEEL_RENDER_DELAY_MS = 140;
+const LAYER_TOUCH_DRAG_DELAY_MS = 500;
+const LAYER_TOUCH_DRAG_CANCEL_PX = 8;
+const LAYER_TOUCH_AUTOSCROLL_EDGE_PX = 56;
+const LAYER_TOUCH_AUTOSCROLL_MAX_PX = 14;
+const LAYER_REORDER_ANIMATION_MS = 180;
 const DRILL_LAYER_KIND = "drill";
 const GERBER_LAYER_KIND = "gerber";
 const PTH_DRILL_TYPE = "pth";
@@ -647,6 +658,11 @@ export class GerberViewer {
     this.nextLayerDomId = 0;
     this.draggedLayerId = null;
     this.layerDropIndex = null;
+    this.layerTouchDrag = null;
+    this.layerTouchDragTimer = null;
+    this.layerTouchScrollFrame = null;
+    this.layerTouchScrollVelocity = 0;
+    this.layerTouchSuppressClickUntil = 0;
     this.pendingLayerRecordsForRecovery = null;
     this.pendingLazyRenderTimer = null;
     this.lazyViewportRenderState = null;
@@ -716,7 +732,7 @@ export class GerberViewer {
     this.arcTessellationQuality =
       this.viewerOptionsStore.get("arcTessellationQuality") ?? "normal";
     this.minimumFeaturePixels = Number(
-      this.viewerOptionsStore.get("minimumFeaturePixels") ?? 0,
+      this.viewerOptionsStore.get("minimumFeaturePixels") ?? 1,
     );
     this.drillOutlinePixels = Number(
       this.viewerOptionsStore.get("drillOutlinePixels") ?? 0,
@@ -728,6 +744,10 @@ export class GerberViewer {
     this.renderingMode = RENDERING_MODE_VALUES.has(storedRenderingMode)
       ? storedRenderingMode
       : RENDERING_MODE_LAZY;
+    const storedCompositeMode = this.viewerOptionsStore.get("compositeMode");
+    this.compositeMode = COMPOSITE_MODE_VALUES.has(storedCompositeMode)
+      ? storedCompositeMode
+      : COMPOSITE_MODE_BLEND;
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -775,7 +795,8 @@ export class GerberViewer {
         canvasHeight: this.canvas.height,
         rectWidth: rect.width,
         rectHeight: rect.height,
-        globalAlpha: this.globalAlpha,
+        globalAlpha: this.getCompositeAlpha(),
+        compositeMode: this.compositeMode,
         backgroundColor: this.isCanvasLight ? "#f8fafc" : "#020617",
       }),
       isWebGlUnavailable: () =>
@@ -1100,6 +1121,14 @@ export class GerberViewer {
       });
     }
 
+    for (const input of this.getCompositeModeInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setCompositeMode(input.value);
+        }
+      });
+    }
+
     // Alpha slider
     this.alphaSlider.addEventListener("input", (e) => {
       const alpha = parseInt(e.target.value) / 100;
@@ -1217,6 +1246,31 @@ export class GerberViewer {
         this.clearLayerDropIndicator();
       }
     });
+    this.layerList.addEventListener(
+      "touchstart",
+      (e) => this.handleLayerTouchStart(e),
+      { passive: false },
+    );
+    this.layerList.addEventListener(
+      "touchmove",
+      (e) => this.handleLayerTouchMove(e),
+      { passive: false },
+    );
+    this.layerList.addEventListener(
+      "touchend",
+      (e) => this.handleLayerTouchEnd(e),
+      { passive: false },
+    );
+    this.layerList.addEventListener(
+      "touchcancel",
+      (e) => this.handleLayerTouchCancel(e),
+      { passive: false },
+    );
+    this.layerList.addEventListener(
+      "click",
+      (e) => this.suppressLayerClickAfterTouchDrag(e),
+      true,
+    );
 
     // File drop events
     this.dropZone.addEventListener("dragover", (e) => this.handleDragOver(e));
@@ -1323,6 +1377,7 @@ export class GerberViewer {
       minimumFeaturePixels: this.minimumFeaturePixels,
       drillOutlinePixels: this.drillOutlinePixels,
       pthPlatingMicrometers: this.pthPlatingMicrometers,
+      compositeMode: this.compositeMode,
     };
   }
 
@@ -1369,6 +1424,10 @@ export class GerberViewer {
     return [this.renderingModeLazyInput, this.renderingModeRealtimeInput];
   }
 
+  getCompositeModeInputs() {
+    return [this.compositeModeBlendInput, this.compositeModeStackInput];
+  }
+
   syncRenderingModeControls() {
     const renderingModeDisabled =
       this.isRendererBusy() || this.isViewportGestureActive();
@@ -1380,6 +1439,11 @@ export class GerberViewer {
 
   syncOptionControls() {
     this.syncRenderingModeControls();
+
+    for (const input of this.getCompositeModeInputs()) {
+      input.checked = input.value === this.compositeMode;
+      input.disabled = this.isRendererBusy();
+    }
 
     this.regionArcExactInput.checked = this.preserveArcRegions;
     this.regionArcApproximateInput.checked = !this.preserveArcRegions;
@@ -1440,6 +1504,39 @@ export class GerberViewer {
 
   shouldRenderViewportRealtime() {
     return this.isRealtimeRendering();
+  }
+
+  setCompositeMode(mode) {
+    if (!COMPOSITE_MODE_VALUES.has(mode)) {
+      this.syncOptionControls();
+      return;
+    }
+    if (mode === this.compositeMode) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    this.compositeMode = mode;
+    this.viewerOptionsStore.set("compositeMode", this.compositeMode);
+    this.syncOptionControls();
+    this.requestRender();
+    this.updateUiState();
+  }
+
+  isStackCompositeMode() {
+    return this.compositeMode === COMPOSITE_MODE_STACK;
+  }
+
+  updateAlphaControlState(rendererBusy = this.isRendererBusy()) {
+    const shouldHide = this.isStackCompositeMode();
+    const alphaControl = this.alphaSlider.closest(".alpha-control");
+    if (alphaControl) {
+      alphaControl.hidden = shouldHide;
+    }
+    this.alphaSlider.disabled = rendererBusy || shouldHide;
   }
 
   isViewportGestureActive() {
@@ -1897,10 +1994,14 @@ export class GerberViewer {
     this.fileInput.disabled = rendererBusy;
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
+    this.updateAlphaControlState(rendererBusy);
     this.clearAllBtn.disabled = rendererBusy || totalLayers === 0;
     this.toolbarClearAllBtn.disabled = rendererBusy || totalLayers === 0;
     this.updateEmptyLayerListActionState(rendererBusy);
     this.syncRenderingModeControls();
+    for (const input of this.getCompositeModeInputs()) {
+      input.disabled = rendererBusy;
+    }
     this.regionArcExactInput.disabled = rendererBusy;
     this.regionArcApproximateInput.disabled = rendererBusy;
     for (const input of this.getArcQualityInputs()) {
@@ -3605,7 +3706,8 @@ export class GerberViewer {
     }
 
     try {
-      const { activeLayerIds, colorData, blendModes } = this.getRenderLayerPayload();
+      const { activeLayerIds, colorData, blendModes, alpha } =
+        this.getRenderLayerPayload();
 
       // Render with active layers
       if (blendModes.some((mode) => mode !== 0)) {
@@ -3620,7 +3722,7 @@ export class GerberViewer {
           this.getViewScaleY(),
           this.camera.offsetX,
           this.camera.offsetY,
-          this.globalAlpha,
+          alpha,
           true,
         );
       } else {
@@ -3631,7 +3733,7 @@ export class GerberViewer {
           this.getViewScaleY(),
           this.camera.offsetX,
           this.camera.offsetY,
-          this.globalAlpha,
+          alpha,
         );
       }
       this.renderSelectedFeatureHighlight();
@@ -3678,17 +3780,23 @@ export class GerberViewer {
     const activeLayerIds = [];
     const colorData = [];
     const blendModes = [];
+    const alpha = this.getCompositeAlpha();
+    const isStack = this.isStackCompositeMode();
     const backgroundColor = this.isCanvasLight
       ? [248 / 255, 250 / 255, 252 / 255]
       : [2 / 255, 6 / 255, 23 / 255];
-    const drillAlpha = this.globalAlpha > 0 ? 1 / this.globalAlpha : 0;
+    const drillAlpha = alpha > 0 ? 1 / alpha : 0;
 
-    this.layers.forEach((layer) => {
-      if (!isDrillLayer(layer) && selectedLayerIds.has(layer.id)) {
-        activeLayerIds.push(layer.layerId);
-        colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
-        blendModes.push(0);
-      }
+    const gerberLayers = this.layers.filter(
+      (layer) => !isDrillLayer(layer) && selectedLayerIds.has(layer.id),
+    );
+    const orderedGerberLayers = isStack
+      ? [...gerberLayers].reverse()
+      : gerberLayers;
+    orderedGerberLayers.forEach((layer) => {
+      activeLayerIds.push(layer.layerId);
+      colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
+      blendModes.push(isStack ? 1 : 0);
     });
 
     this.layers.forEach((layer) => {
@@ -3721,7 +3829,12 @@ export class GerberViewer {
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
       blendModes: new Uint8Array(blendModes),
+      alpha,
     };
+  }
+
+  getCompositeAlpha() {
+    return this.isStackCompositeMode() ? 1 : this.globalAlpha;
   }
 
   renderMeasurements() {
@@ -4298,10 +4411,11 @@ export class GerberViewer {
 
   getVisibleInteractionLayerIds() {
     const layerIds = [];
-    for (const layer of this.layers) {
-      if (layer.visible && !isDrillLayer(layer)) {
-        layerIds.push(layer.layerId);
-      }
+    const gerberLayers = this.layers
+      .filter((layer) => layer.visible && !isDrillLayer(layer))
+      .reverse();
+    for (const layer of gerberLayers) {
+      layerIds.push(layer.layerId);
     }
     for (const layer of this.layers) {
       if (layer.visible && isDrillLayer(layer)) {
@@ -4960,30 +5074,75 @@ export class GerberViewer {
 
     event.preventDefault();
     event.stopPropagation();
+    this.reorderGerberLayer(this.draggedLayerId, this.layerDropIndex);
+    this.draggedLayerId = null;
+    this.layerDropIndex = null;
+    this.clearLayerDropIndicator();
+  }
+
+  reorderGerberLayer(layerId, dropIndex) {
     const gerberLayers = this.layers.filter((layer) => !isDrillLayer(layer));
     const drillLayers = this.layers.filter(isDrillLayer);
     const fromIndex = gerberLayers.findIndex(
-      (layer) => layer.id === this.draggedLayerId,
+      (layer) => layer.id === layerId,
     );
-    if (fromIndex === -1) return;
+    if (fromIndex === -1) return false;
 
-    let toIndex = this.layerDropIndex;
+    let toIndex = dropIndex;
     if (fromIndex < toIndex) {
       toIndex -= 1;
     }
 
     if (fromIndex !== toIndex) {
+      const previousRects = this.captureLayerItemRects();
       const [layer] = gerberLayers.splice(fromIndex, 1);
       gerberLayers.splice(toIndex, 0, layer);
       this.layers = [...gerberLayers, ...drillLayers];
       this.renderLayerList();
+      this.animateLayerReorder(previousRects);
       this.requestRender();
       this.updateUiState();
     }
 
-    this.draggedLayerId = null;
-    this.layerDropIndex = null;
-    this.clearLayerDropIndicator();
+    return fromIndex !== toIndex;
+  }
+
+  captureLayerItemRects() {
+    const rects = new Map();
+    for (const item of this.layerList.querySelectorAll(".layer-item[data-layer-id]")) {
+      rects.set(item.dataset.layerId, item.getBoundingClientRect());
+    }
+    return rects;
+  }
+
+  animateLayerReorder(previousRects) {
+    if (
+      !previousRects?.size ||
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+
+    for (const item of this.layerList.querySelectorAll(".layer-item[data-layer-id]")) {
+      const previousRect = previousRects.get(item.dataset.layerId);
+      if (!previousRect) continue;
+
+      const currentRect = item.getBoundingClientRect();
+      const deltaX = previousRect.left - currentRect.left;
+      const deltaY = previousRect.top - currentRect.top;
+      if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) continue;
+
+      item.animate(
+        [
+          { transform: `translate(${deltaX}px, ${deltaY}px)` },
+          { transform: "translate(0, 0)" },
+        ],
+        {
+          duration: LAYER_REORDER_ANIMATION_MS,
+          easing: "cubic-bezier(0.2, 0, 0, 1)",
+        },
+      );
+    }
   }
 
   getLayerDropPlacement(clientY) {
@@ -5015,6 +5174,224 @@ export class GerberViewer {
     this.layerList
       .querySelectorAll(".drop-before, .drop-after")
       .forEach((item) => item.classList.remove("drop-before", "drop-after"));
+  }
+
+  handleLayerTouchStart(event) {
+    if (event.touches.length !== 1 || this.layerTouchDrag) {
+      this.cancelLayerTouchDrag();
+      return;
+    }
+    if (
+      event.target instanceof Element &&
+      event.target.closest("input, button")
+    ) {
+      return;
+    }
+
+    const item = event.target instanceof Element
+      ? event.target.closest('.layer-item[draggable="true"][data-layer-id]')
+      : null;
+    if (!item) {
+      return;
+    }
+
+    const touch = event.touches[0];
+    const layerId = item.dataset.layerId;
+    const scrollElement = this.getLayerListScrollElement();
+    this.layerTouchDrag = {
+      active: false,
+      identifier: touch.identifier,
+      layerId,
+      item,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      lastClientY: touch.clientY,
+      scrollElement,
+    };
+    this.layerTouchDragTimer = window.setTimeout(() => {
+      this.activateLayerTouchDrag();
+    }, LAYER_TOUCH_DRAG_DELAY_MS);
+  }
+
+  handleLayerTouchMove(event) {
+    if (!this.layerTouchDrag) return;
+
+    if (event.touches.length !== 1) {
+      if (this.layerTouchDrag.active) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.layerTouchSuppressClickUntil = Date.now() + 500;
+      }
+      this.cancelLayerTouchDrag();
+      return;
+    }
+
+    const touch = this.findLayerTouch(event.touches);
+    if (!touch) {
+      this.cancelLayerTouchDrag();
+      return;
+    }
+
+    const drag = this.layerTouchDrag;
+    const distance = Math.hypot(
+      touch.clientX - drag.startX,
+      touch.clientY - drag.startY,
+    );
+
+    if (!drag.active) {
+      if (distance > LAYER_TOUCH_DRAG_CANCEL_PX) {
+        this.cancelLayerTouchDrag();
+      }
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    drag.lastClientY = touch.clientY;
+    this.updateLayerTouchDropPlacement(touch.clientY);
+    this.updateLayerTouchAutoScroll(touch.clientY);
+  }
+
+  handleLayerTouchEnd(event) {
+    if (!this.layerTouchDrag) return;
+
+    const drag = this.layerTouchDrag;
+    if (!this.findLayerTouch(event.changedTouches)) {
+      return;
+    }
+
+    const wasActive = drag.active;
+    if (wasActive) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.draggedLayerId && this.layerDropIndex !== null) {
+        this.reorderGerberLayer(this.draggedLayerId, this.layerDropIndex);
+      }
+      this.layerTouchSuppressClickUntil = Date.now() + 500;
+    }
+    this.cancelLayerTouchDrag();
+  }
+
+  handleLayerTouchCancel(event) {
+    if (!this.layerTouchDrag) return;
+    if (this.layerTouchDrag.active) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.layerTouchSuppressClickUntil = Date.now() + 500;
+    }
+    this.cancelLayerTouchDrag();
+  }
+
+  activateLayerTouchDrag() {
+    const drag = this.layerTouchDrag;
+    if (!drag || drag.active) return;
+
+    drag.active = true;
+    this.draggedLayerId = drag.layerId;
+    this.layerDropIndex = null;
+    this.dropZone.classList.remove("drag-active");
+    drag.item.classList.add("dragging", "touch-dragging");
+    this.updateLayerTouchDropPlacement(drag.lastClientY);
+  }
+
+  cancelLayerTouchDrag() {
+    if (this.layerTouchDragTimer !== null) {
+      clearTimeout(this.layerTouchDragTimer);
+      this.layerTouchDragTimer = null;
+    }
+    this.stopLayerTouchAutoScroll();
+    if (this.layerTouchDrag?.item) {
+      this.layerTouchDrag.item.classList.remove("dragging", "touch-dragging");
+    }
+    this.layerTouchDrag = null;
+    this.draggedLayerId = null;
+    this.layerDropIndex = null;
+    this.layerTouchScrollVelocity = 0;
+    this.clearLayerDropIndicator();
+  }
+
+  findLayerTouch(touchList) {
+    const drag = this.layerTouchDrag;
+    if (!drag) return null;
+    return Array.from(touchList).find(
+      (touch) => touch.identifier === drag.identifier,
+    ) ?? null;
+  }
+
+  getLayerListScrollElement() {
+    return this.layerList.closest(".layer-list-scroll") ?? this.layerList;
+  }
+
+  updateLayerTouchDropPlacement(clientY) {
+    const placement = this.getLayerDropPlacement(clientY);
+    if (!placement) return;
+
+    this.layerDropIndex = placement.dropIndex;
+    this.clearLayerDropIndicator();
+    placement.item.classList.add(
+      placement.position === "after" ? "drop-after" : "drop-before",
+    );
+  }
+
+  updateLayerTouchAutoScroll(clientY) {
+    const drag = this.layerTouchDrag;
+    const scrollElement = drag?.scrollElement;
+    if (!drag?.active || !scrollElement) return;
+
+    const rect = scrollElement.getBoundingClientRect();
+    let velocity = 0;
+    if (clientY < rect.top + LAYER_TOUCH_AUTOSCROLL_EDGE_PX) {
+      const ratio =
+        (rect.top + LAYER_TOUCH_AUTOSCROLL_EDGE_PX - clientY) /
+        LAYER_TOUCH_AUTOSCROLL_EDGE_PX;
+      velocity = -Math.ceil(ratio * LAYER_TOUCH_AUTOSCROLL_MAX_PX);
+    } else if (clientY > rect.bottom - LAYER_TOUCH_AUTOSCROLL_EDGE_PX) {
+      const ratio =
+        (clientY - (rect.bottom - LAYER_TOUCH_AUTOSCROLL_EDGE_PX)) /
+        LAYER_TOUCH_AUTOSCROLL_EDGE_PX;
+      velocity = Math.ceil(ratio * LAYER_TOUCH_AUTOSCROLL_MAX_PX);
+    }
+
+    this.layerTouchScrollVelocity = velocity;
+    if (velocity === 0) {
+      this.stopLayerTouchAutoScroll();
+      return;
+    }
+
+    if (this.layerTouchScrollFrame === null) {
+      this.layerTouchScrollFrame = requestAnimationFrame(() =>
+        this.stepLayerTouchAutoScroll(),
+      );
+    }
+  }
+
+  stepLayerTouchAutoScroll() {
+    this.layerTouchScrollFrame = null;
+    const drag = this.layerTouchDrag;
+    const scrollElement = drag?.scrollElement;
+    if (!drag?.active || !scrollElement || this.layerTouchScrollVelocity === 0) {
+      return;
+    }
+
+    scrollElement.scrollTop += this.layerTouchScrollVelocity;
+    this.updateLayerTouchDropPlacement(drag.lastClientY);
+    this.layerTouchScrollFrame = requestAnimationFrame(() =>
+      this.stepLayerTouchAutoScroll(),
+    );
+  }
+
+  stopLayerTouchAutoScroll() {
+    if (this.layerTouchScrollFrame !== null) {
+      cancelAnimationFrame(this.layerTouchScrollFrame);
+      this.layerTouchScrollFrame = null;
+    }
+  }
+
+  suppressLayerClickAfterTouchDrag(event) {
+    if (Date.now() > this.layerTouchSuppressClickUntil) return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
   }
 
   renderLayerList() {

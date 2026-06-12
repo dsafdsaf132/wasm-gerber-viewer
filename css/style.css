@@ -721,6 +721,11 @@ button {
   background: var(--surface-2);
 }
 
+.alpha-control[hidden],
+.side-panel.collapsed .alpha-control[hidden] {
+  display: none;
+}
+
 .layer-list-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -771,10 +776,17 @@ button {
 
 .layer-item[draggable="true"] {
   cursor: grab;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .layer-item.dragging {
   opacity: 0.45;
+}
+
+.layer-item.touch-dragging {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.55);
 }
 
 .layer-item.drop-before::before,

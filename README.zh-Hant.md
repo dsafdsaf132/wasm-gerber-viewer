@@ -147,6 +147,7 @@ wasm-gerber-viewer/
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
 │   ├── Cargo.lock                     # Rust dependency lockfile
+│   ├── rust-pipeline.md               # Rust/WASM 管線說明
 │   ├── pkg/                           # 產生的 wasm-pack 輸出
 │   └── src/
 │       ├── lib.rs                     # WASM API 入口

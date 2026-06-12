@@ -133,6 +133,7 @@ wasm-gerber-viewer/
 │   └── wasm-gerber-renderer/          # npm package and Node CLI
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
+│   ├── rust-pipeline.md               # Rust/WASM pipeline notes
 │   ├── pkg/                           # Generated wasm-pack output
 │   └── src/
 │       ├── lib.rs                     # WASM API entry point

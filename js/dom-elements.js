@@ -95,6 +95,14 @@ export function getViewerElements(documentRef = document) {
       documentRef,
       "rendering-mode-realtime",
     ),
+    compositeModeBlendInput: requireElement(
+      documentRef,
+      "composite-mode-blend",
+    ),
+    compositeModeStackInput: requireElement(
+      documentRef,
+      "composite-mode-stack",
+    ),
     regionArcExactInput: requireElement(documentRef, "region-arc-exact"),
     regionArcApproximateInput: requireElement(
       documentRef,
