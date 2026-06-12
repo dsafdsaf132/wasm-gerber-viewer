@@ -456,6 +456,7 @@ class GerberParseWorkerPool {
           offset: task.offset,
           preserveArcRegions: task.options.preserveArcRegions,
           arcTessellationQuality: task.options.arcTessellationQuality,
+          interactionsEnabled: task.options.interactionsEnabled,
         });
       } catch (error) {
         this.activeTasks.delete(worker);
@@ -481,6 +482,7 @@ class GerberParseWorkerPool {
     if (event.data.ok) {
       task.resolve({
         renderPayload: event.data.parsedLayer,
+        interactionPayload: event.data.interactionPayload ?? null,
       });
     } else {
       const errorMessage = event.data.error || "Failed to parse Gerber layer";
@@ -1863,12 +1865,16 @@ export class GerberViewer {
           parsedLayers.push({ ...layer, parsedLayer: null });
         } else {
           try {
-            const parsedLayer = await this.parseLayerContent(
+            const parseResult = await this.parseLayerContent(
               layer.sourceContent,
               layer.offset,
               null,
             );
-            parsedLayers.push({ ...layer, parsedLayer });
+            parsedLayers.push({
+              ...layer,
+              parsedLayer: parseResult.renderPayload,
+              interactionPayload: parseResult.interactionPayload,
+            });
           } catch (error) {
             this.handleLayerLoadError(layer.name, error);
             throw new Error(
@@ -1901,6 +1907,7 @@ export class GerberViewer {
             sourceContent: layer.sourceContent,
             offset: layer.offset,
             drillType: layer.drillType,
+            interactionPayload: layer.interactionPayload,
             skipFatalRecovery: true,
           };
           const layerRecord =
@@ -1927,8 +1934,6 @@ export class GerberViewer {
             total: parsedLayers.length,
           });
         }
-
-        await this.buildInteractionLayersProgressively(stagedProcessor, stagedLayers);
 
         const previousProcessor = this.wasmProcessor;
         this.wasmProcessor = stagedProcessor;
@@ -2491,7 +2496,6 @@ export class GerberViewer {
         return;
       }
 
-      const layersBefore = this.layers.length;
       const results = await this.loadLayerSources(layerSources, {
         title: "Loading remote file",
       });
@@ -2503,10 +2507,6 @@ export class GerberViewer {
         this.fitView();
         this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
       }
-      await this.buildInteractionLayersProgressively(
-        this.wasmProcessor,
-        this.layers.slice(layersBefore),
-      );
     } finally {
       this.hideLoadingModal();
     }
@@ -2553,7 +2553,6 @@ export class GerberViewer {
         const layerSources = await this.collectLayerSources(validFiles);
 
         if (layerSources.length > 0) {
-          const layersBefore = this.layers.length;
           const results = await this.loadLayerSources(layerSources, {
             title: "Loading files",
           });
@@ -2565,10 +2564,6 @@ export class GerberViewer {
             this.fitView();
             this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
           }
-          await this.buildInteractionLayersProgressively(
-            this.wasmProcessor,
-            this.layers.slice(layersBefore),
-          );
         }
       } finally {
         this.hideLoadingModal();
@@ -2896,6 +2891,31 @@ export class GerberViewer {
       return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
     }
 
+    const parsePayloadWithOptions =
+      this.wasmModule?.parse_gerber_layer_payload_with_options;
+    if (
+      parseOptions.interactionsEnabled &&
+      typeof parsePayloadWithOptions === "function"
+    ) {
+      this.reserveWasmInputCapacity(content);
+      const payload = parsePayloadWithOptions(
+        content,
+        normalizedOffset.x,
+        normalizedOffset.y,
+        parseOptions.preserveArcRegions,
+        parseOptions.arcTessellationQuality,
+      );
+      return {
+        renderPayload: payload.renderPayload,
+        interactionPayload: payload.interactionPayload ?? null,
+      };
+    }
+    if (parseOptions.interactionsEnabled) {
+      throw new Error(
+        "Interaction parsing requires an updated WASM module",
+      );
+    }
+
     const parseWithOptions = this.wasmModule?.parse_gerber_layer_with_options;
     if (typeof parseWithOptions === "function") {
       if (
@@ -2914,7 +2934,7 @@ export class GerberViewer {
           parseOptions.preserveArcRegions,
           parseOptions.arcTessellationQuality,
         ),
-        interactionData: null,
+        interactionPayload: null,
       };
     }
 
@@ -2932,7 +2952,7 @@ export class GerberViewer {
         normalizedOffset.x,
         normalizedOffset.y,
       ),
-      interactionData: null,
+      interactionPayload: null,
     };
   }
 
@@ -2978,7 +2998,7 @@ export class GerberViewer {
         current: progress.completedLayers,
         total,
       });
-      const { renderPayload } = await this.parseLayerContent(
+      const { renderPayload, interactionPayload = null } = await this.parseLayerContent(
         content,
         source.offset,
         parseWorkerPool,
@@ -2995,6 +3015,7 @@ export class GerberViewer {
         index,
         name,
         parsedLayer: renderPayload,
+        interactionPayload,
         sourceContent: content,
         offset: source.offset,
       };
@@ -3113,6 +3134,7 @@ export class GerberViewer {
         {
           offset: parseResult.offset,
           sourceContent: parseResult.sourceContent,
+          interactionPayload: parseResult.interactionPayload,
         },
       );
       const completed = this.markLayerLoadComplete(progress);
@@ -3135,6 +3157,7 @@ export class GerberViewer {
       return null;
     } finally {
       parseResult.parsedLayer = null;
+      parseResult.interactionPayload = null;
       parseResult.sourceContent = null;
     }
   }
@@ -3455,33 +3478,6 @@ export class GerberViewer {
     return this.commitLayerMetadata(layer);
   }
 
-  async buildInteractionLayersProgressively(processor, layers) {
-    if (!this.interactionsEnabled) return;
-    if (!processor || typeof processor.build_layer_interactions !== "function") return;
-
-    for (const layer of layers) {
-      if (isDrillLayer(layer)) continue;
-      if (typeof layer.sourceContent !== "string") continue;
-      if (processor.has_interaction_layer?.(layer.layerId)) continue;
-
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-
-      const offset = normalizeLayerOffset(layer.offset);
-      try {
-        processor.build_layer_interactions(
-          layer.layerId,
-          layer.sourceContent,
-          offset.x,
-          offset.y,
-        );
-      } catch (error) {
-        if (!isNoGeometryError(getErrorMessage(error))) {
-          console.warn(`[Interaction] Failed to build interactions for ${layer.name}:`, error);
-        }
-      }
-    }
-  }
-
   async createGerberLayerRecord(
     name,
     content,
@@ -3648,6 +3644,23 @@ export class GerberViewer {
         layerId = processor.add_parsed_layer(parsedLayer);
       } else {
         throw new Error("Parsed layer rendering requires an updated WASM module");
+      }
+      if (
+        this.interactionsEnabled &&
+        options.interactionPayload &&
+        typeof processor.add_interaction_payload === "function"
+      ) {
+        try {
+          processor.add_interaction_payload(layerId, options.interactionPayload);
+        } catch (interactionError) {
+          if (isFatalWasmRuntimeError(interactionError)) {
+            throw interactionError;
+          }
+          console.warn(
+            `[Interaction] Failed to attach interactions for ${name}:`,
+            interactionError,
+          );
+        }
       }
       return this.createLayerMetadata(name, layerId, options, processor);
     } catch (error) {

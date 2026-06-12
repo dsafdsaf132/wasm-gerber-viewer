@@ -112,6 +112,7 @@ self.addEventListener("message", async (event) => {
     offset = {},
     preserveArcRegions = true,
     arcTessellationQuality = 1,
+    interactionsEnabled = false,
   } = event.data ?? {};
   let content = event.data?.content;
   let beforeBytes = null;
@@ -127,11 +128,30 @@ self.addEventListener("message", async (event) => {
     const offsetX = Number(offset.x ?? 0);
     const offsetY = Number(offset.y ?? 0);
 
+    const supportsInteractionPayload =
+      interactionsEnabled &&
+      typeof wasmModule.parse_gerber_layer_payload_with_options === "function";
+    if (
+      interactionsEnabled &&
+      typeof wasmModule.parse_gerber_layer_payload_with_options !== "function"
+    ) {
+      throw new Error(
+        "Parse worker API unavailable: parse_gerber_layer_payload_with_options is missing",
+      );
+    }
     const supportsArcQuality =
       typeof wasmModule.parse_gerber_layer_with_options === "function" &&
       wasmModule.parse_gerber_layer_with_options.length >= 5;
-    const parseLayer =
-      typeof wasmModule.parse_gerber_layer_with_options === "function"
+    const parseLayer = supportsInteractionPayload
+      ? () =>
+          wasmModule.parse_gerber_layer_payload_with_options(
+            content,
+            offsetX,
+            offsetY,
+            Boolean(preserveArcRegions),
+            normalizedQuality,
+          )
+      : typeof wasmModule.parse_gerber_layer_with_options === "function"
         ? () => {
             if (
               !supportsArcQuality &&
@@ -158,13 +178,23 @@ self.addEventListener("message", async (event) => {
             }
             return wasmModule.parse_gerber_layer(content, offsetX, offsetY);
           };
-    const parsedLayer = parseLayer();
-    const transferables = collectTransferables(parsedLayer);
+    const parsedResult = parseLayer();
+    const parsedLayer = supportsInteractionPayload
+      ? parsedResult.renderPayload
+      : parsedResult;
+    const interactionPayload = supportsInteractionPayload
+      ? parsedResult.interactionPayload
+      : null;
+    const transferables = collectTransferables({
+      parsedLayer,
+      interactionPayload,
+    });
     self.postMessage(
       {
         id,
         ok: true,
         parsedLayer,
+        interactionPayload,
         workerMemory: {
           beforeBytes,
           afterBytes: getWorkerWasmMemoryBytes(),

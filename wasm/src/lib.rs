@@ -138,6 +138,39 @@ pub fn parse_gerber_layer_with_options(
     gerber_data_layers_to_js(&gerber_data_layers)
 }
 
+#[wasm_bindgen]
+pub fn parse_gerber_layer_payload_with_options(
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+) -> Result<JsValue, JsValue> {
+    let payload = parse_layer_payload_data(
+        &content,
+        offset_x,
+        offset_y,
+        preserve_arc_regions,
+        arc_tessellation_quality,
+    )?;
+
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &JsValue::from_str("renderPayload"),
+        &gerber_data_layers_to_js(&payload.render_layers)?,
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("interactionPayload"),
+        &match payload.interaction_layer {
+            Some(layer) => layer.to_compact_js()?,
+            None => JsValue::NULL,
+        },
+    )?;
+    Ok(object.into())
+}
+
 fn drill_parse_result_to_js(drill: DrillParseResult) -> Result<JsValue, JsValue> {
     let object = Object::new();
     Reflect::set(
@@ -629,6 +662,22 @@ impl GerberProcessor {
                 "Renderer not initialized. Call init() first.",
             ))
         }
+    }
+
+    pub fn add_interaction_payload(
+        &mut self,
+        layer_id: u32,
+        interaction_payload: JsValue,
+    ) -> Result<(), JsValue> {
+        if !self.interaction_enabled
+            || interaction_payload.is_null()
+            || interaction_payload.is_undefined()
+        {
+            return Ok(());
+        }
+        let interaction_layer = InteractionLayer::from_compact_js(&interaction_payload)?;
+        self.set_interaction_layer(layer_id as usize, Some(interaction_layer));
+        Ok(())
     }
 
     /// Build and store the interaction layer for an already-loaded render layer.
