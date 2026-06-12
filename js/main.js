@@ -456,7 +456,6 @@ class GerberParseWorkerPool {
           offset: task.offset,
           preserveArcRegions: task.options.preserveArcRegions,
           arcTessellationQuality: task.options.arcTessellationQuality,
-          includeInteractions: task.options.interactionsEnabled ?? false,
         });
       } catch (error) {
         this.activeTasks.delete(worker);
@@ -482,7 +481,6 @@ class GerberParseWorkerPool {
     if (event.data.ok) {
       task.resolve({
         renderPayload: event.data.parsedLayer,
-        interactionData: event.data.interactionData ?? null,
       });
     } else {
       const errorMessage = event.data.error || "Failed to parse Gerber layer";
@@ -2581,7 +2579,7 @@ export class GerberViewer {
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     this.wasmMemoryExhausted = false;
     const total = layerSources.length;
-    if (layerSources.some(isDrillSource)) {
+    if (layerSources.some(isDrillSource) || this.interactionsEnabled) {
       return this.loadLayerSourcesSerially(layerSources, { title, total });
     }
 
@@ -2890,15 +2888,7 @@ export class GerberViewer {
     const parseOptions = this.getParseOptions();
 
     if (parseWorkerPool) {
-      // Worker resolves with { renderPayload, interactionData? }
       return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
-    }
-
-    if (parseOptions.interactionsEnabled) {
-      // No workers available — trigger serial fallback via pipeline abort
-      throw new ParseWorkerUnavailableError(
-        "Interactive parallel parsing requires parse workers",
-      );
     }
 
     const parseWithOptions = this.wasmModule?.parse_gerber_layer_with_options;
@@ -2983,7 +2973,7 @@ export class GerberViewer {
         current: progress.completedLayers,
         total,
       });
-      const { renderPayload, interactionData } = await this.parseLayerContent(
+      const { renderPayload } = await this.parseLayerContent(
         content,
         source.offset,
         parseWorkerPool,
@@ -3000,7 +2990,6 @@ export class GerberViewer {
         index,
         name,
         parsedLayer: renderPayload,
-        interactionData,
         sourceContent: content,
         offset: source.offset,
       };
@@ -3119,7 +3108,6 @@ export class GerberViewer {
         {
           offset: parseResult.offset,
           sourceContent: parseResult.sourceContent,
-          interactionData: parseResult.interactionData,
         },
       );
       const completed = this.markLayerLoadComplete(progress);
@@ -3142,7 +3130,6 @@ export class GerberViewer {
       return null;
     } finally {
       parseResult.parsedLayer = null;
-      parseResult.interactionData = null;
       parseResult.sourceContent = null;
     }
   }
@@ -3623,16 +3610,7 @@ export class GerberViewer {
       }
 
       let layerId;
-      const { interactionData } = options;
-      if (
-        interactionData &&
-        typeof processor.add_render_payload_with_interactions === "function"
-      ) {
-        layerId = processor.add_render_payload_with_interactions(
-          parsedLayer,
-          interactionData,
-        );
-      } else if (typeof processor.add_render_payload === "function") {
+      if (typeof processor.add_render_payload === "function") {
         layerId = processor.add_render_payload(parsedLayer);
       } else if (typeof processor.add_parsed_layer === "function") {
         layerId = processor.add_parsed_layer(parsedLayer);
