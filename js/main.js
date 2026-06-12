@@ -43,6 +43,8 @@ const MAX_PARSE_WORKERS = 4;
 const BYTES_PER_MIB = 1024 * 1024;
 const RECYCLE_PARSE_WORKER_MEMORY_BYTES = 256 * BYTES_PER_MIB;
 const RECYCLE_PARSE_WORKER_GROWTH_BYTES = 128 * BYTES_PER_MIB;
+const WASM_LINEAR_MEMORY_RENDER_LIMIT_BYTES = 3584 * BYTES_PER_MIB;
+const WASM_LINEAR_MEMORY_INTERACTION_LIMIT_BYTES = 3584 * BYTES_PER_MIB;
 const ARC_TESSELLATION_QUALITY_LEVELS = {
   low: 0,
   normal: 1,
@@ -595,7 +597,9 @@ export class GerberViewer {
     this.wasmModule = null;
     this.wasmExports = null;
     this.wasmProcessor = null;
+    this.interactionProcessor = null;
     this.interactionsEnabled = true;
+    this.featurePickingAvailable = true;
     this.isWebGlContextLost = false;
     this.isRestoringWebGlContext = false;
     this.isRecoveringWasmProcessor = false;
@@ -704,6 +708,7 @@ export class GerberViewer {
     this.interactionsOptionEnabled =
       this.viewerOptionsStore.get("interactionsEnabled") !== false;
     this.interactionsEnabled = this.interactionsOptionEnabled;
+    this.featurePickingAvailable = this.interactionsEnabled;
     this.drawerController = new DrawerController({
       drawer: this.drawer,
       resizeHandle: this.resizeHandle,
@@ -835,7 +840,29 @@ export class GerberViewer {
     }
   }
 
-  configureWasmProcessorOptions(processor) {
+  createInteractionProcessor() {
+    if (!this.gl || this.isWebGlContextLost) {
+      throw new Error("WebGL renderer is not available");
+    }
+
+    const processor = new this.wasmModule.GerberProcessor();
+    try {
+      processor.init(this.gl);
+      this.configureWasmProcessorOptions(processor, {
+        interactionsEnabled: true,
+      });
+      processor.resize();
+      return processor;
+    } catch (error) {
+      this.disposeWasmProcessorInstance(processor, "interaction processor");
+      throw error;
+    }
+  }
+
+  configureWasmProcessorOptions(
+    processor,
+    { interactionsEnabled = this.interactionsEnabled } = {},
+  ) {
     if (typeof processor?.set_preserve_arc_regions === "function") {
       processor.set_preserve_arc_regions(this.preserveArcRegions);
     }
@@ -849,7 +876,13 @@ export class GerberViewer {
     }
 
     if (typeof processor?.set_interactions_enabled === "function") {
-      processor.set_interactions_enabled(this.interactionsEnabled);
+      processor.set_interactions_enabled(interactionsEnabled);
+    }
+  }
+
+  disableProcessorInteractions(processor) {
+    if (typeof processor?.set_interactions_enabled === "function") {
+      processor.set_interactions_enabled(false);
     }
   }
 
@@ -929,6 +962,7 @@ export class GerberViewer {
     if (canResizeProcessor) {
       try {
         this.wasmProcessor.resize();
+        this.interactionProcessor?.resize?.();
       } catch (error) {
         const message = getErrorMessage(error);
         console.error("[Render] Failed to resize renderer:", error);
@@ -1273,6 +1307,15 @@ export class GerberViewer {
       }
       try {
         this.wasmProcessor.restore_context(this.gl);
+        try {
+          this.interactionProcessor?.restore_context?.(this.gl);
+        } catch (interactionRestoreError) {
+          this.disableFeaturePickingForCurrentDocument(
+            "Feature picking failed",
+            `Picking data could not be restored after WebGL context recovery: ${getErrorMessage(interactionRestoreError)}`,
+            { abandon: isFatalWasmRuntimeError(interactionRestoreError) },
+          );
+        }
         this.isWebGlContextLost = false;
         this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
         this.layers = layerSnapshot;
@@ -1305,10 +1348,13 @@ export class GerberViewer {
       `Rebuilding layers after WebGL restore could not reuse cached geometry: ${getErrorMessage(restoreError)}`,
     );
 
-    this.disposeWasmProcessor();
+    this.disposeWasmProcessor({ abandon: true });
+    this.disposeInteractionProcessor({ abandon: true });
+    this.featurePickingAvailable = false;
     this.layers = [];
     this.clearSelectedFeature({ refresh: false });
     this.createWebGlProcessor();
+    this.disableProcessorInteractions(this.wasmProcessor);
     this.isWebGlContextLost = false;
     this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
 
@@ -1332,7 +1378,7 @@ export class GerberViewer {
     return {
       preserveArcRegions: this.preserveArcRegions,
       arcTessellationQuality: this.getArcTessellationQualityLevel(),
-      interactionsEnabled: this.interactionsEnabled,
+      interactionsEnabled: this.interactionsEnabled && this.featurePickingAvailable,
     };
   }
 
@@ -1939,8 +1985,13 @@ export class GerberViewer {
         this.wasmProcessor = stagedProcessor;
         stagedProcessor = null;
         this.layers = stagedLayers;
+        this.disposeInteractionProcessor();
+        this.featurePickingAvailable = this.interactionsEnabled;
         this.clearSelectedFeature({ refresh: false });
         this.disposeWasmProcessorInstance(previousProcessor, "previous processor");
+        await this.buildInteractionLayersForRecords(stagedLayers, {
+          title: "Applying options",
+        });
       } catch (error) {
         this.nextLayerDomId = nextLayerDomId;
         this.nextColorIndex = nextColorIndex;
@@ -2578,6 +2629,10 @@ export class GerberViewer {
 
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
     this.wasmMemoryExhausted = false;
+    if (this.layers.length === 0) {
+      this.disposeInteractionProcessor();
+      this.featurePickingAvailable = this.interactionsEnabled;
+    }
     const total = layerSources.length;
     if (layerSources.some(isDrillSource)) {
       return this.loadLayerSourcesSerially(layerSources, { title, total });
@@ -2745,20 +2800,27 @@ export class GerberViewer {
 
         isResolved = true;
         let didCommitLayer = false;
+        const committedLayers = [];
         for (let index = 0; index < layerRecords.length; index++) {
           const layerRecord = layerRecords[index];
           if (layerRecord) {
             this.prepareLayerMetadata(layerRecord);
             this.commitLayerMetadata(layerRecord, { updateUiState: false });
+            committedLayers.push(layerRecord);
             layerRecords[index] = null;
             didCommitLayer = true;
           }
         }
         restorePendingLayerRecords();
-        if (didCommitLayer) {
-          this.updateUiState();
-        }
-        resolve(results);
+        void (async () => {
+          if (didCommitLayer) {
+            this.updateUiState();
+            await this.buildInteractionLayersForRecords(committedLayers, {
+              title,
+            });
+          }
+          resolve(results);
+        })().catch(reject);
       };
 
       const launchMore = () => {
@@ -3072,10 +3134,32 @@ export class GerberViewer {
       // the synchronous WASM parse+interaction-build blocks the main thread.
       await new Promise((resolve) => requestAnimationFrame(resolve));
 
+      let layerRecord = null;
       if (isDrillSource(source)) {
-        await this.addDrillLayer(name, content, { offset: source.offset });
+        layerRecord = await this.addDrillLayer(name, content, {
+          offset: source.offset,
+        });
       } else {
-        await this.addLayer(name, content, { offset: source.offset });
+        let renderPayload = null;
+        let interactionPayload = null;
+        try {
+          const parseResult = await this.parseLayerContent(
+            content,
+            source.offset,
+            null,
+          );
+          renderPayload = parseResult.renderPayload;
+          interactionPayload = parseResult.interactionPayload ?? null;
+          layerRecord = await this.addParsedLayer(name, renderPayload, {
+            offset: source.offset,
+            sourceContent: content,
+          });
+          layerRecord.interactionPayload = interactionPayload;
+          await this.buildInteractionLayersForRecords([layerRecord], { title });
+        } finally {
+          renderPayload = null;
+          interactionPayload = null;
+        }
       }
       this.updateLoadingModal({
         stage: "Loaded",
@@ -3119,6 +3203,21 @@ export class GerberViewer {
       return null;
     }
 
+    if (this.wasmMemoryExhausted) {
+      const completed = this.markLayerLoadComplete(progress);
+      this.updateLoadingModal({
+        title,
+        stage: "Skipped",
+        fileName: name,
+        current: completed,
+        total,
+      });
+      parseResult.parsedLayer = null;
+      parseResult.interactionPayload = null;
+      parseResult.sourceContent = null;
+      return null;
+    }
+
     try {
       this.updateLoadingModal({
         title,
@@ -3137,6 +3236,7 @@ export class GerberViewer {
           interactionPayload: parseResult.interactionPayload,
         },
       );
+      layerRecord.interactionPayload = parseResult.interactionPayload ?? null;
       const completed = this.markLayerLoadComplete(progress);
       this.updateLoadingModal({
         stage: "Loaded",
@@ -3159,6 +3259,81 @@ export class GerberViewer {
       parseResult.parsedLayer = null;
       parseResult.interactionPayload = null;
       parseResult.sourceContent = null;
+    }
+  }
+
+  async buildInteractionLayersForRecords(
+    layerRecords,
+    { title = "Loading files" } = {},
+  ) {
+    if (!this.interactionsEnabled || !this.featurePickingAvailable) {
+      this.clearInteractionPayloads(layerRecords);
+      return;
+    }
+
+    const candidates = layerRecords.filter(
+      (layer) =>
+        layer &&
+        !isDrillLayer(layer) &&
+        layer.interactionPayload &&
+        Number.isFinite(Number(layer.layerId)),
+    );
+    if (candidates.length === 0) {
+      this.clearInteractionPayloads(layerRecords);
+      return;
+    }
+
+    let processor = this.interactionProcessor;
+    try {
+      if (!processor) {
+        processor = this.createInteractionProcessor();
+        this.interactionProcessor = processor;
+      }
+      if (typeof processor.add_interaction_payload !== "function") {
+        throw new Error("Feature picking requires an updated WASM module");
+      }
+
+      this.featurePickingAvailable = false;
+      this.clearSelectedFeature({ refresh: false });
+      for (const [index, layer] of candidates.entries()) {
+        this.updateLoadingModal({
+          title,
+          stage: "Building picking index",
+          fileName: layer.name,
+          current: index,
+          total: candidates.length,
+        });
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        this.ensureInteractionMemoryHeadroom();
+        processor.add_interaction_payload(layer.layerId, layer.interactionPayload);
+      }
+
+      this.featurePickingAvailable = true;
+      this.updateLoadingModal({
+        title,
+        stage: "Picking ready",
+        current: candidates.length,
+        total: candidates.length,
+      });
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("[Interaction] Failed to build picking index:", error);
+      this.disableFeaturePickingForCurrentDocument(
+        "Feature picking failed",
+        `Picking data could not be built; feature picking is disabled for this document: ${message}`,
+        { abandon: isFatalWasmRuntimeError(error) },
+      );
+    } finally {
+      this.clearInteractionPayloads(layerRecords);
+      this.updateUiState();
+    }
+  }
+
+  clearInteractionPayloads(layerRecords) {
+    for (const layer of layerRecords) {
+      if (layer) {
+        layer.interactionPayload = null;
+      }
     }
   }
 
@@ -3190,19 +3365,55 @@ export class GerberViewer {
     }
   }
 
+  getWasmLinearMemoryBytes() {
+    const byteLength = Number(this.wasmExports?.memory?.buffer?.byteLength);
+    return Number.isFinite(byteLength) && byteLength > 0 ? byteLength : null;
+  }
+
+  hasWasmLinearMemoryHeadroom(limitBytes) {
+    const currentBytes = this.getWasmLinearMemoryBytes();
+    if (!Number.isFinite(currentBytes)) {
+      return true;
+    }
+    return currentBytes < limitBytes;
+  }
+
+  ensureRenderPayloadMemoryHeadroom() {
+    if (this.hasWasmLinearMemoryHeadroom(WASM_LINEAR_MEMORY_RENDER_LIMIT_BYTES)) {
+      return;
+    }
+
+    this.wasmMemoryExhausted = true;
+    throw new Error("WASM memory limit reached");
+  }
+
+  ensureInteractionMemoryHeadroom() {
+    if (
+      this.hasWasmLinearMemoryHeadroom(WASM_LINEAR_MEMORY_INTERACTION_LIMIT_BYTES)
+    ) {
+      return;
+    }
+    throw new Error("WASM memory limit reached");
+  }
+
   createLayerRecoverySnapshot(layer) {
     const snapshot = {
       id: layer.id,
+      layerId: layer.layerId,
       kind: layer.kind ?? GERBER_LAYER_KIND,
       name: layer.name,
       visible: layer.visible,
       color: layer.color ? [...layer.color] : null,
       sourceContent: layer.sourceContent,
       offset: { ...normalizeLayerOffset(layer.offset) },
+      bounds: layer.bounds ? { ...layer.bounds } : null,
     };
     if (isDrillLayer(layer)) {
+      snapshot.outlineLayerId = layer.outlineLayerId;
+      snapshot.fillLayerId = layer.fillLayerId;
       snapshot.drillMetadata = layer.drillMetadata;
       snapshot.drillType = layer.drillType;
+      snapshot.rawBounds = layer.rawBounds ? { ...layer.rawBounds } : null;
     }
     return snapshot;
   }
@@ -3285,6 +3496,46 @@ export class GerberViewer {
     this.disposeWasmProcessorInstance(processor, "processor", { abandon });
   }
 
+  disposeInteractionProcessor({ abandon = false } = {}) {
+    if (!this.interactionProcessor) return;
+
+    const processor = this.interactionProcessor;
+    this.interactionProcessor = null;
+    this.disposeWasmProcessorInstance(processor, "interaction processor", {
+      abandon,
+    });
+  }
+
+  getFeaturePickingProcessorForGerber() {
+    if (!this.interactionsEnabled || !this.featurePickingAvailable) {
+      return null;
+    }
+    return this.interactionProcessor ?? this.wasmProcessor;
+  }
+
+  getFeaturePickingProcessorForLayer(layer) {
+    if (!this.interactionsEnabled || !this.featurePickingAvailable) {
+      return null;
+    }
+    return isDrillLayer(layer)
+      ? this.wasmProcessor
+      : this.getFeaturePickingProcessorForGerber();
+  }
+
+  disableFeaturePickingForCurrentDocument(
+    title,
+    detail,
+    { abandon = false } = {},
+  ) {
+    this.featurePickingAvailable = false;
+    this.disposeInteractionProcessor({ abandon });
+    this.clearSelectedFeature({ refresh: false });
+    this.addDiagnostic("error", title, detail);
+    this.showError(`${title}: ${detail}`);
+    this.updateUiState();
+    this.requestRender();
+  }
+
   disposeWasmProcessorInstance(processor, label = "processor", { abandon = false } = {}) {
     if (!processor) return;
     if (abandon) {
@@ -3323,7 +3574,10 @@ export class GerberViewer {
     const layerSnapshot = this.snapshotLayersForRecovery();
     if (layerSnapshot.length === 0) {
       this.disposeWasmProcessor({ abandon: true });
+      this.disposeInteractionProcessor({ abandon: true });
+      this.featurePickingAvailable = false;
       this.createWebGlProcessor();
+      this.disableProcessorInteractions(this.wasmProcessor);
       this.clearSelectedFeature({ refresh: false });
       this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       return;
@@ -3346,9 +3600,12 @@ export class GerberViewer {
 
     try {
       this.disposeWasmProcessor({ abandon: true });
+      this.disposeInteractionProcessor({ abandon: true });
+      this.featurePickingAvailable = false;
       this.layers = [];
       this.clearSelectedFeature({ refresh: false });
       this.createWebGlProcessor();
+      this.disableProcessorInteractions(this.wasmProcessor);
       this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
 
       let restoreCausedFatalError = false;
@@ -3372,6 +3629,7 @@ export class GerberViewer {
         this.layers = [];
         this.disposeWasmProcessor({ abandon: true });
         this.createWebGlProcessor();
+        this.disableProcessorInteractions(this.wasmProcessor);
         this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
       }
 
@@ -3638,29 +3896,13 @@ export class GerberViewer {
       }
 
       let layerId;
+      this.ensureRenderPayloadMemoryHeadroom();
       if (typeof processor.add_render_payload === "function") {
         layerId = processor.add_render_payload(parsedLayer);
       } else if (typeof processor.add_parsed_layer === "function") {
         layerId = processor.add_parsed_layer(parsedLayer);
       } else {
         throw new Error("Parsed layer rendering requires an updated WASM module");
-      }
-      if (
-        this.interactionsEnabled &&
-        options.interactionPayload &&
-        typeof processor.add_interaction_payload === "function"
-      ) {
-        try {
-          processor.add_interaction_payload(layerId, options.interactionPayload);
-        } catch (interactionError) {
-          if (isFatalWasmRuntimeError(interactionError)) {
-            throw interactionError;
-          }
-          console.warn(
-            `[Interaction] Failed to attach interactions for ${name}:`,
-            interactionError,
-          );
-        }
       }
       return this.createLayerMetadata(name, layerId, options, processor);
     } catch (error) {
@@ -3823,9 +4065,12 @@ export class GerberViewer {
   }
 
   renderSelectedFeatureHighlight() {
+    const pickingProcessor = this.getFeaturePickingProcessorForLayer(
+      this.selectedFeature?.layer,
+    );
     if (
       !this.selectedFeature ||
-      typeof this.wasmProcessor?.render_interaction_highlight !== "function"
+      typeof pickingProcessor?.render_interaction_highlight !== "function"
     ) {
       return;
     }
@@ -3834,7 +4079,7 @@ export class GerberViewer {
       if (this.clearSelectedFeatureIfUnavailable()) {
         return;
       }
-      this.wasmProcessor.render_interaction_highlight(
+      pickingProcessor.render_interaction_highlight(
         this.selectedFeature.layerId,
         this.selectedFeature.featureId,
         this.getViewScaleX(),
@@ -4349,35 +4594,14 @@ export class GerberViewer {
 
   selectFeatureAtCanvasPoint(clientX, clientY, { inputType = "mouse" } = {}) {
     const point = this.canvasPointToWorld(clientX, clientY);
-    if (
-      !point ||
-      !this.interactionsEnabled ||
-      typeof this.wasmProcessor?.pick_interaction_feature !== "function"
-    ) {
+    if (!point || !this.interactionsEnabled || !this.featurePickingAvailable) {
       this.clearSelectedFeature();
       return;
     }
 
-    const layerIds = this.getVisibleInteractionLayerIds();
     const tolerance = this.getFeatureHitToleranceWorld(clientX, clientY, inputType);
     const shouldCycle = this.shouldCycleFeatureSelection(clientX, clientY, inputType);
-    const hit =
-      shouldCycle &&
-      typeof this.wasmProcessor.pick_interaction_feature_after === "function"
-        ? this.wasmProcessor.pick_interaction_feature_after(
-            layerIds,
-            point.x,
-            point.y,
-            tolerance,
-            this.selectedFeature.layerId,
-            this.selectedFeature.featureId,
-          )
-        : this.wasmProcessor.pick_interaction_feature(
-            layerIds,
-            point.x,
-            point.y,
-            tolerance,
-          );
+    const hit = this.pickFeatureAcrossProcessors(point, tolerance, shouldCycle);
     this.selectedFeature = hit ? this.attachLayerToSelectedFeature(hit) : null;
     if (this.selectedFeature) {
       this.lastFeaturePick = { x: clientX, y: clientY, inputType };
@@ -4387,6 +4611,104 @@ export class GerberViewer {
     this.updateUiState();
     this.renderMeasurements();
     this.requestRender();
+  }
+
+  pickFeatureAcrossProcessors(point, tolerance, shouldCycle) {
+    const selectedIsDrill = isDrillLayer(this.selectedFeature?.layer);
+    if (shouldCycle && this.selectedFeature) {
+      const primaryHit = selectedIsDrill
+        ? this.pickFeatureWithProcessor(
+            this.wasmProcessor,
+            this.getVisibleDrillInteractionLayerIds(),
+            point,
+            tolerance,
+            true,
+          )
+        : this.pickFeatureWithProcessor(
+            this.getFeaturePickingProcessorForGerber(),
+            this.getVisibleGerberInteractionLayerIds(),
+            point,
+            tolerance,
+            true,
+          );
+      if (primaryHit && !this.isSelectedFeatureHit(primaryHit)) {
+        return primaryHit;
+      }
+
+      const alternateHit = selectedIsDrill
+        ? this.pickFeatureWithProcessor(
+            this.getFeaturePickingProcessorForGerber(),
+            this.getVisibleGerberInteractionLayerIds(),
+            point,
+            tolerance,
+            false,
+          )
+        : this.pickFeatureWithProcessor(
+            this.wasmProcessor,
+            this.getVisibleDrillInteractionLayerIds(),
+            point,
+            tolerance,
+            false,
+          );
+      return alternateHit ?? primaryHit;
+    }
+
+    return (
+      this.pickFeatureWithProcessor(
+        this.wasmProcessor,
+        this.getVisibleDrillInteractionLayerIds(),
+        point,
+        tolerance,
+        false,
+      ) ??
+      this.pickFeatureWithProcessor(
+        this.getFeaturePickingProcessorForGerber(),
+        this.getVisibleGerberInteractionLayerIds(),
+        point,
+        tolerance,
+        false,
+      )
+    );
+  }
+
+  isSelectedFeatureHit(feature) {
+    return (
+      Number(feature?.layerId) === Number(this.selectedFeature?.layerId) &&
+      Number(feature?.featureId) === Number(this.selectedFeature?.featureId)
+    );
+  }
+
+  pickFeatureWithProcessor(processor, layerIds, point, tolerance, shouldCycle) {
+    if (
+      !processor ||
+      layerIds.length === 0 ||
+      typeof processor.pick_interaction_feature !== "function"
+    ) {
+      return null;
+    }
+
+    const selectedLayerId = Number(this.selectedFeature?.layerId);
+    const canCycle =
+      shouldCycle &&
+      Number.isFinite(selectedLayerId) &&
+      layerIds.includes(selectedLayerId) &&
+      typeof processor.pick_interaction_feature_after === "function";
+    const packedLayerIds = new Uint32Array(layerIds);
+    return canCycle
+      ? processor.pick_interaction_feature_after(
+          packedLayerIds,
+          point.x,
+          point.y,
+          tolerance,
+          this.selectedFeature.layerId,
+          this.selectedFeature.featureId,
+        )
+      : processor.pick_interaction_feature(
+          packedLayerIds,
+          point.x,
+          point.y,
+          tolerance,
+        );
   }
 
   clearSelectedFeature({ refresh = true, resetCycle = true } = {}) {
@@ -4484,20 +4806,28 @@ export class GerberViewer {
     return false;
   }
 
-  getVisibleInteractionLayerIds() {
+  getVisibleGerberInteractionLayerIds() {
     const layerIds = [];
-    const gerberLayers = this.layers
-      .filter((layer) => layer.visible && !isDrillLayer(layer))
-      .reverse();
-    for (const layer of gerberLayers) {
-      layerIds.push(layer.layerId);
+    // this.layers follows the layer-list UI order (top-to-bottom). Rust scans
+    // ids in reverse, so pass bottom-to-top ids for top-first picking.
+    for (const layer of [...this.layers].reverse()) {
+      if (layer.visible && !isDrillLayer(layer)) {
+        layerIds.push(layer.layerId);
+      }
     }
+    return layerIds.filter(Number.isFinite);
+  }
+
+  getVisibleDrillInteractionLayerIds() {
+    const layerIds = [];
+    // Drill layers are rendered in this.layers order, so the same order is
+    // bottom-to-top for Rust's reverse scan.
     for (const layer of this.layers) {
       if (layer.visible && isDrillLayer(layer)) {
         layerIds.push(layer.outlineLayerId);
       }
     }
-    return new Uint32Array(layerIds.filter(Number.isFinite));
+    return layerIds.filter(Number.isFinite);
   }
 
   getLayerInteractionLayerId(layer) {
@@ -5011,6 +5341,11 @@ export class GerberViewer {
         if (this.wasmProcessor) {
           this.removeWasmLayerRecord(layer);
         }
+        if (!isDrillLayer(layer) && this.interactionProcessor) {
+          this.invalidateFeaturePickingAfterLayerSetChange(
+            `${layer.name} was removed; rebuild the document to enable feature picking again.`,
+          );
+        }
 
         // remove from JS array only if WASM removal succeeded
         this.layers.splice(index, 1);
@@ -5033,6 +5368,13 @@ export class GerberViewer {
     this.updateUiState();
   }
 
+  invalidateFeaturePickingAfterLayerSetChange(detail) {
+    this.featurePickingAvailable = false;
+    this.disposeInteractionProcessor();
+    this.clearSelectedFeature({ refresh: false });
+    this.addDiagnostic("warning", "Feature picking cleared", detail);
+  }
+
   removeWasmLayerRecord(layer) {
     if (!this.wasmProcessor || !layer) return;
 
@@ -5053,9 +5395,12 @@ export class GerberViewer {
       if (this.wasmProcessor) {
         this.wasmProcessor.clear();
       }
+      this.disposeInteractionProcessor();
 
       this.layers = [];
       this.clearSelectedFeature({ refresh: false });
+      this.wasmMemoryExhausted = false;
+      this.featurePickingAvailable = this.interactionsEnabled;
       this.nextColorIndex = 0;
       this.nextLayerDomId = 0;
       this.fitViewZoom = null;

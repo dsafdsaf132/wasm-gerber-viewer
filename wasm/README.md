@@ -150,6 +150,21 @@ When interaction is disabled, `set_interactions_enabled(false)` clears stored
 interaction indexes. Worker callers should use the render-only parse path, and
 `add_interaction_payload()` ignores payloads while interaction is disabled.
 
+The viewer normally treats rendering and Gerber feature picking as two phases:
+
+1. A render processor receives render geometry first and owns the visible WebGL
+   layer FBOs.
+2. After render layer records are committed, JS may create a separate
+   interaction processor and restore compact Gerber interaction payloads into
+   matching renderer layer ids with `add_interaction_payload()`.
+
+This split prevents Gerber picking-index construction failures from discarding
+already-rendered layers. If phase 2 fails, JS disables feature picking for the
+whole document and keeps the render processor alive. Drill picking currently
+uses interaction data created by the direct drill parse path on the render
+processor, so JS routes drill picking to the render processor and Gerber picking
+to the interaction processor when one exists.
+
 Layer-add flow:
 
 1. JS calls `add_layer`, `add_layer_with_offset`, `add_render_payload`, or
@@ -160,9 +175,10 @@ Layer-add flow:
    creates renderer layer metadata and GPU resources.
 4. If interaction is enabled during direct parsing, the matching
    `InteractionLayer` is stored by renderer layer id.
-5. If parsing happened outside the renderer instance, JS calls
-   `add_interaction_payload()` with the renderer layer id so Rust can restore
-   the compact interaction payload into `interaction_layers`.
+5. If parsing happened outside the renderer instance, JS first commits the
+   render layer record, then phase 2 calls `add_interaction_payload()` with the
+   renderer layer id so Rust can restore the compact interaction payload into
+   `interaction_layers`.
 
 ### 6. Interaction Pipeline
 
@@ -174,7 +190,7 @@ Important types:
 - `InteractionFeature`
 - `FeatureKind`
 
-Worker/pre-parse transfer flow:
+Viewer worker/pre-parse transfer flow:
 
 1. A worker, or main JS before creating a staged renderer layer, calls
    `parse_gerber_layer_payload_with_options()`.
@@ -183,8 +199,12 @@ Worker/pre-parse transfer flow:
 3. Rust returns `renderPayload` plus `interactionPayload`.
 4. The interaction payload stores repeated data in shared string, descriptor,
    template, primitive, and path-region tables.
-5. Main JS calls `add_render_payload()` first, then `add_interaction_payload()`
-   for the returned renderer layer id.
+5. Main JS calls `add_render_payload()` on the render processor first.
+6. After the render layer is committed, JS calls `add_interaction_payload()` on
+   the interaction processor for the returned renderer layer id.
+7. If any phase-2 payload restore fails, JS discards the interaction processor
+   and disables picking for the whole document rather than leaving partial
+   picking data active.
 
 This avoids reparsing the source on the main thread and avoids expanding
 repeated aperture metadata into per-feature JS objects.
@@ -197,9 +217,14 @@ CPU picking flow:
 
 1. JS converts click/touch coordinates into world coordinates.
 2. JS passes visible interaction layer ids and a world-space tolerance to
-   `pick_interaction_feature()`.
-3. Rust scans layer ids in reverse order so visually higher layers are tested
-   first.
+   `pick_interaction_feature()`. Drill ids are queried on the render processor;
+   Gerber ids are queried on the interaction processor when one exists.
+3. Rust scans layer ids in reverse order. For Gerber layers, the viewer's
+   `layers` array follows the layer-list UI order, top-to-bottom, so JS
+   reverses visible Gerber ids into bottom-to-top order before calling Rust.
+   Drill layers are rendered in `layers` order, so JS passes visible drill ids
+   in that render order and lets Rust's reverse scan test the last rendered
+   drill first.
 4. Repeated picking at nearly the same location uses
    `pick_interaction_feature_after()` to cycle to the next candidate.
 5. Rust returns structured feature metadata, not display strings.
@@ -281,8 +306,9 @@ Registration creates or prepares:
 `add_layer_from_render_payload()` is the worker-to-main-renderer path. It avoids
 reparsing source text in the main renderer when a worker has already produced a
 render payload. When feature picking is enabled, the caller pairs this with
-`add_interaction_payload()` so CPU picking data is restored without a second
-source parse.
+phase-2 `add_interaction_payload()` on the interaction processor so CPU picking
+data is restored without a second source parse and without risking the render
+processor if picking data cannot be built.
 
 ### 3. Render Call Stack
 
