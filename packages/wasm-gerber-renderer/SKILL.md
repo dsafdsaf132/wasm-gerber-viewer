@@ -247,7 +247,7 @@ Layer options:
 
 - `name`
 - `color`
-- `alpha` overrides frame/global alpha for that layer; drill layers default to full opacity unless set
+- `alpha` overrides the frame default for that layer; in `stack` mode explicit Gerber alpha overrides the full-opacity default, and drill layers default to full opacity unless set
 - `offsetX`
 - `offsetY`
 
@@ -278,7 +278,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 - `flipX`, `flipY`: mirror the output around the frame center.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`.
 - `globalAlpha`: opacity for Gerber layers without explicit layer `alpha` in `blend` mode; `stack` defaults Gerber layers to full opacity.
-- `compositeMode`: `"blend"` for additive alpha blending or `"stack"` for ordered source-over compositing.
+- `compositeMode`: `"blend"` for additive alpha blending or `"stack"` for ordered source-over Gerber compositing; drill overlays render after Gerber layers.
 - `minimumFeaturePixels`: minimum visible line/arc width.
 - `renderDrills`: render NC drill files as drill overlays; set `false` to skip them.
 - `preserveArcRegions`: defaults to `true`; set `false` for approximate region arcs.

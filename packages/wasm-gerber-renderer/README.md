@@ -297,7 +297,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
 - `renderDrills`: renders NC drill files (`.drl`, `.nc`, `.xnc`, `.xln`) as drill overlays. Defaults to `true`.
 - `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha` in `blend` mode. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
-- `compositeMode`: layer compositing mode, `"blend"` or `"stack"`. Defaults to `"blend"`. `blend` uses additive alpha blending; `stack` draws layers in order so later layers cover earlier layers and defaults Gerber layer opacity to `1`.
+- `compositeMode`: layer compositing mode, `"blend"` or `"stack"`. Defaults to `"blend"`. `blend` uses additive alpha blending; `stack` uses ordered source-over compositing for Gerber layers, so later Gerber layers cover earlier Gerber layers and default to opacity `1`. Drill overlays render after Gerber layers.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
 - `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
@@ -305,7 +305,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 `layerOptions` control a single layer:
 
 - `color`: layer color. Browser accepts `[r, g, b]`; Node also accepts hex and `rgb()`/`rgba()` strings. Defaults to an automatic color cycle.
-- `alpha`: per-layer opacity. When set, it overrides `globalAlpha`; drill layers default to full opacity unless set.
+- `alpha`: per-layer opacity. When set, it overrides the frame default for that layer; in `stack` mode explicit Gerber `alpha` overrides the full-opacity default. Drill layers default to full opacity unless set.
 - `offsetX`: X offset applied while loading geometry. Defaults to `0`.
 - `offsetY`: Y offset applied while loading geometry. Defaults to `0`.
 - `kind`: force `"gerber"` or `"drill"` when a source filename is unavailable or ambiguous.
@@ -363,13 +363,13 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI options:
 
-- `<input...>`: one or more Gerber/drill files or `.tar.gz`/`.tgz` archives. Multiple files render as layers in argument order.
+- `<input...>`: one or more Gerber/drill files or `.tar.gz`/`.tgz` archives. Gerber inputs render in argument order; drill inputs render as overlays above Gerber layers.
 - `-o, --output <path>`: PNG output path. Required for multiple inputs. Parent directories must already exist.
 - `--width <px>`: output width. Defaults to `1200`.
 - `--height <px>`: output height. Defaults to `800`.
 - `--padding <px>`: fit-to-view padding. Defaults to `0`.
 - `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
-- `--alpha <0-1>`: Gerber layer opacity in `blend` mode. Defaults to `0.7`; `stack` mode uses full Gerber opacity unless a layer has explicit `alpha`, and drill overlays render at full opacity.
+- `--alpha <0-1>`: Gerber layer opacity in `blend` mode. Defaults to `0.7`; `stack` mode uses full Gerber opacity, and drill overlays render at full opacity.
 - `--composite-mode <blend|stack>`: layer compositing mode. Defaults to `blend`.
 - `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.

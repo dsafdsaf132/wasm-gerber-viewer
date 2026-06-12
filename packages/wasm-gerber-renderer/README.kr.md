@@ -272,7 +272,7 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `minimumFeaturePixels`: line/arc의 최소 렌더링 폭(px)입니다. 기본값은 `1`입니다.
 - `renderDrills`: NC drill 파일(`.drl`, `.nc`, `.xnc`, `.xln`)을 drill overlay로 렌더링합니다. 기본값은 `true`입니다.
 - `globalAlpha`: `blend` 모드에서 명시적인 layer `alpha`가 없는 Gerber layer에 적용되는 opacity입니다. 기본값은 `0.7`입니다.
-- `compositeMode`: layer 합성 모드입니다. `"blend"` 또는 `"stack"`을 받으며 기본값은 `"blend"`입니다. `blend`는 alpha additive blending을 사용하고, `stack`은 입력 순서대로 그려 뒤 layer가 앞 layer를 덮으며 Gerber layer 기본 opacity는 `1`입니다.
+- `compositeMode`: layer 합성 모드입니다. `"blend"` 또는 `"stack"`을 받으며 기본값은 `"blend"`입니다. `blend`는 alpha additive blending을 사용하고, `stack`은 Gerber layer를 입력 순서대로 source-over 합성하므로 뒤 Gerber layer가 앞 Gerber layer를 덮으며 기본 opacity는 `1`입니다. Drill overlay는 Gerber layer 이후에 렌더링됩니다.
 - `layerErrorMode`: `"skip"`은 남은 유효한 layer를 계속 렌더링하고, `"throw"`는 첫 실패에서 Promise를 reject합니다. 기본값은 `"skip"`입니다.
 - `onLayerError`: `"skip"` mode에서 건너뛴 layer를 받는 callback입니다. 전달 값은 `{ layer, name, error }`입니다.
 - `rendererOptions`: 브라우저 one-shot helper 전용입니다. 렌더러 생성 시 그대로 전달됩니다.
@@ -280,7 +280,7 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 `layerOptions`는 layer 하나를 제어합니다.
 
 - `color`: layer 색상입니다. 브라우저는 `[r, g, b]`를 받고, Node는 hex와 `rgb()`/`rgba()` string도 받습니다. 기본값은 자동 색상 순환입니다.
-- `alpha`: layer별 opacity입니다. 설정하면 해당 layer에서 `globalAlpha`를 재정의합니다.
+- `alpha`: layer별 opacity입니다. 설정하면 해당 layer의 frame 기본값을 재정의합니다. `stack` 모드에서는 명시적인 Gerber `alpha`가 불투명 기본값을 재정의합니다. Drill layer는 설정하지 않으면 불투명하게 렌더링됩니다.
 - `offsetX`: geometry를 load할 때 적용되는 X offset입니다. 기본값은 `0`입니다.
 - `offsetY`: geometry를 load할 때 적용되는 Y offset입니다. 기본값은 `0`입니다.
 - `kind`: source filename이 없거나 모호할 때 `"gerber"` 또는 `"drill"`을 강제로 지정합니다.
@@ -338,13 +338,13 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI 옵션:
 
-- `<input...>`: 하나 이상의 Gerber/drill 파일 또는 `.tar.gz`/`.tgz` 압축 파일입니다. 여러 파일은 argument 순서대로 layer로 렌더링됩니다.
+- `<input...>`: 하나 이상의 Gerber/drill 파일 또는 `.tar.gz`/`.tgz` 압축 파일입니다. Gerber 입력은 argument 순서대로 렌더링되고, drill 입력은 Gerber layer 위의 overlay로 렌더링됩니다.
 - `-o, --output <path>`: PNG output path입니다. 여러 input을 사용할 때는 필수입니다. 상위 directory는 미리 존재해야 합니다.
 - `--width <px>`: 출력 너비입니다. 기본값은 `1200`입니다.
 - `--height <px>`: 출력 높이입니다. 기본값은 `800`입니다.
 - `--padding <px>`: fit-to-view padding입니다. 기본값은 `0`입니다.
 - `--background <color>`: hex 또는 `rgb()`/`rgba()` 배경입니다. 생략하면 투명 출력입니다.
-- `--alpha <0-1>`: `blend` 모드의 Gerber layer opacity입니다. 기본값은 `0.7`입니다. `stack` 모드에서는 명시적인 layer `alpha`가 없는 Gerber layer를 불투명하게 렌더링하며 drill overlay도 불투명하게 렌더링합니다.
+- `--alpha <0-1>`: `blend` 모드의 Gerber layer opacity입니다. 기본값은 `0.7`입니다. `stack` 모드에서는 Gerber layer와 drill overlay를 불투명하게 렌더링합니다.
 - `--composite-mode <blend|stack>`: layer 합성 모드입니다. 기본값은 `blend`입니다.
 - `--minimum-feature-pixels <px>`: line/arc의 최소 렌더링 폭입니다. 기본값은 `1`입니다.
 - `--max-render-target-bytes <size>`: render target별 memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.

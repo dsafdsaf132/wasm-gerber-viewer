@@ -272,7 +272,7 @@ try {
 - `minimumFeaturePixels`：线段/圆弧的最小渲染宽度，单位为屏幕像素。默认 `1`。
 - `renderDrills`：把 NC drill 文件（`.drl`、`.nc`、`.xnc`、`.xln`）渲染为钻孔叠加层。默认 `true`。
 - `globalAlpha`：`blend` 模式下没有显式图层 `alpha` 的 Gerber 图层透明度。默认 `0.7`。
-- `compositeMode`：图层合成模式，取 `"blend"` 或 `"stack"`。默认 `"blend"`。`blend` 使用 alpha additive blending；`stack` 按输入顺序绘制，后面的图层覆盖前面的图层，Gerber 图层默认透明度为 `1`。
+- `compositeMode`：图层合成模式，取 `"blend"` 或 `"stack"`。默认 `"blend"`。`blend` 使用 alpha additive blending；`stack` 对 Gerber 图层按输入顺序使用 source-over 合成，因此后面的 Gerber 图层覆盖前面的 Gerber 图层，默认透明度为 `1`。钻孔叠加层会在 Gerber 图层之后渲染。
 - `layerErrorMode`：`"skip"` 会继续渲染剩余有效图层；`"throw"` 会在第一次失败时中断。默认 `"skip"`。
 - `onLayerError`：`"skip"` 模式下接收被跳过图层的回调函数，参数为 `{ layer, name, error }`。
 - `rendererOptions`：仅用于浏览器一次性辅助函数；创建渲染器时会原样传入。
@@ -280,7 +280,7 @@ try {
 `layerOptions` 控制单个图层：
 
 - `color`：图层颜色。浏览器接受 `[r, g, b]`；Node 也接受 hex 和 `rgb()`/`rgba()` 字符串。默认使用自动颜色循环。
-- `alpha`：每层透明度。设置后会覆盖该图层的 `globalAlpha`。
+- `alpha`：每层透明度。设置后会覆盖该图层的帧默认值；在 `stack` 模式下，显式 Gerber `alpha` 会覆盖不透明的默认值。钻孔图层默认不透明。
 - `offsetX`：加载几何数据时应用的 X 方向偏移。默认 `0`。
 - `offsetY`：加载几何数据时应用的 Y 方向偏移。默认 `0`。
 - `kind`：当输入源文件名不存在或含义不明确时，强制指定 `"gerber"` 或 `"drill"`。
@@ -338,13 +338,13 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI 选项：
 
-- `<input...>`：一个或多个 Gerber/drill 文件，或 `.tar.gz`/`.tgz` 压缩包。多个文件会按参数顺序作为图层渲染。
+- `<input...>`：一个或多个 Gerber/drill 文件，或 `.tar.gz`/`.tgz` 压缩包。Gerber 输入会按参数顺序渲染；drill 输入会作为覆盖在 Gerber 图层之上的叠加层渲染。
 - `-o, --output <path>`：PNG 输出路径。多个输入时必填。父目录必须已存在。
 - `--width <px>`：输出宽度。默认 `1200`。
 - `--height <px>`：输出高度。默认 `800`。
 - `--padding <px>`：自适应视图时使用的像素内边距。默认 `0`。
 - `--background <color>`：hex 或 `rgb()`/`rgba()` 背景。不指定则为透明输出。
-- `--alpha <0-1>`：`blend` 模式下的 Gerber 图层透明度。默认 `0.7`；`stack` 模式下没有显式图层 `alpha` 的 Gerber 图层会以不透明方式渲染，钻孔叠加层也以不透明方式渲染。
+- `--alpha <0-1>`：`blend` 模式下的 Gerber 图层透明度。默认 `0.7`；`stack` 模式下 Gerber 图层和钻孔叠加层都会以不透明方式渲染。
 - `--composite-mode <blend|stack>`：图层合成模式。默认 `blend`。
 - `--minimum-feature-pixels <px>`：线段/圆弧的最小渲染宽度。默认 `1`。
 - `--max-render-target-bytes <size>`：每个渲染目标的内存上限。接受字节数或 `512m`、`2g` 这样的后缀。

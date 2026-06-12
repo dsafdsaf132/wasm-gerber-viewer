@@ -670,6 +670,7 @@ export class GerberViewer {
     this.layerTouchScrollVelocity = 0;
     this.layerTouchSuppressClickUntil = 0;
     this.pendingLayerRecordsForRecovery = null;
+    this.wasmMemoryExhausted = false;
     this.pendingLazyRenderTimer = null;
     this.lazyViewportRenderState = null;
     this.isViewportTransformActive = false;
@@ -1580,14 +1581,18 @@ export class GerberViewer {
       this.interactionsOptionEnabled,
     );
     this.syncOptionControls();
-    this.showNotification(
-      "Refresh required",
-      "info",
-      NOTIFICATION_DURATION_MS,
-      (messageElement) => {
-        messageElement.textContent = "Interaction setting will apply after page reload.";
-      },
-    );
+    if (this.interactionsOptionEnabled !== this.interactionsEnabled) {
+      this.showNotification(
+        "Page reload required",
+        "info",
+        NOTIFICATION_DURATION_MS,
+        (messageElement) => {
+          messageElement.textContent = "Feature picking setting will apply after page reload.";
+        },
+      );
+    } else {
+      this.hideNotification();
+    }
     this.updateUiState();
   }
 
@@ -2628,6 +2633,7 @@ export class GerberViewer {
   }
 
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
+    this.wasmMemoryExhausted = false;
     const total = layerSources.length;
     if (this.interactionsEnabled || layerSources.some(isDrillSource)) {
       return this.loadLayerSourcesSerially(layerSources, { title, total });
@@ -2780,7 +2786,13 @@ export class GerberViewer {
       };
 
       const finishIfDone = () => {
-        if (isResolved || completedTasks < total) {
+        if (isResolved) {
+          return;
+        }
+        // Allow early finish when WASM memory is exhausted and no tasks are running.
+        // Un-started tasks will never complete, so we finalize with partial results.
+        const memoryExhausted = this.wasmMemoryExhausted && activeTasks === 0;
+        if (!memoryExhausted && completedTasks < total) {
           return;
         }
 
@@ -2803,6 +2815,10 @@ export class GerberViewer {
       };
 
       const launchMore = () => {
+        if (this.wasmMemoryExhausted) {
+          finishIfDone();
+          return;
+        }
         while (activeTasks < concurrency && scheduledTasks < total) {
           const task = this.pickNextLayerParseTask(parseTasks, {
             activeTasks,
@@ -3382,6 +3398,7 @@ export class GerberViewer {
       this.createWebGlProcessor();
       this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
 
+      let restoreCausedFatalError = false;
       for (const layer of layerSnapshot) {
         try {
           await this.restoreLayerFromSnapshot(layer);
@@ -3390,9 +3407,19 @@ export class GerberViewer {
           console.error(`[WASM] Failed to restore layer ${layer.name}:`, restoreError);
           this.addDiagnostic("error", `Restore failed: ${layer.name}`, message);
           if (isFatalWasmRuntimeError(restoreError)) {
+            restoreCausedFatalError = true;
             break;
           }
         }
+      }
+
+      if (restoreCausedFatalError) {
+        // The new processor also OOM'd during restore; create a fresh empty one
+        // so subsequent callers don't encounter a trapped WASM module.
+        this.layers = [];
+        this.disposeWasmProcessor();
+        this.createWebGlProcessor();
+        this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
       }
 
       this.nextLayerDomId = nextLayerDomId;
@@ -3507,6 +3534,9 @@ export class GerberViewer {
     try {
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
+        if (this.wasmMemoryExhausted) {
+          throw new Error("WASM memory limit reached");
+        }
       }
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
@@ -3538,6 +3568,7 @@ export class GerberViewer {
 
       if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
+        this.wasmMemoryExhausted = true;
       }
 
       console.error(`[Layer] Failed to add layer ${name}:`, error);
@@ -3559,6 +3590,9 @@ export class GerberViewer {
     try {
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
+        if (this.wasmMemoryExhausted) {
+          throw new Error("WASM memory limit reached");
+        }
       }
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
@@ -3614,6 +3648,7 @@ export class GerberViewer {
     } catch (error) {
       if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
+        this.wasmMemoryExhausted = true;
       }
 
       console.error(`[Layer] Failed to add drill layer ${name}:`, error);
@@ -3641,6 +3676,9 @@ export class GerberViewer {
     try {
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
+        if (this.wasmMemoryExhausted) {
+          throw new Error("WASM memory limit reached");
+        }
       }
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
@@ -3663,6 +3701,7 @@ export class GerberViewer {
 
       if (isFatalWasmRuntimeError(error) && !options.skipFatalRecovery) {
         await this.recoverWasmProcessorAfterFatalError(name, error);
+        this.wasmMemoryExhausted = true;
       }
 
       console.error(`[Layer] Failed to add parsed layer ${name}:`, error);

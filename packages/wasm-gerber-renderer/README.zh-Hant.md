@@ -272,7 +272,7 @@ try {
 - `minimumFeaturePixels`：線段/圓弧的最小渲染寬度，單位為螢幕像素。預設 `1`。
 - `renderDrills`：把 NC drill 檔案（`.drl`、`.nc`、`.xnc`、`.xln`）渲染為鑽孔疊加層。預設 `true`。
 - `globalAlpha`：`blend` 模式下沒有明確圖層 `alpha` 的 Gerber 圖層透明度。預設 `0.7`。
-- `compositeMode`：圖層合成模式，取 `"blend"` 或 `"stack"`。預設 `"blend"`。`blend` 使用 alpha additive blending；`stack` 按輸入順序繪製，後面的圖層覆蓋前面的圖層，Gerber 圖層預設透明度為 `1`。
+- `compositeMode`：圖層合成模式，取 `"blend"` 或 `"stack"`。預設 `"blend"`。`blend` 使用 alpha additive blending；`stack` 對 Gerber 圖層按輸入順序使用 source-over 合成，因此後面的 Gerber 圖層覆蓋前面的 Gerber 圖層，預設透明度為 `1`。鑽孔疊加層會在 Gerber 圖層之後渲染。
 - `layerErrorMode`：`"skip"` 會繼續渲染剩餘有效圖層；`"throw"` 會在第一次失敗時中斷。預設 `"skip"`。
 - `onLayerError`：`"skip"` 模式下接收被跳過圖層的回呼函式，參數為 `{ layer, name, error }`。
 - `rendererOptions`：僅用於瀏覽器一次性輔助函式；建立渲染器時會原樣傳入。
@@ -280,7 +280,7 @@ try {
 `layerOptions` 控制單個圖層：
 
 - `color`：圖層顏色。瀏覽器接受 `[r, g, b]`；Node 也接受 hex 與 `rgb()`/`rgba()` 字串。預設使用自動顏色循環。
-- `alpha`：每層透明度。設定後會覆蓋該圖層的 `globalAlpha`。
+- `alpha`：每層透明度。設定後會覆蓋該圖層的幀預設值；在 `stack` 模式下，明確 Gerber `alpha` 會覆蓋不透明的預設值。鑽孔圖層預設不透明。
 - `offsetX`：載入幾何資料時套用的 X 方向偏移。預設 `0`。
 - `offsetY`：載入幾何資料時套用的 Y 方向偏移。預設 `0`。
 - `kind`：當輸入來源檔名不存在或含義不明確時，強制指定 `"gerber"` 或 `"drill"`。
@@ -338,13 +338,13 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI 選項：
 
-- `<input...>`：一個或多個 Gerber/drill 檔案，或 `.tar.gz`/`.tgz` 壓縮檔。多個檔案會按參數順序作為圖層渲染。
+- `<input...>`：一個或多個 Gerber/drill 檔案，或 `.tar.gz`/`.tgz` 壓縮檔。Gerber 輸入會按參數順序渲染；drill 輸入會作為覆蓋在 Gerber 圖層之上的疊加層渲染。
 - `-o, --output <path>`：PNG 輸出路徑。多個輸入時必填。父目錄必須已存在。
 - `--width <px>`：輸出寬度。預設 `1200`。
 - `--height <px>`：輸出高度。預設 `800`。
 - `--padding <px>`：自動適配視圖時使用的像素內邊距。預設 `0`。
 - `--background <color>`：hex 或 `rgb()`/`rgba()` 背景。不指定則為透明輸出。
-- `--alpha <0-1>`：`blend` 模式下的 Gerber 圖層透明度。預設 `0.7`；`stack` 模式下沒有明確圖層 `alpha` 的 Gerber 圖層會以不透明方式渲染，鑽孔疊加層也以不透明方式渲染。
+- `--alpha <0-1>`：`blend` 模式下的 Gerber 圖層透明度。預設 `0.7`；`stack` 模式下 Gerber 圖層和鑽孔疊加層都會以不透明方式渲染。
 - `--composite-mode <blend|stack>`：圖層合成模式。預設 `blend`。
 - `--minimum-feature-pixels <px>`：線段/圓弧的最小渲染寬度。預設 `1`。
 - `--max-render-target-bytes <size>`：每個渲染目標的記憶體上限。接受位元組數或 `512m`、`2g` 這類後綴。

@@ -14,7 +14,7 @@ Options:
   --padding <px>                   Fit padding in pixels (default: 0)
   --background <color>             Background color, e.g. #05070c (default: transparent)
   --alpha <0-1>                    Blend-mode Gerber alpha (default: 0.7)
-  --composite-mode <blend|stack>   Layer compositing mode (default: blend)
+  --composite-mode <blend|stack>   blend=additive, stack=ordered source-over
   --minimum-feature-pixels <px>    Minimum line/arc display width (default: 1)
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --approx-region-arcs             Approximate region arcs before rendering (default: false)
