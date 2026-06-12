@@ -12,7 +12,7 @@ flowchart TD
   JS["JavaScript UI / workers"] --> API["wasm/src/lib.rs public API"]
   API --> InputKind{"Input path"}
 
-  InputKind -->|Gerber source| GerberParse["parse_gerber_layer* / parse_gerber_layer_payload_with_options"]
+  InputKind -->|Gerber source| GerberParse["add_layer* / parse_gerber_layer* / parse_gerber_layer_payload_with_options"]
   GerberParse --> Parser["GerberParser"]
   Parser --> GerberData["GerberData vector<br/>polarity sublayers"]
   Parser --> MaybeInteraction["Optional InteractionLayer"]
@@ -24,9 +24,11 @@ flowchart TD
   DrillResult --> DrillMeta["Drill metadata"]
   DrillResult --> DrillInteraction["Optional InteractionLayer"]
 
-  InputKind -->|Worker payload| Payload["Render payload / restored GerberData"]
+  GerberData --> RenderPayload["JS render payload"]
+  InputKind -->|Worker or pre-parse payload| Payload["Render payload / restored GerberData"]
   CompactInteraction --> InteractionPayload["Compact interaction payload"]
   GerberData --> AddParsed["GerberProcessor::add_parsed_layers"]
+  RenderPayload --> Payload
   Payload --> AddPayload["Renderer::add_layer_from_render_payload"]
   InteractionPayload --> AddInteraction["GerberProcessor::add_interaction_payload"]
   DrillLayers --> AddDrill["GerberProcessor::add_drill_parse_result"]
@@ -59,6 +61,12 @@ Key APIs:
   both the render payload and a compact interaction payload.
 - `parse_drill_layer()`: parses Excellon/NC drill input into outline/fill
   payloads.
+- `GerberProcessor::add_layer*()`: parses source directly inside the stateful
+  renderer instance.
+- `GerberProcessor::add_render_payload()`: uploads worker/pre-parse render
+  payloads into WebGL buffers.
+- `GerberProcessor::add_interaction_payload()`: restores compact interaction
+  payloads for an already-created renderer layer id.
 - `GerberProcessor`: owns the stateful WebGL renderer, parser options, drill
   options, and optional interaction indexes.
 
@@ -120,11 +128,12 @@ Important types:
 - `Lines`, `Circles`, `Arcs`, `Thermals`, `TriangleTemplateInstances`.
 - `PathRegions`: region/path based geometry.
 
-`GerberData` supports JS render-payload conversion. This lets a worker parse
-geometry in one WASM instance and pass render buffers back to the main renderer
-instance. Feature picking data uses a separate compact interaction payload from
-`wasm/src/interaction.rs` so aperture strings, descriptors, templates,
-primitives, and path-region data can remain table-based across the JS boundary.
+`GerberData` supports JS render-payload conversion. This lets a worker, or a
+main-thread pre-parse helper, parse geometry outside the stateful renderer
+instance and pass render buffers into `add_render_payload()`. Feature picking
+data uses a separate compact interaction payload from `wasm/src/interaction.rs`
+so aperture strings, descriptors, templates, primitives, and path-region data
+can remain table-based across the JS boundary.
 
 ### 5. Processor State
 
@@ -137,19 +146,23 @@ primitives, and path-region data can remain table-based across the JS boundary.
 - `drill_outline_layer_ids`: drill outline layers that need option updates.
 - `interaction_enabled`, `interaction_layers`: CPU picking data.
 
+When interaction is disabled, `set_interactions_enabled(false)` clears stored
+interaction indexes. Worker callers should use the render-only parse path, and
+`add_interaction_payload()` ignores payloads while interaction is disabled.
+
 Layer-add flow:
 
 1. JS calls `add_layer`, `add_layer_with_offset`, `add_render_payload`, or
    `add_drill_layer`.
-2. Rust parses source text directly or restores `GerberData` from render
-   payloads.
+2. Rust parses source text directly in `add_layer*()`/`add_drill_layer*()`, or
+   restores `GerberData` from render payloads in `add_render_payload()`.
 3. `Renderer::add_layer()` or `Renderer::add_layer_from_render_payload()`
    creates renderer layer metadata and GPU resources.
 4. If interaction is enabled during direct parsing, the matching
    `InteractionLayer` is stored by renderer layer id.
-5. If parsing happened in a worker, JS calls `add_interaction_payload()` with
-   the renderer layer id so Rust can restore the compact interaction payload
-   into `interaction_layers`.
+5. If parsing happened outside the renderer instance, JS calls
+   `add_interaction_payload()` with the renderer layer id so Rust can restore
+   the compact interaction payload into `interaction_layers`.
 
 ### 6. Interaction Pipeline
 
@@ -161,12 +174,13 @@ Important types:
 - `InteractionFeature`
 - `FeatureKind`
 
-Worker/main transfer flow:
+Worker/pre-parse transfer flow:
 
-1. A worker calls `parse_gerber_layer_payload_with_options()`.
+1. A worker, or main JS before creating a staged renderer layer, calls
+   `parse_gerber_layer_payload_with_options()`.
 2. Rust parses the file once, producing render geometry and an
    `InteractionLayer`.
-3. The worker returns `renderPayload` plus `interactionPayload`.
+3. Rust returns `renderPayload` plus `interactionPayload`.
 4. The interaction payload stores repeated data in shared string, descriptor,
    template, primitive, and path-region tables.
 5. Main JS calls `add_render_payload()` first, then `add_interaction_payload()`
@@ -174,6 +188,10 @@ Worker/main transfer flow:
 
 This avoids reparsing the source on the main thread and avoids expanding
 repeated aperture metadata into per-feature JS objects.
+
+`build_layer_interactions()` still exists as a compatibility API for building
+an interaction layer after `add_render_payload()`, but it reparses source text
+and is not the current viewer pipeline.
 
 CPU picking flow:
 
