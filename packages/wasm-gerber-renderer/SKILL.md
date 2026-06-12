@@ -49,7 +49,8 @@ gerber-renderer top.gbr bottom.gbr mask.gbr \
   --height 1000 \
   --background '#05070c' \
   --padding 32 \
-  --alpha 0.7
+  --alpha 0.7 \
+  --composite-mode blend
 ```
 
 Render an archive:
@@ -65,6 +66,7 @@ Useful CLI options:
 - `--background <color>` accepts hex or `rgb()`/`rgba()`; omit for transparent output.
 - `--padding <px>` adds fit-to-view padding.
 - `--alpha <0-1>` sets global Gerber layer opacity; drill overlays render at full opacity.
+- `--composite-mode <blend|stack>` sets additive blending or ordered stack compositing.
 - `--minimum-feature-pixels <px>` keeps thin lines/arcs visible.
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
 - `--approx-region-arcs` uses faster approximate region arcs.
@@ -97,6 +99,7 @@ await renderGerberToPngFile(
     height: 1000,
     background: "#05070c",
     padding: 32,
+    compositeMode: "blend",
     minimumFeaturePixels: 1,
     onLayerError: ({ name, error }) => {
       console.warn(`Skipped ${name}: ${error instanceof Error ? error.message : error}`);
@@ -275,6 +278,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 - `flipX`, `flipY`: mirror the output around the frame center.
 - `view`: manual `{ zoomX, zoomY, offsetX, offsetY }`.
 - `globalAlpha`: opacity for Gerber layers without explicit layer `alpha`.
+- `compositeMode`: `"blend"` for additive alpha blending or `"stack"` for ordered source-over compositing.
 - `minimumFeaturePixels`: minimum visible line/arc width.
 - `renderDrills`: render NC drill files as drill overlays; set `false` to skip them.
 - `preserveArcRegions`: defaults to `true`; set `false` for approximate region arcs.

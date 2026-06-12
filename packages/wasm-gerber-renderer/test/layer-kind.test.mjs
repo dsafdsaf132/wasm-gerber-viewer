@@ -9,7 +9,11 @@ import {
 } from "../../../js/source-loader.js";
 import { GerberRenderer } from "../index.js";
 import { fileLayer, NodeGerberRenderer } from "../node.js";
-import { normalizeLayerKind } from "../shared.js";
+import {
+  createBaseFrameOptions,
+  normalizeCompositeMode,
+  normalizeLayerKind,
+} from "../shared.js";
 
 const DRILL_CONTENT = `M48
 METRIC,LZ
@@ -125,4 +129,15 @@ test("renderDrills false skips drill sources before reading", async () => {
     { renderDrills: false },
   );
   assert.equal(nodeRecord, null);
+});
+
+test("package composite mode defaults to blend and validates explicit values", () => {
+  assert.equal(createBaseFrameOptions().compositeMode, "blend");
+  assert.equal(createBaseFrameOptions({ compositeMode: "stack" }).compositeMode, "stack");
+  assert.equal(normalizeCompositeMode("blend"), "blend");
+  assert.equal(normalizeCompositeMode("stack"), "stack");
+  assert.throws(
+    () => normalizeCompositeMode("overlay"),
+    /compositeMode must be 'blend' or 'stack'/,
+  );
 });

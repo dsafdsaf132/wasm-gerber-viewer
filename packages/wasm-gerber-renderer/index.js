@@ -1,5 +1,6 @@
 import {
   DEFAULT_BACKGROUND,
+  COMPOSITE_MODE_STACK,
   FrameState,
   PNG_SIGNATURE,
   addDrillLayerToProcessor,
@@ -376,6 +377,7 @@ export class GerberRenderer {
       frame.layers,
       globalAlpha,
       frame.options.background,
+      frame.options.compositeMode,
     );
     const activeLayerIds = new Uint32Array(renderEntries.map((entry) => entry.layerId));
     const blendModes = new Uint8Array(renderEntries.map((entry) => entry.blendMode));
@@ -391,7 +393,7 @@ export class GerberRenderer {
       );
       if (blendModes.some((mode) => mode !== 0)) {
         if (typeof frame.processor.render_with_clear_and_blend_modes !== "function") {
-          throw new Error("Drill rendering requires an updated WASM renderer.");
+          throw new Error("Stack compositing and drill rendering require an updated WASM renderer.");
         }
         frame.processor.render_with_clear_and_blend_modes(
           activeLayerIds,
@@ -422,9 +424,10 @@ export class GerberRenderer {
       }
       if (
         frame.layers.some((layer) => layer.alpha != null) ||
-        frame.layers.some((layer) => isDrillLayerKind(layer.kind))
+        frame.layers.some((layer) => isDrillLayerKind(layer.kind)) ||
+        frame.options.compositeMode === COMPOSITE_MODE_STACK
       ) {
-        throw new Error("Layer alpha requires an updated WASM renderer.");
+        throw new Error("Layer alpha, stack compositing, and drill rendering require an updated WASM renderer.");
       }
       const colorData = new Float32Array(
         renderEntries.flatMap((entry) => entry.color),
@@ -502,17 +505,20 @@ export class GerberRenderer {
   }
 }
 
-function createRenderEntries(layers, globalAlpha, background) {
+function createRenderEntries(layers, globalAlpha, background, compositeMode) {
   const entries = [];
   const drillColors = resolveDrillRenderColors(background);
+  const gerberBlendMode = compositeMode === COMPOSITE_MODE_STACK ? 1 : 0;
+  const gerberDefaultAlpha =
+    compositeMode === COMPOSITE_MODE_STACK ? 1 : globalAlpha;
 
   for (const layer of layers) {
     if (!isDrillLayerKind(layer.kind)) {
       entries.push({
         layerId: layer.layerId,
         color: layer.color,
-        alpha: resolveLayerAlpha(layer.alpha, globalAlpha),
-        blendMode: 0,
+        alpha: resolveLayerAlpha(layer.alpha, gerberDefaultAlpha),
+        blendMode: gerberBlendMode,
       });
     }
   }

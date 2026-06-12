@@ -296,7 +296,8 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `arcTessellationQuality`: arc approximation quality, `0` low, `1` normal, `2` high. Defaults to `1`.
 - `minimumFeaturePixels`: minimum rendered line/arc width in screen pixels. Defaults to `1`.
 - `renderDrills`: renders NC drill files (`.drl`, `.nc`, `.xnc`, `.xln`) as drill overlays. Defaults to `true`.
-- `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha`. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
+- `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha` in `blend` mode. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
+- `compositeMode`: layer compositing mode, `"blend"` or `"stack"`. Defaults to `"blend"`. `blend` uses additive alpha blending; `stack` draws layers in order so later layers cover earlier layers and defaults Gerber layer opacity to `1`.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
 - `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
@@ -347,6 +348,7 @@ gerber-renderer top.gbr bottom.gbr \
   --background '#05070c' \
   --padding 32 \
   --alpha 0.7 \
+  --composite-mode blend \
   --minimum-feature-pixels 1
 ```
 
@@ -368,6 +370,7 @@ CLI options:
 - `--padding <px>`: fit-to-view padding. Defaults to `0`.
 - `--background <color>`: hex or `rgb()`/`rgba()` background. Omit for transparent output.
 - `--alpha <0-1>`: global Gerber layer opacity. Defaults to `0.7`; drill overlays render at full opacity.
+- `--composite-mode <blend|stack>`: layer compositing mode. Defaults to `blend`.
 - `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
 - `--approx-region-arcs`: converts region arcs to line segments before rendering.

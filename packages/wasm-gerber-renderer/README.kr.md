@@ -271,7 +271,8 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `arcTessellationQuality`: arc 근사 품질입니다. `0` low, `1` normal, `2` high이며 기본값은 `1`입니다.
 - `minimumFeaturePixels`: line/arc의 최소 렌더링 폭(px)입니다. 기본값은 `1`입니다.
 - `renderDrills`: NC drill 파일(`.drl`, `.nc`, `.xnc`, `.xln`)을 drill overlay로 렌더링합니다. 기본값은 `true`입니다.
-- `globalAlpha`: 명시적인 layer `alpha`가 없는 layer에 적용되는 opacity입니다. 기본값은 `0.7`입니다.
+- `globalAlpha`: `blend` 모드에서 명시적인 layer `alpha`가 없는 Gerber layer에 적용되는 opacity입니다. 기본값은 `0.7`입니다.
+- `compositeMode`: layer 합성 모드입니다. `"blend"` 또는 `"stack"`을 받으며 기본값은 `"blend"`입니다. `blend`는 alpha additive blending을 사용하고, `stack`은 입력 순서대로 그려 뒤 layer가 앞 layer를 덮으며 Gerber layer 기본 opacity는 `1`입니다.
 - `layerErrorMode`: `"skip"`은 남은 유효한 layer를 계속 렌더링하고, `"throw"`는 첫 실패에서 Promise를 reject합니다. 기본값은 `"skip"`입니다.
 - `onLayerError`: `"skip"` mode에서 건너뛴 layer를 받는 callback입니다. 전달 값은 `{ layer, name, error }`입니다.
 - `rendererOptions`: 브라우저 one-shot helper 전용입니다. 렌더러 생성 시 그대로 전달됩니다.
@@ -322,6 +323,7 @@ gerber-renderer top.gbr bottom.gbr \
   --background '#05070c' \
   --padding 32 \
   --alpha 0.7 \
+  --composite-mode blend \
   --minimum-feature-pixels 1
 ```
 
@@ -343,6 +345,7 @@ CLI 옵션:
 - `--padding <px>`: fit-to-view padding입니다. 기본값은 `0`입니다.
 - `--background <color>`: hex 또는 `rgb()`/`rgba()` 배경입니다. 생략하면 투명 출력입니다.
 - `--alpha <0-1>`: global layer opacity입니다. 기본값은 `0.7`입니다.
+- `--composite-mode <blend|stack>`: layer 합성 모드입니다. 기본값은 `blend`입니다.
 - `--minimum-feature-pixels <px>`: line/arc의 최소 렌더링 폭입니다. 기본값은 `1`입니다.
 - `--max-render-target-bytes <size>`: render target별 memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
 - `--approx-region-arcs`: 렌더링 전에 region arc를 line segment로 변환합니다.

@@ -271,7 +271,8 @@ try {
 - `arcTessellationQuality`：圓弧近似品質，`0` 為低、`1` 為標準、`2` 為高。預設 `1`。
 - `minimumFeaturePixels`：線段/圓弧的最小渲染寬度，單位為螢幕像素。預設 `1`。
 - `renderDrills`：把 NC drill 檔案（`.drl`、`.nc`、`.xnc`、`.xln`）渲染為鑽孔疊加層。預設 `true`。
-- `globalAlpha`：沒有明確圖層 `alpha` 時使用的透明度。預設 `0.7`。
+- `globalAlpha`：`blend` 模式下沒有明確圖層 `alpha` 的 Gerber 圖層透明度。預設 `0.7`。
+- `compositeMode`：圖層合成模式，取 `"blend"` 或 `"stack"`。預設 `"blend"`。`blend` 使用 alpha additive blending；`stack` 按輸入順序繪製，後面的圖層覆蓋前面的圖層，Gerber 圖層預設透明度為 `1`。
 - `layerErrorMode`：`"skip"` 會繼續渲染剩餘有效圖層；`"throw"` 會在第一次失敗時中斷。預設 `"skip"`。
 - `onLayerError`：`"skip"` 模式下接收被跳過圖層的回呼函式，參數為 `{ layer, name, error }`。
 - `rendererOptions`：僅用於瀏覽器一次性輔助函式；建立渲染器時會原樣傳入。
@@ -322,6 +323,7 @@ gerber-renderer top.gbr bottom.gbr \
   --background '#05070c' \
   --padding 32 \
   --alpha 0.7 \
+  --composite-mode blend \
   --minimum-feature-pixels 1
 ```
 
@@ -343,6 +345,7 @@ CLI 選項：
 - `--padding <px>`：自動適配視圖時使用的像素內邊距。預設 `0`。
 - `--background <color>`：hex 或 `rgb()`/`rgba()` 背景。不指定則為透明輸出。
 - `--alpha <0-1>`：全域圖層透明度。預設 `0.7`。
+- `--composite-mode <blend|stack>`：圖層合成模式。預設 `blend`。
 - `--minimum-feature-pixels <px>`：線段/圓弧的最小渲染寬度。預設 `1`。
 - `--max-render-target-bytes <size>`：每個渲染目標的記憶體上限。接受位元組數或 `512m`、`2g` 這類後綴。
 - `--approx-region-arcs`：渲染前把 region 圓弧轉換為線段。

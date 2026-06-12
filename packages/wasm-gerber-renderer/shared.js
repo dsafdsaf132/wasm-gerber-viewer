@@ -22,6 +22,9 @@ export const DEFAULT_BACKGROUND = null;
 export const DEFAULT_GLOBAL_ALPHA = 0.7;
 export const DEFAULT_MINIMUM_FEATURE_PIXELS = 1;
 export const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
+export const DEFAULT_COMPOSITE_MODE = "blend";
+export const COMPOSITE_MODE_BLEND = "blend";
+export const COMPOSITE_MODE_STACK = "stack";
 export const LAYER_KIND_GERBER = "gerber";
 export const LAYER_KIND_DRILL = "drill";
 
@@ -206,6 +209,8 @@ export class FrameState {
 
   toResult(view) {
     const globalAlpha = clamp01(numberOrDefault(this.options.globalAlpha, 1));
+    const gerberDefaultAlpha =
+      this.options.compositeMode === COMPOSITE_MODE_STACK ? 1 : globalAlpha;
     return {
       width: this.options.width,
       height: this.options.height,
@@ -219,7 +224,7 @@ export class FrameState {
         color: layer.color,
         alpha: resolveLayerAlpha(
           layer.alpha,
-          isDrillLayerKind(layer.kind) ? 1 : globalAlpha,
+          isDrillLayerKind(layer.kind) ? 1 : gerberDefaultAlpha,
         ),
       })),
     };
@@ -246,8 +251,18 @@ export function createBaseFrameOptions(frameOptions = {}) {
     ),
     renderDrills: frameOptions.renderDrills !== false,
     globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
+    compositeMode: normalizeCompositeMode(frameOptions.compositeMode),
     colors: DEFAULT_COLORS.map((color) => [...color]),
   };
+}
+
+export function normalizeCompositeMode(value) {
+  if (value == null) return DEFAULT_COMPOSITE_MODE;
+  const mode = String(value);
+  if (mode === COMPOSITE_MODE_BLEND || mode === COMPOSITE_MODE_STACK) {
+    return mode;
+  }
+  throw new TypeError("compositeMode must be 'blend' or 'stack'.");
 }
 
 export async function loadWasmJsModule(rendererOptions, options = {}) {

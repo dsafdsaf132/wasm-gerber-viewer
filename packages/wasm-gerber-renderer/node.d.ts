@@ -51,6 +51,7 @@ export type GerberNodePreparedLayer = {
 export type RGBColor = [number, number, number];
 export type RGBAColor = [number, number, number, number];
 export type LayerKind = "gerber" | "drill";
+export type CompositeMode = "blend" | "stack";
 export type PngRenderStrategy = "auto" | "full-frame" | "stream";
 
 export type NodeRendererOptions = {
@@ -85,6 +86,7 @@ export type NodeFrameOptions = {
   minimumFeaturePixels?: number;
   renderDrills?: boolean;
   globalAlpha?: number;
+  compositeMode?: CompositeMode;
   maxBandBytes?: number;
   maxFullFrameBytes?: number;
   maxRenderTargetBytes?: number;

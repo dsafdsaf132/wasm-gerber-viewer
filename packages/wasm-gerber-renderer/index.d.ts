@@ -20,6 +20,7 @@ export type GerberLayer =
 export type RGBColor = [number, number, number];
 export type RGBAColor = [number, number, number, number];
 export type LayerKind = "gerber" | "drill";
+export type CompositeMode = "blend" | "stack";
 
 export type RendererOptions = {
   wasmModule?: unknown;
@@ -49,6 +50,7 @@ export type FrameOptions = {
   minimumFeaturePixels?: number;
   renderDrills?: boolean;
   globalAlpha?: number;
+  compositeMode?: CompositeMode;
   rendererOptions?: RendererOptions;
   onLayerError?: (failure: LayerFailure) => void;
   layerErrorMode?: LayerErrorMode;

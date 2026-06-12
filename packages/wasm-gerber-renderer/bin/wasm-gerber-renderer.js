@@ -14,6 +14,7 @@ Options:
   --padding <px>                   Fit padding in pixels (default: 0)
   --background <color>             Background color, e.g. #05070c (default: transparent)
   --alpha <0-1>                    Global layer alpha (default: 0.7)
+  --composite-mode <blend|stack>   Layer compositing mode (default: blend)
   --minimum-feature-pixels <px>    Minimum line/arc display width (default: 1)
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --approx-region-arcs             Approximate region arcs before rendering (default: false)
@@ -100,6 +101,8 @@ function parseArgs(args) {
       frameOptions.background = readOptionValue(args, ++index, arg);
     } else if (arg === "--alpha") {
       frameOptions.globalAlpha = readNumber(args, ++index, arg);
+    } else if (arg === "--composite-mode") {
+      frameOptions.compositeMode = readCompositeMode(args, ++index, arg);
     } else if (arg === "--minimum-feature-pixels") {
       frameOptions.minimumFeaturePixels = readNumber(args, ++index, arg);
     } else if (arg === "--max-render-target-bytes") {
@@ -124,6 +127,14 @@ function parseArgs(args) {
   }
 
   return { inputs, output, frameOptions, showSkill };
+}
+
+function readCompositeMode(args, index, flag) {
+  const value = readOptionValue(args, index, flag);
+  if (value === "blend" || value === "stack") {
+    return value;
+  }
+  throw new Error(`${flag} must be blend or stack.`);
 }
 
 function inferOutputPath(inputs) {

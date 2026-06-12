@@ -9,6 +9,7 @@ import { finished } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createDeflate } from "node:zlib";
 import {
+  COMPOSITE_MODE_STACK,
   DEFAULT_ARC_TESSELLATION_QUALITY,
   FrameState,
   PNG_SIGNATURE,
@@ -487,6 +488,7 @@ class NodeFrameState extends FrameState {
       preserveArcRegions: this.options.preserveArcRegions,
       arcTessellationQuality: this.options.arcTessellationQuality,
       minimumFeaturePixels: this.options.minimumFeaturePixels,
+      compositeMode: this.options.compositeMode,
       maxFullFrameBytes: this.options.maxFullFrameBytes,
       maxRenderTargetBytes: this.options.maxRenderTargetBytes,
       framebufferMemorySafetyFactor: this.options.framebufferMemorySafetyFactor,
@@ -1022,7 +1024,7 @@ function renderStreamBand(state, width, height, tileY, view, bandRowBytes) {
     const readX = tileX - renderTileX;
     if (hasBlendModes(state.renderContext.blendModes)) {
       if (typeof state.renderContext.processor.render_tile_with_blend_modes !== "function") {
-        throw new Error("Drill rendering requires an updated WASM renderer.");
+        throw new Error("Stack compositing and drill rendering require an updated WASM renderer.");
       }
       state.renderContext.processor.render_tile_with_blend_modes(
         state.renderContext.activeLayerIds,
@@ -1168,7 +1170,7 @@ function renderPlanPixels(renderContext, plan) {
       typeof renderContext.processor.render_pixels_with_clear_and_blend_modes !==
       "function"
     ) {
-      throw new Error("Drill rendering requires an updated WASM renderer.");
+      throw new Error("Stack compositing and drill rendering require an updated WASM renderer.");
     }
     return renderContext.processor.render_pixels_with_clear_and_blend_modes(
       renderContext.activeLayerIds,
@@ -1219,6 +1221,9 @@ function createPlanRenderEntries(processor, plan) {
   const drillOutlineEntries = [];
   const drillFillEntries = [];
   const drillColors = resolveDrillRenderColors(plan.background);
+  const gerberBlendMode = plan.compositeMode === COMPOSITE_MODE_STACK ? 1 : 0;
+  const gerberDefaultAlpha =
+    plan.compositeMode === COMPOSITE_MODE_STACK ? 1 : plan.globalAlpha;
 
   for (const layer of plan.layers) {
     if (isDrillLayerKind(layer.kind)) {
@@ -1244,8 +1249,8 @@ function createPlanRenderEntries(processor, plan) {
     gerberEntries.push({
       layerId: addPlanLayerToProcessor(processor, layer),
       color: layer.color,
-      alpha: resolveLayerAlpha(layer.alpha, plan.globalAlpha),
-      blendMode: 0,
+      alpha: resolveLayerAlpha(layer.alpha, gerberDefaultAlpha),
+      blendMode: gerberBlendMode,
     });
   }
 
