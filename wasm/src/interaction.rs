@@ -131,6 +131,29 @@ impl FeatureKind {
             FeatureKind::DrillSlot => "drill-slot",
         }
     }
+
+    fn to_u8(&self) -> u8 {
+        match self {
+            FeatureKind::Flash => 0,
+            FeatureKind::Draw => 1,
+            FeatureKind::ArcDraw => 2,
+            FeatureKind::Region => 3,
+            FeatureKind::DrillHit => 4,
+            FeatureKind::DrillSlot => 5,
+        }
+    }
+
+    fn from_u8(v: u8) -> Result<Self, String> {
+        match v {
+            0 => Ok(FeatureKind::Flash),
+            1 => Ok(FeatureKind::Draw),
+            2 => Ok(FeatureKind::ArcDraw),
+            3 => Ok(FeatureKind::Region),
+            4 => Ok(FeatureKind::DrillHit),
+            5 => Ok(FeatureKind::DrillSlot),
+            _ => Err(format!("Unknown FeatureKind byte: {v}")),
+        }
+    }
 }
 
 impl FeatureDescriptorKey {
@@ -233,6 +256,89 @@ impl InteractionLayer {
 
     pub fn pick(&self, x: f32, y: f32, tolerance: f32) -> Option<(usize, &InteractionFeature)> {
         self.pick_after(x, y, tolerance, None).0
+    }
+
+    /// Serialize to a compact binary format for cross-WASM-instance transfer.
+    ///
+    /// `Rc`-shared templates are deduplicated by pointer identity into a header table
+    /// so that `from_bytes` can restore sharing via `Rc::clone` from that table.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut w = BinaryWriter::new();
+        w.write_bytes(b"ILYR");
+        w.write_u8(1); // version
+
+        // Build template table, keyed by Rc pointer for deduplication
+        let mut template_table: Vec<Rc<Vec<f32>>> = Vec::new();
+        let mut template_map: HashMap<*const Vec<f32>, u32> = HashMap::new();
+        for feature in &self.features {
+            feature.primitives.for_each(|p| {
+                if let Primitive::TriangleTemplateFlash { template, .. } = p {
+                    let ptr = Rc::as_ptr(template);
+                    if !template_map.contains_key(&ptr) {
+                        let idx = template_table.len() as u32;
+                        template_map.insert(ptr, idx);
+                        template_table.push(Rc::clone(template));
+                    }
+                }
+            });
+        }
+
+        w.write_u32(template_table.len() as u32);
+        for template in &template_table {
+            w.write_u32(template.len() as u32);
+            for &v in template.iter() {
+                w.write_f32(v);
+            }
+        }
+
+        w.write_u32(self.features.len() as u32);
+        for feature in &self.features {
+            encode_feature_bytes(&mut w, feature, &template_map);
+        }
+
+        w.into_vec()
+    }
+
+    /// Deserialize from the binary format produced by `to_bytes()`.
+    ///
+    /// Templates are re-shared via `Rc::clone` from the restored table.
+    /// Descriptor strings and keys are re-interned into fresh pools via `push()`.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        let mut r = BinaryReader::new(data);
+
+        let magic = r.read_bytes(4)?;
+        if magic != b"ILYR" {
+            return Err(format!(
+                "Invalid interaction data magic: expected ILYR, got {:?}",
+                magic
+            ));
+        }
+        let version = r.read_u8()?;
+        if version != 1 {
+            return Err(format!(
+                "Unsupported interaction data version: {version}"
+            ));
+        }
+
+        let template_count = r.read_u32()? as usize;
+        let mut templates: Vec<Rc<Vec<f32>>> = Vec::with_capacity(template_count);
+        for _ in 0..template_count {
+            let len = r.read_u32()? as usize;
+            let mut tpl = Vec::with_capacity(len);
+            for _ in 0..len {
+                tpl.push(r.read_f32()?);
+            }
+            templates.push(Rc::new(tpl));
+        }
+
+        let feature_count = r.read_u32()? as usize;
+        let mut layer = InteractionLayer::new();
+        for _ in 0..feature_count {
+            let feature = decode_feature_bytes(&mut r, &templates)?;
+            layer.push(feature);
+        }
+
+        Ok(layer)
     }
 
     pub fn pick_after(
@@ -1740,4 +1846,701 @@ mod tests {
         assert!(batches[1].clear);
         assert!(batches[1].vertices.len() > CIRCLE_SEGMENTS * 6);
     }
+}
+
+// ===== Binary encoding helpers (worker→main transfer) =====
+
+struct BinaryWriter {
+    buf: Vec<u8>,
+}
+
+impl BinaryWriter {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, v: u8) {
+        self.buf.push(v);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_f32(&mut self, v: f32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    fn write_opt_str(&mut self, s: &Option<Rc<str>>) {
+        match s {
+            None => self.write_u32(u32::MAX),
+            Some(s) => {
+                let b = s.as_bytes();
+                self.write_u32(b.len() as u32);
+                self.write_bytes(b);
+            }
+        }
+    }
+
+    fn write_f32_slice(&mut self, values: &[f32]) {
+        self.write_u32(values.len() as u32);
+        for &v in values {
+            self.write_f32(v);
+        }
+    }
+
+    fn write_u32_slice(&mut self, values: &[u32]) {
+        self.write_u32(values.len() as u32);
+        for &v in values {
+            self.write_u32(v);
+        }
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+struct BinaryReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BinaryReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> Result<u8, String> {
+        self.data
+            .get(self.pos)
+            .copied()
+            .map(|v| {
+                self.pos += 1;
+                v
+            })
+            .ok_or_else(|| "Truncated interaction data (u8)".to_string())
+    }
+
+    fn read_u32(&mut self) -> Result<u32, String> {
+        if self.pos + 4 > self.data.len() {
+            return Err("Truncated interaction data (u32)".to_string());
+        }
+        let b: [u8; 4] = self.data[self.pos..self.pos + 4].try_into().unwrap();
+        self.pos += 4;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    fn read_f32(&mut self) -> Result<f32, String> {
+        if self.pos + 4 > self.data.len() {
+            return Err("Truncated interaction data (f32)".to_string());
+        }
+        let b: [u8; 4] = self.data[self.pos..self.pos + 4].try_into().unwrap();
+        self.pos += 4;
+        Ok(f32::from_le_bytes(b))
+    }
+
+    fn read_f32_vec(&mut self) -> Result<Vec<f32>, String> {
+        let len = self.read_u32()? as usize;
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(self.read_f32()?);
+        }
+        Ok(v)
+    }
+
+    fn read_u32_vec(&mut self) -> Result<Vec<u32>, String> {
+        let len = self.read_u32()? as usize;
+        let mut v = Vec::with_capacity(len);
+        for _ in 0..len {
+            v.push(self.read_u32()?);
+        }
+        Ok(v)
+    }
+
+    fn read_opt_str(&mut self) -> Result<Option<Rc<str>>, String> {
+        let len = self.read_u32()?;
+        if len == u32::MAX {
+            return Ok(None);
+        }
+        let len = len as usize;
+        if self.pos + len > self.data.len() {
+            return Err("Truncated interaction data (string)".to_string());
+        }
+        let s = std::str::from_utf8(&self.data[self.pos..self.pos + len])
+            .map_err(|_| "Invalid UTF-8 in interaction data string".to_string())?;
+        self.pos += len;
+        Ok(Some(Rc::from(s)))
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&[u8], String> {
+        if self.pos + len > self.data.len() {
+            return Err("Truncated interaction data (bytes)".to_string());
+        }
+        let slice = &self.data[self.pos..self.pos + len];
+        self.pos += len;
+        Ok(slice)
+    }
+}
+
+fn encode_feature_bytes(
+    w: &mut BinaryWriter,
+    feature: &InteractionFeature,
+    template_map: &HashMap<*const Vec<f32>, u32>,
+) {
+    let d = &feature.descriptor;
+    w.write_u8(d.kind.to_u8());
+    w.write_u8(if d.polarity == Polarity::Negative { 1 } else { 0 });
+    w.write_opt_str(&d.aperture);
+    w.write_opt_str(&d.aperture_type);
+    w.write_opt_str(&d.macro_name);
+
+    let p = &d.properties;
+    let flags: u8 = (p.diameter.is_some() as u8)
+        | ((p.width.is_some() as u8) << 1)
+        | ((p.height.is_some() as u8) << 2)
+        | ((p.rotation.is_some() as u8) << 3)
+        | ((p.vertices.is_some() as u8) << 4)
+        | ((p.tool_code.is_some() as u8) << 5)
+        | ((p.primitive_count.is_some() as u8) << 6)
+        | ((p.arc_command.is_some() as u8) << 7);
+    w.write_u8(flags);
+    if let Some(v) = p.diameter {
+        w.write_f32(v);
+    }
+    if let Some(v) = p.width {
+        w.write_f32(v);
+    }
+    if let Some(v) = p.height {
+        w.write_f32(v);
+    }
+    if let Some(v) = p.rotation {
+        w.write_f32(v);
+    }
+    if let Some(v) = p.vertices {
+        w.write_u32(v);
+    }
+    if let Some(v) = p.tool_code {
+        w.write_u32(v);
+    }
+    if let Some(v) = p.primitive_count {
+        w.write_u32(v);
+    }
+    if let Some(ref s) = p.arc_command {
+        let b = s.as_bytes();
+        w.write_u32(b.len() as u32);
+        w.write_bytes(b);
+    }
+
+    w.write_f32(feature.bounds.min_x());
+    w.write_f32(feature.bounds.min_y());
+    w.write_f32(feature.bounds.max_x());
+    w.write_f32(feature.bounds.max_y());
+
+    encode_storage_bytes(w, &feature.primitives.storage, template_map);
+
+    match &feature.path_regions {
+        None => w.write_u8(0),
+        Some(pr) => {
+            w.write_u8(1);
+            encode_path_regions_bytes(w, pr);
+        }
+    }
+}
+
+fn encode_storage_bytes(
+    w: &mut BinaryWriter,
+    storage: &FeaturePrimitiveStorage,
+    template_map: &HashMap<*const Vec<f32>, u32>,
+) {
+    match storage {
+        FeaturePrimitiveStorage::Empty => w.write_u8(0),
+        FeaturePrimitiveStorage::Triangle(p) => {
+            w.write_u8(1);
+            if let Primitive::Triangle {
+                vertices,
+                exposure,
+                hole_x,
+                hole_y,
+                hole_radius,
+            } = p.as_ref()
+            {
+                for [vx, vy] in vertices {
+                    w.write_f32(*vx);
+                    w.write_f32(*vy);
+                }
+                w.write_f32(*exposure);
+                w.write_f32(*hole_x);
+                w.write_f32(*hole_y);
+                w.write_f32(*hole_radius);
+            }
+        }
+        FeaturePrimitiveStorage::Circle {
+            x,
+            y,
+            radius,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+        } => {
+            w.write_u8(2);
+            w.write_f32(*x);
+            w.write_f32(*y);
+            w.write_f32(*radius);
+            w.write_f32(*exposure);
+            w.write_f32(*hole_x);
+            w.write_f32(*hole_y);
+            w.write_f32(*hole_radius);
+        }
+        FeaturePrimitiveStorage::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            exposure,
+        } => {
+            w.write_u8(3);
+            w.write_f32(*x);
+            w.write_f32(*y);
+            w.write_f32(*radius);
+            w.write_f32(*start_angle);
+            w.write_f32(*end_angle);
+            w.write_f32(*thickness);
+            w.write_f32(*exposure);
+        }
+        FeaturePrimitiveStorage::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            exposure,
+        } => {
+            w.write_u8(4);
+            w.write_f32(*x);
+            w.write_f32(*y);
+            w.write_f32(*outer_diameter);
+            w.write_f32(*inner_diameter);
+            w.write_f32(*gap_thickness);
+            w.write_f32(*rotation);
+            w.write_f32(*exposure);
+        }
+        FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y } => {
+            w.write_u8(5);
+            let idx = template_map[&Rc::as_ptr(template)];
+            w.write_u32(idx);
+            w.write_f32(*x);
+            w.write_f32(*y);
+        }
+        FeaturePrimitiveStorage::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+        } => {
+            w.write_u8(6);
+            w.write_f32(*start_x);
+            w.write_f32(*start_y);
+            w.write_f32(*end_x);
+            w.write_f32(*end_y);
+            w.write_f32(*width);
+            w.write_f32(*exposure);
+        }
+        FeaturePrimitiveStorage::Multiple(primitives) => {
+            w.write_u8(7);
+            w.write_u32(primitives.len() as u32);
+            for p in primitives.iter() {
+                encode_primitive_bytes(w, p, template_map);
+            }
+        }
+    }
+}
+
+fn encode_primitive_bytes(
+    w: &mut BinaryWriter,
+    primitive: &Primitive,
+    template_map: &HashMap<*const Vec<f32>, u32>,
+) {
+    match primitive {
+        Primitive::Triangle {
+            vertices,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+        } => {
+            w.write_u8(1);
+            for [vx, vy] in vertices {
+                w.write_f32(*vx);
+                w.write_f32(*vy);
+            }
+            w.write_f32(*exposure);
+            w.write_f32(*hole_x);
+            w.write_f32(*hole_y);
+            w.write_f32(*hole_radius);
+        }
+        Primitive::Circle {
+            x,
+            y,
+            radius,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+        } => {
+            w.write_u8(2);
+            w.write_f32(*x);
+            w.write_f32(*y);
+            w.write_f32(*radius);
+            w.write_f32(*exposure);
+            w.write_f32(*hole_x);
+            w.write_f32(*hole_y);
+            w.write_f32(*hole_radius);
+        }
+        Primitive::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            exposure,
+        } => {
+            w.write_u8(3);
+            w.write_f32(*x);
+            w.write_f32(*y);
+            w.write_f32(*radius);
+            w.write_f32(*start_angle);
+            w.write_f32(*end_angle);
+            w.write_f32(*thickness);
+            w.write_f32(*exposure);
+        }
+        Primitive::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            exposure,
+        } => {
+            w.write_u8(4);
+            w.write_f32(*x);
+            w.write_f32(*y);
+            w.write_f32(*outer_diameter);
+            w.write_f32(*inner_diameter);
+            w.write_f32(*gap_thickness);
+            w.write_f32(*rotation);
+            w.write_f32(*exposure);
+        }
+        Primitive::TriangleTemplateFlash { template, x, y } => {
+            w.write_u8(5);
+            let idx = template_map[&Rc::as_ptr(template)];
+            w.write_u32(idx);
+            w.write_f32(*x);
+            w.write_f32(*y);
+        }
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+        } => {
+            w.write_u8(6);
+            w.write_f32(*start_x);
+            w.write_f32(*start_y);
+            w.write_f32(*end_x);
+            w.write_f32(*end_y);
+            w.write_f32(*width);
+            w.write_f32(*exposure);
+        }
+    }
+}
+
+fn encode_path_regions_bytes(w: &mut BinaryWriter, pr: &PathRegions) {
+    w.write_f32_slice(&pr.wedge_vertices);
+    w.write_u32_slice(&pr.wedge_vertex_offsets);
+    w.write_f32_slice(&pr.sector_vertices);
+    w.write_u32_slice(&pr.sector_vertex_offsets);
+    w.write_f32_slice(&pr.cover_vertices);
+    w.write_f32_slice(&pr.clear_vertices);
+    w.write_u32(pr.pick_contours.len() as u32);
+    for region in &pr.pick_contours {
+        w.write_u32(region.len() as u32);
+        for contour in region {
+            w.write_u32(contour.len() as u32);
+            for [x, y] in contour {
+                w.write_f32(*x);
+                w.write_f32(*y);
+            }
+        }
+    }
+}
+
+fn decode_feature_bytes(
+    r: &mut BinaryReader<'_>,
+    templates: &[Rc<Vec<f32>>],
+) -> Result<InteractionFeature, String> {
+    let kind = FeatureKind::from_u8(r.read_u8()?)?;
+    let polarity = if r.read_u8()? != 0 {
+        Polarity::Negative
+    } else {
+        Polarity::Positive
+    };
+    let aperture = r.read_opt_str()?;
+    let aperture_type = r.read_opt_str()?;
+    let macro_name = r.read_opt_str()?;
+
+    let flags = r.read_u8()?;
+    let diameter = (flags & 1 != 0).then(|| r.read_f32()).transpose()?;
+    let width = (flags & 2 != 0).then(|| r.read_f32()).transpose()?;
+    let height = (flags & 4 != 0).then(|| r.read_f32()).transpose()?;
+    let rotation = (flags & 8 != 0).then(|| r.read_f32()).transpose()?;
+    let vertices = (flags & 16 != 0).then(|| r.read_u32()).transpose()?;
+    let tool_code = (flags & 32 != 0).then(|| r.read_u32()).transpose()?;
+    let primitive_count = (flags & 64 != 0).then(|| r.read_u32()).transpose()?;
+    let arc_command = if flags & 128 != 0 {
+        let len = r.read_u32()? as usize;
+        let b = r.read_bytes(len)?;
+        let s = std::str::from_utf8(b)
+            .map_err(|_| "Invalid UTF-8 in arc_command".to_string())?;
+        Some(Rc::from(s))
+    } else {
+        None
+    };
+
+    let min_x = r.read_f32()?;
+    let min_y = r.read_f32()?;
+    let max_x = r.read_f32()?;
+    let max_y = r.read_f32()?;
+    let bounds = Boundary::new(min_x, max_x, min_y, max_y);
+
+    let primitives = decode_storage_bytes(r, templates)?;
+
+    let path_regions = if r.read_u8()? != 0 {
+        Some(Box::new(decode_path_regions_bytes(r)?))
+    } else {
+        None
+    };
+
+    Ok(InteractionFeature {
+        descriptor: Rc::new(FeatureDescriptor {
+            kind,
+            aperture,
+            aperture_type,
+            macro_name,
+            polarity,
+            properties: FeatureProperties {
+                diameter,
+                width,
+                height,
+                rotation,
+                vertices,
+                tool_code,
+                primitive_count,
+                arc_command,
+            },
+        }),
+        primitives,
+        path_regions,
+        bounds,
+    })
+}
+
+fn decode_storage_bytes(
+    r: &mut BinaryReader<'_>,
+    templates: &[Rc<Vec<f32>>],
+) -> Result<FeaturePrimitives, String> {
+    let tag = r.read_u8()?;
+    let storage = match tag {
+        0 => FeaturePrimitiveStorage::Empty,
+        1 => {
+            let v0 = [r.read_f32()?, r.read_f32()?];
+            let v1 = [r.read_f32()?, r.read_f32()?];
+            let v2 = [r.read_f32()?, r.read_f32()?];
+            FeaturePrimitiveStorage::Triangle(Box::new(Primitive::Triangle {
+                vertices: [v0, v1, v2],
+                exposure: r.read_f32()?,
+                hole_x: r.read_f32()?,
+                hole_y: r.read_f32()?,
+                hole_radius: r.read_f32()?,
+            }))
+        }
+        2 => FeaturePrimitiveStorage::Circle {
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            radius: r.read_f32()?,
+            exposure: r.read_f32()?,
+            hole_x: r.read_f32()?,
+            hole_y: r.read_f32()?,
+            hole_radius: r.read_f32()?,
+        },
+        3 => FeaturePrimitiveStorage::Arc {
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            radius: r.read_f32()?,
+            start_angle: r.read_f32()?,
+            end_angle: r.read_f32()?,
+            thickness: r.read_f32()?,
+            exposure: r.read_f32()?,
+        },
+        4 => FeaturePrimitiveStorage::Thermal {
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            outer_diameter: r.read_f32()?,
+            inner_diameter: r.read_f32()?,
+            gap_thickness: r.read_f32()?,
+            rotation: r.read_f32()?,
+            exposure: r.read_f32()?,
+        },
+        5 => {
+            let idx = r.read_u32()? as usize;
+            let template = templates
+                .get(idx)
+                .ok_or_else(|| format!("Template index {idx} out of range ({} templates)", templates.len()))?;
+            FeaturePrimitiveStorage::TriangleTemplateFlash {
+                template: Rc::clone(template),
+                x: r.read_f32()?,
+                y: r.read_f32()?,
+            }
+        }
+        6 => FeaturePrimitiveStorage::Line {
+            start_x: r.read_f32()?,
+            start_y: r.read_f32()?,
+            end_x: r.read_f32()?,
+            end_y: r.read_f32()?,
+            width: r.read_f32()?,
+            exposure: r.read_f32()?,
+        },
+        7 => {
+            let count = r.read_u32()? as usize;
+            let mut primitives = Vec::with_capacity(count);
+            for _ in 0..count {
+                primitives.push(decode_primitive_bytes(r, templates)?);
+            }
+            FeaturePrimitiveStorage::Multiple(primitives.into_boxed_slice())
+        }
+        _ => return Err(format!("Unknown primitive storage tag: {tag}")),
+    };
+    Ok(FeaturePrimitives { storage })
+}
+
+fn decode_primitive_bytes(
+    r: &mut BinaryReader<'_>,
+    templates: &[Rc<Vec<f32>>],
+) -> Result<Primitive, String> {
+    let tag = r.read_u8()?;
+    match tag {
+        1 => {
+            let v0 = [r.read_f32()?, r.read_f32()?];
+            let v1 = [r.read_f32()?, r.read_f32()?];
+            let v2 = [r.read_f32()?, r.read_f32()?];
+            Ok(Primitive::Triangle {
+                vertices: [v0, v1, v2],
+                exposure: r.read_f32()?,
+                hole_x: r.read_f32()?,
+                hole_y: r.read_f32()?,
+                hole_radius: r.read_f32()?,
+            })
+        }
+        2 => Ok(Primitive::Circle {
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            radius: r.read_f32()?,
+            exposure: r.read_f32()?,
+            hole_x: r.read_f32()?,
+            hole_y: r.read_f32()?,
+            hole_radius: r.read_f32()?,
+        }),
+        3 => Ok(Primitive::Arc {
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            radius: r.read_f32()?,
+            start_angle: r.read_f32()?,
+            end_angle: r.read_f32()?,
+            thickness: r.read_f32()?,
+            exposure: r.read_f32()?,
+        }),
+        4 => Ok(Primitive::Thermal {
+            x: r.read_f32()?,
+            y: r.read_f32()?,
+            outer_diameter: r.read_f32()?,
+            inner_diameter: r.read_f32()?,
+            gap_thickness: r.read_f32()?,
+            rotation: r.read_f32()?,
+            exposure: r.read_f32()?,
+        }),
+        5 => {
+            let idx = r.read_u32()? as usize;
+            let template = templates
+                .get(idx)
+                .ok_or_else(|| format!("Template index {idx} out of range"))?;
+            Ok(Primitive::TriangleTemplateFlash {
+                template: Rc::clone(template),
+                x: r.read_f32()?,
+                y: r.read_f32()?,
+            })
+        }
+        6 => Ok(Primitive::Line {
+            start_x: r.read_f32()?,
+            start_y: r.read_f32()?,
+            end_x: r.read_f32()?,
+            end_y: r.read_f32()?,
+            width: r.read_f32()?,
+            exposure: r.read_f32()?,
+        }),
+        _ => Err(format!("Unknown primitive tag: {tag}")),
+    }
+}
+
+fn decode_path_regions_bytes(r: &mut BinaryReader<'_>) -> Result<PathRegions, String> {
+    let wedge_vertices = r.read_f32_vec()?;
+    let wedge_vertex_offsets = r.read_u32_vec()?;
+    let sector_vertices = r.read_f32_vec()?;
+    let sector_vertex_offsets = r.read_u32_vec()?;
+    let cover_vertices = r.read_f32_vec()?;
+    let clear_vertices = r.read_f32_vec()?;
+
+    let region_count = r.read_u32()? as usize;
+    let mut pick_contours: Vec<Vec<Vec<[f32; 2]>>> = Vec::with_capacity(region_count);
+    for _ in 0..region_count {
+        let contour_count = r.read_u32()? as usize;
+        let mut region = Vec::with_capacity(contour_count);
+        for _ in 0..contour_count {
+            let point_count = r.read_u32()? as usize;
+            let mut contour = Vec::with_capacity(point_count);
+            for _ in 0..point_count {
+                contour.push([r.read_f32()?, r.read_f32()?]);
+            }
+            region.push(contour);
+        }
+        pick_contours.push(region);
+    }
+
+    // Offsets are already normalized from the original parse; construct directly
+    // to avoid double-normalization from PathRegions::new().
+    Ok(PathRegions {
+        wedge_vertices,
+        wedge_vertex_offsets,
+        sector_vertices,
+        sector_vertex_offsets,
+        cover_vertices,
+        clear_vertices,
+        pick_contours,
+    })
 }

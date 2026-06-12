@@ -112,6 +112,7 @@ self.addEventListener("message", async (event) => {
     offset = {},
     preserveArcRegions = true,
     arcTessellationQuality = 1,
+    includeInteractions = false,
   } = event.data ?? {};
   let content = event.data?.content;
   let beforeBytes = null;
@@ -124,6 +125,47 @@ self.addEventListener("message", async (event) => {
     beforeBytes = getWorkerWasmMemoryBytes();
     reserveWasmInputCapacity(wasmModule, content);
     const normalizedQuality = Number(arcTessellationQuality ?? 1);
+    const offsetX = Number(offset.x ?? 0);
+    const offsetY = Number(offset.y ?? 0);
+
+    if (includeInteractions) {
+      if (typeof wasmModule.parse_gerber_layer_with_interactions !== "function") {
+        throw new Error(
+          "Parse worker requires an updated WASM module for interaction parsing",
+        );
+      }
+      const result = wasmModule.parse_gerber_layer_with_interactions(
+        content,
+        offsetX,
+        offsetY,
+        Boolean(preserveArcRegions),
+        normalizedQuality,
+      );
+      const parsedLayer = result.renderPayload;
+      const interactionData = result.interactionData;
+      const transferables = collectTransferables(parsedLayer);
+      if (
+        interactionData instanceof Uint8Array &&
+        interactionData.buffer.byteLength > 0
+      ) {
+        transferables.push(interactionData.buffer);
+      }
+      self.postMessage(
+        {
+          id,
+          ok: true,
+          parsedLayer,
+          interactionData,
+          workerMemory: {
+            beforeBytes,
+            afterBytes: getWorkerWasmMemoryBytes(),
+          },
+        },
+        transferables,
+      );
+      return;
+    }
+
     const supportsArcQuality =
       typeof wasmModule.parse_gerber_layer_with_options === "function" &&
       wasmModule.parse_gerber_layer_with_options.length >= 5;
@@ -141,8 +183,8 @@ self.addEventListener("message", async (event) => {
             }
             return wasmModule.parse_gerber_layer_with_options(
               content,
-              Number(offset.x ?? 0),
-              Number(offset.y ?? 0),
+              offsetX,
+              offsetY,
               Boolean(preserveArcRegions),
               normalizedQuality,
             );
@@ -153,11 +195,7 @@ self.addEventListener("message", async (event) => {
                 "Parse worker requires an updated WASM module for region arc options",
               );
             }
-            return wasmModule.parse_gerber_layer(
-              content,
-              Number(offset.x ?? 0),
-              Number(offset.y ?? 0),
-            );
+            return wasmModule.parse_gerber_layer(content, offsetX, offsetY);
           };
     const parsedLayer = parseLayer();
     const transferables = collectTransferables(parsedLayer);

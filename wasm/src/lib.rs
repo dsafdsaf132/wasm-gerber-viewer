@@ -16,7 +16,7 @@ use crate::parser::{
 use crate::renderer::Renderer;
 use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::util::format_bytes;
-use js_sys::{Object, Reflect};
+use js_sys::{Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
 
@@ -136,6 +136,54 @@ pub fn parse_gerber_layer_with_options(
         arc_tessellation_quality,
     )?;
     gerber_data_layers_to_js(&gerber_data_layers)
+}
+
+/// Parse a Gerber layer and return both render geometry and interaction data.
+///
+/// Intended for use in workers so the result can be transferred to the main
+/// thread and injected into the active `GerberProcessor` via
+/// `add_render_payload_with_interactions`.
+///
+/// Returns `{ renderPayload, interactionData: Uint8Array }`.
+#[wasm_bindgen]
+pub fn parse_gerber_layer_with_interactions(
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+) -> Result<JsValue, JsValue> {
+    let payload = parse_layer_payload_data(
+        &content,
+        offset_x,
+        offset_y,
+        preserve_arc_regions,
+        arc_tessellation_quality,
+    )?;
+
+    let render_payload = gerber_data_layers_to_js(&payload.render_layers)?;
+
+    let interaction_data: JsValue = if let Some(interaction_layer) = payload.interaction_layer {
+        let bytes = interaction_layer.to_bytes();
+        let array = Uint8Array::new_with_length(bytes.len() as u32);
+        array.copy_from(&bytes);
+        array.into()
+    } else {
+        JsValue::NULL
+    };
+
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &JsValue::from_str("renderPayload"),
+        &render_payload,
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("interactionData"),
+        &interaction_data,
+    )?;
+    Ok(object.into())
 }
 
 fn drill_parse_result_to_js(drill: DrillParseResult) -> Result<JsValue, JsValue> {
@@ -629,6 +677,35 @@ impl GerberProcessor {
                 "Renderer not initialized. Call init() first.",
             ))
         }
+    }
+
+    /// Add a worker-produced render payload with pre-built interaction data.
+    ///
+    /// `interaction_data` must be a buffer produced by `parse_gerber_layer_with_interactions`.
+    /// If `interaction_enabled` is false or the buffer is empty, interaction data is silently
+    /// ignored so callers do not need to branch on the interactions setting.
+    pub fn add_render_payload_with_interactions(
+        &mut self,
+        render_payload: JsValue,
+        interaction_data: &[u8],
+    ) -> Result<u32, JsValue> {
+        let layer_id = if let Some(renderer) = &mut self.renderer {
+            renderer.add_layer_from_render_payload(&render_payload)? as u32
+        } else {
+            return Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ));
+        };
+
+        if self.interaction_enabled && !interaction_data.is_empty() {
+            let interaction_layer =
+                InteractionLayer::from_bytes(interaction_data).map_err(|e| {
+                    JsValue::from_str(&format!("Failed to decode interaction data: {e}"))
+                })?;
+            self.set_interaction_layer(layer_id as usize, Some(interaction_layer));
+        }
+
+        Ok(layer_id)
     }
 
     /// Remove a layer from the renderer
