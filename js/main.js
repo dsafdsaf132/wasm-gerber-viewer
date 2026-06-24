@@ -873,7 +873,7 @@ export class GerberViewer {
       this.runLayerContextMenuAction(button.dataset.layerMenuAction);
     });
 
-    document.body.appendChild(menu);
+    this.dropZone.appendChild(menu);
     return menu;
   }
 
