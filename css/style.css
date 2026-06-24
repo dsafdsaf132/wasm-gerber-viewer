@@ -729,7 +729,7 @@ button {
 .outline-source-control {
   display: grid;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 8px 14px;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-2);
@@ -747,9 +747,22 @@ button {
   height: 32px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
-  background: var(--surface-1);
-  color: var(--text);
+  background: #0f1724;
+  color: #f8fafc;
   font: inherit;
+  font-weight: 650;
+  outline: none;
+  padding: 0 12px;
+}
+
+.outline-source-control select:focus {
+  border-color: rgba(94, 234, 212, 0.62);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.18);
+}
+
+.outline-source-control option {
+  background: #0f1724;
+  color: #f8fafc;
 }
 
 .side-panel.collapsed .outline-source-control {
@@ -780,7 +793,7 @@ button {
 .layer-item {
   position: relative;
   display: grid;
-  grid-template-columns: 28px 24px 24px minmax(0, 1fr) 32px;
+  grid-template-columns: 28px 24px 28px minmax(0, 1fr) 32px;
   align-items: center;
   gap: 8px;
   min-height: 50px;

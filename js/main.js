@@ -5897,6 +5897,7 @@ export class GerberViewer {
 
     layer.inverted = Boolean(inverted);
     this.removeInvertedLayerCache(layer);
+    this.renderLayerList();
     this.requestRender();
     this.updateUiState();
   }
