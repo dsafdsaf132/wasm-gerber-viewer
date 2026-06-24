@@ -19,6 +19,8 @@ Options:
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --approx-region-arcs             Approximate region arcs before rendering (default: false)
   --arc-quality <0|1|2>            Approx arc quality: low, normal, high (default: 1)
+  --invert-layer <selector>        Invert a Gerber layer by 1-based index or name (repeatable)
+  --outline-layer <selector>       Inverted fill outline: auto, bounds, index, or name
   --flip-x                         Mirror the output horizontally
   --flip-y                         Mirror the output vertically
   --no-drill                       Skip NC drill layers
@@ -54,6 +56,7 @@ async function main() {
   if (layers.length === 0) {
     throw new Error("No Gerber layers found in input files.");
   }
+  applyLayerSelectionOptions(layers, frameOptions);
 
   const skippedLayers = [];
   frameOptions.onLayerError = ({ name, error }) => {
@@ -78,6 +81,7 @@ async function main() {
 function parseArgs(args) {
   const inputs = [];
   const frameOptions = {};
+  const invertLayerSelectors = [];
   let output = "";
   let showSkill = false;
 
@@ -111,6 +115,10 @@ function parseArgs(args) {
       frameOptions.preserveArcRegions = false;
     } else if (arg === "--arc-quality") {
       frameOptions.arcTessellationQuality = readNonNegativeInteger(args, ++index, arg);
+    } else if (arg === "--invert-layer") {
+      invertLayerSelectors.push(readOptionValue(args, ++index, arg));
+    } else if (arg === "--outline-layer") {
+      frameOptions.invertedOutline = readOptionValue(args, ++index, arg);
     } else if (arg === "--flip-x") {
       frameOptions.flipX = true;
     } else if (arg === "--flip-y") {
@@ -126,6 +134,7 @@ function parseArgs(args) {
     }
   }
 
+  frameOptions.invertLayerSelectors = invertLayerSelectors;
   return { inputs, output, frameOptions, showSkill };
 }
 
@@ -246,6 +255,74 @@ async function collectInputLayers(inputs) {
   }
 
   return layers;
+}
+
+function applyLayerSelectionOptions(layers, frameOptions) {
+  const selectors = frameOptions.invertLayerSelectors ?? [];
+  delete frameOptions.invertLayerSelectors;
+
+  for (const selector of selectors) {
+    const layer = resolveLayerSelector(layers, selector, "--invert-layer");
+    layer.inverted = true;
+  }
+
+  if (selectors.length > 0) {
+    frameOptions.retainSourceContentForInversion = true;
+  }
+
+  if (
+    frameOptions.invertedOutline != null &&
+    !isInvertedOutlineKeyword(frameOptions.invertedOutline)
+  ) {
+    const outlineLayer = resolveLayerSelector(
+      layers,
+      frameOptions.invertedOutline,
+      "--outline-layer",
+    );
+    frameOptions.invertedOutline = String(layers.indexOf(outlineLayer) + 1);
+    if (selectors.length > 0) {
+      frameOptions.retainSourceContentForInversion = true;
+    }
+  }
+}
+
+function isInvertedOutlineKeyword(value) {
+  const normalized = String(value ?? "").toLowerCase();
+  return normalized === "auto" || normalized === "bounds";
+}
+
+function resolveLayerSelector(layers, selector, optionName) {
+  const normalized = String(selector ?? "").trim();
+  if (!normalized) {
+    throw new Error(`${optionName} requires a non-empty selector.`);
+  }
+
+  const numericIndex = Number(normalized);
+  if (
+    Number.isInteger(numericIndex) &&
+    numericIndex >= 1 &&
+    numericIndex <= layers.length
+  ) {
+    return layers[numericIndex - 1];
+  }
+
+  const matches = layers.filter((layer) => {
+    const names = [
+      layer.name,
+      layer.source?.path,
+      layer.source?.path ? basename(layer.source.path) : "",
+      layer.name ? basename(layer.name) : "",
+    ].filter(Boolean);
+    return names.includes(normalized);
+  });
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (matches.length > 1) {
+    throw new Error(`${optionName} selector is ambiguous: ${normalized}`);
+  }
+  throw new Error(`${optionName} selector did not match any layer: ${normalized}`);
 }
 
 async function readTarGzLayers(path) {

@@ -43,7 +43,7 @@ function isBoardOutlineLayer(layer) {
     return true;
   }
 
-  return /(^|[^a-z0-9])(board[-_ ]?outline|outline|edge[-_ ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
+  return /(^|[^a-z0-9])(board[-_. ]?outline|outline|edge[-_. ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
     normalized,
   );
 }

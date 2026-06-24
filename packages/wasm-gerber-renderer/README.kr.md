@@ -155,6 +155,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     }
   | {
       path: string;
@@ -163,6 +164,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     };
 ```
 
@@ -273,6 +275,7 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `renderDrills`: NC drill 파일(`.drl`, `.nc`, `.xnc`, `.xln`)을 drill overlay로 렌더링합니다. 기본값은 `true`입니다.
 - `globalAlpha`: `blend` 모드에서 명시적인 layer `alpha`가 없는 Gerber layer에 적용되는 opacity입니다. 기본값은 `0.7`입니다.
 - `compositeMode`: layer 합성 모드입니다. `"blend"` 또는 `"stack"`을 받으며 기본값은 `"blend"`입니다. `blend`는 alpha additive blending을 사용하고, `stack`은 Gerber layer를 입력 순서대로 source-over 합성하므로 뒤 Gerber layer가 앞 Gerber layer를 덮으며 기본 opacity는 `1`입니다. Drill overlay는 Gerber layer 이후에 렌더링됩니다.
+- `invertedOutline`: Node 전용 inverted layer 기준 outline입니다. `"auto"`는 board outline layer를 자동 감지하고, `"bounds"`는 현재 Gerber bounds를 채우며, layer index/name selector도 사용할 수 있습니다. 기본값은 `"auto"`입니다.
 - `layerErrorMode`: `"skip"`은 남은 유효한 layer를 계속 렌더링하고, `"throw"`는 첫 실패에서 Promise를 reject합니다. 기본값은 `"skip"`입니다.
 - `onLayerError`: `"skip"` mode에서 건너뛴 layer를 받는 callback입니다. 전달 값은 `{ layer, name, error }`입니다.
 - `rendererOptions`: 브라우저 one-shot helper 전용입니다. 렌더러 생성 시 그대로 전달됩니다.
@@ -283,6 +286,7 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `alpha`: layer별 opacity입니다. 설정하면 해당 layer의 frame 기본값을 재정의합니다. `stack` 모드에서는 명시적인 Gerber `alpha`가 불투명 기본값을 재정의합니다. Drill layer는 설정하지 않으면 불투명하게 렌더링됩니다.
 - `offsetX`: geometry를 load할 때 적용되는 X offset입니다. 기본값은 `0`입니다.
 - `offsetY`: geometry를 load할 때 적용되는 Y offset입니다. 기본값은 `0`입니다.
+- `inverted`: Node 전용입니다. 이 Gerber layer를 `frameOptions.invertedOutline` 기준의 inverted/negative layer로 렌더링합니다. 기본값은 `false`입니다.
 - `kind`: source filename이 없거나 모호할 때 `"gerber"` 또는 `"drill"`을 강제로 지정합니다.
 - `name`: `{ source, name }` 또는 `{ path, name }` 같은 config object에서 쓰는 layer 표시 이름입니다.
 
@@ -324,7 +328,9 @@ gerber-renderer top.gbr bottom.gbr \
   --padding 32 \
   --alpha 0.7 \
   --composite-mode blend \
-  --minimum-feature-pixels 1
+  --minimum-feature-pixels 1 \
+  --invert-layer mask.gbr \
+  --outline-layer board.gko
 ```
 
 Archive 예시:
@@ -350,6 +356,8 @@ CLI 옵션:
 - `--max-render-target-bytes <size>`: render target별 memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
 - `--approx-region-arcs`: 렌더링 전에 region arc를 line segment로 변환합니다.
 - `--arc-quality <0|1|2>`: arc 근사 품질입니다. 기본값은 `1`입니다.
+- `--invert-layer <selector>`: Gerber layer를 inverted/negative layer로 렌더링합니다. 여러 layer를 뒤집으려면 반복해서 지정합니다. Selector는 1-based layer index, exact layer name, basename을 지원합니다.
+- `--outline-layer <selector>`: inverted layer에 사용할 board outline입니다. `auto`, `bounds`, 1-based layer index, exact layer name, basename을 사용할 수 있습니다. 기본값은 `auto`입니다.
 - `--flip-x`: output을 좌우 반전합니다.
 - `--flip-y`: output을 상하 반전합니다.
 - `--no-drill`: NC drill layer를 건너뜁니다.

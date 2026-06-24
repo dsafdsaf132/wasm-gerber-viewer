@@ -987,6 +987,11 @@ button {
   color: #fecaca;
 }
 
+.layer-context-menu-item.active {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.14);
+}
+
 .layer-context-menu-item:disabled {
   color: var(--muted);
   cursor: not-allowed;

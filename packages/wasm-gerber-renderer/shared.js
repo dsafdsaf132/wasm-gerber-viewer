@@ -27,8 +27,20 @@ export const COMPOSITE_MODE_BLEND = "blend";
 export const COMPOSITE_MODE_STACK = "stack";
 export const LAYER_KIND_GERBER = "gerber";
 export const LAYER_KIND_DRILL = "drill";
+export const INVERTED_OUTLINE_AUTO = "auto";
+export const INVERTED_OUTLINE_BOUNDS = "bounds";
 
 const DRILL_FILE_EXTENSIONS = new Set([".drl", ".nc", ".xnc", ".xln"]);
+const BOARD_OUTLINE_EXTENSIONS = new Set([
+  ".gko",
+  ".gml",
+  ".gm1",
+  ".gmb",
+  ".gbrd",
+  ".outline",
+  ".edge",
+  ".cuts",
+]);
 const CSS_NAMED_COLORS = new Map([
   ["aliceblue", [240, 248, 255, 255]],
   ["antiquewhite", [250, 235, 215, 255]],
@@ -252,6 +264,7 @@ export function createBaseFrameOptions(frameOptions = {}) {
     renderDrills: frameOptions.renderDrills !== false,
     globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
     compositeMode: normalizeCompositeMode(frameOptions.compositeMode),
+    invertedOutline: normalizeInvertedOutline(frameOptions.invertedOutline),
     colors: DEFAULT_COLORS.map((color) => [...color]),
   };
 }
@@ -263,6 +276,17 @@ export function normalizeCompositeMode(value) {
     return mode;
   }
   throw new TypeError("compositeMode must be 'blend' or 'stack'.");
+}
+
+export function normalizeInvertedOutline(value) {
+  if (value == null || value === "") return INVERTED_OUTLINE_AUTO;
+
+  const normalized = String(value);
+  const lower = normalized.toLowerCase();
+  if (lower === INVERTED_OUTLINE_AUTO || lower === INVERTED_OUTLINE_BOUNDS) {
+    return lower;
+  }
+  return normalized;
 }
 
 export async function loadWasmJsModule(rendererOptions, options = {}) {
@@ -501,6 +525,17 @@ export function isDrillPath(path) {
   const normalized = String(path).toLowerCase();
   const dotIndex = normalized.lastIndexOf(".");
   return dotIndex >= 0 && DRILL_FILE_EXTENSIONS.has(normalized.slice(dotIndex));
+}
+
+export function isBoardOutlineLayerName(name) {
+  const normalized = String(name ?? "").toLowerCase();
+  const dotIndex = normalized.lastIndexOf(".");
+  if (dotIndex >= 0 && BOARD_OUTLINE_EXTENSIONS.has(normalized.slice(dotIndex))) {
+    return true;
+  }
+  return /(^|[^a-z0-9])(board[-_. ]?outline|outline|edge[-_. ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
+    normalized,
+  );
 }
 
 function isAmbiguousDrdPath(path) {

@@ -11,6 +11,7 @@ import { GerberRenderer } from "../index.js";
 import { fileLayer, NodeGerberRenderer } from "../node.js";
 import {
   createBaseFrameOptions,
+  isBoardOutlineLayerName,
   normalizeCompositeMode,
   normalizeLayerKind,
 } from "../shared.js";
@@ -140,4 +141,11 @@ test("package composite mode defaults to blend and validates explicit values", (
     () => normalizeCompositeMode("overlay"),
     /compositeMode must be 'blend' or 'stack'/,
   );
+});
+
+test("package board outline detection accepts common outline names", () => {
+  assert.equal(isBoardOutlineLayerName("board.gko"), true);
+  assert.equal(isBoardOutlineLayerName("Edge.Cuts.gbr"), true);
+  assert.equal(isBoardOutlineLayerName("board-outline.gbr"), true);
+  assert.equal(isBoardOutlineLayerName("top-copper.gtl"), false);
 });

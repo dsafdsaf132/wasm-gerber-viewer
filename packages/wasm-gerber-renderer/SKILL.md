@@ -71,6 +71,8 @@ Useful CLI options:
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
 - `--approx-region-arcs` uses faster approximate region arcs.
 - `--arc-quality <0|1|2>` controls approximate arc quality.
+- `--invert-layer <selector>` renders a Gerber layer as an inverted/negative layer. Repeat it for multiple layers.
+- `--outline-layer <selector>` chooses the board outline for inverted layers. Use `auto`, `bounds`, a 1-based layer index, exact layer name, or basename.
 - `--flip-x` mirrors the output horizontally.
 - `--flip-y` mirrors the output vertically.
 - `--no-drill` skips NC drill layers.

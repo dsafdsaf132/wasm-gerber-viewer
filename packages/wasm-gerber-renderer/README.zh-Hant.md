@@ -155,6 +155,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     }
   | {
       path: string;
@@ -163,6 +164,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     };
 ```
 
@@ -273,6 +275,7 @@ try {
 - `renderDrills`：把 NC drill 檔案（`.drl`、`.nc`、`.xnc`、`.xln`）渲染為鑽孔疊加層。預設 `true`。
 - `globalAlpha`：`blend` 模式下沒有明確圖層 `alpha` 的 Gerber 圖層透明度。預設 `0.7`。
 - `compositeMode`：圖層合成模式，取 `"blend"` 或 `"stack"`。預設 `"blend"`。`blend` 使用 alpha additive blending；`stack` 對 Gerber 圖層按輸入順序使用 source-over 合成，因此後面的 Gerber 圖層覆蓋前面的 Gerber 圖層，預設透明度為 `1`。鑽孔疊加層會在 Gerber 圖層之後渲染。
+- `invertedOutline`：僅 Node 使用的反相圖層外框來源。`"auto"` 會自動偵測 board outline 圖層，`"bounds"` 會填充目前 Gerber bounds，也可以使用圖層序號或名稱 selector。預設 `"auto"`。
 - `layerErrorMode`：`"skip"` 會繼續渲染剩餘有效圖層；`"throw"` 會在第一次失敗時中斷。預設 `"skip"`。
 - `onLayerError`：`"skip"` 模式下接收被跳過圖層的回呼函式，參數為 `{ layer, name, error }`。
 - `rendererOptions`：僅用於瀏覽器一次性輔助函式；建立渲染器時會原樣傳入。
@@ -283,6 +286,7 @@ try {
 - `alpha`：每層透明度。設定後會覆蓋該圖層的幀預設值；在 `stack` 模式下，明確 Gerber `alpha` 會覆蓋不透明的預設值。鑽孔圖層預設不透明。
 - `offsetX`：載入幾何資料時套用的 X 方向偏移。預設 `0`。
 - `offsetY`：載入幾何資料時套用的 Y 方向偏移。預設 `0`。
+- `inverted`：僅 Node 使用。把此 Gerber 圖層按 `frameOptions.invertedOutline` 渲染為反相/negative 圖層。預設 `false`。
 - `kind`：當輸入來源檔名不存在或含義不明確時，強制指定 `"gerber"` 或 `"drill"`。
 - `name`：用於 `{ source, name }` 或 `{ path, name }` 等設定物件的圖層顯示名稱。
 
@@ -324,7 +328,9 @@ gerber-renderer top.gbr bottom.gbr \
   --padding 32 \
   --alpha 0.7 \
   --composite-mode blend \
-  --minimum-feature-pixels 1
+  --minimum-feature-pixels 1 \
+  --invert-layer mask.gbr \
+  --outline-layer board.gko
 ```
 
 壓縮檔範例：
@@ -350,6 +356,8 @@ CLI 選項：
 - `--max-render-target-bytes <size>`：每個渲染目標的記憶體上限。接受位元組數或 `512m`、`2g` 這類後綴。
 - `--approx-region-arcs`：渲染前把 region 圓弧轉換為線段。
 - `--arc-quality <0|1|2>`：圓弧近似品質。預設 `1`。
+- `--invert-layer <selector>`：把 Gerber 圖層渲染為反相/negative 圖層。需要反相多個圖層時可重複指定。Selector 支援 1-based 圖層序號、完整圖層名和 basename。
+- `--outline-layer <selector>`：反相圖層使用的 board outline。可使用 `auto`、`bounds`、1-based 圖層序號、完整圖層名或 basename。預設 `auto`。
 - `--flip-x`：水平鏡像輸出。
 - `--flip-y`：垂直鏡像輸出。
 - `--no-drill`：跳過 NC drill 圖層。

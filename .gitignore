@@ -25,12 +25,15 @@ Thumbs.db
 .env.*
 
 # WASM build artifacts
+node_modules/
 wasm_gerber_processor/target/
 wasm/target
 wasm/pkg/
 packages/gerber-renderer/wasm/
 packages/gerber-renderer/node_modules/
 packages/gerber-renderer/package-lock.json
+packages/wasm-gerber-renderer/node_modules/
+packages/wasm-gerber-renderer/package-lock.json
 
 # Large demo files are stored in Vercel Blob.
 demo/performance-test-arc-region-*.gbr

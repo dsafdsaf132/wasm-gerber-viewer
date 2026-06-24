@@ -17,6 +17,7 @@ export type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
       kind?: LayerKind;
     }
   | {
@@ -26,6 +27,7 @@ export type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
       kind?: LayerKind;
     };
 
@@ -53,6 +55,7 @@ export type RGBAColor = [number, number, number, number];
 export type LayerKind = "gerber" | "drill";
 export type CompositeMode = "blend" | "stack";
 export type PngRenderStrategy = "auto" | "full-frame" | "stream";
+export type InvertedOutlineSelection = "auto" | "bounds" | string | number;
 
 export type NodeRendererOptions = {
   wasmModule?: unknown;
@@ -87,6 +90,7 @@ export type NodeFrameOptions = {
   renderDrills?: boolean;
   globalAlpha?: number;
   compositeMode?: CompositeMode;
+  invertedOutline?: InvertedOutlineSelection;
   maxBandBytes?: number;
   maxFullFrameBytes?: number;
   maxRenderTargetBytes?: number;
@@ -110,6 +114,7 @@ export type NodeLayerOptions = {
   alpha?: number;
   offsetX?: number;
   offsetY?: number;
+  inverted?: boolean;
   kind?: LayerKind;
 };
 

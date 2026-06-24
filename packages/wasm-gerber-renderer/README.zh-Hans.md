@@ -155,6 +155,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     }
   | {
       path: string;
@@ -163,6 +164,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     };
 ```
 
@@ -273,6 +275,7 @@ try {
 - `renderDrills`：把 NC drill 文件（`.drl`、`.nc`、`.xnc`、`.xln`）渲染为钻孔叠加层。默认 `true`。
 - `globalAlpha`：`blend` 模式下没有显式图层 `alpha` 的 Gerber 图层透明度。默认 `0.7`。
 - `compositeMode`：图层合成模式，取 `"blend"` 或 `"stack"`。默认 `"blend"`。`blend` 使用 alpha additive blending；`stack` 对 Gerber 图层按输入顺序使用 source-over 合成，因此后面的 Gerber 图层覆盖前面的 Gerber 图层，默认透明度为 `1`。钻孔叠加层会在 Gerber 图层之后渲染。
+- `invertedOutline`：仅 Node 使用的反相图层外框来源。`"auto"` 会自动检测 board outline 图层，`"bounds"` 会填充当前 Gerber bounds，也可以使用图层序号或名称 selector。默认 `"auto"`。
 - `layerErrorMode`：`"skip"` 会继续渲染剩余有效图层；`"throw"` 会在第一次失败时中断。默认 `"skip"`。
 - `onLayerError`：`"skip"` 模式下接收被跳过图层的回调函数，参数为 `{ layer, name, error }`。
 - `rendererOptions`：仅用于浏览器一次性辅助函数；创建渲染器时会原样传入。
@@ -283,6 +286,7 @@ try {
 - `alpha`：每层透明度。设置后会覆盖该图层的帧默认值；在 `stack` 模式下，显式 Gerber `alpha` 会覆盖不透明的默认值。钻孔图层默认不透明。
 - `offsetX`：加载几何数据时应用的 X 方向偏移。默认 `0`。
 - `offsetY`：加载几何数据时应用的 Y 方向偏移。默认 `0`。
+- `inverted`：仅 Node 使用。把此 Gerber 图层按 `frameOptions.invertedOutline` 渲染为反相/negative 图层。默认 `false`。
 - `kind`：当输入源文件名不存在或含义不明确时，强制指定 `"gerber"` 或 `"drill"`。
 - `name`：用于 `{ source, name }` 或 `{ path, name }` 等配置对象的图层显示名称。
 
@@ -324,7 +328,9 @@ gerber-renderer top.gbr bottom.gbr \
   --padding 32 \
   --alpha 0.7 \
   --composite-mode blend \
-  --minimum-feature-pixels 1
+  --minimum-feature-pixels 1 \
+  --invert-layer mask.gbr \
+  --outline-layer board.gko
 ```
 
 压缩包示例：
@@ -350,6 +356,8 @@ CLI 选项：
 - `--max-render-target-bytes <size>`：每个渲染目标的内存上限。接受字节数或 `512m`、`2g` 这样的后缀。
 - `--approx-region-arcs`：渲染前把 region 圆弧转换为线段。
 - `--arc-quality <0|1|2>`：圆弧近似质量。默认 `1`。
+- `--invert-layer <selector>`：把 Gerber 图层渲染为反相/negative 图层。需要反相多个图层时可重复指定。Selector 支持 1-based 图层序号、完整图层名和 basename。
+- `--outline-layer <selector>`：反相图层使用的 board outline。可使用 `auto`、`bounds`、1-based 图层序号、完整图层名或 basename。默认 `auto`。
 - `--flip-x`：水平镜像输出。
 - `--flip-y`：垂直镜像输出。
 - `--no-drill`：跳过 NC drill 图层。

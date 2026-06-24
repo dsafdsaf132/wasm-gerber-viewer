@@ -169,6 +169,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     }
   | {
       path: string;
@@ -177,6 +178,7 @@ type GerberNodeLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      inverted?: boolean;
     };
 ```
 
@@ -298,6 +300,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `renderDrills`: renders NC drill files (`.drl`, `.nc`, `.xnc`, `.xln`) as drill overlays. Defaults to `true`.
 - `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha` in `blend` mode. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
 - `compositeMode`: layer compositing mode, `"blend"` or `"stack"`. Defaults to `"blend"`. `blend` uses additive alpha blending; `stack` uses ordered source-over compositing for Gerber layers, so later Gerber layers cover earlier Gerber layers and default to opacity `1`. Drill overlays render after Gerber layers.
+- `invertedOutline`: Node-only outline source for inverted layers. Use `"auto"` to detect a board outline layer, `"bounds"` to fill the current Gerber bounds, or a layer index/name selector. Defaults to `"auto"`.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
 - `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
@@ -308,6 +311,7 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `alpha`: per-layer opacity. When set, it overrides the frame default for that layer; in `stack` mode explicit Gerber `alpha` overrides the full-opacity default. Drill layers default to full opacity unless set.
 - `offsetX`: X offset applied while loading geometry. Defaults to `0`.
 - `offsetY`: Y offset applied while loading geometry. Defaults to `0`.
+- `inverted`: Node-only; renders this Gerber layer as an inverted/negative layer using `frameOptions.invertedOutline`. Defaults to `false`.
 - `kind`: force `"gerber"` or `"drill"` when a source filename is unavailable or ambiguous.
 - `name`: layer display name for config objects such as `{ source, name }` or `{ path, name }`.
 
@@ -349,7 +353,9 @@ gerber-renderer top.gbr bottom.gbr \
   --padding 32 \
   --alpha 0.7 \
   --composite-mode blend \
-  --minimum-feature-pixels 1
+  --minimum-feature-pixels 1 \
+  --invert-layer mask.gbr \
+  --outline-layer board.gko
 ```
 
 Archive example:
@@ -375,6 +381,8 @@ CLI options:
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
 - `--approx-region-arcs`: converts region arcs to line segments before rendering.
 - `--arc-quality <0|1|2>`: approximate arc quality. Defaults to `1`.
+- `--invert-layer <selector>`: renders a Gerber layer as an inverted/negative layer. Repeat for multiple layers. Selectors match 1-based layer index, exact layer name, or basename.
+- `--outline-layer <selector>`: board outline used by inverted layers. Use `auto`, `bounds`, a 1-based layer index, exact layer name, or basename. Defaults to `auto`.
 - `--flip-x`: mirrors the output horizontally.
 - `--flip-y`: mirrors the output vertically.
 - `--no-drill`: skips NC drill layers.

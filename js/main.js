@@ -144,7 +144,7 @@ function isBoardOutlineLayer(layer) {
     return true;
   }
 
-  return /(^|[^a-z0-9])(board[-_ ]?outline|outline|edge[-_ ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
+  return /(^|[^a-z0-9])(board[-_. ]?outline|outline|edge[-_. ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
     normalized,
   );
 }
@@ -857,6 +857,12 @@ export class GerberViewer {
       ],
       [
         {
+          action: "invert-layer",
+          icon: "flip-horizontal-2",
+          label: "Invert Layer",
+          checkable: true,
+        },
+        {
           action: "delete-layer",
           icon: "trash-2",
           label: "Delete Layer",
@@ -880,7 +886,7 @@ export class GerberViewer {
           ? "layer-context-menu-item danger"
           : "layer-context-menu-item";
         button.dataset.layerMenuAction = item.action;
-        button.setAttribute("role", "menuitem");
+        button.setAttribute("role", item.checkable ? "menuitemcheckbox" : "menuitem");
 
         const icon = document.createElement("i");
         icon.setAttribute("data-lucide", item.icon);
@@ -923,6 +929,8 @@ export class GerberViewer {
 
   syncLayerContextMenuState(layer) {
     this.setLayerContextMenuItemDisabled("delete-layer", !layer);
+    this.setLayerContextMenuItemDisabled("invert-layer", !this.canInvertLayer(layer));
+    this.setLayerContextMenuItemChecked("invert-layer", Boolean(layer?.inverted));
   }
 
   setLayerContextMenuItemDisabled(action, disabled) {
@@ -931,6 +939,14 @@ export class GerberViewer {
 
     button.disabled = Boolean(disabled);
     button.setAttribute("aria-disabled", disabled ? "true" : "false");
+  }
+
+  setLayerContextMenuItemChecked(action, checked) {
+    const button = this.layerContextMenuButtons.get(action);
+    if (!button) return;
+
+    button.classList.toggle("active", Boolean(checked));
+    button.setAttribute("aria-checked", checked ? "true" : "false");
   }
 
   positionLayerContextMenu(clientX, clientY) {
@@ -1038,6 +1054,7 @@ export class GerberViewer {
 
   runLayerContextMenuAction(action) {
     const layerId = this.layerContextMenuLayerId;
+    const layer = this.layers.find((candidate) => candidate.id === layerId);
     this.closeLayerContextMenu();
 
     switch (action) {
@@ -1053,6 +1070,11 @@ export class GerberViewer {
       case "show-bottom":
         this.selectLayersByFilter("bottom");
         break;
+      case "invert-layer":
+        if (this.canInvertLayer(layer)) {
+          this.updateLayerInverted(layer, !layer.inverted);
+        }
+        break;
       case "delete-layer":
         if (layerId) {
           this.deleteLayer(layerId);
@@ -1061,6 +1083,10 @@ export class GerberViewer {
       default:
         break;
     }
+  }
+
+  canInvertLayer(layer) {
+    return Boolean(layer && !isDrillLayer(layer));
   }
 
   createWebGlContext() {
