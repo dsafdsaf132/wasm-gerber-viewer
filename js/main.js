@@ -77,6 +77,7 @@ const LAYER_TOUCH_DRAG_CANCEL_PX = 8;
 const LAYER_TOUCH_AUTOSCROLL_EDGE_PX = 56;
 const LAYER_TOUCH_AUTOSCROLL_MAX_PX = 14;
 const LAYER_REORDER_ANIMATION_MS = 180;
+const LAYER_CONTEXT_MENU_MARGIN_PX = 8;
 const DRILL_LAYER_KIND = "drill";
 const GERBER_LAYER_KIND = "gerber";
 const PTH_DRILL_TYPE = "pth";
@@ -619,6 +620,9 @@ export class GerberViewer {
     this.layerTouchScrollFrame = null;
     this.layerTouchScrollVelocity = 0;
     this.layerTouchSuppressClickUntil = 0;
+    this.layerContextMenuButtons = new Map();
+    this.layerContextMenu = this.createLayerContextMenu();
+    this.layerContextMenuLayerId = null;
     this.pendingLayerRecordsForRecovery = null;
     this.wasmMemoryExhausted = false;
     this.pendingLazyRenderTimer = null;
@@ -803,6 +807,230 @@ export class GerberViewer {
     this.updateViewFlipControls();
     this.requestRender();
     this.loadInitialUrlSource();
+  }
+
+  createLayerContextMenu() {
+    const menu = document.createElement("div");
+    menu.className = "layer-context-menu";
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Layer actions");
+    menu.hidden = true;
+
+    const itemGroups = [
+      [
+        { action: "show-all", icon: "eye", label: "Show All" },
+        { action: "hide-all", icon: "eye-off", label: "Hide All" },
+      ],
+      [
+        { action: "show-top", icon: "panel-top", label: "Show Top" },
+        { action: "show-bottom", icon: "panel-bottom", label: "Show Bottom" },
+      ],
+      [
+        {
+          action: "delete-layer",
+          icon: "trash-2",
+          label: "Delete Layer",
+          danger: true,
+        },
+      ],
+    ];
+
+    for (const [groupIndex, group] of itemGroups.entries()) {
+      if (groupIndex > 0) {
+        const separator = document.createElement("div");
+        separator.className = "layer-context-menu-separator";
+        separator.setAttribute("role", "separator");
+        menu.appendChild(separator);
+      }
+
+      for (const item of group) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = item.danger
+          ? "layer-context-menu-item danger"
+          : "layer-context-menu-item";
+        button.dataset.layerMenuAction = item.action;
+        button.setAttribute("role", "menuitem");
+
+        const icon = document.createElement("i");
+        icon.setAttribute("data-lucide", item.icon);
+        const label = document.createElement("span");
+        label.textContent = item.label;
+        button.append(icon, label);
+        menu.appendChild(button);
+        this.layerContextMenuButtons.set(item.action, button);
+      }
+    }
+
+    menu.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-layer-menu-action]")
+        : null;
+      if (!button || button.disabled) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      this.runLayerContextMenuAction(button.dataset.layerMenuAction);
+    });
+
+    document.body.appendChild(menu);
+    return menu;
+  }
+
+  showLayerContextMenu({ layerId, clientX, clientY }) {
+    if (this.draggedLayerId) return;
+
+    const layer = this.layers.find((candidate) => candidate.id === layerId);
+    if (!layer) {
+      this.closeLayerContextMenu();
+      return;
+    }
+
+    this.layerContextMenuLayerId = layerId;
+    this.syncLayerContextMenuState(layer);
+    this.positionLayerContextMenu(clientX, clientY);
+  }
+
+  syncLayerContextMenuState(layer) {
+    this.setLayerContextMenuItemDisabled("delete-layer", !layer);
+  }
+
+  setLayerContextMenuItemDisabled(action, disabled) {
+    const button = this.layerContextMenuButtons.get(action);
+    if (!button) return;
+
+    button.disabled = Boolean(disabled);
+    button.setAttribute("aria-disabled", disabled ? "true" : "false");
+  }
+
+  positionLayerContextMenu(clientX, clientY) {
+    const menu = this.layerContextMenu;
+    if (!menu) return;
+
+    menu.hidden = false;
+    menu.classList.add("open");
+    menu.style.visibility = "hidden";
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+
+    const rect = menu.getBoundingClientRect();
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+    const viewportHeight =
+      window.innerHeight || document.documentElement.clientHeight;
+    const left = Math.max(
+      LAYER_CONTEXT_MENU_MARGIN_PX,
+      Math.min(
+        Number(clientX) || LAYER_CONTEXT_MENU_MARGIN_PX,
+        viewportWidth - rect.width - LAYER_CONTEXT_MENU_MARGIN_PX,
+      ),
+    );
+    const top = Math.max(
+      LAYER_CONTEXT_MENU_MARGIN_PX,
+      Math.min(
+        Number(clientY) || LAYER_CONTEXT_MENU_MARGIN_PX,
+        viewportHeight - rect.height - LAYER_CONTEXT_MENU_MARGIN_PX,
+      ),
+    );
+
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    menu.style.visibility = "";
+    this.refreshIcons();
+
+    const firstEnabledButton = menu.querySelector(
+      ".layer-context-menu-item:not(:disabled)",
+    );
+    firstEnabledButton?.focus({ preventScroll: true });
+  }
+
+  closeLayerContextMenu() {
+    if (!this.layerContextMenu || this.layerContextMenu.hidden) return;
+
+    this.layerContextMenu.hidden = true;
+    this.layerContextMenu.classList.remove("open");
+    this.layerContextMenuLayerId = null;
+  }
+
+  handleLayerContextMenuPointerDown(event) {
+    if (
+      this.layerContextMenu?.hidden ||
+      !(event.target instanceof Node) ||
+      this.layerContextMenu.contains(event.target)
+    ) {
+      return;
+    }
+
+    this.closeLayerContextMenu();
+  }
+
+  handleLayerContextMenuKeyDown(event) {
+    if (this.layerContextMenu?.hidden) return;
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.closeLayerContextMenu();
+      return;
+    }
+
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+      return;
+    }
+
+    const buttons = Array.from(
+      this.layerContextMenu.querySelectorAll(
+        ".layer-context-menu-item:not(:disabled)",
+      ),
+    );
+    if (buttons.length === 0) return;
+
+    event.preventDefault();
+    const activeIndex = buttons.indexOf(document.activeElement);
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex =
+      activeIndex === -1
+        ? 0
+        : (activeIndex + direction + buttons.length) % buttons.length;
+    buttons[nextIndex].focus({ preventScroll: true });
+  }
+
+  handleDocumentContextMenu(event) {
+    if (
+      this.layerContextMenu?.hidden ||
+      !(event.target instanceof Node) ||
+      this.layerList.contains(event.target) ||
+      this.layerContextMenu.contains(event.target)
+    ) {
+      return;
+    }
+
+    this.closeLayerContextMenu();
+  }
+
+  runLayerContextMenuAction(action) {
+    const layerId = this.layerContextMenuLayerId;
+    this.closeLayerContextMenu();
+
+    switch (action) {
+      case "show-all":
+        this.selectAllLayerCheckboxes();
+        break;
+      case "hide-all":
+        this.unselectAllLayerCheckboxes();
+        break;
+      case "show-top":
+        this.selectLayersByFilter("top");
+        break;
+      case "show-bottom":
+        this.selectLayersByFilter("bottom");
+        break;
+      case "delete-layer":
+        if (layerId) {
+          this.deleteLayer(layerId);
+        }
+        break;
+      default:
+        break;
+    }
   }
 
   createWebGlContext() {
@@ -1073,6 +1301,25 @@ export class GerberViewer {
       this.updateFullscreenState();
       this.triggerCanvasResize();
     });
+    document.addEventListener(
+      "pointerdown",
+      (event) => this.handleLayerContextMenuPointerDown(event),
+      true,
+    );
+    document.addEventListener("keydown", (event) =>
+      this.handleLayerContextMenuKeyDown(event),
+    );
+    document.addEventListener(
+      "contextmenu",
+      (event) => this.handleDocumentContextMenu(event),
+      true,
+    );
+    document.addEventListener(
+      "scroll",
+      () => this.closeLayerContextMenu(),
+      true,
+    );
+    window.addEventListener("resize", () => this.closeLayerContextMenu());
 
     // Layer control buttons
     this.selectAllBtn.addEventListener("click", () => {
@@ -5829,6 +6076,7 @@ export class GerberViewer {
   }
 
   renderLayerList() {
+    this.closeLayerContextMenu();
     renderLayerListView({
       container: this.layerList,
       layers: this.layers,
@@ -5849,7 +6097,7 @@ export class GerberViewer {
         this.requestRender();
         this.updateUiState();
       },
-      onDelete: (layerId) => this.deleteLayer(layerId),
+      onContextMenu: (detail) => this.showLayerContextMenu(detail),
       onOpenFiles: () => this.openFilePicker(),
     });
     this.refreshIcons();

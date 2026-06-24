@@ -47,7 +47,7 @@ function createLayerItem({
   onColorChange,
   onVisibilityChange,
   onToggleVisibility,
-  onDelete,
+  onContextMenu,
 }) {
   const item = document.createElement("li");
   item.className = "layer-item";
@@ -56,6 +56,9 @@ function createLayerItem({
   item.draggable = true;
   item.addEventListener("dragstart", (event) => onDragStart(event, layer.id));
   item.addEventListener("dragend", onDragEnd);
+  item.addEventListener("contextmenu", (event) => {
+    openLayerContextMenu(event, layer, onContextMenu);
+  });
 
   const colorPicker = document.createElement("input");
   colorPicker.type = "color";
@@ -85,19 +88,19 @@ function createLayerItem({
     onToggleVisibility(layer);
   });
 
-  const deleteBtn = document.createElement("button");
-  deleteBtn.type = "button";
-  deleteBtn.className = "icon-button layer-delete-btn";
-  deleteBtn.setAttribute("aria-label", "Delete layer");
-  deleteBtn.title = "Delete layer";
-  const deleteIcon = document.createElement("i");
-  deleteIcon.setAttribute("data-lucide", "trash-2");
-  deleteBtn.appendChild(deleteIcon);
-  deleteBtn.addEventListener("click", () => {
-    onDelete(layer.id);
+  const menuBtn = document.createElement("button");
+  menuBtn.type = "button";
+  menuBtn.className = "icon-button layer-menu-btn";
+  menuBtn.setAttribute("aria-label", "Layer actions");
+  menuBtn.title = "Layer actions";
+  const menuIcon = document.createElement("i");
+  menuIcon.setAttribute("data-lucide", "more-vertical");
+  menuBtn.appendChild(menuIcon);
+  menuBtn.addEventListener("click", (event) => {
+    openLayerMenuFromButton(event, layer, onContextMenu);
   });
 
-  item.append(colorPicker, checkbox, label, deleteBtn);
+  item.append(colorPicker, checkbox, label, menuBtn);
   return item;
 }
 
@@ -114,11 +117,14 @@ function createDrillItem({
   onColorChange,
   onVisibilityChange,
   onToggleVisibility,
-  onDelete,
+  onContextMenu,
 }) {
   const item = document.createElement("li");
   item.className = "layer-item drill-layer-item";
   item.dataset.layerId = layer.id;
+  item.addEventListener("contextmenu", (event) => {
+    openLayerContextMenu(event, layer, onContextMenu);
+  });
 
   const colorPicker = document.createElement("input");
   colorPicker.type = "color";
@@ -148,20 +154,45 @@ function createDrillItem({
     onToggleVisibility(layer);
   });
 
-  const deleteBtn = document.createElement("button");
-  deleteBtn.type = "button";
-  deleteBtn.className = "icon-button layer-delete-btn";
-  deleteBtn.setAttribute("aria-label", "Delete drill layer");
-  deleteBtn.title = "Delete drill layer";
-  const deleteIcon = document.createElement("i");
-  deleteIcon.setAttribute("data-lucide", "trash-2");
-  deleteBtn.appendChild(deleteIcon);
-  deleteBtn.addEventListener("click", () => {
-    onDelete(layer.id);
+  const menuBtn = document.createElement("button");
+  menuBtn.type = "button";
+  menuBtn.className = "icon-button layer-menu-btn";
+  menuBtn.setAttribute("aria-label", "Layer actions");
+  menuBtn.title = "Layer actions";
+  const menuIcon = document.createElement("i");
+  menuIcon.setAttribute("data-lucide", "more-vertical");
+  menuBtn.appendChild(menuIcon);
+  menuBtn.addEventListener("click", (event) => {
+    openLayerMenuFromButton(event, layer, onContextMenu);
   });
 
-  item.append(colorPicker, checkbox, label, deleteBtn);
+  item.append(colorPicker, checkbox, label, menuBtn);
   return item;
+}
+
+function openLayerContextMenu(event, layer, onContextMenu) {
+  if (!onContextMenu) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  onContextMenu({
+    layerId: layer.id,
+    clientX: event.clientX,
+    clientY: event.clientY,
+  });
+}
+
+function openLayerMenuFromButton(event, layer, onContextMenu) {
+  if (!onContextMenu) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const rect = event.currentTarget.getBoundingClientRect();
+  onContextMenu({
+    layerId: layer.id,
+    clientX: rect.right,
+    clientY: rect.bottom + 4,
+  });
 }
 
 export function renderLayerList({
@@ -173,7 +204,7 @@ export function renderLayerList({
   onColorChange,
   onVisibilityChange,
   onToggleVisibility,
-  onDelete,
+  onContextMenu,
   onOpenFiles,
 }) {
   container.replaceChildren();
@@ -200,7 +231,7 @@ export function renderLayerList({
         onColorChange,
         onVisibilityChange,
         onToggleVisibility,
-        onDelete,
+        onContextMenu,
       }),
     );
   }
@@ -216,7 +247,7 @@ export function renderLayerList({
         onColorChange,
         onVisibilityChange,
         onToggleVisibility,
-        onDelete,
+        onContextMenu,
       }),
     );
   }
