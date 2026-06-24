@@ -13,6 +13,7 @@ use shader::{
 };
 
 use crate::interaction::InteractionFeature;
+use crate::parser::geometry::{triangulate_outline, Primitive};
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -57,6 +58,13 @@ struct BufferCacheBuildGuard {
     gl: WebGl2RenderingContext,
     cache: BufferCache,
     committed: bool,
+}
+
+#[derive(Clone)]
+struct OutlineSegment {
+    start: [f32; 2],
+    end: [f32; 2],
+    points: Vec<[f32; 2]>,
 }
 
 impl BufferCacheBuildGuard {
@@ -241,6 +249,445 @@ impl Renderer {
             self.layer_count += 1;
             Ok(self.layers.len() - 1)
         }
+    }
+
+    /// Add a display-only layer that fills the board outline, then clears the
+    /// target layer geometry from it. This preserves the existing polarity
+    /// sublayer renderer while supporting inverted solder mask style previews.
+    pub fn add_inverted_layer_from_outline(
+        &mut self,
+        outline_data: &[GerberData],
+        mut target_data: Vec<GerberData>,
+    ) -> Result<usize, JsValue> {
+        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(1));
+        inverted_data.push(Self::outline_fill_layer(outline_data)?);
+
+        for mut sublayer in target_data.drain(..) {
+            sublayer.is_negative = !sublayer.is_negative;
+            inverted_data.push(sublayer);
+        }
+
+        self.add_layer(inverted_data)
+    }
+
+    pub fn add_inverted_layer_from_bounds(
+        &mut self,
+        bounds: Boundary,
+        mut target_data: Vec<GerberData>,
+    ) -> Result<usize, JsValue> {
+        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(1));
+        inverted_data.push(Self::bounds_fill_layer(bounds)?);
+
+        for mut sublayer in target_data.drain(..) {
+            sublayer.is_negative = !sublayer.is_negative;
+            inverted_data.push(sublayer);
+        }
+
+        self.add_layer(inverted_data)
+    }
+
+    fn outline_fill_layer(outline_data: &[GerberData]) -> Result<GerberData, JsValue> {
+        let segments = Self::outline_segments(outline_data)?;
+        let contour = Self::largest_closed_outline_contour(&segments).ok_or_else(|| {
+            JsValue::from_str("Board outline must contain a closed aperture draw contour")
+        })?;
+        let triangles = triangulate_outline(&contour, 1.0).map_err(|error| {
+            JsValue::from_str(&format!("Failed to triangulate outline: {error}"))
+        })?;
+
+        let mut vertices = Vec::with_capacity(triangles.len().saturating_mul(6));
+        for primitive in triangles {
+            if let Primitive::Triangle {
+                vertices: triangle, ..
+            } = primitive
+            {
+                for point in triangle {
+                    vertices.push(point[0]);
+                    vertices.push(point[1]);
+                }
+            }
+        }
+
+        if vertices.is_empty() {
+            return Err(JsValue::from_str(
+                "Board outline triangulation produced no fill geometry",
+            ));
+        }
+
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for point in &contour {
+            min_x = min_x.min(point[0]);
+            max_x = max_x.max(point[0]);
+            min_y = min_y.min(point[1]);
+            max_y = max_y.max(point[1]);
+        }
+
+        Ok(GerberData::new(
+            Triangles::new(vertices, Vec::new(), Vec::new(), Vec::new()),
+            Vec::new(),
+            Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            Circles::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Arcs::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Thermals::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            PathRegions::empty(),
+            Boundary::new(min_x, max_x, min_y, max_y),
+            false,
+        ))
+    }
+
+    fn bounds_fill_layer(bounds: Boundary) -> Result<GerberData, JsValue> {
+        Self::validate_finite_value("inverted bounds min_x", bounds.min_x)?;
+        Self::validate_finite_value("inverted bounds max_x", bounds.max_x)?;
+        Self::validate_finite_value("inverted bounds min_y", bounds.min_y)?;
+        Self::validate_finite_value("inverted bounds max_y", bounds.max_y)?;
+        if bounds.min_x >= bounds.max_x || bounds.min_y >= bounds.max_y {
+            return Err(JsValue::from_str(
+                "Inverted layer fallback bounds must have positive area",
+            ));
+        }
+
+        let vertices = vec![
+            bounds.min_x,
+            bounds.min_y,
+            bounds.max_x,
+            bounds.min_y,
+            bounds.max_x,
+            bounds.max_y,
+            bounds.min_x,
+            bounds.min_y,
+            bounds.max_x,
+            bounds.max_y,
+            bounds.min_x,
+            bounds.max_y,
+        ];
+
+        Ok(GerberData::new(
+            Triangles::new(vertices, Vec::new(), Vec::new(), Vec::new()),
+            Vec::new(),
+            Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            Circles::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Arcs::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Thermals::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            PathRegions::empty(),
+            bounds,
+            false,
+        ))
+    }
+
+    fn outline_segments(outline_data: &[GerberData]) -> Result<Vec<OutlineSegment>, JsValue> {
+        const MIN_OUTLINE_WIDTH: f32 = 0.000001;
+
+        let mut segments = Vec::new();
+        for data in outline_data {
+            if data.is_negative {
+                continue;
+            }
+
+            let line_count = data
+                .lines
+                .start_x
+                .len()
+                .min(data.lines.start_y.len())
+                .min(data.lines.end_x.len())
+                .min(data.lines.end_y.len())
+                .min(data.lines.width.len());
+            segments.try_reserve(line_count).map_err(|_| {
+                JsValue::from_str("Not enough memory to collect board outline segments")
+            })?;
+            for idx in 0..line_count {
+                let width = data.lines.width[idx];
+                if !width.is_finite() || width <= MIN_OUTLINE_WIDTH {
+                    continue;
+                }
+
+                let start = [data.lines.start_x[idx], data.lines.start_y[idx]];
+                let end = [data.lines.end_x[idx], data.lines.end_y[idx]];
+                if !Self::finite_outline_point(start) || !Self::finite_outline_point(end) {
+                    continue;
+                }
+                if Self::outline_points_close(start, end, MIN_OUTLINE_WIDTH) {
+                    continue;
+                }
+
+                segments.push(OutlineSegment {
+                    start,
+                    end,
+                    points: vec![start, end],
+                });
+            }
+
+            let arc_count = data
+                .arcs
+                .x
+                .len()
+                .min(data.arcs.y.len())
+                .min(data.arcs.radius.len())
+                .min(data.arcs.start_angle.len())
+                .min(data.arcs.sweep_angle.len())
+                .min(data.arcs.thickness.len());
+            segments.try_reserve(arc_count).map_err(|_| {
+                JsValue::from_str("Not enough memory to collect board outline arcs")
+            })?;
+            for idx in 0..arc_count {
+                let thickness = data.arcs.thickness[idx];
+                if !thickness.is_finite() || thickness <= MIN_OUTLINE_WIDTH {
+                    continue;
+                }
+                if let Some(points) = Self::outline_arc_points(
+                    data.arcs.x[idx],
+                    data.arcs.y[idx],
+                    data.arcs.radius[idx],
+                    data.arcs.start_angle[idx],
+                    data.arcs.sweep_angle[idx],
+                ) {
+                    if let (Some(start), Some(end)) = (points.first(), points.last()) {
+                        segments.push(OutlineSegment {
+                            start: *start,
+                            end: *end,
+                            points,
+                        });
+                    }
+                }
+            }
+        }
+
+        if segments.is_empty() {
+            return Err(JsValue::from_str(
+                "Board outline does not contain aperture line or arc geometry",
+            ));
+        }
+
+        Ok(segments)
+    }
+
+    fn outline_arc_points(
+        center_x: f32,
+        center_y: f32,
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+    ) -> Option<Vec<[f32; 2]>> {
+        if !center_x.is_finite()
+            || !center_y.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !start_angle.is_finite()
+            || !sweep_angle.is_finite()
+            || sweep_angle.abs() <= f32::EPSILON
+        {
+            return None;
+        }
+
+        let max_step = std::f32::consts::PI / 24.0;
+        let segment_count = ((sweep_angle.abs() / max_step).ceil() as usize).clamp(1, 512);
+        let mut points = Vec::with_capacity(segment_count + 1);
+        for segment_idx in 0..=segment_count {
+            let t = segment_idx as f32 / segment_count as f32;
+            let angle = start_angle + sweep_angle * t;
+            points.push([
+                center_x + radius * angle.cos(),
+                center_y + radius * angle.sin(),
+            ]);
+        }
+        Some(points)
+    }
+
+    fn largest_closed_outline_contour(segments: &[OutlineSegment]) -> Option<Vec<[f32; 2]>> {
+        if segments.is_empty() {
+            return None;
+        }
+
+        let tolerance = Self::outline_close_tolerance(segments);
+        let mut best_contour = None;
+        let mut best_area = 0.0_f32;
+
+        for start_idx in 0..segments.len() {
+            let mut used = vec![false; segments.len()];
+            used[start_idx] = true;
+            let mut points = segments[start_idx].points.clone();
+
+            for _ in 0..segments.len() {
+                if Self::outline_contour_is_closed(&points, tolerance) {
+                    let contour = Self::normalize_outline_contour(points, tolerance)?;
+                    let area = Self::outline_area(&contour).abs();
+                    if area > best_area {
+                        best_area = area;
+                        best_contour = Some(contour);
+                    }
+                    break;
+                }
+
+                let last = *points.last()?;
+                let mut next = None;
+                for (idx, segment) in segments.iter().enumerate() {
+                    if used[idx] {
+                        continue;
+                    }
+
+                    if Self::outline_points_close(last, segment.start, tolerance) {
+                        next = Some((idx, false));
+                        break;
+                    }
+                    if Self::outline_points_close(last, segment.end, tolerance) {
+                        next = Some((idx, true));
+                        break;
+                    }
+                }
+
+                let Some((next_idx, reverse)) = next else {
+                    break;
+                };
+                used[next_idx] = true;
+                Self::append_outline_segment_points(
+                    &mut points,
+                    &segments[next_idx].points,
+                    reverse,
+                    tolerance,
+                );
+            }
+        }
+
+        best_contour
+    }
+
+    fn append_outline_segment_points(
+        points: &mut Vec<[f32; 2]>,
+        segment_points: &[[f32; 2]],
+        reverse: bool,
+        tolerance: f32,
+    ) {
+        if reverse {
+            for point in segment_points.iter().rev().skip(1) {
+                if points
+                    .last()
+                    .is_none_or(|last| !Self::outline_points_close(*last, *point, tolerance))
+                {
+                    points.push(*point);
+                }
+            }
+        } else {
+            for point in segment_points.iter().skip(1) {
+                if points
+                    .last()
+                    .is_none_or(|last| !Self::outline_points_close(*last, *point, tolerance))
+                {
+                    points.push(*point);
+                }
+            }
+        }
+    }
+
+    fn normalize_outline_contour(points: Vec<[f32; 2]>, tolerance: f32) -> Option<Vec<[f32; 2]>> {
+        let mut contour = Vec::with_capacity(points.len());
+        for point in points {
+            if contour
+                .last()
+                .is_none_or(|last| !Self::outline_points_close(*last, point, tolerance))
+            {
+                contour.push(point);
+            }
+        }
+
+        if contour.len() >= 2
+            && Self::outline_points_close(*contour.first()?, *contour.last()?, tolerance)
+        {
+            contour.pop();
+        }
+
+        if contour.len() >= 3 {
+            Some(contour)
+        } else {
+            None
+        }
+    }
+
+    fn outline_contour_is_closed(points: &[[f32; 2]], tolerance: f32) -> bool {
+        points.len() >= 4
+            && points
+                .first()
+                .zip(points.last())
+                .is_some_and(|(first, last)| Self::outline_points_close(*first, *last, tolerance))
+    }
+
+    fn outline_close_tolerance(segments: &[OutlineSegment]) -> f32 {
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        for segment in segments {
+            for point in [segment.start, segment.end] {
+                min_x = min_x.min(point[0]);
+                max_x = max_x.max(point[0]);
+                min_y = min_y.min(point[1]);
+                max_y = max_y.max(point[1]);
+            }
+        }
+
+        let extent = (max_x - min_x).abs().max((max_y - min_y).abs());
+        (extent * 0.00001).max(0.0001)
+    }
+
+    fn outline_points_close(a: [f32; 2], b: [f32; 2], tolerance: f32) -> bool {
+        (a[0] - b[0]).abs() <= tolerance && (a[1] - b[1]).abs() <= tolerance
+    }
+
+    fn finite_outline_point(point: [f32; 2]) -> bool {
+        point[0].is_finite() && point[1].is_finite()
+    }
+
+    fn outline_area(points: &[[f32; 2]]) -> f32 {
+        let mut area = 0.0;
+        for idx in 0..points.len() {
+            let next_idx = (idx + 1) % points.len();
+            area += points[idx][0] * points[next_idx][1] - points[next_idx][0] * points[idx][1];
+        }
+        area * 0.5
     }
 
     /// Add a layer from a worker-produced render payload without rebuilding

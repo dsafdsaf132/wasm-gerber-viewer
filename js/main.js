@@ -71,6 +71,8 @@ const INTERACTION_MODE_VALUES = new Set([
   INTERACTION_MODE_ON,
   INTERACTION_MODE_OFF,
 ]);
+const BOARD_OUTLINE_AUTO = "auto";
+const BOARD_OUTLINE_BOUNDS = "bounds";
 const LAZY_WHEEL_RENDER_DELAY_MS = 140;
 const LAYER_TOUCH_DRAG_DELAY_MS = 500;
 const LAYER_TOUCH_DRAG_CANCEL_PX = 8;
@@ -119,6 +121,32 @@ function isDrillSource(source) {
 
 function isDrillLayer(layer) {
   return layer?.kind === DRILL_LAYER_KIND;
+}
+
+function isBoardOutlineLayer(layer) {
+  if (!layer || isDrillLayer(layer)) return false;
+
+  const normalized = String(layer.name ?? "").toLowerCase();
+  const extensionMatch = normalized.match(/\.([a-z0-9]+)(?:\s*#\d+)?$/i);
+  const extension = extensionMatch?.[1] ?? "";
+  if (
+    [
+      "gko",
+      "gml",
+      "gm1",
+      "gmb",
+      "gbrd",
+      "outline",
+      "edge",
+      "cuts",
+    ].includes(extension)
+  ) {
+    return true;
+  }
+
+  return /(^|[^a-z0-9])(board[-_ ]?outline|outline|edge[-_ ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
+    normalized,
+  );
 }
 
 function getDefaultDrillColor(name) {
@@ -628,6 +656,7 @@ export class GerberViewer {
     this.pendingLazyRenderTimer = null;
     this.lazyViewportRenderState = null;
     this.isViewportTransformActive = false;
+    this.boardOutlineSelection = BOARD_OUTLINE_AUTO;
 
     // Camera
     this.camera = {
@@ -769,6 +798,7 @@ export class GerberViewer {
       drawMeasurements: (context, renderState) =>
         this.drawMeasurementsOnContext(context, renderState),
       showError: (message) => this.showError(message),
+      getBoardOutlineSelection: () => this.boardOutlineSelection,
     });
   }
 
@@ -1381,6 +1411,10 @@ export class GerberViewer {
       this.updateGlobalAlpha(alpha);
     });
 
+    this.boardOutlineSelect.addEventListener("change", () => {
+      this.setBoardOutlineSelection(this.boardOutlineSelect.value);
+    });
+
     this.regionArcExactInput.addEventListener("change", () => {
       if (this.regionArcExactInput.checked) {
         void this.setRegionArcMode("exact");
@@ -1747,6 +1781,64 @@ export class GerberViewer {
   syncFilterInputs() {
     this.topFilterInput.value = this.layerFilterStore.get("top");
     this.bottomFilterInput.value = this.layerFilterStore.get("bottom");
+  }
+
+  syncBoardOutlineSelect() {
+    const currentValue = this.boardOutlineSelection;
+    const outlineLayers = this.layers.filter(isBoardOutlineLayer);
+    const validValues = new Set([
+      BOARD_OUTLINE_AUTO,
+      BOARD_OUTLINE_BOUNDS,
+      ...outlineLayers.map((layer) => layer.id),
+    ]);
+    if (!validValues.has(this.boardOutlineSelection)) {
+      this.boardOutlineSelection = BOARD_OUTLINE_AUTO;
+    }
+
+    const options = [
+      { value: BOARD_OUTLINE_AUTO, label: "Auto" },
+      { value: BOARD_OUTLINE_BOUNDS, label: "Bounds" },
+      ...outlineLayers.map((layer) => ({
+        value: layer.id,
+        label: layer.name,
+      })),
+    ];
+    this.boardOutlineSelect.replaceChildren(
+      ...options.map((option) => {
+        const element = document.createElement("option");
+        element.value = option.value;
+        element.textContent = option.label;
+        return element;
+      }),
+    );
+    this.boardOutlineSelect.value = this.boardOutlineSelection;
+    this.boardOutlineSelect.disabled = this.isRendererBusy() || this.layers.length === 0;
+
+    if (currentValue !== this.boardOutlineSelection) {
+      this.clearAllInvertedLayerCaches();
+      this.requestRender();
+    }
+  }
+
+  setBoardOutlineSelection(value) {
+    const nextValue = String(value ?? BOARD_OUTLINE_AUTO);
+    const validLayer = this.layers.some(
+      (layer) => isBoardOutlineLayer(layer) && layer.id === nextValue,
+    );
+    if (
+      nextValue !== BOARD_OUTLINE_AUTO &&
+      nextValue !== BOARD_OUTLINE_BOUNDS &&
+      !validLayer
+    ) {
+      this.boardOutlineSelection = BOARD_OUTLINE_AUTO;
+    } else {
+      this.boardOutlineSelection = nextValue;
+    }
+
+    this.clearAllInvertedLayerCaches();
+    this.syncBoardOutlineSelect();
+    this.requestRender();
+    this.updateUiState();
   }
 
   setRenderingMode(mode) {
@@ -2313,6 +2405,7 @@ export class GerberViewer {
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
     this.updateAlphaControlState(rendererBusy);
+    this.syncBoardOutlineSelect();
     this.clearAllBtn.disabled = rendererBusy || totalLayers === 0;
     this.toolbarClearAllBtn.disabled = rendererBusy || totalLayers === 0;
     this.updateEmptyLayerListActionState(rendererBusy);
@@ -3665,6 +3758,7 @@ export class GerberViewer {
       name: layer.name,
       visible: layer.visible,
       color: layer.color ? [...layer.color] : null,
+      inverted: Boolean(layer.inverted),
       sourceContent: layer.sourceContent,
       offset: { ...normalizeLayerOffset(layer.offset) },
       bounds: layer.bounds ? { ...layer.bounds } : null,
@@ -3684,6 +3778,7 @@ export class GerberViewer {
       id: layer.id,
       visible: layer.visible,
       color: layer.color,
+      inverted: layer.inverted,
       sourceContent: layer.sourceContent,
       offset: layer.offset,
       drillType: layer.drillType,
@@ -3945,6 +4040,10 @@ export class GerberViewer {
       name: name,
       visible: options.visible ?? true,
       color: options.color ? [...options.color] : null,
+      inverted: options.inverted ?? false,
+      invertedLayerId: options.invertedLayerId ?? null,
+      invertedOutlineLayerId: options.invertedOutlineLayerId ?? null,
+      invertedErrorKey: null,
       sourceContent: options.sourceContent,
       offset: normalizeLayerOffset(options.offset),
       bounds: {
@@ -4356,6 +4455,213 @@ export class GerberViewer {
     }
   }
 
+  getVisibleGerberBounds({ excludeLayerId = null, selectedLayerIds = null } = {}) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let count = 0;
+
+    for (const layer of this.layers) {
+      if (
+        isDrillLayer(layer) ||
+        !layer.visible ||
+        layer.id === excludeLayerId ||
+        (selectedLayerIds && !selectedLayerIds.has(layer.id)) ||
+        !layer.bounds
+      ) {
+        continue;
+      }
+
+      const bounds = layer.bounds;
+      if (
+        !Number.isFinite(bounds.minX) ||
+        !Number.isFinite(bounds.maxX) ||
+        !Number.isFinite(bounds.minY) ||
+        !Number.isFinite(bounds.maxY)
+      ) {
+        continue;
+      }
+
+      minX = Math.min(minX, bounds.minX);
+      maxX = Math.max(maxX, bounds.maxX);
+      minY = Math.min(minY, bounds.minY);
+      maxY = Math.max(maxY, bounds.maxY);
+      count++;
+    }
+
+    if (count === 0 || minX >= maxX || minY >= maxY) {
+      return null;
+    }
+
+    return { minX, maxX, minY, maxY };
+  }
+
+  findAutomaticBoardOutlineLayer(targetLayer = null) {
+    return (
+      this.layers.find(
+        (layer) =>
+          layer.id !== targetLayer?.id &&
+          typeof layer.sourceContent === "string" &&
+          isBoardOutlineLayer(layer),
+      ) ?? null
+    );
+  }
+
+  getInvertedFillSource(layer, selectedLayerIds) {
+    const selectedOutlineLayer =
+      this.boardOutlineSelection !== BOARD_OUTLINE_AUTO &&
+      this.boardOutlineSelection !== BOARD_OUTLINE_BOUNDS
+        ? this.layers.find((candidate) => candidate.id === this.boardOutlineSelection)
+        : null;
+    const outlineLayer =
+      selectedOutlineLayer && selectedOutlineLayer.id !== layer.id
+        ? selectedOutlineLayer
+        : this.boardOutlineSelection === BOARD_OUTLINE_AUTO
+          ? this.findAutomaticBoardOutlineLayer(layer)
+          : null;
+
+    if (outlineLayer && typeof outlineLayer.sourceContent === "string") {
+      const outlineOffset = normalizeLayerOffset(outlineLayer.offset);
+      return {
+        type: "outline",
+        key: `outline:${outlineLayer.id}:${outlineLayer.layerId}:${outlineOffset.x}:${outlineOffset.y}`,
+        outlineLayer,
+        outlineOffset,
+      };
+    }
+
+    const bounds =
+      this.getVisibleGerberBounds({
+        excludeLayerId: layer.id,
+        selectedLayerIds,
+      }) ??
+      this.getVisibleGerberBounds({
+        selectedLayerIds,
+      });
+    if (!bounds) {
+      return null;
+    }
+
+    return {
+      type: "bounds",
+      key: `bounds:${bounds.minX}:${bounds.maxX}:${bounds.minY}:${bounds.maxY}`,
+      bounds,
+    };
+  }
+
+  getInvertedRenderLayerId(layer, selectedLayerIds) {
+    if (!layer.inverted) {
+      return layer.layerId;
+    }
+    if (typeof layer.sourceContent !== "string") {
+      this.reportInvertedLayerWarningOnce(
+        layer,
+        "missing-source",
+        "Reload files before using inverted layer rendering.",
+      );
+      return layer.layerId;
+    }
+
+    const processor = this.wasmProcessor;
+    const fillSource = this.getInvertedFillSource(layer, selectedLayerIds);
+    if (!processor || !fillSource) {
+      this.reportInvertedLayerWarningOnce(
+        layer,
+        "missing-fill-source",
+        "Inverted layer rendering needs a board outline or visible layer bounds.",
+      );
+      return layer.layerId;
+    }
+
+    const targetOffset = normalizeLayerOffset(layer.offset);
+    const sourceKey = `target:${layer.layerId}:${targetOffset.x}:${targetOffset.y}|${fillSource.key}`;
+    if (
+      Number.isFinite(Number(layer.invertedLayerId)) &&
+      layer.invertedSourceKey === sourceKey
+    ) {
+      return layer.invertedLayerId;
+    }
+
+    this.removeInvertedLayerCache(layer);
+    try {
+      let invertedLayerId;
+      if (fillSource.type === "outline") {
+        if (typeof processor.add_inverted_layer_with_outline !== "function") {
+          throw new Error("Inverted outline rendering requires an updated WASM module.");
+        }
+        this.reserveWasmInputCapacity(layer.sourceContent);
+        this.reserveWasmInputCapacity(fillSource.outlineLayer.sourceContent);
+        invertedLayerId = processor.add_inverted_layer_with_outline(
+          layer.sourceContent,
+          fillSource.outlineLayer.sourceContent,
+          targetOffset.x,
+          targetOffset.y,
+          fillSource.outlineOffset.x,
+          fillSource.outlineOffset.y,
+        );
+      } else {
+        if (typeof processor.add_inverted_layer_with_bounds !== "function") {
+          throw new Error("Inverted bounds rendering requires an updated WASM module.");
+        }
+        this.reserveWasmInputCapacity(layer.sourceContent);
+        invertedLayerId = processor.add_inverted_layer_with_bounds(
+          layer.sourceContent,
+          targetOffset.x,
+          targetOffset.y,
+          fillSource.bounds.minX,
+          fillSource.bounds.maxX,
+          fillSource.bounds.minY,
+          fillSource.bounds.maxY,
+        );
+      }
+
+      layer.invertedLayerId = Number(invertedLayerId);
+      layer.invertedSourceKey = sourceKey;
+      layer.invertedErrorKey = null;
+      return layer.invertedLayerId;
+    } catch (error) {
+      const message = getErrorMessage(error);
+      this.reportInvertedLayerWarningOnce(layer, sourceKey, message);
+      return layer.layerId;
+    }
+  }
+
+  reportInvertedLayerWarningOnce(layer, key, message) {
+    if (layer.invertedErrorKey === key) return;
+    layer.invertedErrorKey = key;
+    this.addDiagnostic("warning", `Inverted layer skipped: ${layer.name}`, message);
+  }
+
+  removeInvertedLayerCache(layer) {
+    const rawInvertedLayerId = layer?.invertedLayerId;
+    const invertedLayerId = Number(rawInvertedLayerId);
+    if (
+      this.wasmProcessor &&
+      rawInvertedLayerId !== undefined &&
+      rawInvertedLayerId !== null &&
+      Number.isFinite(invertedLayerId)
+    ) {
+      try {
+        this.wasmProcessor.remove_layer(invertedLayerId);
+      } catch (error) {
+        console.warn("[Layer] Failed to remove inverted layer cache:", error);
+      }
+    }
+
+    if (layer) {
+      layer.invertedLayerId = null;
+      layer.invertedSourceKey = null;
+      layer.invertedErrorKey = null;
+    }
+  }
+
+  clearAllInvertedLayerCaches() {
+    for (const layer of this.layers) {
+      this.removeInvertedLayerCache(layer);
+    }
+  }
+
   getRenderLayerPayload() {
     const selectedLayerIds = this.getSelectedLayerIds();
     const activeLayerIds = [];
@@ -4375,7 +4681,7 @@ export class GerberViewer {
       ? [...gerberLayers].reverse()
       : gerberLayers;
     orderedGerberLayers.forEach((layer) => {
-      activeLayerIds.push(layer.layerId);
+      activeLayerIds.push(this.getInvertedRenderLayerId(layer, selectedLayerIds));
       colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
       blendModes.push(isStack ? 1 : 0);
     });
@@ -5586,6 +5892,15 @@ export class GerberViewer {
     this.updateUiState();
   }
 
+  updateLayerInverted(layer, inverted) {
+    if (!layer || isDrillLayer(layer)) return;
+
+    layer.inverted = Boolean(inverted);
+    this.removeInvertedLayerCache(layer);
+    this.requestRender();
+    this.updateUiState();
+  }
+
   updateGlobalAlpha(alpha) {
     this.globalAlpha = alpha;
     // Re-render with new alpha
@@ -5641,7 +5956,7 @@ export class GerberViewer {
 
     const layerIds = isDrillLayer(layer)
       ? [layer.outlineLayerId, layer.fillLayerId]
-      : [layer.layerId];
+      : [layer.layerId, layer.invertedLayerId];
 
     for (const layerId of layerIds) {
       if (layerId !== undefined && layerId !== null) {
@@ -5678,6 +5993,7 @@ export class GerberViewer {
     this.layers.forEach((layer) => {
       layer.visible = true;
     });
+    this.clearAllInvertedLayerCaches();
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
@@ -5689,6 +6005,7 @@ export class GerberViewer {
         layer.visible = this.layerFilterStore.matches(layer, kind);
       }
     });
+    this.clearAllInvertedLayerCaches();
     this.clearSelectedFeatureIfUnavailable();
     this.renderLayerList();
     this.requestRender();
@@ -5699,6 +6016,7 @@ export class GerberViewer {
     this.layers.forEach((layer) => {
       layer.visible = false;
     });
+    this.clearAllInvertedLayerCaches();
     this.clearSelectedFeature();
     this.renderLayerList();
     this.requestRender();
@@ -5708,7 +6026,7 @@ export class GerberViewer {
   handleLayerDragStart(event, layerId) {
     if (
       event.target instanceof Element &&
-      event.target.closest("input, button")
+      event.target.closest("input, button, select")
     ) {
       event.preventDefault();
       return;
@@ -5864,7 +6182,7 @@ export class GerberViewer {
     }
     if (
       event.target instanceof Element &&
-      event.target.closest("input, button")
+      event.target.closest("input, button, select")
     ) {
       return;
     }
@@ -6087,12 +6405,14 @@ export class GerberViewer {
       onColorChange: (layerId, color) => this.updateLayerColor(layerId, color),
       onVisibilityChange: (layer, visible) => {
         layer.visible = visible;
+        this.clearAllInvertedLayerCaches();
         this.clearSelectedFeatureForHiddenLayer(layer);
         this.requestRender();
         this.updateUiState();
       },
       onToggleVisibility: (layer) => {
         layer.visible = !layer.visible;
+        this.clearAllInvertedLayerCaches();
         this.clearSelectedFeatureForHiddenLayer(layer);
         this.requestRender();
         this.updateUiState();

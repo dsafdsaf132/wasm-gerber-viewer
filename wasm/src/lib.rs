@@ -617,6 +617,75 @@ impl GerberProcessor {
         self.add_parsed_layers(gerber_data_layers)
     }
 
+    /// Add an inverted display layer by filling a board outline and clearing
+    /// the target layer geometry from it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_inverted_layer_with_outline(
+        &mut self,
+        target_content: String,
+        outline_content: String,
+        target_offset_x: f32,
+        target_offset_y: f32,
+        outline_offset_x: f32,
+        outline_offset_y: f32,
+    ) -> Result<u32, JsValue> {
+        let target_layers = parse_layer_data(
+            &target_content,
+            target_offset_x,
+            target_offset_y,
+            self.preserve_arc_regions,
+            self.arc_tessellation_quality,
+        )?;
+        let outline_layers = parse_layer_data(
+            &outline_content,
+            outline_offset_x,
+            outline_offset_y,
+            self.preserve_arc_regions,
+            self.arc_tessellation_quality,
+        )?;
+
+        if let Some(renderer) = &mut self.renderer {
+            let layer_id =
+                renderer.add_inverted_layer_from_outline(&outline_layers, target_layers)?;
+            Ok(layer_id as u32)
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
+    pub fn add_inverted_layer_with_bounds(
+        &mut self,
+        target_content: String,
+        target_offset_x: f32,
+        target_offset_y: f32,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<u32, JsValue> {
+        let target_layers = parse_layer_data(
+            &target_content,
+            target_offset_x,
+            target_offset_y,
+            self.preserve_arc_regions,
+            self.arc_tessellation_quality,
+        )?;
+
+        if let Some(renderer) = &mut self.renderer {
+            let layer_id = renderer.add_inverted_layer_from_bounds(
+                Boundary::new(min_x, max_x, min_y, max_y),
+                target_layers,
+            )?;
+            Ok(layer_id as u32)
+        } else {
+            Err(JsValue::from_str(
+                "Renderer not initialized. Call init() first.",
+            ))
+        }
+    }
+
     /// Add an Excellon / NC Drill file as a drill overlay.
     pub fn add_drill_layer(&mut self, content: String) -> Result<JsValue, JsValue> {
         let drill = if self.interaction_enabled {

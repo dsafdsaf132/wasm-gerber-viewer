@@ -726,6 +726,36 @@ button {
   display: none;
 }
 
+.outline-source-control {
+  display: grid;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.outline-source-control span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.outline-source-control select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+}
+
+.side-panel.collapsed .outline-source-control {
+  display: none;
+}
+
 .layer-list-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -750,7 +780,7 @@ button {
 .layer-item {
   position: relative;
   display: grid;
-  grid-template-columns: 28px 24px minmax(0, 1fr) 32px;
+  grid-template-columns: 28px 24px 24px minmax(0, 1fr) 32px;
   align-items: center;
   gap: 8px;
   min-height: 50px;
@@ -766,7 +796,6 @@ button {
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
 }
 
 .drill-layer-item .layer-label span {
@@ -856,6 +885,10 @@ button {
   height: 18px;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.drill-layer-item {
+  grid-template-columns: 28px 24px minmax(0, 1fr) 32px;
 }
 
 .layer-label {

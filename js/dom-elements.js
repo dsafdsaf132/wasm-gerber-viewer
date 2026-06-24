@@ -75,6 +75,7 @@ export function getViewerElements(documentRef = document) {
     clearDiagnosticsBtn: requireElement(documentRef, "clear-diagnostics-btn"),
     alphaSlider: requireElement(documentRef, "alpha-slider"),
     alphaValue: requireElement(documentRef, "alpha-value"),
+    boardOutlineSelect: requireElement(documentRef, "board-outline-select"),
     layerList: requireElement(documentRef, "layer-list"),
     diagnosticList: requireElement(documentRef, "diagnostic-list"),
     notification,

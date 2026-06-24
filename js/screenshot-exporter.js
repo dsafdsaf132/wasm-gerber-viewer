@@ -22,6 +22,32 @@ function isDrillLayer(layer) {
   return layer?.kind === "drill";
 }
 
+function isBoardOutlineLayer(layer) {
+  if (!layer || isDrillLayer(layer)) return false;
+
+  const normalized = String(layer.name ?? "").toLowerCase();
+  const extensionMatch = normalized.match(/\.([a-z0-9]+)(?:\s*#\d+)?$/i);
+  const extension = extensionMatch?.[1] ?? "";
+  if (
+    [
+      "gko",
+      "gml",
+      "gm1",
+      "gmb",
+      "gbrd",
+      "outline",
+      "edge",
+      "cuts",
+    ].includes(extension)
+  ) {
+    return true;
+  }
+
+  return /(^|[^a-z0-9])(board[-_ ]?outline|outline|edge[-_ ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
+    normalized,
+  );
+}
+
 function getDrillOutlineStyle(layer, renderOptions = {}) {
   if (layer?.drillType === "npth") {
     return {
@@ -34,6 +60,79 @@ function getDrillOutlineStyle(layer, renderOptions = {}) {
     pixels: 0,
     worldMm: Number(renderOptions.pthPlatingMicrometers ?? 20) / 1000,
   };
+}
+
+function getVisibleGerberBounds(layers, { excludeLayer = null } = {}) {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let count = 0;
+
+  for (const layer of layers) {
+    if (
+      isDrillLayer(layer) ||
+      !layer.visible ||
+      layer === excludeLayer ||
+      !layer.bounds
+    ) {
+      continue;
+    }
+
+    const bounds = layer.bounds;
+    if (
+      !Number.isFinite(bounds.minX) ||
+      !Number.isFinite(bounds.maxX) ||
+      !Number.isFinite(bounds.minY) ||
+      !Number.isFinite(bounds.maxY)
+    ) {
+      continue;
+    }
+
+    minX = Math.min(minX, bounds.minX);
+    maxX = Math.max(maxX, bounds.maxX);
+    minY = Math.min(minY, bounds.minY);
+    maxY = Math.max(maxY, bounds.maxY);
+    count++;
+  }
+
+  if (count === 0 || minX >= maxX || minY >= maxY) {
+    return null;
+  }
+
+  return { minX, maxX, minY, maxY };
+}
+
+function resolveInvertedFillSource(layers, layer, boardOutlineSelection) {
+  const selection = String(boardOutlineSelection ?? "auto");
+  const selectedOutlineLayer =
+    selection !== "auto" && selection !== "bounds"
+      ? layers.find((candidate) => candidate.id === selection)
+      : null;
+  const outlineLayer =
+    selectedOutlineLayer && selectedOutlineLayer !== layer
+      ? selectedOutlineLayer
+      : selection === "auto"
+        ? layers.find(
+            (candidate) =>
+              candidate !== layer &&
+              typeof candidate.sourceContent === "string" &&
+              isBoardOutlineLayer(candidate),
+          )
+        : null;
+
+  if (outlineLayer && typeof outlineLayer.sourceContent === "string") {
+    return {
+      type: "outline",
+      outlineLayer,
+      outlineOffset: normalizeLayerOffset(outlineLayer.offset),
+    };
+  }
+
+  const bounds =
+    getVisibleGerberBounds(layers, { excludeLayer: layer }) ??
+    getVisibleGerberBounds(layers);
+  return bounds ? { type: "bounds", bounds } : null;
 }
 
 function hexColorToRgb(color) {
@@ -69,6 +168,7 @@ export class ScreenshotExporter {
     getWasmModule,
     getWasmProcessor,
     getLayers,
+    getBoardOutlineSelection,
     getParseOptions,
     getRenderOptions,
     getRenderState,
@@ -93,6 +193,7 @@ export class ScreenshotExporter {
     this.getWasmModule = getWasmModule;
     this.getWasmProcessor = getWasmProcessor;
     this.getLayers = getLayers;
+    this.getBoardOutlineSelection = getBoardOutlineSelection;
     this.getParseOptions = getParseOptions;
     this.getRenderOptions = getRenderOptions;
     this.getRenderState = getRenderState;
@@ -405,7 +506,9 @@ export class ScreenshotExporter {
       : [0, 0, 0];
     const drillFillBlendMode = includeBackground ? 1 : 2;
     const drillAlpha = renderState.globalAlpha > 0 ? 1 / renderState.globalAlpha : 0;
-    for (const layer of this.getLayers()) {
+    const layers = this.getLayers();
+    const boardOutlineSelection = this.getBoardOutlineSelection?.() ?? "auto";
+    for (const layer of layers) {
       if (typeof layer.sourceContent !== "string") {
         throw new Error("Reload files before using high-resolution screenshot export.");
       }
@@ -452,7 +555,55 @@ export class ScreenshotExporter {
         continue;
       }
 
+      if (!layer.visible) {
+        continue;
+      }
+
       const offset = normalizeLayerOffset(layer.offset);
+      if (layer.inverted) {
+        const fillSource = resolveInvertedFillSource(
+          layers,
+          layer,
+          boardOutlineSelection,
+        );
+        if (!fillSource) {
+          throw new Error("Inverted screenshot export needs a board outline or visible layer bounds.");
+        }
+        let layerId;
+        if (fillSource.type === "outline") {
+          if (typeof processor.add_inverted_layer_with_outline !== "function") {
+            throw new Error("Inverted outline screenshot export requires an updated WASM module.");
+          }
+          layerId = processor.add_inverted_layer_with_outline(
+            layer.sourceContent,
+            fillSource.outlineLayer.sourceContent,
+            offset.x,
+            offset.y,
+            fillSource.outlineOffset.x,
+            fillSource.outlineOffset.y,
+          );
+        } else {
+          if (typeof processor.add_inverted_layer_with_bounds !== "function") {
+            throw new Error("Inverted bounds screenshot export requires an updated WASM module.");
+          }
+          layerId = processor.add_inverted_layer_with_bounds(
+            layer.sourceContent,
+            offset.x,
+            offset.y,
+            fillSource.bounds.minX,
+            fillSource.bounds.maxX,
+            fillSource.bounds.minY,
+            fillSource.bounds.maxY,
+          );
+        }
+        wasmLayerCount += 1;
+        gerberRenderLayers.push({
+          layerId,
+          color: layer.color,
+        });
+        continue;
+      }
+
       if (
         hasLayerOffset(offset) &&
         typeof processor.add_layer_with_offset !== "function"
@@ -463,12 +614,10 @@ export class ScreenshotExporter {
         ? processor.add_layer_with_offset(layer.sourceContent, offset.x, offset.y)
         : processor.add_layer(layer.sourceContent);
       wasmLayerCount += 1;
-      if (layer.visible) {
-        gerberRenderLayers.push({
-          layerId,
-          color: layer.color,
-        });
-      }
+      gerberRenderLayers.push({
+        layerId,
+        color: layer.color,
+      });
     }
 
     const orderedGerberRenderLayers = isStackCompositeMode
