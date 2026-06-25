@@ -1405,6 +1405,108 @@ button {
   opacity: 0.55;
 }
 
+.option-number-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.option-number-control > input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  outline: none;
+  padding: 0 8px;
+}
+
+.option-number-control > input:focus {
+  border-color: rgba(94, 234, 212, 0.62);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.18);
+}
+
+.option-number-control > input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.option-number-control > input::-webkit-outer-spin-button,
+.option-number-control > input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.option-number-control > input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.option-unit-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.option-unit-choice {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.option-unit-choice input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.option-unit-choice span {
+  height: 28px;
+  display: grid;
+  place-items: center;
+  min-width: 42px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.option-unit-choice input:checked + span {
+  border-color: rgba(94, 234, 212, 0.52);
+  background: rgba(20, 49, 58, 0.86);
+  color: var(--text);
+}
+
+.option-unit-choice input:focus-visible + span {
+  border-color: rgba(94, 234, 212, 0.72);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.26);
+}
+
+.option-unit-choice input:disabled + span {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@container (max-width: 300px) {
+  .option-row-stack-narrow {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
+
 .option-note {
   display: grid;
   gap: 3px;

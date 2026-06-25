@@ -65,6 +65,14 @@ const COMPOSITE_MODE_VALUES = new Set([
   COMPOSITE_MODE_BLEND,
   COMPOSITE_MODE_STACK,
 ]);
+const DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM = 20;
+const MM_PER_INCH = 25.4;
+const BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_MM = "mm";
+const BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH = "inch";
+const BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_VALUES = new Set([
+  BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_MM,
+  BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH,
+]);
 const INTERACTION_MODE_ON = "on";
 const INTERACTION_MODE_OFF = "off";
 const INTERACTION_MODE_VALUES = new Set([
@@ -190,6 +198,54 @@ function expandBounds(bounds, amount) {
     minY: bounds.minY - value,
     maxY: bounds.maxY + value,
   };
+}
+
+function normalizeBoardOutlineBoundsMarginMm(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM;
+  }
+  const margin = Number(value);
+  if (!Number.isFinite(margin)) {
+    return DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM;
+  }
+  return Math.max(0, margin);
+}
+
+function normalizeBoardOutlineBoundsMarginUnit(unit) {
+  return BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_VALUES.has(unit)
+    ? unit
+    : BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_MM;
+}
+
+function formatBoardOutlineBoundsMarginInputValue(marginMm, unit) {
+  const value =
+    unit === BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH
+      ? marginMm / MM_PER_INCH
+      : marginMm;
+  const decimals = unit === BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH ? 4 : 3;
+  return String(Number(value.toFixed(decimals)));
+}
+
+function parseBoardOutlineBoundsMarginInputValue(value, unit) {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM;
+  }
+  const margin = Math.max(0, parsed);
+  return unit === BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH
+    ? margin * MM_PER_INCH
+    : margin;
 }
 
 function normalizeDrillMetadata(metadata = {}) {
@@ -740,6 +796,12 @@ export class GerberViewer {
       this.viewerOptionsStore.get("arcTessellationQuality") ?? "normal";
     this.minimumFeaturePixels = Number(
       this.viewerOptionsStore.get("minimumFeaturePixels") ?? 1,
+    );
+    this.boardOutlineBoundsMarginMm = normalizeBoardOutlineBoundsMarginMm(
+      this.viewerOptionsStore.get("boardOutlineBoundsMarginMm"),
+    );
+    this.boardOutlineBoundsMarginUnit = normalizeBoardOutlineBoundsMarginUnit(
+      this.viewerOptionsStore.get("boardOutlineBoundsMarginUnit"),
     );
     this.drillOutlinePixels = Number(
       this.viewerOptionsStore.get("drillOutlinePixels") ?? 0,
@@ -1458,6 +1520,20 @@ export class GerberViewer {
       this.setBoardOutlineSelection(this.boardOutlineSelect.value);
     });
 
+    this.boardOutlineBoundsMarginInput.addEventListener("change", () => {
+      this.setBoardOutlineBoundsMargin(
+        this.boardOutlineBoundsMarginInput.value,
+      );
+    });
+
+    for (const input of this.getBoardOutlineBoundsMarginUnitInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setBoardOutlineBoundsMarginUnit(input.value);
+        }
+      });
+    }
+
     this.regionArcExactInput.addEventListener("change", () => {
       if (this.regionArcExactInput.checked) {
         void this.setRegionArcMode("exact");
@@ -1711,6 +1787,7 @@ export class GerberViewer {
   getRenderOptions() {
     return {
       minimumFeaturePixels: this.minimumFeaturePixels,
+      boardOutlineBoundsMarginMm: this.boardOutlineBoundsMarginMm,
       drillOutlinePixels: this.drillOutlinePixels,
       pthPlatingMicrometers: this.pthPlatingMicrometers,
       compositeMode: this.compositeMode,
@@ -1734,6 +1811,13 @@ export class GerberViewer {
       this.minimumVisibilityOffInput,
       this.minimumVisibility1Input,
       this.minimumVisibility2Input,
+    ];
+  }
+
+  getBoardOutlineBoundsMarginUnitInputs() {
+    return [
+      this.boardOutlineBoundsMarginUnitMmInput,
+      this.boardOutlineBoundsMarginUnitInchInput,
     ];
   }
 
@@ -1800,6 +1884,8 @@ export class GerberViewer {
       input.disabled = this.isRendererBusy();
     }
 
+    this.syncBoardOutlineBoundsMarginControl();
+
     for (const input of this.getDrillOutlineInputs()) {
       input.checked = Number(input.value) === this.drillOutlinePixels;
       input.disabled = this.isRendererBusy();
@@ -1817,6 +1903,23 @@ export class GerberViewer {
       : INTERACTION_MODE_OFF;
     for (const input of this.getInteractionModeInputs()) {
       input.checked = input.value === mode;
+      input.disabled = rendererBusy;
+    }
+  }
+
+  syncBoardOutlineBoundsMarginControl(rendererBusy = this.isRendererBusy()) {
+    this.boardOutlineBoundsMarginInput.value =
+      formatBoardOutlineBoundsMarginInputValue(
+        this.boardOutlineBoundsMarginMm,
+        this.boardOutlineBoundsMarginUnit,
+      );
+    this.boardOutlineBoundsMarginInput.step =
+      this.boardOutlineBoundsMarginUnit === BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH
+        ? "0.001"
+        : "0.1";
+    this.boardOutlineBoundsMarginInput.disabled = rendererBusy;
+    for (const input of this.getBoardOutlineBoundsMarginUnitInputs()) {
+      input.checked = input.value === this.boardOutlineBoundsMarginUnit;
       input.disabled = rendererBusy;
     }
   }
@@ -2137,6 +2240,50 @@ export class GerberViewer {
     } finally {
       this.updateUiState();
     }
+  }
+
+  setBoardOutlineBoundsMargin(value) {
+    const margin = parseBoardOutlineBoundsMarginInputValue(
+      value,
+      this.boardOutlineBoundsMarginUnit,
+    );
+    if (margin === this.boardOutlineBoundsMarginMm) {
+      this.syncOptionControls();
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    this.boardOutlineBoundsMarginMm = margin;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set(
+      "boardOutlineBoundsMarginMm",
+      this.boardOutlineBoundsMarginMm,
+    );
+    this.clearAllInvertedLayerCaches();
+    this.requestRender();
+    this.updateUiState();
+  }
+
+  setBoardOutlineBoundsMarginUnit(unit) {
+    const nextUnit = normalizeBoardOutlineBoundsMarginUnit(unit);
+    if (nextUnit === this.boardOutlineBoundsMarginUnit) {
+      this.syncOptionControls();
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    this.boardOutlineBoundsMarginUnit = nextUnit;
+    this.viewerOptionsStore.set(
+      "boardOutlineBoundsMarginUnit",
+      this.boardOutlineBoundsMarginUnit,
+    );
+    this.syncOptionControls();
   }
 
   setDrillOutlinePixels(pixels) {
@@ -2466,6 +2613,7 @@ export class GerberViewer {
     for (const input of this.getMinimumVisibilityInputs()) {
       input.disabled = rendererBusy;
     }
+    this.syncBoardOutlineBoundsMarginControl(rendererBusy);
     for (const input of this.getDrillOutlineInputs()) {
       input.disabled = rendererBusy;
     }
@@ -4635,14 +4783,16 @@ export class GerberViewer {
   }
 
   getInvertedBoundsFillSource(layer, selectedLayerIds) {
-    const bounds = this.getVisibleGerberBounds({ selectedLayerIds });
-    if (!bounds) {
+    const rawBounds = this.getVisibleGerberBounds({ selectedLayerIds });
+    if (!rawBounds) {
       return null;
     }
+    const margin = this.boardOutlineBoundsMarginMm;
+    const bounds = expandBounds(rawBounds, margin);
 
     return {
       type: "bounds",
-      key: `bounds:${bounds.minX}:${bounds.maxX}:${bounds.minY}:${bounds.maxY}`,
+      key: `bounds:${bounds.minX}:${bounds.maxX}:${bounds.minY}:${bounds.maxY}:margin:${margin}`,
       bounds,
     };
   }

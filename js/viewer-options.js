@@ -2,6 +2,8 @@ const DEFAULT_VIEWER_OPTIONS = {
   preserveArcRegions: true,
   arcTessellationQuality: "normal",
   minimumFeaturePixels: 1,
+  boardOutlineBoundsMarginMm: 20,
+  boardOutlineBoundsMarginUnit: "mm",
   drillOutlinePixels: 0,
   pthPlatingMicrometers: 20,
   renderingMode: "lazy",
@@ -15,6 +17,22 @@ const DRILL_OUTLINE_PIXELS = new Set([0, 1, 2, 3]);
 const PTH_PLATING_MICROMETERS = new Set([10, 20, 30, 40, 50]);
 const RENDERING_MODES = new Set(["lazy", "realtime"]);
 const COMPOSITE_MODES = new Set(["blend", "stack"]);
+const BOARD_OUTLINE_BOUNDS_MARGIN_UNITS = new Set(["mm", "inch"]);
+
+function normalizeNonNegativeNumber(value, fallback) {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return fallback;
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.max(0, number);
+}
 
 function createMemoryStorage() {
   const values = new Map();
@@ -70,6 +88,15 @@ export class ViewerOptionsStore {
         )
           ? stored.minimumFeaturePixels
           : DEFAULT_VIEWER_OPTIONS.minimumFeaturePixels,
+        boardOutlineBoundsMarginMm: normalizeNonNegativeNumber(
+          stored.boardOutlineBoundsMarginMm,
+          DEFAULT_VIEWER_OPTIONS.boardOutlineBoundsMarginMm,
+        ),
+        boardOutlineBoundsMarginUnit: BOARD_OUTLINE_BOUNDS_MARGIN_UNITS.has(
+          stored.boardOutlineBoundsMarginUnit,
+        )
+          ? stored.boardOutlineBoundsMarginUnit
+          : DEFAULT_VIEWER_OPTIONS.boardOutlineBoundsMarginUnit,
         drillOutlinePixels: DRILL_OUTLINE_PIXELS.has(stored.drillOutlinePixels)
           ? stored.drillOutlinePixels
           : DEFAULT_VIEWER_OPTIONS.drillOutlinePixels,

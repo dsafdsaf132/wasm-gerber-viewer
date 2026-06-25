@@ -126,6 +126,18 @@ export function getViewerElements(documentRef = document) {
       documentRef,
       "minimum-visibility-2",
     ),
+    boardOutlineBoundsMarginInput: requireElement(
+      documentRef,
+      "board-outline-bounds-margin",
+    ),
+    boardOutlineBoundsMarginUnitMmInput: requireElement(
+      documentRef,
+      "board-outline-bounds-margin-unit-mm",
+    ),
+    boardOutlineBoundsMarginUnitInchInput: requireElement(
+      documentRef,
+      "board-outline-bounds-margin-unit-inch",
+    ),
     drillOutlineOffInput: requireElement(documentRef, "drill-outline-off"),
     drillOutline1Input: requireElement(documentRef, "drill-outline-1"),
     drillOutline2Input: requireElement(documentRef, "drill-outline-2"),

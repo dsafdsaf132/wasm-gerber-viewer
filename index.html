@@ -237,14 +237,14 @@
               </div>
               <div class="layer-list-scroll">
                 <ul class="layer-list" id="layer-list"></ul>
+                <label class="outline-source-control" for="board-outline-select">
+                  <span>Board Outline</span>
+                  <select id="board-outline-select">
+                    <option value="auto">Auto</option>
+                    <option value="bounds">Bounds</option>
+                  </select>
+                </label>
               </div>
-              <label class="outline-source-control" for="board-outline-select">
-                <span>Board Outline</span>
-                <select id="board-outline-select">
-                  <option value="auto">Auto</option>
-                  <option value="bounds">Bounds</option>
-                </select>
-              </label>
             </section>
 
             <section class="panel-section" data-panel="options">
@@ -426,6 +426,44 @@
                           <span>2px</span>
                         </label>
                       </div>
+                    </div>
+                  </div>
+                  <div class="option-outline">
+                    <div class="option-row option-row-stack-narrow">
+                      <span>Bounds Margin</span>
+                      <div class="option-number-control">
+                        <input
+                          type="number"
+                          id="board-outline-bounds-margin"
+                          min="0"
+                          step="0.1"
+                          inputmode="decimal"
+                          aria-label="Board outline bounds margin"
+                        />
+                        <div class="option-unit-toggle" role="radiogroup" aria-label="Bounds margin unit">
+                          <label class="option-unit-choice">
+                            <input
+                              type="radio"
+                              id="board-outline-bounds-margin-unit-mm"
+                              name="board-outline-bounds-margin-unit"
+                              value="mm"
+                            />
+                            <span>mm</span>
+                          </label>
+                          <label class="option-unit-choice">
+                            <input
+                              type="radio"
+                              id="board-outline-bounds-margin-unit-inch"
+                              name="board-outline-bounds-margin-unit"
+                              value="inch"
+                            />
+                            <span>inch</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="option-note">
+                      <span>Used when Board Outline falls back to Bounds.</span>
                     </div>
                   </div>
                   <div class="option-outline">

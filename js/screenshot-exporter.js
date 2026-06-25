@@ -66,6 +66,19 @@ function getDrillOutlineStyle(layer, renderOptions = {}) {
   };
 }
 
+function expandBounds(bounds, amount) {
+  const value = Number(amount);
+  if (!bounds || !Number.isFinite(value) || value <= 0) {
+    return bounds;
+  }
+  return {
+    minX: bounds.minX - value,
+    maxX: bounds.maxX + value,
+    minY: bounds.minY - value,
+    maxY: bounds.maxY + value,
+  };
+}
+
 function getVisibleGerberBounds(layers, { excludeLayer = null } = {}) {
   let minX = Infinity;
   let maxX = -Infinity;
@@ -107,7 +120,12 @@ function getVisibleGerberBounds(layers, { excludeLayer = null } = {}) {
   return { minX, maxX, minY, maxY };
 }
 
-function resolveInvertedFillSource(layers, layer, boardOutlineSelection) {
+function resolveInvertedFillSource(
+  layers,
+  layer,
+  boardOutlineSelection,
+  boundsMarginMm,
+) {
   const selection = String(boardOutlineSelection ?? "auto");
   const selectedOutlineLayer =
     selection !== "auto" && selection !== "bounds"
@@ -134,11 +152,11 @@ function resolveInvertedFillSource(layers, layer, boardOutlineSelection) {
     };
   }
 
-  return resolveInvertedBoundsFillSource(layers, layer);
+  return resolveInvertedBoundsFillSource(layers, layer, boundsMarginMm);
 }
 
-function resolveInvertedBoundsFillSource(layers, layer) {
-  const bounds = getVisibleGerberBounds(layers);
+function resolveInvertedBoundsFillSource(layers, layer, boundsMarginMm = 0) {
+  const bounds = expandBounds(getVisibleGerberBounds(layers), boundsMarginMm);
   return bounds ? { type: "bounds", bounds } : null;
 }
 
@@ -544,6 +562,14 @@ export class ScreenshotExporter {
     const drillAlpha = renderState.globalAlpha > 0 ? 1 / renderState.globalAlpha : 0;
     const layers = this.getLayers();
     const boardOutlineSelection = this.getBoardOutlineSelection?.() ?? "auto";
+    const rawBoardOutlineBoundsMarginMm = Number(
+      renderOptions.boardOutlineBoundsMarginMm,
+    );
+    const boardOutlineBoundsMarginMm = Number.isFinite(
+      rawBoardOutlineBoundsMarginMm,
+    )
+      ? Math.max(0, rawBoardOutlineBoundsMarginMm)
+      : 20;
     for (const layer of layers) {
       if (typeof layer.sourceContent !== "string") {
         throw new Error("Reload files before using high-resolution screenshot export.");
@@ -601,6 +627,7 @@ export class ScreenshotExporter {
           layers,
           layer,
           boardOutlineSelection,
+          boardOutlineBoundsMarginMm,
         );
         if (!fillSource) {
           throw new Error("Inverted screenshot export needs a board outline or visible layer bounds.");
@@ -612,7 +639,11 @@ export class ScreenshotExporter {
           if (fillSource.type !== "outline" || String(boardOutlineSelection ?? "auto") !== "auto") {
             throw error;
           }
-          const fallbackSource = resolveInvertedBoundsFillSource(layers, layer);
+          const fallbackSource = resolveInvertedBoundsFillSource(
+            layers,
+            layer,
+            boardOutlineBoundsMarginMm,
+          );
           if (!fallbackSource) {
             throw error;
           }
