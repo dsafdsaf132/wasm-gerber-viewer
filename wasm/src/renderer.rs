@@ -261,13 +261,17 @@ impl Renderer {
         outline_data: &[GerberData],
         mut target_data: Vec<GerberData>,
     ) -> Result<usize, JsValue> {
-        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(1));
-        inverted_data.push(Self::outline_fill_layer(outline_data)?);
+        let (fill_layer, fill_contours) = Self::outline_fill_layer_with_contours(outline_data)?;
+        let clip_layer =
+            Self::outside_clip_layer(&fill_contours, &fill_layer.boundary, &target_data)?;
+        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(2));
+        inverted_data.push(fill_layer);
 
         for mut sublayer in target_data.drain(..) {
             sublayer.is_negative = !sublayer.is_negative;
             inverted_data.push(sublayer);
         }
+        inverted_data.push(clip_layer);
 
         self.add_layer(inverted_data)
     }
@@ -277,18 +281,25 @@ impl Renderer {
         bounds: Boundary,
         mut target_data: Vec<GerberData>,
     ) -> Result<usize, JsValue> {
-        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(1));
-        inverted_data.push(Self::bounds_fill_layer(bounds)?);
+        let fill_contours = vec![Self::bounds_region_contour(&bounds)?];
+        let fill_layer = Self::bounds_fill_layer(bounds)?;
+        let clip_layer =
+            Self::outside_clip_layer(&fill_contours, &fill_layer.boundary, &target_data)?;
+        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(2));
+        inverted_data.push(fill_layer);
 
         for mut sublayer in target_data.drain(..) {
             sublayer.is_negative = !sublayer.is_negative;
             inverted_data.push(sublayer);
         }
+        inverted_data.push(clip_layer);
 
         self.add_layer(inverted_data)
     }
 
-    fn outline_fill_layer(outline_data: &[GerberData]) -> Result<GerberData, JsValue> {
+    fn outline_fill_layer_with_contours(
+        outline_data: &[GerberData],
+    ) -> Result<(GerberData, Vec<RegionContour>), JsValue> {
         let segments = Self::outline_segments(outline_data)?;
         let contours = Self::closed_outline_regions(&segments);
         if contours.is_empty() {
@@ -308,7 +319,7 @@ impl Renderer {
             ));
         }
 
-        Ok(GerberData::new(
+        let layer = GerberData::new(
             Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Vec::new(),
             Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -339,7 +350,8 @@ impl Renderer {
             path_regions,
             boundary,
             false,
-        ))
+        );
+        Ok((layer, contours))
     }
 
     fn bounds_fill_layer(bounds: Boundary) -> Result<GerberData, JsValue> {
@@ -400,6 +412,111 @@ impl Renderer {
             bounds,
             false,
         ))
+    }
+
+    fn outside_clip_layer(
+        fill_contours: &[RegionContour],
+        fill_boundary: &Boundary,
+        target_data: &[GerberData],
+    ) -> Result<GerberData, JsValue> {
+        let mut clip_boundary = fill_boundary.clone();
+        for sublayer in target_data {
+            clip_boundary.include_boundary(&sublayer.boundary);
+        }
+        Self::validate_finite_value("inverted clip min_x", clip_boundary.min_x)?;
+        Self::validate_finite_value("inverted clip max_x", clip_boundary.max_x)?;
+        Self::validate_finite_value("inverted clip min_y", clip_boundary.min_y)?;
+        Self::validate_finite_value("inverted clip max_y", clip_boundary.max_y)?;
+        if clip_boundary.min_x >= clip_boundary.max_x || clip_boundary.min_y >= clip_boundary.max_y
+        {
+            return Err(JsValue::from_str(
+                "Inverted layer clip bounds must have positive area",
+            ));
+        }
+
+        let mut clip_contours = Vec::with_capacity(fill_contours.len().saturating_add(1));
+        clip_contours.push(Self::bounds_region_contour(&clip_boundary)?);
+        clip_contours.extend(fill_contours.iter().cloned());
+        let path_regions = build_path_regions(&clip_contours, &ParserState::default(), 1, false)
+            .map_err(|error| {
+                JsValue::from_str(&format!("Failed to build inverted clip region: {error}"))
+            })?;
+
+        Ok(GerberData::new(
+            Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            Vec::new(),
+            Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            Circles::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Arcs::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Thermals::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            path_regions,
+            clip_boundary,
+            true,
+        ))
+    }
+
+    fn bounds_region_contour(bounds: &Boundary) -> Result<RegionContour, JsValue> {
+        Self::validate_finite_value("region bounds min_x", bounds.min_x)?;
+        Self::validate_finite_value("region bounds max_x", bounds.max_x)?;
+        Self::validate_finite_value("region bounds min_y", bounds.min_y)?;
+        Self::validate_finite_value("region bounds max_y", bounds.max_y)?;
+        if bounds.min_x >= bounds.max_x || bounds.min_y >= bounds.max_y {
+            return Err(JsValue::from_str("Region bounds must have positive area"));
+        }
+
+        let min_x = bounds.min_x;
+        let max_x = bounds.max_x;
+        let min_y = bounds.min_y;
+        let max_y = bounds.max_y;
+        Ok(RegionContour {
+            points: vec![
+                [min_x, min_y],
+                [max_x, min_y],
+                [max_x, max_y],
+                [min_x, max_y],
+                [min_x, min_y],
+            ],
+            segments: vec![
+                RegionSegment::Line {
+                    start: [min_x, min_y],
+                    end: [max_x, min_y],
+                },
+                RegionSegment::Line {
+                    start: [max_x, min_y],
+                    end: [max_x, max_y],
+                },
+                RegionSegment::Line {
+                    start: [max_x, max_y],
+                    end: [min_x, max_y],
+                },
+                RegionSegment::Line {
+                    start: [min_x, max_y],
+                    end: [min_x, min_y],
+                },
+            ],
+            has_arc: false,
+        })
     }
 
     fn outline_segments(outline_data: &[GerberData]) -> Result<Vec<OutlineSegment>, JsValue> {
@@ -5360,6 +5477,41 @@ mod tests {
         }
     }
 
+    fn empty_gerber_data(boundary: Boundary, is_negative: bool) -> GerberData {
+        GerberData::new(
+            Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            Vec::new(),
+            Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            Circles::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Arcs::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            Thermals::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            PathRegions::empty(),
+            boundary,
+            is_negative,
+        )
+    }
+
     #[test]
     fn validate_offsets_rejects_nonzero_initial_offset() {
         assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[0, 9], 9).is_ok());
@@ -5431,5 +5583,22 @@ mod tests {
         assert!((boundary.max_x() - 7.0).abs() < 0.0001);
         assert!((boundary.min_y() - 3.0).abs() < 0.0001);
         assert!((boundary.max_y() - 7.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn outside_clip_layer_covers_target_overflow() {
+        let fill_bounds = Boundary::new(0.0, 10.0, 0.0, 10.0);
+        let fill_contours = vec![Renderer::bounds_region_contour(&fill_bounds).unwrap()];
+        let target = empty_gerber_data(Boundary::new(-2.0, 12.0, -3.0, 11.0), false);
+
+        let clip = Renderer::outside_clip_layer(&fill_contours, &fill_bounds, &[target]).unwrap();
+
+        assert!(clip.is_negative);
+        assert!(clip.path_regions.has_geometry());
+        assert_eq!(clip.path_regions.region_count(), 1);
+        assert!((clip.boundary.min_x() + 2.0).abs() < 0.0001);
+        assert!((clip.boundary.max_x() - 12.0).abs() < 0.0001);
+        assert!((clip.boundary.min_y() + 3.0).abs() < 0.0001);
+        assert!((clip.boundary.max_y() - 11.0).abs() < 0.0001);
     }
 }

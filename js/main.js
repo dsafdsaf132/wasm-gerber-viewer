@@ -2330,6 +2330,7 @@ export class GerberViewer {
             id: layer.id,
             visible: layer.visible,
             color: layer.color,
+            inverted: layer.inverted,
             sourceContent: layer.sourceContent,
             offset: layer.offset,
             drillType: layer.drillType,
@@ -4549,6 +4550,13 @@ export class GerberViewer {
       return getLayerRenderBounds(layer);
     }
     const fillSource = this.getInvertedFillSource(layer, selectedLayerIds);
+    const targetRenderBounds = getLayerRenderBounds(layer);
+    if (
+      layer.invertedErrorKey &&
+      !this.hasInvertedLayerCache(layer)
+    ) {
+      return targetRenderBounds;
+    }
     if (fillSource?.type === "outline") {
       const targetOffset = normalizeLayerOffset(layer.offset);
       const sourceKey = this.getInvertedLayerSourceKey(layer, fillSource, targetOffset);
@@ -4562,7 +4570,7 @@ export class GerberViewer {
         );
       }
     }
-    return fillSource?.bounds ?? getLayerRenderBounds(layer);
+    return fillSource?.bounds ?? targetRenderBounds;
   }
 
   getViewportFitLayers(selectedLayerIds) {
@@ -4617,14 +4625,7 @@ export class GerberViewer {
   }
 
   getInvertedBoundsFillSource(layer, selectedLayerIds) {
-    const bounds =
-      this.getVisibleGerberBounds({
-        excludeLayerId: layer.id,
-        selectedLayerIds,
-      }) ??
-      this.getVisibleGerberBounds({
-        selectedLayerIds,
-      });
+    const bounds = this.getVisibleGerberBounds({ selectedLayerIds });
     if (!bounds) {
       return null;
     }
@@ -4677,6 +4678,15 @@ export class GerberViewer {
     return `target:${layer.layerId}:${targetOffset.x}:${targetOffset.y}|${fillSource.key}`;
   }
 
+  hasInvertedLayerCache(layer) {
+    const rawInvertedLayerId = layer?.invertedLayerId;
+    return (
+      rawInvertedLayerId !== undefined &&
+      rawInvertedLayerId !== null &&
+      Number.isFinite(Number(rawInvertedLayerId))
+    );
+  }
+
   getInvertedFallbackSourceKey(sourceKey, fallbackSource) {
     return `${sourceKey}|fallback:${fallbackSource.key}`;
   }
@@ -4715,7 +4725,7 @@ export class GerberViewer {
     const targetOffset = normalizeLayerOffset(layer.offset);
     const sourceKey = this.getInvertedLayerSourceKey(layer, fillSource, targetOffset);
     if (
-      Number.isFinite(Number(layer.invertedLayerId)) &&
+      this.hasInvertedLayerCache(layer) &&
       (layer.invertedSourceKey === sourceKey ||
         layer.invertedSourceKey ===
           this.getCurrentInvertedFallbackSourceKey(layer, selectedLayerIds, sourceKey))

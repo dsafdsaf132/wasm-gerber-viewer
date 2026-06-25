@@ -34,6 +34,7 @@ AI guide: run \`gerber-renderer --skill\` for usage notes.
 const TAR_GZ_EXTENSIONS = [".tar.gz", ".tgz"];
 const GENERIC_GERBER_EXTENSIONS = [".art", ".gbr", ".gdo", ".ger", ".pho"];
 const SKILL_URL = new URL("../SKILL.md", import.meta.url);
+const CLI_LAYER_SELECTOR_PREFIX = "__wasmGerberRendererCliLayer:";
 
 async function main() {
   const { inputs, output, frameOptions, showSkill } = parseArgs(
@@ -258,6 +259,10 @@ async function collectInputLayers(inputs) {
 }
 
 function applyLayerSelectionOptions(layers, frameOptions) {
+  for (const [index, layer] of layers.entries()) {
+    layer.__selectorKey = `${CLI_LAYER_SELECTOR_PREFIX}${index + 1}`;
+  }
+
   const selectors = frameOptions.invertLayerSelectors ?? [];
   delete frameOptions.invertLayerSelectors;
 
@@ -279,7 +284,7 @@ function applyLayerSelectionOptions(layers, frameOptions) {
       frameOptions.invertedOutline,
       "--outline-layer",
     );
-    frameOptions.invertedOutline = String(layers.indexOf(outlineLayer) + 1);
+    frameOptions.invertedOutline = outlineLayer.__selectorKey;
     if (selectors.length > 0) {
       frameOptions.retainSourceContentForInversion = true;
     }

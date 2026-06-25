@@ -149,3 +149,67 @@ test("package board outline detection accepts common outline names", () => {
   assert.equal(isBoardOutlineLayerName("board-outline.gbr"), true);
   assert.equal(isBoardOutlineLayerName("top-copper.gtl"), false);
 });
+
+test("node render plan preserves internal CLI outline selectors", async () => {
+  const selectorKey = "__wasmGerberRendererCliLayer:1";
+  const renderer = new NodeGerberRenderer({}, {});
+
+  await renderer.withFrame({ invertedOutline: selectorKey }, async () => {
+    renderer.frame.addLayer(makeNodeLayerRecord({
+      layerId: 0,
+      name: "outline.gko",
+      selectorKey,
+      bounds: { minX: 0, maxX: 10, minY: 0, maxY: 10 },
+    }));
+    renderer.frame.addLayer(makeNodeLayerRecord({
+      layerId: 1,
+      name: "mask.gbs",
+      inverted: true,
+      bounds: { minX: 100, maxX: 101, minY: 100, maxY: 101 },
+    }));
+  });
+
+  assert.equal(renderer.lastRenderPlan.layers[0].selectorKey, selectorKey);
+  assert.deepEqual(renderer.lastFrame.bounds, { minX: 0, maxX: 10, minY: 0, maxY: 10 });
+});
+
+test("node bounds inversion includes the target layer extents", async () => {
+  const renderer = new NodeGerberRenderer({}, {});
+
+  await renderer.withFrame({ invertedOutline: "bounds" }, async () => {
+    renderer.frame.addLayer(makeNodeLayerRecord({
+      layerId: 0,
+      name: "silk.gto",
+      bounds: { minX: 0, maxX: 10, minY: 0, maxY: 10 },
+    }));
+    renderer.frame.addLayer(makeNodeLayerRecord({
+      layerId: 1,
+      name: "mask.gbs",
+      inverted: true,
+      bounds: { minX: 100, maxX: 101, minY: 100, maxY: 101 },
+    }));
+  });
+
+  assert.deepEqual(renderer.lastFrame.bounds, { minX: 0, maxX: 101, minY: 0, maxY: 101 });
+});
+
+function makeNodeLayerRecord(overrides = {}) {
+  return {
+    kind: "gerber",
+    layerId: 0,
+    selectorKey: null,
+    name: "layer.gbr",
+    sourceName: "layer.gbr",
+    content: "synthetic",
+    parsedLayer: null,
+    parsedDrillLayer: null,
+    offsetX: 0,
+    offsetY: 0,
+    bounds: { minX: 0, maxX: 1, minY: 0, maxY: 1 },
+    color: [1, 0, 0],
+    alpha: null,
+    inverted: false,
+    outlineStyle: null,
+    ...overrides,
+  };
+}

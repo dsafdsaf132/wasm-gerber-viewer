@@ -79,6 +79,7 @@ const REQUIRED_WEBGL2_METHODS = [
   "readPixels",
 ];
 const NODE_PREPARED_LAYER = Symbol("wasm-gerber-renderer.nodePreparedLayer");
+const INTERNAL_LAYER_SELECTOR_PREFIX = "__wasmGerberRendererCliLayer:";
 
 export async function createNodeGerberRenderer(rendererOptions = {}) {
   return NodeGerberRenderer.create(rendererOptions);
@@ -376,6 +377,7 @@ export class NodeGerberRenderer {
     return {
       kind: prepared.kind,
       layerId,
+      selectorKey: prepared.selectorKey,
       name: prepared.name || `Layer ${layerId}`,
       sourceName: prepared.sourceName,
       content: prepared.content,
@@ -443,6 +445,8 @@ export class NodeGerberRenderer {
       kind,
       name,
       sourceName,
+      selectorKey:
+        typeof options.__selectorKey === "string" ? options.__selectorKey : null,
       content:
         supportsParsedLayerReuse(this.wasmModule) && !retainSourceContent
           ? null
@@ -526,6 +530,7 @@ class NodeFrameState extends FrameState {
       strategy: this.options.strategy,
       layers: this.layers.map((layer) => ({
         kind: layer.kind,
+        selectorKey: layer.selectorKey,
         name: layer.name,
         sourceName: layer.sourceName,
         content: layer.content,
@@ -772,6 +777,7 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
         ? String(layerOptions.name)
         : preparedLayer.name,
     kind,
+    selectorKey: preparedLayer.selectorKey ?? null,
     color:
       "color" in layerOptions
         ? layerOptions.color
@@ -1338,9 +1344,7 @@ function addPlanInvertedLayerToProcessor(processor, layer, plan) {
     if (fillSource.type !== "outline" || outlineSelection !== INVERTED_OUTLINE_AUTO) {
       throw error;
     }
-    const bounds =
-      getPlanGerberBounds(plan.layers, layer) ??
-      getPlanGerberBounds(plan.layers, null);
+    const bounds = getPlanGerberBounds(plan.layers, null);
     if (!bounds) {
       throw error;
     }
@@ -1411,9 +1415,7 @@ function resolveInvertedFillSourceForLayers(layers, invertedOutline, targetLayer
     return { type: "outline", layer: outlineLayer };
   }
 
-  const bounds =
-    getPlanGerberBounds(layers, targetLayer) ??
-    getPlanGerberBounds(layers, null);
+  const bounds = getPlanGerberBounds(layers, null);
   return bounds ? { type: "bounds", bounds } : null;
 }
 
@@ -1443,11 +1445,7 @@ function resolveLayerRenderBounds(layers, options, layer) {
   }
   const outlineSelection = options.invertedOutline ?? INVERTED_OUTLINE_AUTO;
   if (fillSource.type === "outline" && outlineSelection === INVERTED_OUTLINE_AUTO) {
-    return (
-      getPlanGerberBounds(layers, layer) ??
-      getPlanGerberBounds(layers, null) ??
-      fillSource.layer.bounds
-    );
+    return fillSource.layer.bounds;
   }
   return fillSource.type === "outline" ? fillSource.layer.bounds : fillSource.bounds;
 }
@@ -1464,6 +1462,17 @@ function findAutomaticInvertedOutlineLayer(layers, targetLayer) {
 
 function findLayerBySelector(layers, selector, targetLayer = null) {
   const normalizedSelector = String(selector);
+  if (normalizedSelector.startsWith(INTERNAL_LAYER_SELECTOR_PREFIX)) {
+    const matches = layers.filter(
+      (layer) =>
+        layer !== targetLayer && layer.selectorKey === normalizedSelector,
+    );
+    if (matches.length > 1) {
+      throw new Error(`Layer selector is ambiguous: ${normalizedSelector}`);
+    }
+    return matches[0] ?? null;
+  }
+
   const index = Number(normalizedSelector);
   if (Number.isInteger(index) && index >= 1 && index <= layers.length) {
     const layer = layers[index - 1];
