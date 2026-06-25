@@ -51,6 +51,9 @@ function createLayerItem({
 }) {
   const item = document.createElement("li");
   item.className = "layer-item";
+  if (layer.inverted) {
+    item.classList.add("layer-item-inverted");
+  }
   item.dataset.layerId = layer.id;
   item.dataset.layerIndex = String(index);
   item.draggable = true;
@@ -72,6 +75,10 @@ function createLayerItem({
   checkbox.type = "checkbox";
   checkbox.className = "layer-checkbox";
   checkbox.checked = layer.visible;
+  checkbox.setAttribute(
+    "aria-label",
+    `${layer.name} visibility${layer.inverted ? " (inverted)" : ""}`,
+  );
   checkbox.addEventListener("change", () => {
     onVisibilityChange(layer, checkbox.checked);
   });
@@ -138,6 +145,7 @@ function createDrillItem({
   checkbox.type = "checkbox";
   checkbox.className = "layer-checkbox";
   checkbox.checked = layer.visible;
+  checkbox.setAttribute("aria-label", `${layer.name} visibility`);
   checkbox.addEventListener("change", () => {
     onVisibilityChange(layer, checkbox.checked);
   });

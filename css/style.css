@@ -741,6 +741,18 @@ button {
   font-weight: 700;
 }
 
+.outline-source-status {
+  display: block;
+  padding: 0 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 500;
+}
+
 .outline-source-control select {
   width: 100%;
   min-width: 0;
@@ -765,7 +777,8 @@ button {
   color: #f8fafc;
 }
 
-.side-panel.collapsed .outline-source-control {
+.side-panel.collapsed .outline-source-control,
+.side-panel.collapsed .outline-source-status {
   display: none;
 }
 
@@ -896,8 +909,12 @@ button {
 .layer-checkbox {
   width: 18px;
   height: 18px;
-  accent-color: var(--accent);
+  accent-color: #3b82f6;
   cursor: pointer;
+}
+
+.layer-item-inverted .layer-checkbox {
+  accent-color: #ea580c;
 }
 
 .layer-label {

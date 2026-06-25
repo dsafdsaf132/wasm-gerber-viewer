@@ -2,7 +2,7 @@ const DEFAULT_VIEWER_OPTIONS = {
   preserveArcRegions: true,
   arcTessellationQuality: "normal",
   minimumFeaturePixels: 1,
-  boardOutlineBoundsMarginMm: 20,
+  boardOutlineBoundsMarginMm: 10,
   boardOutlineBoundsMarginUnit: "mm",
   drillOutlinePixels: 0,
   pthPlatingMicrometers: 20,

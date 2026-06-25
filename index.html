@@ -239,11 +239,12 @@
                 <ul class="layer-list" id="layer-list"></ul>
                 <label class="outline-source-control" for="board-outline-select">
                   <span>Board Outline</span>
-                  <select id="board-outline-select">
+                  <select id="board-outline-select" aria-describedby="board-outline-status">
                     <option value="auto">Auto</option>
                     <option value="bounds">Bounds</option>
                   </select>
                 </label>
+                <span class="outline-source-status" id="board-outline-status" role="status" aria-live="polite">Auto fallback: Bounds</span>
               </div>
             </section>
 

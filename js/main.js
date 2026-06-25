@@ -65,7 +65,7 @@ const COMPOSITE_MODE_VALUES = new Set([
   COMPOSITE_MODE_BLEND,
   COMPOSITE_MODE_STACK,
 ]);
-const DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM = 20;
+const DEFAULT_BOARD_OUTLINE_BOUNDS_MARGIN_MM = 10;
 const MM_PER_INCH = 25.4;
 const BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_MM = "mm";
 const BOARD_OUTLINE_BOUNDS_MARGIN_UNIT_INCH = "inch";
@@ -1962,10 +1962,73 @@ export class GerberViewer {
     );
     this.boardOutlineSelect.value = this.boardOutlineSelection;
     this.boardOutlineSelect.disabled = this.isRendererBusy() || this.layers.length === 0;
+    this.syncBoardOutlineStatus();
 
     if (currentValue !== this.boardOutlineSelection) {
       this.clearAllInvertedLayerCaches();
       this.requestRender();
+    }
+  }
+
+  syncBoardOutlineStatus() {
+    let statusText = "";
+    if (this.layers.length === 0) {
+      statusText = "No layers";
+      this.setBoardOutlineStatusText(statusText);
+      return;
+    }
+    const boundsStatusLabel = this.getBoardOutlineBoundsStatusLabel();
+
+    if (this.boardOutlineSelection === BOARD_OUTLINE_AUTO) {
+      const outlineLayer = this.findAutomaticBoardOutlineLayer();
+      if (outlineLayer) {
+        const selfFallback = outlineLayer.inverted
+          ? `, self uses ${boundsStatusLabel}`
+          : "";
+        statusText = `Auto outline: ${outlineLayer.name}${selfFallback}`;
+      } else {
+        statusText = `Auto fallback: ${boundsStatusLabel}`;
+      }
+      this.setBoardOutlineStatusText(statusText);
+      return;
+    }
+
+    if (this.boardOutlineSelection === BOARD_OUTLINE_BOUNDS) {
+      statusText = `Selected: ${boundsStatusLabel}`;
+      this.setBoardOutlineStatusText(statusText);
+      return;
+    }
+
+    const selectedLayer = this.layers.find(
+      (layer) => layer.id === this.boardOutlineSelection,
+    );
+    if (selectedLayer) {
+      const selfFallback = selectedLayer.inverted
+        ? `, self uses ${boundsStatusLabel}`
+        : "";
+      statusText = `Selected outline: ${selectedLayer.name}${selfFallback}`;
+    }
+    this.setBoardOutlineStatusText(statusText);
+  }
+
+  getBoardOutlineBoundsStatusLabel() {
+    const bounds = this.getVisibleGerberBounds();
+    if (!bounds) {
+      return "Bounds unavailable";
+    }
+    return `Bounds, margin ${this.getBoardOutlineBoundsMarginStatusLabel()}`;
+  }
+
+  getBoardOutlineBoundsMarginStatusLabel() {
+    return `${formatBoardOutlineBoundsMarginInputValue(
+      this.boardOutlineBoundsMarginMm,
+      this.boardOutlineBoundsMarginUnit,
+    )} ${this.boardOutlineBoundsMarginUnit}`;
+  }
+
+  setBoardOutlineStatusText(text) {
+    if (this.boardOutlineStatus.textContent !== text) {
+      this.boardOutlineStatus.textContent = text;
     }
   }
 
@@ -2287,6 +2350,7 @@ export class GerberViewer {
       this.boardOutlineBoundsMarginUnit,
     );
     this.syncOptionControls();
+    this.syncBoardOutlineStatus();
   }
 
   setDrillOutlinePixels(pixels) {
@@ -4987,6 +5051,7 @@ export class GerberViewer {
               layer,
               `${sourceKey}:fallback`,
               `${message}; using visible layer bounds instead.`,
+              "Inverted layer fallback",
             );
             return layer.invertedLayerId;
           } catch (fallbackError) {
@@ -5009,10 +5074,10 @@ export class GerberViewer {
     }
   }
 
-  reportInvertedLayerWarningOnce(layer, key, message) {
+  reportInvertedLayerWarningOnce(layer, key, message, title = "Inverted layer skipped") {
     if (layer.invertedErrorKey === key) return;
     layer.invertedErrorKey = key;
-    this.addDiagnostic("warning", `Inverted layer skipped: ${layer.name}`, message);
+    this.addDiagnostic("warning", `${title}: ${layer.name}`, message);
   }
 
   removeInvertedLayerCache(layer) {

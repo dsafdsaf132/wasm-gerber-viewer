@@ -76,6 +76,7 @@ export function getViewerElements(documentRef = document) {
     alphaSlider: requireElement(documentRef, "alpha-slider"),
     alphaValue: requireElement(documentRef, "alpha-value"),
     boardOutlineSelect: requireElement(documentRef, "board-outline-select"),
+    boardOutlineStatus: requireElement(documentRef, "board-outline-status"),
     layerList: requireElement(documentRef, "layer-list"),
     diagnosticList: requireElement(documentRef, "diagnostic-list"),
     notification,

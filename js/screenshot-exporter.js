@@ -572,7 +572,7 @@ export class ScreenshotExporter {
       rawBoardOutlineBoundsMarginMm,
     )
       ? Math.max(0, rawBoardOutlineBoundsMarginMm)
-      : 20;
+      : 10;
     for (const layer of layers) {
       if (typeof layer.sourceContent !== "string") {
         throw new Error("Reload files before using high-resolution screenshot export.");
