@@ -645,6 +645,7 @@ export class GerberViewer {
     this.isRestoringWebGlContext = false;
     this.isRecoveringWasmProcessor = false;
     this.wasmRecoveryPromise = null;
+    this.pendingFatalWasmRecovery = false;
     this.isInitialUrlLoading = Boolean(getInitialSourceUrl());
     this.isLoadingLayers = false;
     this.loadingWorkspaceStatus = "Loading files";
@@ -4703,6 +4704,40 @@ export class GerberViewer {
       : null;
   }
 
+  recoverAfterFatalInvertedLayerError(layer, error) {
+    this.wasmMemoryExhausted = true;
+    this.addDiagnostic(
+      "error",
+      `Inverted layer failed: ${layer.name}`,
+      getErrorMessage(error),
+    );
+    if (
+      this.pendingFatalWasmRecovery ||
+      this.isRecoveringWasmProcessor ||
+      this.isWebGlContextLost
+    ) {
+      return;
+    }
+    this.pendingFatalWasmRecovery = true;
+    void Promise.resolve().then(async () => {
+      try {
+        await this.recoverWasmProcessorAfterFatalError(
+          `inverted layer ${layer.name}`,
+          error,
+        );
+      } catch (recoveryError) {
+        console.error("[WASM] Failed to recover inverted layer renderer:", recoveryError);
+        this.addDiagnostic(
+          "error",
+          "Renderer recovery failed",
+          getErrorMessage(recoveryError),
+        );
+      } finally {
+        this.pendingFatalWasmRecovery = false;
+      }
+    });
+  }
+
   getInvertedRenderLayerId(layer, selectedLayerIds) {
     if (!layer.inverted) {
       return layer.layerId;
@@ -4755,6 +4790,11 @@ export class GerberViewer {
       layer.renderBounds = this.getInvertedFillSourceBounds(fillSource);
       return layer.invertedLayerId;
     } catch (error) {
+      if (isFatalWasmRuntimeError(error)) {
+        this.recoverAfterFatalInvertedLayerError(layer, error);
+        layer.renderBounds = null;
+        return layer.layerId;
+      }
       const message = getErrorMessage(error);
       if (
         fillSource.type === "outline" &&
@@ -4783,6 +4823,11 @@ export class GerberViewer {
             );
             return layer.invertedLayerId;
           } catch (fallbackError) {
+            if (isFatalWasmRuntimeError(fallbackError)) {
+              this.recoverAfterFatalInvertedLayerError(layer, fallbackError);
+              layer.renderBounds = null;
+              return layer.layerId;
+            }
             this.reportInvertedLayerWarningOnce(
               layer,
               fallbackKey,

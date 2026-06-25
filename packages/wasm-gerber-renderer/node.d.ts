@@ -121,6 +121,7 @@ export type NodeLayerOptions = {
 export type NodeLayerLoadOptions = NodeLayerOptions & {
   preserveArcRegions?: boolean;
   arcTessellationQuality?: 0 | 1 | 2;
+  retainSourceContentForInversion?: boolean;
 };
 
 export type NodeExportOptions = {
