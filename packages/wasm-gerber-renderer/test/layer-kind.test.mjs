@@ -205,6 +205,31 @@ test("node render plan preserves internal CLI outline selectors", async () => {
   assert.deepEqual(renderer.lastFrame.bounds, { minX: 0, maxX: 10, minY: 0, maxY: 10 });
 });
 
+test("node numeric outline selectors keep original input indices after skips", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+
+  await renderer.withFrame({ invertedOutline: 2, renderDrills: false }, async () => {
+    await renderer.renderLayers([
+      { source: DRILL_CONTENT, name: "holes.drl" },
+      { source: GERBER_CONTENT, name: "routing.gbr" },
+      { source: GERBER_CONTENT, name: "mask.gbs", inverted: true },
+    ]);
+  });
+
+  assert.equal(
+    renderer.lastRenderPlan.invertedOutline,
+    "__wasmGerberRendererCliLayer:2",
+  );
+  assert.equal(
+    renderer.lastRenderPlan.layers[0].selectorKey,
+    "__wasmGerberRendererCliLayer:2",
+  );
+  assert.equal(
+    renderer.lastRenderPlan.layers[1].selectorKey,
+    "__wasmGerberRendererCliLayer:3",
+  );
+});
+
 test("node bounds inversion includes the target layer extents", async () => {
   const renderer = new NodeGerberRenderer({}, {});
 

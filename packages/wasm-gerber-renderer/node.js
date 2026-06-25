@@ -24,6 +24,7 @@ import {
   getPngChannelCount,
   getPngColorType,
   getPngRowStride,
+  getLayerFailureName,
   getSourceName,
   getDefaultDrillOutlineStyle,
   hasDrillOutlineStyle,
@@ -44,7 +45,6 @@ import {
   payloadBounds,
   positiveIntegerOrDefault,
   positiveNumberOrDefault,
-  renderLayersBestEffort,
   resolveDrillRenderColors,
   resolveFrameFitPadding,
   resolveFrameView,
@@ -201,10 +201,19 @@ export class NodeGerberRenderer {
     }
 
     const normalizedLayers = normalizeLayerList(layers);
+    const selectorStartIndex = this.frame.nextInputLayerSelectorIndex ?? 0;
+    const selectorKeys = normalizedLayers.map((_, index) =>
+      getInternalLayerSelectorKey(selectorStartIndex + index),
+    );
+    this.frame.nextInputLayerSelectorIndex =
+      selectorStartIndex + normalizedLayers.length;
+    this.frame.options.invertedOutline = resolveNodeFrameOutlineSelector(
+      this.frame.options.invertedOutline,
+    );
     if (normalizedLayers.some(layerRequestsInversion)) {
       this.frame.options.retainSourceContentForInversion = true;
     }
-    return renderLayersBestEffort(this, normalizedLayers, options);
+    return renderNodeLayersBestEffort(this, normalizedLayers, options, selectorKeys);
   }
 
   async loadLayer(layer, layerOptions = {}) {
@@ -788,7 +797,10 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
         ? String(layerOptions.name)
         : preparedLayer.name,
     kind,
-    selectorKey: preparedLayer.selectorKey ?? null,
+    selectorKey:
+      typeof layerOptions.__selectorKey === "string"
+        ? layerOptions.__selectorKey
+        : preparedLayer.selectorKey ?? null,
     color:
       "color" in layerOptions
         ? layerOptions.color
@@ -799,6 +811,59 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
         : preparedLayer.alpha,
     inverted,
   };
+}
+
+function getInternalLayerSelectorKey(index) {
+  return `${INTERNAL_LAYER_SELECTOR_PREFIX}${index + 1}`;
+}
+
+function resolveNodeFrameOutlineSelector(invertedOutline) {
+  const normalized = String(invertedOutline ?? "");
+  const index = Number(normalized);
+  if (Number.isInteger(index) && index >= 1) {
+    return getInternalLayerSelectorKey(index - 1);
+  }
+  return invertedOutline;
+}
+
+async function renderNodeLayersBestEffort(renderer, layers, options = {}, selectorKeys = []) {
+  const layerErrorMode = options.layerErrorMode || "skip";
+  if (layerErrorMode !== "skip" && layerErrorMode !== "throw") {
+    throw new TypeError("layerErrorMode must be 'skip' or 'throw'.");
+  }
+
+  const failures = [];
+  let renderedCount = 0;
+
+  for (const [index, layer] of layers.entries()) {
+    try {
+      const layerId = await renderer.renderLayer(layer, {
+        __selectorKey: selectorKeys[index],
+      });
+      if (layerId != null) {
+        renderedCount += 1;
+      }
+    } catch (error) {
+      const failure = {
+        layer,
+        name: getLayerFailureName(layer),
+        error,
+      };
+      failures.push(failure);
+      if (typeof options.onLayerError === "function") {
+        options.onLayerError(failure);
+      }
+      if (layerErrorMode === "throw") {
+        throw error;
+      }
+    }
+  }
+
+  if (renderedCount === 0 && failures.length > 0) {
+    throw failures[0].error;
+  }
+
+  return { renderedCount, failures };
 }
 
 async function renderPlanToPngBuffer(renderer, plan, exportOptions) {

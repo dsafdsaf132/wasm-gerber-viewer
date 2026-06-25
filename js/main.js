@@ -129,6 +129,10 @@ function isBoardOutlineLayer(layer) {
   return [layer.name, layer.sourceName, layer.fileName].some(isBoardOutlineName);
 }
 
+function isGerberLayer(layer) {
+  return Boolean(layer && !isDrillLayer(layer));
+}
+
 function isBoardOutlineName(name) {
   const normalized = String(name ?? "").toLowerCase();
   const extensionMatch = normalized.match(/\.([a-z0-9]+)(?:\s*#\d+)?$/i);
@@ -1824,7 +1828,7 @@ export class GerberViewer {
 
   syncBoardOutlineSelect() {
     const currentValue = this.boardOutlineSelection;
-    const outlineLayers = this.layers.filter(isBoardOutlineLayer);
+    const outlineLayers = this.layers.filter(isGerberLayer);
     const validValues = new Set([
       BOARD_OUTLINE_AUTO,
       BOARD_OUTLINE_BOUNDS,
@@ -1862,7 +1866,7 @@ export class GerberViewer {
   setBoardOutlineSelection(value) {
     const nextValue = String(value ?? BOARD_OUTLINE_AUTO);
     const validLayer = this.layers.some(
-      (layer) => isBoardOutlineLayer(layer) && layer.id === nextValue,
+      (layer) => isGerberLayer(layer) && layer.id === nextValue,
     );
     if (
       nextValue !== BOARD_OUTLINE_AUTO &&
@@ -4706,10 +4710,15 @@ export class GerberViewer {
 
   recoverAfterFatalInvertedLayerError(layer, error) {
     this.wasmMemoryExhausted = true;
+    layer.inverted = false;
+    layer.invertedLayerId = null;
+    layer.invertedSourceKey = null;
+    layer.invertedErrorKey = "fatal-wasm-error";
+    layer.renderBounds = null;
     this.addDiagnostic(
       "error",
       `Inverted layer failed: ${layer.name}`,
-      getErrorMessage(error),
+      `${getErrorMessage(error)}; inverted rendering was disabled for this layer.`,
     );
     if (
       this.pendingFatalWasmRecovery ||
