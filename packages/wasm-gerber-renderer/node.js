@@ -181,6 +181,9 @@ export class NodeGerberRenderer {
     if (!this.frame) {
       throw new Error("renderLayer must be called inside withFrame().");
     }
+    if (layerRequestsInversion(layer, layerOptions)) {
+      this.frame.options.retainSourceContentForInversion = true;
+    }
 
     const layerRecord = await this.createLayerRecord(layer, layerOptions);
     if (!layerRecord) {
@@ -421,7 +424,10 @@ export class NodeGerberRenderer {
     const name = options.name || sourceName || "Layer";
     const inverted = options.inverted === true;
     const retainSourceContent =
-      inverted || options.retainSourceContentForInversion === true;
+      inverted ||
+      options.retainSourceContentForInversion === true ||
+      isBoardOutlineLayerName(name) ||
+      isBoardOutlineLayerName(sourceName);
     const parsed = isDrillLayerKind(kind)
       ? parseDrillLayerPayload(this.wasmModule, content, offsetX, offsetY)
       : parseLayerPayload(
@@ -691,11 +697,16 @@ function normalizeFrameOptions(frameOptions) {
     );
   }
 
+  const baseFrameOptions = createBaseFrameOptions(frameOptions);
+  const needsOutlineSourceRetention =
+    frameOptions.invertedOutline != null &&
+    baseFrameOptions.invertedOutline !== INVERTED_OUTLINE_BOUNDS;
+
   return {
     width: positiveIntegerOrDefault(frameOptions.width, DEFAULT_WIDTH),
     height: positiveIntegerOrDefault(frameOptions.height, DEFAULT_HEIGHT),
     clear: true,
-    ...createBaseFrameOptions(frameOptions),
+    ...baseFrameOptions,
     maxBandBytes: positiveIntegerOrDefault(
       frameOptions.maxBandBytes,
       DEFAULT_MAX_STREAM_BAND_BYTES,
@@ -716,7 +727,8 @@ function normalizeFrameOptions(frameOptions) {
       DEFAULT_FRAMEBUFFER_MEMORY_SAFETY_FACTOR,
     ),
     retainSourceContentForInversion:
-      frameOptions.retainSourceContentForInversion === true,
+      frameOptions.retainSourceContentForInversion === true ||
+      needsOutlineSourceRetention,
     strategy: normalizeExportStrategy(frameOptions.strategy),
   };
 }
@@ -725,12 +737,13 @@ function isPreparedNodeLayer(value) {
   return Boolean(value?.[NODE_PREPARED_LAYER]);
 }
 
-function layerRequestsInversion(layer) {
+function layerRequestsInversion(layer, layerOptions = {}) {
   return Boolean(
-    layer &&
-      typeof layer === "object" &&
-      "inverted" in layer &&
-      layer.inverted === true,
+    layerOptions.inverted === true ||
+      (layer &&
+        typeof layer === "object" &&
+        "inverted" in layer &&
+        layer.inverted === true),
   );
 }
 
@@ -1318,6 +1331,27 @@ function addPlanInvertedLayerToProcessor(processor, layer, plan) {
     throw new Error(`Inverted layer needs a board outline or bounds: ${layer.name}`);
   }
 
+  try {
+    return addPlanInvertedLayerWithFillSource(processor, layer, fillSource);
+  } catch (error) {
+    const outlineSelection = plan.invertedOutline ?? INVERTED_OUTLINE_AUTO;
+    if (fillSource.type !== "outline" || outlineSelection !== INVERTED_OUTLINE_AUTO) {
+      throw error;
+    }
+    const bounds =
+      getPlanGerberBounds(plan.layers, layer) ??
+      getPlanGerberBounds(plan.layers, null);
+    if (!bounds) {
+      throw error;
+    }
+    return addPlanInvertedLayerWithFillSource(processor, layer, {
+      type: "bounds",
+      bounds,
+    });
+  }
+}
+
+function addPlanInvertedLayerWithFillSource(processor, layer, fillSource) {
   if (fillSource.type === "outline") {
     if (typeof processor.add_inverted_layer_with_outline !== "function") {
       throw new Error("Inverted outline rendering requires an updated WASM renderer.");
@@ -1407,6 +1441,14 @@ function resolveLayerRenderBounds(layers, options, layer) {
   if (!fillSource) {
     return layer.bounds;
   }
+  const outlineSelection = options.invertedOutline ?? INVERTED_OUTLINE_AUTO;
+  if (fillSource.type === "outline" && outlineSelection === INVERTED_OUTLINE_AUTO) {
+    return (
+      getPlanGerberBounds(layers, layer) ??
+      getPlanGerberBounds(layers, null) ??
+      fillSource.layer.bounds
+    );
+  }
   return fillSource.type === "outline" ? fillSource.layer.bounds : fillSource.bounds;
 }
 
@@ -1415,7 +1457,8 @@ function findAutomaticInvertedOutlineLayer(layers, targetLayer) {
     (layer) =>
       layer !== targetLayer &&
       !isDrillLayerKind(layer.kind) &&
-      isBoardOutlineLayerName(layer.name || layer.sourceName),
+      (isBoardOutlineLayerName(layer.name) ||
+        isBoardOutlineLayerName(layer.sourceName)),
   ) ?? null;
 }
 
@@ -1427,7 +1470,7 @@ function findLayerBySelector(layers, selector, targetLayer = null) {
     return layer === targetLayer ? null : layer;
   }
 
-  return layers.find((layer) => {
+  const matches = layers.filter((layer) => {
     if (layer === targetLayer) return false;
     return (
       layer.name === normalizedSelector ||
@@ -1435,7 +1478,11 @@ function findLayerBySelector(layers, selector, targetLayer = null) {
       basename(layer.name || "") === normalizedSelector ||
       basename(layer.sourceName || "") === normalizedSelector
     );
-  }) ?? null;
+  });
+  if (matches.length > 1) {
+    throw new Error(`Layer selector is ambiguous: ${normalizedSelector}`);
+  }
+  return matches[0] ?? null;
 }
 
 function getPlanGerberBounds(layers, excludeLayer) {

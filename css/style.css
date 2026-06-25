@@ -793,7 +793,7 @@ button {
 .layer-item {
   position: relative;
   display: grid;
-  grid-template-columns: 28px 24px 28px minmax(0, 1fr) 32px;
+  grid-template-columns: 28px 24px minmax(0, 1fr) 32px;
   align-items: center;
   gap: 8px;
   min-height: 50px;
@@ -898,10 +898,6 @@ button {
   height: 18px;
   accent-color: var(--accent);
   cursor: pointer;
-}
-
-.drill-layer-item {
-  grid-template-columns: 28px 24px minmax(0, 1fr) 32px;
 }
 
 .layer-label {

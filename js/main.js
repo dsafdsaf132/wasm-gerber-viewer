@@ -126,7 +126,11 @@ function isDrillLayer(layer) {
 function isBoardOutlineLayer(layer) {
   if (!layer || isDrillLayer(layer)) return false;
 
-  const normalized = String(layer.name ?? "").toLowerCase();
+  return [layer.name, layer.sourceName, layer.fileName].some(isBoardOutlineName);
+}
+
+function isBoardOutlineName(name) {
+  const normalized = String(name ?? "").toLowerCase();
   const extensionMatch = normalized.match(/\.([a-z0-9]+)(?:\s*#\d+)?$/i);
   const extension = extensionMatch?.[1] ?? "";
   if (
@@ -147,6 +151,14 @@ function isBoardOutlineLayer(layer) {
   return /(^|[^a-z0-9])(board[-_. ]?outline|outline|edge[-_. ]?cuts?|profile|contour|mechanical|mech|dimension)([^a-z0-9]|$)/i.test(
     normalized,
   );
+}
+
+function getLayerRenderBounds(layer) {
+  return layer?.renderBounds ?? layer?.bounds ?? null;
+}
+
+function getLayerRawBounds(layer) {
+  return layer?.bounds ?? null;
 }
 
 function getDefaultDrillColor(name) {
@@ -2521,11 +2533,12 @@ export class GerberViewer {
     let maxY = -Infinity;
 
     for (const layer of this.layers) {
-      if (!layer.bounds) continue;
-      minX = Math.min(minX, layer.bounds.minX);
-      maxX = Math.max(maxX, layer.bounds.maxX);
-      minY = Math.min(minY, layer.bounds.minY);
-      maxY = Math.max(maxY, layer.bounds.maxY);
+      const bounds = this.getLayerDisplayBounds(layer);
+      if (!bounds) continue;
+      minX = Math.min(minX, bounds.minX);
+      maxX = Math.max(maxX, bounds.maxX);
+      minY = Math.min(minY, bounds.minY);
+      maxY = Math.max(maxY, bounds.maxY);
     }
 
     if (!isFinite(minX) || !isFinite(maxX) || !isFinite(minY) || !isFinite(maxY)) {
@@ -4070,8 +4083,11 @@ export class GerberViewer {
       invertedLayerId: options.invertedLayerId ?? null,
       invertedOutlineLayerId: options.invertedOutlineLayerId ?? null,
       invertedErrorKey: null,
+      invertedSourceKey: null,
+      sourceName: options.sourceName ?? name,
       sourceContent: options.sourceContent,
       offset: normalizeLayerOffset(options.offset),
+      renderBounds: options.renderBounds ?? null,
       bounds: {
         minX: bounds.min_x,
         maxX: bounds.max_x,
@@ -4441,6 +4457,7 @@ export class GerberViewer {
       }
       this.renderSelectedFeatureHighlight();
       this.zoomReadout.textContent = this.formatZoom();
+      this.boundsReadout.textContent = this.formatCombinedBounds();
     } catch (error) {
       const message = getErrorMessage(error);
       console.error("[Render] Failed to render:", error);
@@ -4481,7 +4498,11 @@ export class GerberViewer {
     }
   }
 
-  getVisibleGerberBounds({ excludeLayerId = null, selectedLayerIds = null } = {}) {
+  getVisibleGerberBounds({
+    excludeLayerId = null,
+    selectedLayerIds = null,
+    useRenderBounds = false,
+  } = {}) {
     let minX = Infinity;
     let maxX = -Infinity;
     let minY = Infinity;
@@ -4494,12 +4515,12 @@ export class GerberViewer {
         !layer.visible ||
         layer.id === excludeLayerId ||
         (selectedLayerIds && !selectedLayerIds.has(layer.id)) ||
-        !layer.bounds
+        !(useRenderBounds ? getLayerRenderBounds(layer) : getLayerRawBounds(layer))
       ) {
         continue;
       }
 
-      const bounds = layer.bounds;
+      const bounds = useRenderBounds ? getLayerRenderBounds(layer) : getLayerRawBounds(layer);
       if (
         !Number.isFinite(bounds.minX) ||
         !Number.isFinite(bounds.maxX) ||
@@ -4521,6 +4542,40 @@ export class GerberViewer {
     }
 
     return { minX, maxX, minY, maxY };
+  }
+
+  getLayerDisplayBounds(layer, selectedLayerIds = null) {
+    if (!layer?.inverted || isDrillLayer(layer)) {
+      return getLayerRenderBounds(layer);
+    }
+    const fillSource = this.getInvertedFillSource(layer, selectedLayerIds);
+    if (fillSource?.type === "outline") {
+      const targetOffset = normalizeLayerOffset(layer.offset);
+      const sourceKey = this.getInvertedLayerSourceKey(layer, fillSource, targetOffset);
+      if (
+        layer.renderBounds &&
+        String(layer.invertedSourceKey ?? "").startsWith(`${sourceKey}|fallback:`)
+      ) {
+        return (
+          this.getInvertedBoundsFillSource(layer, selectedLayerIds)?.bounds ??
+          layer.renderBounds
+        );
+      }
+    }
+    return fillSource?.bounds ?? getLayerRenderBounds(layer);
+  }
+
+  getViewportFitLayers(selectedLayerIds) {
+    return this.layers.map((layer) => {
+      const bounds = this.getLayerDisplayBounds(layer, selectedLayerIds);
+      if (bounds === getLayerRenderBounds(layer)) {
+        return layer;
+      }
+      return {
+        ...layer,
+        renderBounds: bounds,
+      };
+    });
   }
 
   findAutomaticBoardOutlineLayer(targetLayer = null) {
@@ -4554,9 +4609,14 @@ export class GerberViewer {
         key: `outline:${outlineLayer.id}:${outlineLayer.layerId}:${outlineOffset.x}:${outlineOffset.y}`,
         outlineLayer,
         outlineOffset,
+        bounds: getLayerRenderBounds(outlineLayer),
       };
     }
 
+    return this.getInvertedBoundsFillSource(layer, selectedLayerIds);
+  }
+
+  getInvertedBoundsFillSource(layer, selectedLayerIds) {
     const bounds =
       this.getVisibleGerberBounds({
         excludeLayerId: layer.id,
@@ -4574,6 +4634,58 @@ export class GerberViewer {
       key: `bounds:${bounds.minX}:${bounds.maxX}:${bounds.minY}:${bounds.maxY}`,
       bounds,
     };
+  }
+
+  addInvertedLayerToProcessor(layer, fillSource, targetOffset) {
+    const processor = this.wasmProcessor;
+    if (fillSource.type === "outline") {
+      if (typeof processor.add_inverted_layer_with_outline !== "function") {
+        throw new Error("Inverted outline rendering requires an updated WASM module.");
+      }
+      this.reserveWasmInputCapacity(layer.sourceContent);
+      this.reserveWasmInputCapacity(fillSource.outlineLayer.sourceContent);
+      return processor.add_inverted_layer_with_outline(
+        layer.sourceContent,
+        fillSource.outlineLayer.sourceContent,
+        targetOffset.x,
+        targetOffset.y,
+        fillSource.outlineOffset.x,
+        fillSource.outlineOffset.y,
+      );
+    }
+
+    if (typeof processor.add_inverted_layer_with_bounds !== "function") {
+      throw new Error("Inverted bounds rendering requires an updated WASM module.");
+    }
+    this.reserveWasmInputCapacity(layer.sourceContent);
+    return processor.add_inverted_layer_with_bounds(
+      layer.sourceContent,
+      targetOffset.x,
+      targetOffset.y,
+      fillSource.bounds.minX,
+      fillSource.bounds.maxX,
+      fillSource.bounds.minY,
+      fillSource.bounds.maxY,
+    );
+  }
+
+  getInvertedFillSourceBounds(fillSource) {
+    return fillSource.type === "outline" ? fillSource.bounds : fillSource.bounds;
+  }
+
+  getInvertedLayerSourceKey(layer, fillSource, targetOffset) {
+    return `target:${layer.layerId}:${targetOffset.x}:${targetOffset.y}|${fillSource.key}`;
+  }
+
+  getInvertedFallbackSourceKey(sourceKey, fallbackSource) {
+    return `${sourceKey}|fallback:${fallbackSource.key}`;
+  }
+
+  getCurrentInvertedFallbackSourceKey(layer, selectedLayerIds, sourceKey) {
+    const fallbackSource = this.getInvertedBoundsFillSource(layer, selectedLayerIds);
+    return fallbackSource
+      ? this.getInvertedFallbackSourceKey(sourceKey, fallbackSource)
+      : null;
   }
 
   getInvertedRenderLayerId(layer, selectedLayerIds) {
@@ -4601,54 +4713,71 @@ export class GerberViewer {
     }
 
     const targetOffset = normalizeLayerOffset(layer.offset);
-    const sourceKey = `target:${layer.layerId}:${targetOffset.x}:${targetOffset.y}|${fillSource.key}`;
+    const sourceKey = this.getInvertedLayerSourceKey(layer, fillSource, targetOffset);
     if (
       Number.isFinite(Number(layer.invertedLayerId)) &&
-      layer.invertedSourceKey === sourceKey
+      (layer.invertedSourceKey === sourceKey ||
+        layer.invertedSourceKey ===
+          this.getCurrentInvertedFallbackSourceKey(layer, selectedLayerIds, sourceKey))
     ) {
+      if (layer.invertedSourceKey === sourceKey) {
+        layer.renderBounds = this.getInvertedFillSourceBounds(fillSource);
+      }
       return layer.invertedLayerId;
     }
 
     this.removeInvertedLayerCache(layer);
     try {
-      let invertedLayerId;
-      if (fillSource.type === "outline") {
-        if (typeof processor.add_inverted_layer_with_outline !== "function") {
-          throw new Error("Inverted outline rendering requires an updated WASM module.");
-        }
-        this.reserveWasmInputCapacity(layer.sourceContent);
-        this.reserveWasmInputCapacity(fillSource.outlineLayer.sourceContent);
-        invertedLayerId = processor.add_inverted_layer_with_outline(
-          layer.sourceContent,
-          fillSource.outlineLayer.sourceContent,
-          targetOffset.x,
-          targetOffset.y,
-          fillSource.outlineOffset.x,
-          fillSource.outlineOffset.y,
-        );
-      } else {
-        if (typeof processor.add_inverted_layer_with_bounds !== "function") {
-          throw new Error("Inverted bounds rendering requires an updated WASM module.");
-        }
-        this.reserveWasmInputCapacity(layer.sourceContent);
-        invertedLayerId = processor.add_inverted_layer_with_bounds(
-          layer.sourceContent,
-          targetOffset.x,
-          targetOffset.y,
-          fillSource.bounds.minX,
-          fillSource.bounds.maxX,
-          fillSource.bounds.minY,
-          fillSource.bounds.maxY,
-        );
-      }
+      const invertedLayerId = this.addInvertedLayerToProcessor(
+        layer,
+        fillSource,
+        targetOffset,
+      );
 
       layer.invertedLayerId = Number(invertedLayerId);
       layer.invertedSourceKey = sourceKey;
       layer.invertedErrorKey = null;
+      layer.renderBounds = this.getInvertedFillSourceBounds(fillSource);
       return layer.invertedLayerId;
     } catch (error) {
       const message = getErrorMessage(error);
+      if (
+        fillSource.type === "outline" &&
+        this.boardOutlineSelection === BOARD_OUTLINE_AUTO
+      ) {
+        const fallbackSource = this.getInvertedBoundsFillSource(layer, selectedLayerIds);
+        if (fallbackSource) {
+          const fallbackKey = this.getInvertedFallbackSourceKey(
+            sourceKey,
+            fallbackSource,
+          );
+          try {
+            const invertedLayerId = this.addInvertedLayerToProcessor(
+              layer,
+              fallbackSource,
+              targetOffset,
+            );
+            layer.invertedLayerId = Number(invertedLayerId);
+            layer.invertedSourceKey = fallbackKey;
+            layer.invertedErrorKey = null;
+            layer.renderBounds = fallbackSource.bounds;
+            this.reportInvertedLayerWarningOnce(
+              layer,
+              `${sourceKey}:fallback`,
+              `${message}; using visible layer bounds instead.`,
+            );
+            return layer.invertedLayerId;
+          } catch (fallbackError) {
+            this.reportInvertedLayerWarningOnce(
+              layer,
+              fallbackKey,
+              getErrorMessage(fallbackError),
+            );
+          }
+        }
+      }
       this.reportInvertedLayerWarningOnce(layer, sourceKey, message);
+      layer.renderBounds = null;
       return layer.layerId;
     }
   }
@@ -4679,6 +4808,7 @@ export class GerberViewer {
       layer.invertedLayerId = null;
       layer.invertedSourceKey = null;
       layer.invertedErrorKey = null;
+      layer.renderBounds = null;
     }
   }
 
@@ -4774,6 +4904,7 @@ export class GerberViewer {
 
   fitView() {
     this.flushLazyViewportRender();
+    this.flushPendingRenderFrame();
     const fitView = this.calculateFitView();
     if (!fitView) return;
 
@@ -4796,9 +4927,10 @@ export class GerberViewer {
   }
 
   calculateFitView() {
+    const selectedLayerIds = this.getSelectedLayerIds();
     return calculateViewportFit({
-      layers: this.layers,
-      selectedLayerIds: this.getSelectedLayerIds(),
+      layers: this.getViewportFitLayers(selectedLayerIds),
+      selectedLayerIds,
       canvas: this.canvas,
       drawer: this.drawer,
       isMobileLayout: () => this.drawerController.isMobileLayout(),
@@ -5960,6 +6092,7 @@ export class GerberViewer {
         if (this.layers.length === 0) {
           this.fitViewZoom = null;
         }
+        this.clearAllInvertedLayerCaches();
       } catch (error) {
         console.error(`[Layer] Failed to remove layer ${layer.name}:`, error);
         return;

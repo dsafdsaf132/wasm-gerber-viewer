@@ -205,11 +205,12 @@ function getLayerBounds(layers) {
   let maxY = -Infinity;
 
   for (const layer of layers) {
-    if (!layer.bounds) continue;
-    minX = Math.min(minX, layer.bounds.minX);
-    maxX = Math.max(maxX, layer.bounds.maxX);
-    minY = Math.min(minY, layer.bounds.minY);
-    maxY = Math.max(maxY, layer.bounds.maxY);
+    const bounds = layer.renderBounds ?? layer.bounds;
+    if (!bounds) continue;
+    minX = Math.min(minX, bounds.minX);
+    maxX = Math.max(maxX, bounds.maxX);
+    minY = Math.min(minY, bounds.minY);
+    maxY = Math.max(maxY, bounds.maxY);
   }
 
   if (!isFinite(minX) || !isFinite(maxX) || !isFinite(minY) || !isFinite(maxY)) {

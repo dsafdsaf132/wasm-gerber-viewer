@@ -25,7 +25,11 @@ function isDrillLayer(layer) {
 function isBoardOutlineLayer(layer) {
   if (!layer || isDrillLayer(layer)) return false;
 
-  const normalized = String(layer.name ?? "").toLowerCase();
+  return [layer.name, layer.sourceName, layer.fileName].some(isBoardOutlineName);
+}
+
+function isBoardOutlineName(name) {
+  const normalized = String(name ?? "").toLowerCase();
   const extensionMatch = normalized.match(/\.([a-z0-9]+)(?:\s*#\d+)?$/i);
   const extension = extensionMatch?.[1] ?? "";
   if (
@@ -70,16 +74,16 @@ function getVisibleGerberBounds(layers, { excludeLayer = null } = {}) {
   let count = 0;
 
   for (const layer of layers) {
+    const bounds = layer.bounds;
     if (
       isDrillLayer(layer) ||
       !layer.visible ||
       layer === excludeLayer ||
-      !layer.bounds
+      !bounds
     ) {
       continue;
     }
 
-    const bounds = layer.bounds;
     if (
       !Number.isFinite(bounds.minX) ||
       !Number.isFinite(bounds.maxX) ||
@@ -126,13 +130,47 @@ function resolveInvertedFillSource(layers, layer, boardOutlineSelection) {
       type: "outline",
       outlineLayer,
       outlineOffset: normalizeLayerOffset(outlineLayer.offset),
+      bounds: outlineLayer.renderBounds ?? outlineLayer.bounds ?? null,
     };
   }
 
+  return resolveInvertedBoundsFillSource(layers, layer);
+}
+
+function resolveInvertedBoundsFillSource(layers, layer) {
   const bounds =
     getVisibleGerberBounds(layers, { excludeLayer: layer }) ??
     getVisibleGerberBounds(layers);
   return bounds ? { type: "bounds", bounds } : null;
+}
+
+function addInvertedLayerToProcessor(processor, layer, fillSource, offset) {
+  if (fillSource.type === "outline") {
+    if (typeof processor.add_inverted_layer_with_outline !== "function") {
+      throw new Error("Inverted outline screenshot export requires an updated WASM module.");
+    }
+    return processor.add_inverted_layer_with_outline(
+      layer.sourceContent,
+      fillSource.outlineLayer.sourceContent,
+      offset.x,
+      offset.y,
+      fillSource.outlineOffset.x,
+      fillSource.outlineOffset.y,
+    );
+  }
+
+  if (typeof processor.add_inverted_layer_with_bounds !== "function") {
+    throw new Error("Inverted bounds screenshot export requires an updated WASM module.");
+  }
+  return processor.add_inverted_layer_with_bounds(
+    layer.sourceContent,
+    offset.x,
+    offset.y,
+    fillSource.bounds.minX,
+    fillSource.bounds.maxX,
+    fillSource.bounds.minY,
+    fillSource.bounds.maxY,
+  );
 }
 
 function hexColorToRgb(color) {
@@ -570,30 +608,21 @@ export class ScreenshotExporter {
           throw new Error("Inverted screenshot export needs a board outline or visible layer bounds.");
         }
         let layerId;
-        if (fillSource.type === "outline") {
-          if (typeof processor.add_inverted_layer_with_outline !== "function") {
-            throw new Error("Inverted outline screenshot export requires an updated WASM module.");
+        try {
+          layerId = addInvertedLayerToProcessor(processor, layer, fillSource, offset);
+        } catch (error) {
+          if (fillSource.type !== "outline" || String(boardOutlineSelection ?? "auto") !== "auto") {
+            throw error;
           }
-          layerId = processor.add_inverted_layer_with_outline(
-            layer.sourceContent,
-            fillSource.outlineLayer.sourceContent,
-            offset.x,
-            offset.y,
-            fillSource.outlineOffset.x,
-            fillSource.outlineOffset.y,
-          );
-        } else {
-          if (typeof processor.add_inverted_layer_with_bounds !== "function") {
-            throw new Error("Inverted bounds screenshot export requires an updated WASM module.");
+          const fallbackSource = resolveInvertedBoundsFillSource(layers, layer);
+          if (!fallbackSource) {
+            throw error;
           }
-          layerId = processor.add_inverted_layer_with_bounds(
-            layer.sourceContent,
-            offset.x,
-            offset.y,
-            fillSource.bounds.minX,
-            fillSource.bounds.maxX,
-            fillSource.bounds.minY,
-            fillSource.bounds.maxY,
+          layerId = addInvertedLayerToProcessor(
+            processor,
+            layer,
+            fallbackSource,
+            offset,
           );
         }
         wasmLayerCount += 1;

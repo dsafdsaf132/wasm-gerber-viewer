@@ -290,12 +290,15 @@ impl Renderer {
 
     fn outline_fill_layer(outline_data: &[GerberData]) -> Result<GerberData, JsValue> {
         let segments = Self::outline_segments(outline_data)?;
-        let contour = Self::largest_closed_outline_region(&segments).ok_or_else(|| {
-            JsValue::from_str("Board outline must contain a closed aperture draw contour")
-        })?;
-        let boundary = Self::outline_region_boundary(&contour)
+        let contours = Self::closed_outline_regions(&segments);
+        if contours.is_empty() {
+            return Err(JsValue::from_str(
+                "Board outline must contain a closed aperture draw contour",
+            ));
+        }
+        let boundary = Self::outline_regions_boundary(&contours)
             .ok_or_else(|| JsValue::from_str("Board outline boundary is not finite"))?;
-        let path_regions = build_path_regions(&[contour], &ParserState::default(), 1, false)
+        let path_regions = build_path_regions(&contours, &ParserState::default(), 1, false)
             .map_err(|error| {
                 JsValue::from_str(&format!("Failed to build board outline region: {error}"))
             })?;
@@ -466,19 +469,13 @@ impl Renderer {
                 if !Self::valid_outline_arc(center, radius, start_angle, sweep_angle) {
                     continue;
                 }
-                let start = [
-                    center[0] + radius * start_angle.cos(),
-                    center[1] + radius * start_angle.sin(),
-                ];
-                let end_angle = start_angle + sweep_angle;
-                let end = [
-                    center[0] + radius * end_angle.cos(),
-                    center[1] + radius * end_angle.sin(),
-                ];
+                let points = Self::outline_arc_points(center, radius, start_angle, sweep_angle);
+                let start = points[0];
+                let end = *points.last().unwrap_or(&start);
                 segments.push(OutlineSegment {
                     start,
                     end,
-                    points: vec![start, end],
+                    points,
                     segment: RegionSegment::Arc {
                         start,
                         end,
@@ -500,6 +497,32 @@ impl Renderer {
         Ok(segments)
     }
 
+    fn outline_arc_points(
+        center: [f32; 2],
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+    ) -> Vec<[f32; 2]> {
+        let quarter_turn = std::f32::consts::FRAC_PI_2;
+        let steps = ((sweep_angle.abs() / quarter_turn).ceil() as usize).clamp(1, 32);
+        let mut points = Vec::with_capacity(steps.saturating_add(1));
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let angle = start_angle + sweep_angle * t;
+            points.push([
+                center[0] + radius * angle.cos(),
+                center[1] + radius * angle.sin(),
+            ]);
+        }
+        if sweep_angle.abs() >= std::f32::consts::PI * 2.0 - 0.00001 {
+            let first = points[0];
+            if let Some(last) = points.last_mut() {
+                *last = first;
+            }
+        }
+        points
+    }
+
     fn valid_outline_arc(
         center: [f32; 2],
         radius: f32,
@@ -514,32 +537,42 @@ impl Renderer {
             && sweep_angle.abs() > f32::EPSILON
     }
 
-    fn largest_closed_outline_region(segments: &[OutlineSegment]) -> Option<RegionContour> {
+    fn closed_outline_regions(segments: &[OutlineSegment]) -> Vec<RegionContour> {
         if segments.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         let tolerance = Self::outline_close_tolerance(segments);
-        let mut best_contour = None;
-        let mut best_area = 0.0_f32;
+        let mut contours = Vec::new();
+        let mut consumed = vec![false; segments.len()];
 
         for start_idx in 0..segments.len() {
+            if consumed[start_idx] {
+                continue;
+            }
+
             let mut used = vec![false; segments.len()];
             used[start_idx] = true;
             let mut contour = Self::outline_segment_to_region_contour(&segments[start_idx], false);
 
             for _ in 0..segments.len() {
                 if Self::outline_contour_is_closed(&contour.points, tolerance) {
-                    let contour = Self::normalize_outline_region_contour(contour, tolerance)?;
-                    let area = Self::outline_area(&contour.points).abs();
-                    if area > best_area {
-                        best_area = area;
-                        best_contour = Some(contour);
+                    if let Some(contour) =
+                        Self::normalize_outline_region_contour(contour, tolerance)
+                    {
+                        for (idx, is_used) in used.iter().enumerate() {
+                            if *is_used {
+                                consumed[idx] = true;
+                            }
+                        }
+                        contours.push(contour);
                     }
                     break;
                 }
 
-                let last = *contour.points.last()?;
+                let Some(last) = contour.points.last().copied() else {
+                    break;
+                };
                 let mut next = None;
                 for (idx, segment) in segments.iter().enumerate() {
                     if used[idx] {
@@ -569,7 +602,7 @@ impl Renderer {
             }
         }
 
-        best_contour
+        contours
     }
 
     fn outline_segment_to_region_contour(segment: &OutlineSegment, reverse: bool) -> RegionContour {
@@ -698,20 +731,40 @@ impl Renderer {
         Some(contour)
     }
 
-    fn outline_region_boundary(contour: &RegionContour) -> Option<Boundary> {
+    fn outline_regions_boundary(contours: &[RegionContour]) -> Option<Boundary> {
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_y = f32::NEG_INFINITY;
 
+        for contour in contours {
+            Self::include_outline_contour_boundary(
+                contour, &mut min_x, &mut max_x, &mut min_y, &mut max_y,
+            )?;
+        }
+
+        if min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite() {
+            Some(Boundary::new(min_x, max_x, min_y, max_y))
+        } else {
+            None
+        }
+    }
+
+    fn include_outline_contour_boundary(
+        contour: &RegionContour,
+        min_x: &mut f32,
+        max_x: &mut f32,
+        min_y: &mut f32,
+        max_y: &mut f32,
+    ) -> Option<()> {
         for point in &contour.points {
             if !Self::finite_outline_point(*point) {
                 return None;
             }
-            min_x = min_x.min(point[0]);
-            max_x = max_x.max(point[0]);
-            min_y = min_y.min(point[1]);
-            max_y = max_y.max(point[1]);
+            *min_x = min_x.min(point[0]);
+            *max_x = max_x.max(point[0]);
+            *min_y = min_y.min(point[1]);
+            *max_y = max_y.max(point[1]);
         }
 
         for segment in &contour.segments {
@@ -725,18 +778,14 @@ impl Renderer {
             {
                 let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) =
                     arc_curve_bounds(center, radius, start_angle, sweep_angle);
-                min_x = min_x.min(arc_min_x);
-                max_x = max_x.max(arc_max_x);
-                min_y = min_y.min(arc_min_y);
-                max_y = max_y.max(arc_max_y);
+                *min_x = min_x.min(arc_min_x);
+                *max_x = max_x.max(arc_max_x);
+                *min_y = min_y.min(arc_min_y);
+                *max_y = max_y.max(arc_max_y);
             }
         }
 
-        if min_x.is_finite() && max_x.is_finite() && min_y.is_finite() && max_y.is_finite() {
-            Some(Boundary::new(min_x, max_x, min_y, max_y))
-        } else {
-            None
-        }
+        Some(())
     }
 
     fn outline_contour_is_closed(points: &[[f32; 2]], tolerance: f32) -> bool {
@@ -5302,6 +5351,15 @@ impl Drop for Renderer {
 mod tests {
     use super::*;
 
+    fn outline_line(start: [f32; 2], end: [f32; 2]) -> OutlineSegment {
+        OutlineSegment {
+            start,
+            end,
+            points: vec![start, end],
+            segment: RegionSegment::Line { start, end },
+        }
+    }
+
     #[test]
     fn validate_offsets_rejects_nonzero_initial_offset() {
         assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[0, 9], 9).is_ok());
@@ -5317,5 +5375,61 @@ mod tests {
         assert_eq!(path_regions.wedge_vertex_offsets, vec![0]);
         assert_eq!(path_regions.sector_vertex_offsets, vec![0]);
         assert!(Renderer::validate_path_region_data(&path_regions, 0).is_ok());
+    }
+
+    #[test]
+    fn closed_outline_regions_preserve_multiple_contours() {
+        let segments = vec![
+            outline_line([0.0, 0.0], [10.0, 0.0]),
+            outline_line([10.0, 0.0], [10.0, 10.0]),
+            outline_line([10.0, 10.0], [0.0, 10.0]),
+            outline_line([0.0, 10.0], [0.0, 0.0]),
+            outline_line([3.0, 3.0], [7.0, 3.0]),
+            outline_line([7.0, 3.0], [7.0, 7.0]),
+            outline_line([7.0, 7.0], [3.0, 7.0]),
+            outline_line([3.0, 7.0], [3.0, 3.0]),
+        ];
+
+        let contours = Renderer::closed_outline_regions(&segments);
+        assert_eq!(contours.len(), 2);
+        let boundary = Renderer::outline_regions_boundary(&contours).expect("finite boundary");
+        assert!((boundary.min_x() - 0.0).abs() < 0.0001);
+        assert!((boundary.max_x() - 10.0).abs() < 0.0001);
+        assert!((boundary.min_y() - 0.0).abs() < 0.0001);
+        assert!((boundary.max_y() - 10.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn closed_outline_regions_accept_arc_only_circle() {
+        let center = [5.0, 5.0];
+        let radius = 2.0;
+        let start_angle = 0.0;
+        let sweep_angle = std::f32::consts::PI * 2.0;
+        let points = Renderer::outline_arc_points(center, radius, start_angle, sweep_angle);
+        let start = points[0];
+        let end = *points.last().expect("arc endpoint");
+        let segments = vec![OutlineSegment {
+            start,
+            end,
+            points,
+            segment: RegionSegment::Arc {
+                start,
+                end,
+                center,
+                radius,
+                start_angle,
+                sweep_angle,
+            },
+        }];
+
+        let contours = Renderer::closed_outline_regions(&segments);
+        assert_eq!(contours.len(), 1);
+        assert!(contours[0].has_arc);
+        assert!(contours[0].points.len() >= 4);
+        let boundary = Renderer::outline_regions_boundary(&contours).expect("finite boundary");
+        assert!((boundary.min_x() - 3.0).abs() < 0.0001);
+        assert!((boundary.max_x() - 7.0).abs() < 0.0001);
+        assert!((boundary.min_y() - 3.0).abs() < 0.0001);
+        assert!((boundary.max_y() - 7.0).abs() < 0.0001);
     }
 }
