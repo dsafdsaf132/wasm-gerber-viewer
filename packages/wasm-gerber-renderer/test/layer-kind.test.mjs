@@ -230,6 +230,30 @@ test("node numeric outline selectors keep original input indices after skips", a
   );
 });
 
+test("node numeric outline selectors include prior renderLayer calls", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+
+  await renderer.withFrame({ invertedOutline: 1 }, async () => {
+    await renderer.renderLayer({ source: GERBER_CONTENT, name: "routing.gbr" });
+    await renderer.renderLayers([
+      { source: GERBER_CONTENT, name: "mask.gbs", inverted: true },
+    ]);
+  });
+
+  assert.equal(
+    renderer.lastRenderPlan.invertedOutline,
+    "__wasmGerberRendererCliLayer:1",
+  );
+  assert.equal(
+    renderer.lastRenderPlan.layers[0].selectorKey,
+    "__wasmGerberRendererCliLayer:1",
+  );
+  assert.equal(
+    renderer.lastRenderPlan.layers[1].selectorKey,
+    "__wasmGerberRendererCliLayer:2",
+  );
+});
+
 test("node bounds inversion includes the target layer extents", async () => {
   const renderer = new NodeGerberRenderer({}, {});
 
