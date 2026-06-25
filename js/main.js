@@ -875,7 +875,7 @@ export class GerberViewer {
       [
         {
           action: "invert-layer",
-          icon: "flip-horizontal-2",
+          icon: "contrast",
           label: "Invert Layer",
           checkable: true,
         },
