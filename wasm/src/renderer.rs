@@ -13,8 +13,9 @@ use shader::{
 };
 
 use crate::interaction::InteractionFeature;
-use crate::parser::geometry::{arc_curve_bounds, build_path_regions, RegionContour, RegionSegment};
+use crate::parser::geometry::{arc_curve_bounds, build_path_regions};
 use crate::parser::ParserState;
+use crate::region::{RegionContour, RegionSegment};
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -67,6 +68,22 @@ struct OutlineSegment {
     end: [f32; 2],
     points: Vec<[f32; 2]>,
     segment: RegionSegment,
+}
+
+fn include_optional_boundary(boundary: &mut Option<Boundary>, next: Boundary) {
+    if let Some(boundary) = boundary {
+        boundary.include_boundary(&next);
+    } else {
+        *boundary = Some(next);
+    }
+}
+
+fn fill_layers_boundary(fill_layers: &[GerberData]) -> Result<Boundary, JsValue> {
+    let mut boundary = None;
+    for layer in fill_layers {
+        include_optional_boundary(&mut boundary, layer.boundary.clone());
+    }
+    boundary.ok_or_else(|| JsValue::from_str("Board outline region boundary is not finite"))
 }
 
 impl BufferCacheBuildGuard {
@@ -261,11 +278,19 @@ impl Renderer {
         outline_data: &[GerberData],
         mut target_data: Vec<GerberData>,
     ) -> Result<usize, JsValue> {
-        let (fill_layer, fill_contours) = Self::outline_fill_layer_with_contours(outline_data)?;
-        let clip_layer =
-            Self::outside_clip_layer(&fill_contours, &fill_layer.boundary, &target_data)?;
-        let mut inverted_data = Vec::with_capacity(target_data.len().saturating_add(2));
-        inverted_data.push(fill_layer);
+        let (mut fill_layers, fill_contours) = Self::inverted_outline_fill_layers(outline_data)?;
+        let clip_layer = Self::outside_clip_layer(
+            &fill_contours,
+            &fill_layers_boundary(&fill_layers)?,
+            &target_data,
+        )?;
+        let mut inverted_data = Vec::with_capacity(
+            fill_layers
+                .len()
+                .saturating_add(target_data.len())
+                .saturating_add(1),
+        );
+        inverted_data.append(&mut fill_layers);
 
         for mut sublayer in target_data.drain(..) {
             sublayer.is_negative = !sublayer.is_negative;
@@ -274,6 +299,85 @@ impl Renderer {
         inverted_data.push(clip_layer);
 
         self.add_layer(inverted_data)
+    }
+
+    fn inverted_outline_fill_layers(
+        outline_data: &[GerberData],
+    ) -> Result<(Vec<GerberData>, Vec<RegionContour>), JsValue> {
+        match Self::outline_fill_layer_with_contours(outline_data) {
+            Ok((fill_layer, fill_contours)) => Ok((vec![fill_layer], fill_contours)),
+            Err(outline_error) => match Self::region_outline_fill_layers(outline_data)? {
+                Some(region_source) => Ok(region_source),
+                None => Err(outline_error),
+            },
+        }
+    }
+
+    fn region_outline_fill_layers(
+        outline_data: &[GerberData],
+    ) -> Result<Option<(Vec<GerberData>, Vec<RegionContour>)>, JsValue> {
+        let mut fill_layers = Vec::new();
+        let mut all_contours = Vec::new();
+
+        for data in outline_data {
+            if !data.path_regions.has_source_contours() {
+                continue;
+            }
+
+            let path_regions =
+                Self::path_regions_from_source_groups(&data.path_regions.source_contours)?;
+            if !path_regions.has_geometry() {
+                continue;
+            }
+
+            let boundary = Self::region_groups_boundary(&data.path_regions.source_contours)
+                .ok_or_else(|| JsValue::from_str("Board outline region boundary is not finite"))?;
+            for group in &data.path_regions.source_contours {
+                all_contours.try_reserve(group.len()).map_err(|_| {
+                    JsValue::from_str("Not enough memory to collect board outline region contours")
+                })?;
+                all_contours.extend(group.iter().cloned());
+            }
+            fill_layers.push(Self::path_region_layer(
+                path_regions,
+                boundary,
+                data.is_negative,
+            ));
+        }
+
+        if fill_layers.is_empty() {
+            return Ok(None);
+        }
+        if all_contours.is_empty() {
+            return Err(JsValue::from_str(
+                "Board outline region produced no fill contours",
+            ));
+        }
+        Ok(Some((fill_layers, all_contours)))
+    }
+
+    fn path_regions_from_source_groups(
+        region_groups: &[Vec<RegionContour>],
+    ) -> Result<PathRegions, JsValue> {
+        let mut path_regions = PathRegions::empty();
+        for group in region_groups {
+            let group_regions = build_path_regions(group, &ParserState::default(), 1, false, false)
+                .map_err(|error| {
+                    JsValue::from_str(&format!("Failed to build board outline region: {error}"))
+                })?;
+            path_regions.append(group_regions);
+        }
+        Ok(path_regions)
+    }
+
+    fn region_groups_boundary(region_groups: &[Vec<RegionContour>]) -> Option<Boundary> {
+        let mut boundary = None;
+        for group in region_groups {
+            if let Some(group_boundary) = Self::outline_regions_boundary(group) {
+                include_optional_boundary(&mut boundary, group_boundary);
+            }
+        }
+        boundary
     }
 
     pub fn add_inverted_layer_from_bounds(
@@ -309,7 +413,7 @@ impl Renderer {
         }
         let boundary = Self::outline_regions_boundary(&contours)
             .ok_or_else(|| JsValue::from_str("Board outline boundary is not finite"))?;
-        let path_regions = build_path_regions(&contours, &ParserState::default(), 1, false)
+        let path_regions = build_path_regions(&contours, &ParserState::default(), 1, false, false)
             .map_err(|error| {
                 JsValue::from_str(&format!("Failed to build board outline region: {error}"))
             })?;
@@ -319,38 +423,7 @@ impl Renderer {
             ));
         }
 
-        let layer = GerberData::new(
-            Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-            Vec::new(),
-            Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-            Circles::new(
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            Arcs::new(
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            Thermals::new(
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            ),
-            path_regions,
-            boundary,
-            false,
-        );
+        let layer = Self::path_region_layer(path_regions, boundary, false);
         Ok((layer, contours))
     }
 
@@ -437,12 +510,22 @@ impl Renderer {
         let mut clip_contours = Vec::with_capacity(fill_contours.len().saturating_add(1));
         clip_contours.push(Self::bounds_region_contour(&clip_boundary)?);
         clip_contours.extend(fill_contours.iter().cloned());
-        let path_regions = build_path_regions(&clip_contours, &ParserState::default(), 1, false)
-            .map_err(|error| {
-                JsValue::from_str(&format!("Failed to build inverted clip region: {error}"))
-            })?;
+        let path_regions =
+            build_path_regions(&clip_contours, &ParserState::default(), 1, false, false).map_err(
+                |error| {
+                    JsValue::from_str(&format!("Failed to build inverted clip region: {error}"))
+                },
+            )?;
 
-        Ok(GerberData::new(
+        Ok(Self::path_region_layer(path_regions, clip_boundary, true))
+    }
+
+    fn path_region_layer(
+        path_regions: PathRegions,
+        boundary: Boundary,
+        is_negative: bool,
+    ) -> GerberData {
+        GerberData::new(
             Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Vec::new(),
             Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -471,9 +554,9 @@ impl Renderer {
                 Vec::new(),
             ),
             path_regions,
-            clip_boundary,
-            true,
-        ))
+            boundary,
+            is_negative,
+        )
     }
 
     fn bounds_region_contour(bounds: &Boundary) -> Result<RegionContour, JsValue> {
@@ -5467,6 +5550,7 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::GerberParser;
 
     fn outline_line(start: [f32; 2], end: [f32; 2]) -> OutlineSegment {
         OutlineSegment {
@@ -5510,6 +5594,14 @@ mod tests {
             boundary,
             is_negative,
         )
+    }
+
+    fn parse_gerber_with_source_contours(data: &str) -> Vec<GerberData> {
+        let mut parser = GerberParser::with_options(true, 1);
+        parser.preserve_region_source_contours = true;
+        parser
+            .parse(data)
+            .expect("Gerber with source contours should parse")
     }
 
     #[test]
@@ -5600,5 +5692,192 @@ mod tests {
         assert!((clip.boundary.max_x() - 12.0).abs() < 0.0001);
         assert!((clip.boundary.min_y() + 3.0).abs() < 0.0001);
         assert!((clip.boundary.max_y() - 11.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn region_outline_fill_uses_source_region_contours() {
+        let outline_data = "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X000000Y000000D02*
+G01*
+X010000Y000000D01*
+X010000Y010000D01*
+X000000Y010000D01*
+G37*
+M02*";
+        let default_layers = GerberParser::with_options(true, 1)
+            .parse(outline_data)
+            .expect("default region outline should parse");
+        assert!(!default_layers[0].path_regions.has_source_contours());
+
+        let outline_layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X000000Y000000D02*
+G01*
+X010000Y000000D01*
+X010000Y010000D01*
+X000000Y010000D01*
+G37*
+M02*",
+        );
+
+        assert_eq!(outline_layers.len(), 1);
+        assert!(!outline_layers[0].path_regions.has_geometry());
+        assert!(outline_layers[0].path_regions.has_source_contours());
+
+        let (fill_layers, fill_contours) = Renderer::region_outline_fill_layers(&outline_layers)
+            .expect("region outline fill should build")
+            .expect("region outline source should be used");
+
+        assert_eq!(fill_layers.len(), 1);
+        assert!(!fill_layers[0].is_negative);
+        assert!(fill_layers[0].path_regions.has_geometry());
+        assert_eq!(fill_layers[0].path_regions.region_count(), 1);
+        assert_eq!(fill_contours.len(), 1);
+    }
+
+    #[test]
+    fn region_outline_fill_preserves_source_sublayer_polarity() {
+        let outline_layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X000000Y000000D02*
+G01*
+X020000Y000000D01*
+X020000Y020000D01*
+X000000Y020000D01*
+G37*
+%LPC*%
+G36*
+X005000Y005000D02*
+G01*
+X015000Y005000D01*
+X015000Y015000D01*
+X005000Y015000D01*
+G37*
+M02*",
+        );
+
+        assert_eq!(outline_layers.len(), 2);
+        assert!(outline_layers
+            .iter()
+            .all(|layer| layer.path_regions.has_source_contours()));
+
+        let (fill_layers, fill_contours) = Renderer::region_outline_fill_layers(&outline_layers)
+            .expect("region outline fill should build")
+            .expect("region outline source should be used");
+
+        assert_eq!(fill_layers.len(), 2);
+        assert!(!fill_layers[0].is_negative);
+        assert!(fill_layers[1].is_negative);
+        assert_eq!(fill_contours.len(), 2);
+
+        let fill_boundary =
+            fill_layers_boundary(&fill_layers).expect("fill layer boundary should be finite");
+        let clip_layer = Renderer::outside_clip_layer(&fill_contours, &fill_boundary, &[])
+            .expect("outside clip should be built from all source contours");
+        assert!(clip_layer.is_negative);
+        assert!(clip_layer.path_regions.has_geometry());
+    }
+
+    #[test]
+    fn region_outline_fill_preserves_arc_source_contours() {
+        let outline_layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+%LPD*%
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+X010000Y000000I010000J000000D01*
+G37*
+M02*",
+        );
+
+        assert_eq!(outline_layers.len(), 1);
+        assert!(outline_layers[0].path_regions.has_geometry());
+        assert!(outline_layers[0].path_regions.has_source_contours());
+
+        let (fill_layers, fill_contours) = Renderer::region_outline_fill_layers(&outline_layers)
+            .expect("arc region outline fill should build")
+            .expect("arc region outline source should be used");
+
+        assert_eq!(fill_layers.len(), 1);
+        assert!(fill_contours.iter().any(|contour| contour.has_arc));
+        assert!(!fill_layers[0].path_regions.sector_vertices.is_empty());
+    }
+
+    #[test]
+    fn region_source_contours_survive_following_draw_geometry() {
+        let layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X000000Y000000D02*
+G01*
+X010000Y000000D01*
+X010000Y010000D01*
+X000000Y010000D01*
+G37*
+%ADD10C,0.100*%
+D10*
+X020000Y000000D02*
+X030000Y000000D01*
+M02*",
+        );
+
+        assert_eq!(layers.len(), 1);
+        assert!(layers[0].path_regions.has_source_contours());
+        assert!(!layers[0].lines.start_x.is_empty());
+    }
+
+    #[test]
+    fn inverted_outline_fill_prefers_closed_aperture_outline_over_region_source() {
+        let outline_layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10C,0.100*%
+D10*
+X000000Y000000D02*
+X040000Y000000D01*
+X040000Y040000D01*
+X000000Y040000D01*
+X000000Y000000D01*
+%LPD*%
+G36*
+X010000Y010000D02*
+G01*
+X020000Y010000D01*
+X020000Y020000D01*
+X010000Y020000D01*
+G37*
+M02*",
+        );
+
+        let (fill_layers, fill_contours) = Renderer::inverted_outline_fill_layers(&outline_layers)
+            .expect("mixed outline source should build fill");
+
+        assert_eq!(fill_layers.len(), 1);
+        assert_eq!(fill_contours.len(), 1);
+        assert!((fill_layers[0].boundary.min_x() - 0.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.max_x() - 4.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.min_y() - 0.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.max_y() - 4.0).abs() < 0.0001);
     }
 }

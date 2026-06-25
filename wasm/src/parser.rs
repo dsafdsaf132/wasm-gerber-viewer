@@ -14,8 +14,9 @@ use state::{
     parse_format_spec, parse_if, parse_lm, parse_lp, parse_lr, parse_ls, parse_mo, parse_sr,
 };
 
-use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive, RegionContour};
+use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive};
 use crate::interaction::InteractionLayer;
+use crate::region::RegionContour;
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
@@ -820,6 +821,7 @@ pub struct GerberParser {
     pub macros: HashMap<String, ApertureMacro>,
     pub current_state: ParserState,
     pub preserve_arc_regions: bool,
+    pub preserve_region_source_contours: bool,
     pub arc_tessellation_quality: u32,
     // Store primitive batches in object-stream polarity order.
     pub polarity_layers: Vec<PolarityLayer>,
@@ -844,6 +846,7 @@ impl GerberParser {
             macros: HashMap::new(),
             current_state: ParserState::default(),
             preserve_arc_regions,
+            preserve_region_source_contours: false,
             arc_tessellation_quality,
             polarity_layers: Vec::new(),
             current_primitives: Vec::new(),
@@ -884,6 +887,7 @@ impl GerberParser {
                     self.preserve_arc_regions,
                     self.arc_tessellation_quality,
                     self.interaction_layer.is_some(),
+                    self.preserve_region_source_contours,
                 )?;
             } else if line_ref.starts_with("G04") {
                 // Comment line, skip
@@ -907,6 +911,7 @@ impl GerberParser {
                     self.preserve_arc_regions,
                     self.arc_tessellation_quality,
                     collect_interactions,
+                    self.preserve_region_source_contours,
                 )
                 .map_err(|message| JsValue::from_str(&message))?;
             }
@@ -915,7 +920,9 @@ impl GerberParser {
         }
 
         // Save last accumulated primitives by polarity
-        if !self.current_primitives.is_empty() || self.current_path_regions.has_geometry() {
+        if !self.current_primitives.is_empty()
+            || self.current_path_regions.has_geometry_or_source_contours()
+        {
             try_reserve_exact(&mut self.polarity_layers, 1, "polarity layer list")?;
             self.polarity_layers.push(PolarityLayer {
                 polarity: self.current_state.polarity,
@@ -1009,6 +1016,7 @@ fn parse_command(
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     collect_interactions: bool,
+    collect_region_source_contours: bool,
 ) -> Result<(), JsValue> {
     let line = if !line_ref.ends_with('%') {
         let mut buffer = String::new();
@@ -1080,6 +1088,7 @@ fn parse_command(
             preserve_arc_regions,
             arc_tessellation_quality,
             collect_interactions,
+            collect_region_source_contours,
         )?;
     } else if line.starts_with("%LM") {
         // Layer mirroring: %LMN*, %LMX*, %LMY*, %LMXY*
@@ -1109,7 +1118,7 @@ fn flush_primitives(
     polarity_layers: &mut Vec<PolarityLayer>,
     polarity: Polarity,
 ) -> Result<(), JsValue> {
-    if !current_primitives.is_empty() || current_path_regions.has_geometry() {
+    if !current_primitives.is_empty() || current_path_regions.has_geometry_or_source_contours() {
         try_reserve_exact(polarity_layers, 1, "polarity layer list")?;
         polarity_layers.push(PolarityLayer {
             polarity,
@@ -1160,6 +1169,7 @@ fn parse_aperture_block(
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     collect_interactions: bool,
+    collect_region_source_contours: bool,
 ) -> Result<(), JsValue> {
     let Some(block_code) = parse_aperture_block_code(line) else {
         return Ok(());
@@ -1205,6 +1215,7 @@ fn parse_aperture_block(
                 preserve_arc_regions,
                 arc_tessellation_quality,
                 collect_interactions,
+                collect_region_source_contours,
             )?;
             if let Some(enclosing_state) = nested_block_state {
                 *state = enclosing_state;
@@ -1228,6 +1239,7 @@ fn parse_aperture_block(
                 preserve_arc_regions,
                 arc_tessellation_quality,
                 collect_interactions,
+                collect_region_source_contours,
             )
             .map_err(|message| JsValue::from_str(&message))?;
         }

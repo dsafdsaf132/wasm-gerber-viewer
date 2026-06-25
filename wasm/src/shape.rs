@@ -1,3 +1,4 @@
+use crate::region::{RegionContour, RegionSegment};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 
@@ -448,6 +449,7 @@ pub struct PathRegions {
     pub(crate) cover_vertices: Vec<f32>,
     pub(crate) clear_vertices: Vec<f32>,
     pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
+    pub(crate) source_contours: Vec<Vec<RegionContour>>,
 }
 
 impl PathRegions {
@@ -467,6 +469,7 @@ impl PathRegions {
             cover_vertices,
             clear_vertices,
             pick_contours: Vec::new(),
+            source_contours: Vec::new(),
         }
     }
 
@@ -479,6 +482,7 @@ impl PathRegions {
             cover_vertices: Vec::new(),
             clear_vertices: Vec::new(),
             pick_contours: Vec::new(),
+            source_contours: Vec::new(),
         }
     }
 
@@ -487,11 +491,15 @@ impl PathRegions {
     }
 
     pub(crate) fn has_geometry(&self) -> bool {
-        self.region_count() > 0 || !self.cover_vertices.is_empty()
+        self.region_count() > 0
+            && (!self.wedge_vertices.is_empty()
+                || !self.sector_vertices.is_empty()
+                || !self.cover_vertices.is_empty()
+                || !self.clear_vertices.is_empty())
     }
 
     pub(crate) fn append(&mut self, other: PathRegions) {
-        if !other.has_geometry() {
+        if !other.has_geometry() && !other.has_source_contours() {
             return;
         }
 
@@ -502,6 +510,7 @@ impl PathRegions {
         self.cover_vertices.extend(other.cover_vertices);
         self.clear_vertices.extend(other.clear_vertices);
         self.pick_contours.extend(other.pick_contours);
+        self.source_contours.extend(other.source_contours);
 
         for offset in other.wedge_vertex_offsets.iter().skip(1) {
             self.wedge_vertex_offsets.push(wedge_base + offset);
@@ -517,6 +526,21 @@ impl PathRegions {
         self.cover_vertices = Vec::new();
         self.clear_vertices = Vec::new();
         self.pick_contours = Vec::new();
+        self.source_contours = Vec::new();
+    }
+
+    pub(crate) fn has_source_contours(&self) -> bool {
+        !self.source_contours.is_empty()
+    }
+
+    pub(crate) fn has_geometry_or_source_contours(&self) -> bool {
+        self.has_geometry() || self.has_source_contours()
+    }
+
+    pub(crate) fn append_source_contours(&mut self, contours: Vec<RegionContour>) {
+        if !contours.is_empty() {
+            self.source_contours.push(contours);
+        }
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
@@ -539,6 +563,7 @@ impl PathRegions {
                 }
             }
         }
+        translate_region_contours(&mut self.source_contours, dx, dy);
     }
 
     pub(crate) fn transform_for_flash(
@@ -605,6 +630,15 @@ impl PathRegions {
                 }
             }
         }
+        transform_region_contours_for_flash(
+            &mut self.source_contours,
+            scale,
+            mirror_x,
+            mirror_y,
+            rotation,
+            dx,
+            dy,
+        );
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -722,6 +756,115 @@ fn transform_arc_angles(
     start += rotation;
     end += rotation;
     (start, end - start)
+}
+
+fn translate_region_contours(region_groups: &mut [Vec<RegionContour>], dx: f32, dy: f32) {
+    for contours in region_groups {
+        for contour in contours {
+            for point in &mut contour.points {
+                point[0] += dx;
+                point[1] += dy;
+            }
+            for segment in &mut contour.segments {
+                match segment {
+                    RegionSegment::Line { start, end } => {
+                        start[0] += dx;
+                        start[1] += dy;
+                        end[0] += dx;
+                        end[1] += dy;
+                    }
+                    RegionSegment::Arc {
+                        start, end, center, ..
+                    } => {
+                        start[0] += dx;
+                        start[1] += dy;
+                        end[0] += dx;
+                        end[1] += dy;
+                        center[0] += dx;
+                        center[1] += dy;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn transform_region_contours_for_flash(
+    region_groups: &mut [Vec<RegionContour>],
+    scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    rotation: f32,
+    dx: f32,
+    dy: f32,
+) {
+    for contours in region_groups {
+        for contour in contours {
+            for point in &mut contour.points {
+                let (x, y) = transformed_point_for_flash(
+                    point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+                );
+                point[0] = x;
+                point[1] = y;
+            }
+            for segment in &mut contour.segments {
+                match segment {
+                    RegionSegment::Line { start, end } => {
+                        *start = transformed_array_point_for_flash(
+                            *start, scale, mirror_x, mirror_y, rotation, dx, dy,
+                        );
+                        *end = transformed_array_point_for_flash(
+                            *end, scale, mirror_x, mirror_y, rotation, dx, dy,
+                        );
+                    }
+                    RegionSegment::Arc {
+                        start,
+                        end,
+                        center,
+                        radius,
+                        start_angle,
+                        sweep_angle,
+                    } => {
+                        *start = transformed_array_point_for_flash(
+                            *start, scale, mirror_x, mirror_y, rotation, dx, dy,
+                        );
+                        *end = transformed_array_point_for_flash(
+                            *end, scale, mirror_x, mirror_y, rotation, dx, dy,
+                        );
+                        *center = transformed_array_point_for_flash(
+                            *center, scale, mirror_x, mirror_y, rotation, dx, dy,
+                        );
+                        *radius *= scale.abs();
+                        let (next_start, next_sweep) = transform_arc_angles(
+                            *start_angle,
+                            *sweep_angle,
+                            scale,
+                            mirror_x,
+                            mirror_y,
+                            rotation,
+                        );
+                        *start_angle = next_start;
+                        *sweep_angle = next_sweep;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn transformed_array_point_for_flash(
+    point: [f32; 2],
+    scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    rotation: f32,
+    dx: f32,
+    dy: f32,
+) -> [f32; 2] {
+    let (x, y) = transformed_point_for_flash(
+        point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+    );
+    [x, y]
 }
 
 /// Boundary information for the entire Gerber layer

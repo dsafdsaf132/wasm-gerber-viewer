@@ -312,7 +312,8 @@ pub fn parse_lp(
 
     // Check if polarity has changed
     if state.polarity != new_polarity
-        && (!current_primitives.is_empty() || current_path_regions.has_geometry())
+        && (!current_primitives.is_empty()
+            || current_path_regions.has_geometry_or_source_contours())
     {
         polarity_layers.try_reserve(1).map_err(|_| {
             "Gerber layer is too large to parse: not enough memory for polarity layer list"

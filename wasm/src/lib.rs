@@ -2,6 +2,7 @@ mod drill;
 mod interaction;
 mod parse_common;
 mod parser;
+mod region;
 mod renderer;
 mod shape;
 mod util;
@@ -10,9 +11,7 @@ use crate::drill::{
     parse_drill_with_offset, parse_drill_with_offset_and_interactions, DrillParseResult,
 };
 use crate::interaction::InteractionLayer;
-use crate::parser::{
-    parse_gerber_payload_with_options, parse_gerber_with_options, ParsedGerberLayer,
-};
+use crate::parser::{parse_gerber_payload_with_options, GerberParser, ParsedGerberLayer};
 use crate::renderer::Renderer;
 use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::util::format_bytes;
@@ -27,6 +26,35 @@ const DRILL_OUTLINE_WIDTH_MM: f32 = 0.0;
 pub fn init_panic_hook() {
     #[cfg(feature = "console_error_panic_hook")]
     console_error_panic_hook::set_once();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REGION_OUTLINE: &str = "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X000000Y000000D02*
+G01*
+X010000Y000000D01*
+X010000Y010000D01*
+X000000Y010000D01*
+G37*
+M02*";
+
+    #[test]
+    fn parse_layer_data_preserves_region_sources_only_when_requested() {
+        let normal_layers = parse_layer_data(REGION_OUTLINE, 0.0, 0.0, true, 1, false)
+            .expect("normal region outline should parse");
+        assert!(!normal_layers[0].path_regions.has_source_contours());
+
+        let outline_layers = parse_layer_data(REGION_OUTLINE, 0.0, 0.0, true, 1, true)
+            .expect("outline region source should parse");
+        assert!(outline_layers[0].path_regions.has_source_contours());
+    }
 }
 
 /// Preflight a large JS-to-WASM input copy with catchable allocation failure.
@@ -48,13 +76,15 @@ fn parse_layer_data(
     offset_y: f32,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
+    preserve_region_source_contours: bool,
 ) -> Result<Vec<GerberData>, JsValue> {
     if !offset_x.is_finite() || !offset_y.is_finite() {
         return Err(JsValue::from_str("Layer offset must be finite"));
     }
 
-    let mut gerber_data_layers =
-        parse_gerber_with_options(content, preserve_arc_regions, arc_tessellation_quality)?;
+    let mut parser = GerberParser::with_options(preserve_arc_regions, arc_tessellation_quality);
+    parser.preserve_region_source_contours = preserve_region_source_contours;
+    let mut gerber_data_layers = parser.parse(content)?;
 
     if offset_x != 0.0 || offset_y != 0.0 {
         for layer in &mut gerber_data_layers {
@@ -116,7 +146,7 @@ pub fn parse_gerber_layer(
     offset_x: f32,
     offset_y: f32,
 ) -> Result<JsValue, JsValue> {
-    let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y, true, 1)?;
+    let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y, true, 1, false)?;
     gerber_data_layers_to_js(&gerber_data_layers)
 }
 
@@ -134,6 +164,7 @@ pub fn parse_gerber_layer_with_options(
         offset_y,
         preserve_arc_regions,
         arc_tessellation_quality,
+        false,
     )?;
     gerber_data_layers_to_js(&gerber_data_layers)
 }
@@ -577,6 +608,7 @@ impl GerberProcessor {
             0.0,
             self.preserve_arc_regions,
             self.arc_tessellation_quality,
+            false,
         )?;
         self.add_parsed_layers(gerber_data_layers)
     }
@@ -613,6 +645,7 @@ impl GerberProcessor {
             offset_y,
             self.preserve_arc_regions,
             self.arc_tessellation_quality,
+            false,
         )?;
         self.add_parsed_layers(gerber_data_layers)
     }
@@ -635,6 +668,7 @@ impl GerberProcessor {
             target_offset_y,
             self.preserve_arc_regions,
             self.arc_tessellation_quality,
+            false,
         )?;
         let outline_layers = parse_layer_data(
             &outline_content,
@@ -642,6 +676,7 @@ impl GerberProcessor {
             outline_offset_y,
             self.preserve_arc_regions,
             self.arc_tessellation_quality,
+            true,
         )?;
 
         if let Some(renderer) = &mut self.renderer {
@@ -671,6 +706,7 @@ impl GerberProcessor {
             target_offset_y,
             self.preserve_arc_regions,
             self.arc_tessellation_quality,
+            false,
         )?;
 
         if let Some(renderer) = &mut self.renderer {

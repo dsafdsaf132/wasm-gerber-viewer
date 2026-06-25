@@ -4,6 +4,7 @@ use crate::interaction::{
 };
 use crate::parse_common::{parse_coordinate_number, parse_g_code, read_word_value};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
+use crate::region::{RegionContour, RegionSegment};
 use crate::shape::PathRegions;
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
@@ -128,79 +129,6 @@ pub enum Primitive {
         width: f32,
         exposure: f32,
     },
-}
-
-#[derive(Clone, Debug)]
-pub enum RegionSegment {
-    Line {
-        start: [f32; 2],
-        end: [f32; 2],
-    },
-    Arc {
-        start: [f32; 2],
-        end: [f32; 2],
-        center: [f32; 2],
-        radius: f32,
-        start_angle: f32,
-        sweep_angle: f32,
-    },
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct RegionContour {
-    pub points: Vec<[f32; 2]>,
-    pub segments: Vec<RegionSegment>,
-    pub has_arc: bool,
-}
-
-impl RegionContour {
-    pub fn is_empty(&self) -> bool {
-        self.points.is_empty() && self.segments.is_empty()
-    }
-
-    pub fn push_start(&mut self, point: [f32; 2]) -> Result<(), String> {
-        try_reserve_values(&mut self.points, 1, "region points")?;
-        self.points.push(point);
-        Ok(())
-    }
-
-    fn push_line(&mut self, start: [f32; 2], end: [f32; 2]) -> Result<(), String> {
-        try_reserve_values(&mut self.points, 1, "region points")?;
-        try_reserve_values(&mut self.segments, 1, "region segments")?;
-        if self.points.is_empty() {
-            self.points.push(start);
-        }
-        self.points.push(end);
-        self.segments.push(RegionSegment::Line { start, end });
-        Ok(())
-    }
-
-    fn push_arc(
-        &mut self,
-        start: [f32; 2],
-        end: [f32; 2],
-        center: [f32; 2],
-        radius: f32,
-        start_angle: f32,
-        sweep_angle: f32,
-    ) -> Result<(), String> {
-        try_reserve_values(&mut self.points, 1, "region points")?;
-        try_reserve_values(&mut self.segments, 1, "region segments")?;
-        if self.points.is_empty() {
-            self.points.push(start);
-        }
-        self.points.push(end);
-        self.segments.push(RegionSegment::Arc {
-            start,
-            end,
-            center,
-            radius,
-            start_angle,
-            sweep_angle,
-        });
-        self.has_arc = true;
-        Ok(())
-    }
 }
 
 /// Rotate point around given center
@@ -1113,15 +1041,16 @@ fn transform_primitive_for_flash(
 
 fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
+    path_regions: &mut PathRegions,
     polarity: Polarity,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
-    if !primitives.is_empty() {
+    if !primitives.is_empty() || path_regions.has_geometry_or_source_contours() {
         try_reserve_layers(polarity_layers, 1, "polarity layer")?;
         polarity_layers.push(PolarityLayer {
             polarity,
             primitives: take(primitives),
-            path_regions: PathRegions::empty(),
+            path_regions: take(path_regions),
         });
     }
 
@@ -1160,11 +1089,12 @@ fn flash_block_aperture(
     block_layers: &[PolarityLayer],
     state: &ParserState,
     primitives: &mut Vec<Primitive>,
+    path_regions: &mut PathRegions,
     polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
 ) -> Result<(), String> {
-    flush_primitives_to_layer(primitives, state.polarity, polarity_layers)?;
+    flush_primitives_to_layer(primitives, path_regions, state.polarity, polarity_layers)?;
 
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {
@@ -1299,13 +1229,22 @@ pub fn flash_aperture(
     state: &ParserState,
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
+    path_regions: &mut PathRegions,
     polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
 ) -> Result<(), String> {
     if let Some(aperture) = apertures.get(&state.current_aperture) {
         if let Some(block_layers) = aperture.block_layers.as_ref() {
-            flash_block_aperture(block_layers, state, primitives, polarity_layers, x, y)?;
+            flash_block_aperture(
+                block_layers,
+                state,
+                primitives,
+                path_regions,
+                polarity_layers,
+                x,
+                y,
+            )?;
             return Ok(());
         }
 
@@ -1752,6 +1691,7 @@ pub fn build_path_regions(
     state: &ParserState,
     arc_tessellation_quality: u32,
     collect_pick_contours: bool,
+    collect_source_contours: bool,
 ) -> Result<PathRegions, String> {
     let mut path_regions = PathRegions::empty();
 
@@ -1766,6 +1706,7 @@ pub fn build_path_regions(
                 offset_y,
                 arc_tessellation_quality,
                 collect_pick_contours,
+                collect_source_contours,
             )?;
         }
     }
@@ -1780,6 +1721,7 @@ fn append_path_region(
     offset_y: f32,
     arc_tessellation_quality: u32,
     collect_pick_contours: bool,
+    collect_source_contours: bool,
 ) -> Result<(), String> {
     let Some((min_x, max_x, min_y, max_y)) =
         path_region_bounds(region_contours, offset_x, offset_y)
@@ -1814,6 +1756,13 @@ fn append_path_region(
             arc_tessellation_quality,
         )?);
     }
+    if collect_source_contours {
+        path_regions.append_source_contours(offset_region_contours(
+            region_contours,
+            offset_x,
+            offset_y,
+        )?);
+    }
 
     path_regions
         .wedge_vertex_offsets
@@ -1823,6 +1772,87 @@ fn append_path_region(
         .push((path_regions.sector_vertices.len() / 7) as u32);
 
     Ok(())
+}
+
+fn append_region_source_contours(
+    path_regions: &mut PathRegions,
+    region_contours: &[RegionContour],
+    state: &ParserState,
+) -> Result<(), String> {
+    for sy in 0..state.sr_y {
+        for sx in 0..state.sr_x {
+            let offset_x = sx as f32 * state.sr_i;
+            let offset_y = sy as f32 * state.sr_j;
+            path_regions.append_source_contours(offset_region_contours(
+                region_contours,
+                offset_x,
+                offset_y,
+            )?);
+        }
+    }
+    Ok(())
+}
+
+fn offset_region_contours(
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<Vec<RegionContour>, String> {
+    let mut contours = Vec::new();
+    try_reserve_values(
+        &mut contours,
+        region_contours.len(),
+        "region source contours",
+    )?;
+
+    for contour in region_contours {
+        let mut points = Vec::new();
+        try_reserve_values(&mut points, contour.points.len(), "region source points")?;
+        points.extend(
+            contour
+                .points
+                .iter()
+                .map(|point| [point[0] + offset_x, point[1] + offset_y]),
+        );
+
+        let mut segments = Vec::new();
+        try_reserve_values(
+            &mut segments,
+            contour.segments.len(),
+            "region source segments",
+        )?;
+        for segment in &contour.segments {
+            segments.push(match *segment {
+                RegionSegment::Line { start, end } => RegionSegment::Line {
+                    start: [start[0] + offset_x, start[1] + offset_y],
+                    end: [end[0] + offset_x, end[1] + offset_y],
+                },
+                RegionSegment::Arc {
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                } => RegionSegment::Arc {
+                    start: [start[0] + offset_x, start[1] + offset_y],
+                    end: [end[0] + offset_x, end[1] + offset_y],
+                    center: [center[0] + offset_x, center[1] + offset_y],
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                },
+            });
+        }
+
+        contours.push(RegionContour {
+            points,
+            segments,
+            has_arc: contour.has_arc,
+        });
+    }
+
+    Ok(contours)
 }
 
 fn path_region_pick_contours(
@@ -2463,6 +2493,7 @@ pub fn parse_graphic_command(
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     collect_interactions: bool,
+    collect_region_source_contours: bool,
 ) -> Result<(), String> {
     let clean_line = line.trim_end_matches('*');
 
@@ -2509,12 +2540,18 @@ pub fn parse_graphic_command(
                     state.region_mode = false;
 
                     if preserve_arc_regions && region_contours_have_arcs(region_contours) {
-                        flush_primitives_to_layer(primitives, state.polarity, polarity_layers)?;
+                        flush_primitives_to_layer(
+                            primitives,
+                            path_regions,
+                            state.polarity,
+                            polarity_layers,
+                        )?;
                         let region_path_regions = build_path_regions(
                             region_contours,
                             state,
                             arc_tessellation_quality,
                             collect_interactions,
+                            collect_region_source_contours,
                         )?;
                         path_regions.append(region_path_regions.clone());
                         if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
@@ -2584,6 +2621,9 @@ pub fn parse_graphic_command(
                                     }
                                 }
                             }
+                        }
+                        if collect_region_source_contours && primitives.len() > primitive_start {
+                            append_region_source_contours(path_regions, region_contours, state)?;
                         }
                         record_primitive_delta(
                             interaction_layer.as_deref_mut(),
@@ -2747,7 +2787,15 @@ pub fn parse_graphic_command(
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
                     flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
-                    flash_aperture(state, apertures, primitives, polarity_layers, x, y)?;
+                    flash_aperture(
+                        state,
+                        apertures,
+                        primitives,
+                        path_regions,
+                        polarity_layers,
+                        x,
+                        y,
+                    )?;
                     let aperture = apertures.get(&state.current_aperture);
                     if let Some(aperture) = aperture {
                         if let Some(block_layers) = aperture.block_layers.as_ref() {
