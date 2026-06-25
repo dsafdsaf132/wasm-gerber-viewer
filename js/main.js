@@ -3806,6 +3806,7 @@ export class GerberViewer {
       sourceContent: layer.sourceContent,
       offset: { ...normalizeLayerOffset(layer.offset) },
       bounds: layer.bounds ? { ...layer.bounds } : null,
+      renderBounds: layer.renderBounds ? { ...layer.renderBounds } : null,
     };
     if (isDrillLayer(layer)) {
       snapshot.outlineLayerId = layer.outlineLayerId;

@@ -132,6 +132,38 @@ test("renderDrills false skips drill sources before reading", async () => {
   assert.equal(nodeRecord, null);
 });
 
+test("node prepared layer rejects late inversion without retained source", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+  const prepared = await renderer.loadLayer(GERBER_CONTENT, { name: "mask.gbs" });
+
+  assert.equal(prepared.content, null);
+  await assert.rejects(
+    renderer.withFrame({}, async () => {
+      await renderer.renderLayer(prepared, { inverted: true });
+    }),
+    /Prepared layer cannot be inverted because its source content was not retained/,
+  );
+});
+
+test("node explicit prepared outline requires retained source", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+  const outline = await renderer.loadLayer(GERBER_CONTENT, { name: "routing.gbr" });
+  const mask = await renderer.loadLayer(GERBER_CONTENT, {
+    name: "mask.gbs",
+    inverted: true,
+  });
+
+  assert.equal(outline.content, null);
+  assert.equal(typeof mask.content, "string");
+  await assert.rejects(
+    renderer.withFrame({ invertedOutline: "routing.gbr" }, async () => {
+      await renderer.renderLayer(outline);
+      await renderer.renderLayer(mask);
+    }),
+    /Inverted outline layer requires source content: routing\.gbr/,
+  );
+});
+
 test("package composite mode defaults to blend and validates explicit values", () => {
   assert.equal(createBaseFrameOptions().compositeMode, "blend");
   assert.equal(createBaseFrameOptions({ compositeMode: "stack" }).compositeMode, "stack");
@@ -231,5 +263,22 @@ function makeNodeLayerRecord(overrides = {}) {
     inverted: false,
     outlineStyle: null,
     ...overrides,
+  };
+}
+
+function makeParsedReuseWasmModule() {
+  function GerberProcessor() {}
+  GerberProcessor.prototype.add_parsed_layer = function addParsedLayer() {};
+  return {
+    GerberProcessor,
+    parse_gerber_layer_with_options() {
+      return {
+        sublayers: [
+          {
+            boundary: { minX: 0, maxX: 1, minY: 0, maxY: 1 },
+          },
+        ],
+      };
+    },
   };
 }

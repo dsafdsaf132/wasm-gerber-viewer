@@ -480,6 +480,7 @@ export class NodeGerberRenderer {
       return;
     }
 
+    validateFrameInversionSources(frame.layers, frame.options);
     frame.bounds = resolveFrameRenderBounds(frame.layers, frame.options);
     const view = resolveFrameView(
       {
@@ -756,6 +757,10 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
   const offsetX = numberOrDefault(preparedLayer.offsetX, 0);
   const offsetY = numberOrDefault(preparedLayer.offsetY, 0);
   const kind = normalizeLayerKind(preparedLayer.kind, { name: preparedLayer.sourceName });
+  const inverted =
+    "inverted" in layerOptions
+      ? layerOptions.inverted === true
+      : Boolean(preparedLayer.inverted);
   if (
     ("offsetX" in layerOptions && numberOrDefault(layerOptions.offsetX, 0) !== offsetX) ||
     ("offsetY" in layerOptions && numberOrDefault(layerOptions.offsetY, 0) !== offsetY)
@@ -768,6 +773,12 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
     normalizeLayerKind(layerOptions.kind, { name: preparedLayer.sourceName }) !== kind
   ) {
     throw new Error("Prepared layer kind is fixed. Load the layer again to change kind.");
+  }
+  if (inverted && typeof preparedLayer.content !== "string") {
+    throw new Error(
+      `Prepared layer cannot be inverted because its source content was not retained: ${preparedLayer.name}. ` +
+        "Load the layer with inverted:true or retainSourceContentForInversion:true.",
+    );
   }
 
   return {
@@ -786,10 +797,7 @@ function mergePreparedLayerOptions(preparedLayer, layerOptions = {}) {
       "alpha" in layerOptions
         ? optionalAlpha(layerOptions.alpha)
         : preparedLayer.alpha,
-    inverted:
-      "inverted" in layerOptions
-        ? layerOptions.inverted === true
-        : Boolean(preparedLayer.inverted),
+    inverted,
   };
 }
 
@@ -1387,6 +1395,52 @@ function addPlanInvertedLayerWithFillSource(processor, layer, fillSource) {
     fillSource.bounds.minY,
     fillSource.bounds.maxY,
   );
+}
+
+function validateFrameInversionSources(layers, options) {
+  const invertedLayers = layers.filter(
+    (layer) => layer.inverted && !isDrillLayerKind(layer.kind),
+  );
+  if (invertedLayers.length === 0) {
+    return;
+  }
+
+  for (const layer of invertedLayers) {
+    if (typeof layer.content !== "string") {
+      throw new Error(
+        `Inverted layer requires source content: ${layer.name}. ` +
+          "Load the layer with inverted:true or retainSourceContentForInversion:true.",
+      );
+    }
+  }
+
+  const outlineSelection = options.invertedOutline ?? INVERTED_OUTLINE_AUTO;
+  if (
+    outlineSelection === INVERTED_OUTLINE_AUTO ||
+    outlineSelection === INVERTED_OUTLINE_BOUNDS
+  ) {
+    return;
+  }
+
+  for (const targetLayer of invertedLayers) {
+    const outlineLayer = findLayerBySelector(
+      layers,
+      outlineSelection,
+      targetLayer,
+    );
+    if (!outlineLayer) {
+      throw new Error(`Inverted outline layer was not found: ${outlineSelection}`);
+    }
+    if (isDrillLayerKind(outlineLayer.kind)) {
+      throw new Error(`Inverted outline layer must be a Gerber layer: ${outlineLayer.name}`);
+    }
+    if (typeof outlineLayer.content !== "string") {
+      throw new Error(
+        `Inverted outline layer requires source content: ${outlineLayer.name}. ` +
+          "Load the outline with retainSourceContentForInversion:true.",
+      );
+    }
+  }
 }
 
 function resolveInvertedFillSource(plan, targetLayer) {
