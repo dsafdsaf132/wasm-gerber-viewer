@@ -4773,8 +4773,9 @@ export class GerberViewer {
 
     const targetOffset = normalizeLayerOffset(layer.offset);
     const sourceKey = this.getInvertedLayerSourceKey(layer, fillSource, targetOffset);
+    const hasInvertedCache = this.hasInvertedLayerCache(layer);
     if (
-      this.hasInvertedLayerCache(layer) &&
+      hasInvertedCache &&
       (layer.invertedSourceKey === sourceKey ||
         layer.invertedSourceKey ===
           this.getCurrentInvertedFallbackSourceKey(layer, selectedLayerIds, sourceKey))
@@ -4783,6 +4784,10 @@ export class GerberViewer {
         layer.renderBounds = this.getInvertedFillSourceBounds(fillSource);
       }
       return layer.invertedLayerId;
+    }
+    if (!hasInvertedCache && layer.invertedErrorKey === sourceKey) {
+      layer.renderBounds = null;
+      return layer.layerId;
     }
 
     this.removeInvertedLayerCache(layer);
