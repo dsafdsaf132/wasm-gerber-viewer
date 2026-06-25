@@ -138,9 +138,7 @@ function resolveInvertedFillSource(layers, layer, boardOutlineSelection) {
 }
 
 function resolveInvertedBoundsFillSource(layers, layer) {
-  const bounds =
-    getVisibleGerberBounds(layers, { excludeLayer: layer }) ??
-    getVisibleGerberBounds(layers);
+  const bounds = getVisibleGerberBounds(layers);
   return bounds ? { type: "bounds", bounds } : null;
 }
 

@@ -193,6 +193,26 @@ test("node bounds inversion includes the target layer extents", async () => {
   assert.deepEqual(renderer.lastFrame.bounds, { minX: 0, maxX: 101, minY: 0, maxY: 101 });
 });
 
+test("node auto outline inversion keeps fallback bounds in the frame", async () => {
+  const renderer = new NodeGerberRenderer({}, {});
+
+  await renderer.withFrame({}, async () => {
+    renderer.frame.addLayer(makeNodeLayerRecord({
+      layerId: 0,
+      name: "outline.gko",
+      bounds: { minX: 0, maxX: 10, minY: 0, maxY: 10 },
+    }));
+    renderer.frame.addLayer(makeNodeLayerRecord({
+      layerId: 1,
+      name: "mask.gbs",
+      inverted: true,
+      bounds: { minX: 100, maxX: 101, minY: 100, maxY: 101 },
+    }));
+  });
+
+  assert.deepEqual(renderer.lastFrame.bounds, { minX: 0, maxX: 101, minY: 0, maxY: 101 });
+});
+
 function makeNodeLayerRecord(overrides = {}) {
   return {
     kind: "gerber",

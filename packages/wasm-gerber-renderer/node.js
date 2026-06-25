@@ -1445,7 +1445,7 @@ function resolveLayerRenderBounds(layers, options, layer) {
   }
   const outlineSelection = options.invertedOutline ?? INVERTED_OUTLINE_AUTO;
   if (fillSource.type === "outline" && outlineSelection === INVERTED_OUTLINE_AUTO) {
-    return fillSource.layer.bounds;
+    return getPlanGerberBounds(layers, null) ?? fillSource.layer.bounds;
   }
   return fillSource.type === "outline" ? fillSource.layer.bounds : fillSource.bounds;
 }
