@@ -132,6 +132,10 @@ fn has_positive_extent(value: f32) -> bool {
     value.is_finite() && value > GEOMETRY_EPSILON
 }
 
+fn has_non_negative_extent(value: f32) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
 fn points_are_distinct(start_x: f32, start_y: f32, end_x: f32, end_y: f32) -> bool {
     let dx = end_x - start_x;
     let dy = end_y - start_y;
@@ -168,7 +172,7 @@ fn primitive_is_renderable(primitive: &Primitive) -> bool {
         } => {
             finite_point(*x, *y)
                 && has_positive_extent(*radius)
-                && has_positive_extent(*thickness)
+                && has_non_negative_extent(*thickness)
                 && start_angle.is_finite()
                 && end_angle.is_finite()
                 && (*end_angle - *start_angle).abs() > GEOMETRY_EPSILON
@@ -201,7 +205,7 @@ fn primitive_is_renderable(primitive: &Primitive) -> bool {
         } => {
             finite_point(*start_x, *start_y)
                 && finite_point(*end_x, *end_y)
-                && has_positive_extent(*width)
+                && has_non_negative_extent(*width)
                 && points_are_distinct(*start_x, *start_y, *end_x, *end_y)
         }
         Primitive::TriangleTemplateFlash { template, x, y } => {

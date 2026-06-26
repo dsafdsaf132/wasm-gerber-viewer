@@ -31,6 +31,7 @@ export const GERBER_FILE_EXTENSIONS = new Set([
   ".gto",
   ".gtp",
   ".gts",
+  ".outline",
   ".pastebot",
   ".pastetop",
   ".pho",

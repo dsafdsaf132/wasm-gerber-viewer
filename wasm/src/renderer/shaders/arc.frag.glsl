@@ -21,6 +21,10 @@ float normalizeAngle(float angle) {
 }
 
 void main() {
+    if (vThickness <= 0.0 && vOutlineThickness <= 0.0) {
+        discard;
+    }
+
     float dist = length(vPosition);
     float angle = atan(vPosition.y, vPosition.x);
 

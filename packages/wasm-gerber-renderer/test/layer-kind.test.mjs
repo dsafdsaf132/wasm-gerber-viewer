@@ -148,6 +148,7 @@ test("viewer ZIP preserves known extension behavior without sniffing", async () 
               "layers/plain.gbr": makeZipEntry(plainText, "layers/plain.gbr"),
               "layers/plain.drl": makeZipEntry(plainText, "layers/plain.drl"),
               "layers/plain.ly3": makeZipEntry(plainText, "layers/plain.ly3"),
+              "layers/plain.outline": makeZipEntry(plainText, "layers/plain.outline"),
             },
           };
         },
@@ -155,16 +156,18 @@ test("viewer ZIP preserves known extension behavior without sniffing", async () 
     },
   );
 
-  assert.equal(sources.length, 2);
+  assert.equal(sources.length, 3);
   assert.deepEqual(
     sources.map((source) => [source.name, source.kind]),
     [
       ["plain.drl", "drill"],
       ["plain.gbr", "gerber"],
+      ["plain.outline", "gerber"],
     ],
   );
   assert.equal(await sources[0].readText(), plainText);
   assert.equal(await sources[1].readText(), plainText);
+  assert.equal(await sources[2].readText(), plainText);
 });
 
 test("viewer ZIP sniffs only the first 30 lines for unknown entries", async () => {

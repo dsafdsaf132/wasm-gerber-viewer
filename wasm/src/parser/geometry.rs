@@ -495,7 +495,7 @@ pub fn line_to_body(
     width: f32,
     exposure: f32,
 ) -> Option<Primitive> {
-    if width <= 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
+    if !width.is_finite() || width < 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
         return None;
     }
 

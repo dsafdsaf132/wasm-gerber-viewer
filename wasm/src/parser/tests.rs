@@ -1864,7 +1864,7 @@ M02*",
 }
 
 #[test]
-fn zero_width_solid_circle_draw_does_not_create_line_body() {
+fn zero_width_solid_circle_draw_preserves_line_body() {
     let layers = parse_gerber(
         "\
 %FSLAX26Y26*%
@@ -1876,8 +1876,38 @@ X1000000Y0000000D01*
 M02*",
     )
     .expect("zero-width solid circle D01 should parse");
+    let layer = &layers[0];
 
-    assert!(layers.is_empty());
+    assert!(layer.circles.x.is_empty());
+    assert_eq!(layer.lines.start_x, vec![0.0]);
+    assert_eq!(layer.lines.start_y, vec![0.0]);
+    assert_eq!(layer.lines.end_x, vec![1.0]);
+    assert_eq!(layer.lines.end_y, vec![0.0]);
+    assert_eq!(layer.lines.width, vec![0.0]);
+}
+
+#[test]
+fn zero_width_solid_circle_arc_preserves_arc_body() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,0.0*%
+D10*
+G03*
+X1000000Y0000000D02*
+X0000000Y1000000I-1000000J0000000D01*
+M02*",
+    )
+    .expect("zero-width solid circle arc should parse");
+    let layer = &layers[0];
+
+    assert!(layer.circles.x.is_empty());
+    assert_eq!(layer.arcs.x.len(), 1);
+    assert_approx_eq(layer.arcs.x[0], 0.0);
+    assert_approx_eq(layer.arcs.y[0], 0.0);
+    assert_approx_eq(layer.arcs.radius[0], 1.0);
+    assert_eq!(layer.arcs.thickness, vec![0.0]);
 }
 
 #[test]
