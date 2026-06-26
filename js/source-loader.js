@@ -3,9 +3,14 @@ import {
   isAmbiguousDrdPath,
   getLayerSourceKind,
   isArchiveMetadataPath,
+  isLikelyTextBytes,
   isSupportedLayerPath,
   isZipFile,
+  looksLikeDrillContent,
+  looksLikeGerberContent,
 } from "./file-utils.js";
+
+const UNKNOWN_ZIP_LAYER_SNIFF_LINES = 30;
 
 export function getInitialSourceUrl(search = globalThis.location?.search ?? "") {
   const params = new URLSearchParams(search);
@@ -212,8 +217,7 @@ async function collectZipLayerSources(
       .filter(
         (entry) =>
           !entry.dir &&
-          !isArchiveMetadataPath(entry.name) &&
-          isSupportedLayerPath(entry.name),
+          !isArchiveMetadataPath(entry.name),
       )
       .sort((a, b) =>
         a.name.localeCompare(b.name, undefined, {
@@ -222,7 +226,17 @@ async function collectZipLayerSources(
         }),
       );
 
-    if (entries.length === 0) {
+    const sources = [];
+    for (const entry of entries) {
+      const source = isSupportedLayerPath(entry.name)
+        ? await createKnownZipLayerSource(entry, file.name, onArchiveWarning)
+        : await createUnknownZipLayerSource(entry, file.name, onArchiveWarning);
+      if (source) {
+        sources.push(source);
+      }
+    }
+
+    if (sources.length === 0) {
       onArchiveWarning(
         file.name,
         "No supported layer files found in archive",
@@ -230,31 +244,7 @@ async function collectZipLayerSources(
       return [];
     }
 
-    onArchiveInfo(file.name, `${entries.length} layer files found in archive`);
-
-    const sources = [];
-    for (const entry of entries) {
-      const readText = createSharedTextReader((onProgress = () => {}) =>
-        readZipEntryText(entry, onProgress),
-      );
-      let preview = "";
-      if (isAmbiguousDrdPath(entry.name)) {
-        try {
-          preview = await readZipEntryText(entry);
-        } catch (_error) {
-          onArchiveWarning(
-            file.name,
-            `Could not inspect ${getBaseFileName(entry.name)}; loading as Gerber`,
-          );
-        }
-      }
-      sources.push({
-        name: getBaseFileName(entry.name),
-        kind: getLayerSourceKind(entry.name, preview),
-        sizeBytes: getZipEntrySizeBytes(entry),
-        readText,
-      });
-    }
+    onArchiveInfo(file.name, `${sources.length} layer files found in archive`);
 
     return sources;
   } catch (error) {
@@ -263,10 +253,104 @@ async function collectZipLayerSources(
   }
 }
 
+async function createKnownZipLayerSource(entry, archiveName, onArchiveWarning) {
+  const readText = createSharedTextReader((onProgress = () => {}) =>
+    readZipEntryText(entry, onProgress),
+  );
+  let preview = "";
+  if (isAmbiguousDrdPath(entry.name)) {
+    try {
+      preview = await readZipEntryText(entry);
+    } catch (_error) {
+      onArchiveWarning(
+        archiveName,
+        `Could not inspect ${getBaseFileName(entry.name)}; loading as Gerber`,
+      );
+    }
+  }
+
+  return {
+    name: getBaseFileName(entry.name),
+    kind: getLayerSourceKind(entry.name, preview),
+    sizeBytes: getZipEntrySizeBytes(entry),
+    readText,
+  };
+}
+
+async function createUnknownZipLayerSource(entry, archiveName, onArchiveWarning) {
+  let bytes;
+  try {
+    bytes = await readZipEntryBytes(entry);
+  } catch (_error) {
+    onArchiveWarning(
+      archiveName,
+      `Could not inspect ${getBaseFileName(entry.name)}; skipping unknown file`,
+    );
+    return null;
+  }
+
+  const headBytes = getHeadLineBytes(bytes, UNKNOWN_ZIP_LAYER_SNIFF_LINES);
+  if (!isLikelyTextBytes(headBytes)) {
+    return null;
+  }
+
+  const headText = decodeZipEntryText(headBytes);
+  const looksLikeDrill = looksLikeDrillContent(headText);
+  if (!looksLikeDrill && !looksLikeGerberContent(headText)) {
+    return null;
+  }
+  const sizeBytes = getZipEntrySizeBytes(entry) ?? bytes.byteLength;
+
+  return {
+    name: getBaseFileName(entry.name),
+    kind: looksLikeDrill ? "drill" : "gerber",
+    sizeBytes,
+    readText: createSharedTextReader((onProgress = () => {}) =>
+      readZipEntryText(entry, onProgress),
+    ),
+  };
+}
+
 function readZipEntryText(entry, onProgress = () => {}) {
   return entry.async("string", (metadata) => {
     onProgress(Math.min(metadata.percent / 100, 1));
   });
+}
+
+function readZipEntryBytes(entry, onProgress = () => {}) {
+  return entry.async("uint8array", (metadata) => {
+    onProgress(Math.min(metadata.percent / 100, 1));
+  });
+}
+
+function decodeZipEntryText(bytes) {
+  if (typeof TextDecoder !== "undefined") {
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+
+  let text = "";
+  for (const byte of bytes) {
+    text += String.fromCharCode(byte);
+  }
+  return text;
+}
+
+function getHeadLineBytes(bytes, maxLines) {
+  if (!bytes || bytes.byteLength === 0) {
+    return bytes;
+  }
+
+  let lines = 0;
+  for (let index = 0; index < bytes.byteLength; index++) {
+    if (bytes[index] === 10) {
+      lines += 1;
+      if (lines >= maxLines) {
+        return bytes.subarray(0, index + 1);
+      }
+    }
+  }
+
+  return bytes;
 }
 
 async function readLayerKindPreview(file) {

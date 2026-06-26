@@ -87,6 +87,114 @@ test("viewer ZIP .drd preview failure does not poison readText", async () => {
   assert.equal(readCount, 2);
 });
 
+test("viewer ZIP loads unknown text entries that look like Gerber", async () => {
+  const sources = await collectLayerSources(
+    [makeFile("zip", "layers.zip", "application/zip")],
+    {
+      jsZip: {
+        async loadAsync() {
+          return {
+            files: {
+              "layers/board.ly3": makeZipEntry(GERBER_CONTENT, "layers/board.ly3"),
+              "layers/readme.txt": makeZipEntry("not a Gerber layer", "layers/readme.txt"),
+              "layers/image.bin": makeZipEntry(
+                new Uint8Array([137, 80, 78, 71, 0, 1, 2, 3]),
+                "layers/image.bin",
+              ),
+            },
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].name, "board.ly3");
+  assert.equal(sources[0].kind, "gerber");
+  assert.equal(await sources[0].readText(), GERBER_CONTENT);
+});
+
+test("viewer ZIP loads unknown text entries that look like drills", async () => {
+  const sources = await collectLayerSources(
+    [makeFile("zip", "layers.zip", "application/zip")],
+    {
+      jsZip: {
+        async loadAsync() {
+          return {
+            files: {
+              "layers/holes.tap": makeZipEntry(DRILL_CONTENT, "layers/holes.tap"),
+            },
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].name, "holes.tap");
+  assert.equal(sources[0].kind, "drill");
+  assert.equal(await sources[0].readText(), DRILL_CONTENT);
+});
+
+test("viewer ZIP preserves known extension behavior without sniffing", async () => {
+  const plainText = "not a Gerber layer";
+  const sources = await collectLayerSources(
+    [makeFile("zip", "layers.zip", "application/zip")],
+    {
+      jsZip: {
+        async loadAsync() {
+          return {
+            files: {
+              "layers/plain.gbr": makeZipEntry(plainText, "layers/plain.gbr"),
+              "layers/plain.drl": makeZipEntry(plainText, "layers/plain.drl"),
+              "layers/plain.ly3": makeZipEntry(plainText, "layers/plain.ly3"),
+            },
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(sources.length, 2);
+  assert.deepEqual(
+    sources.map((source) => [source.name, source.kind]),
+    [
+      ["plain.drl", "drill"],
+      ["plain.gbr", "gerber"],
+    ],
+  );
+  assert.equal(await sources[0].readText(), plainText);
+  assert.equal(await sources[1].readText(), plainText);
+});
+
+test("viewer ZIP sniffs only the first 30 lines for unknown entries", async () => {
+  const lateGerberContent = `${Array.from({ length: 30 }, (_, index) => (
+    `comment line ${index + 1}`
+  )).join("\n")}
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,1*%
+D10*
+X0Y0D03*
+M02*`;
+  const sources = await collectLayerSources(
+    [makeFile("zip", "layers.zip", "application/zip")],
+    {
+      jsZip: {
+        async loadAsync() {
+          return {
+            files: {
+              "layers/late.ly3": makeZipEntry(lateGerberContent, "layers/late.ly3"),
+            },
+          };
+        },
+      },
+    },
+  );
+
+  assert.equal(sources.length, 0);
+});
+
 function makeFile(content, name, type = "") {
   const blob = new Blob([content], { type });
   return {
@@ -95,6 +203,31 @@ function makeFile(content, name, type = "") {
     size: blob.size,
     slice: (...args) => blob.slice(...args),
     text: () => blob.text(),
+  };
+}
+
+function makeZipEntry(content, name, options = {}) {
+  const bytes = content instanceof Uint8Array
+    ? content
+    : new TextEncoder().encode(String(content));
+  const text = content instanceof Uint8Array
+    ? new TextDecoder("utf-8").decode(content)
+    : String(content);
+
+  return {
+    dir: false,
+    name,
+    _data: { uncompressedSize: options.uncompressedSize ?? bytes.byteLength },
+    async async(type, onProgress) {
+      if (options.unreadable) {
+        throw new Error("entry should not be read");
+      }
+      onProgress?.({ percent: 100 });
+      if (type === "uint8array") {
+        return bytes;
+      }
+      return text;
+    },
   };
 }
 

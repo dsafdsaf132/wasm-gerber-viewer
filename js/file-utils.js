@@ -20,6 +20,34 @@ export function isSupportedLayerPath(path) {
   return isSupportedGerberPath(path) || isSupportedDrillPath(path);
 }
 
+export function isLikelyTextBytes(bytes) {
+  const sampleLength = Math.min(bytes?.length ?? 0, 8192);
+  if (sampleLength === 0) {
+    return false;
+  }
+
+  let suspicious = 0;
+  for (let index = 0; index < sampleLength; index++) {
+    const byte = bytes[index];
+    if (byte === 0) {
+      return false;
+    }
+    if (
+      byte === 9 ||
+      byte === 10 ||
+      byte === 12 ||
+      byte === 13 ||
+      (byte >= 32 && byte <= 126) ||
+      byte >= 128
+    ) {
+      continue;
+    }
+    suspicious += 1;
+  }
+
+  return suspicious / sampleLength <= 0.01;
+}
+
 export function getLayerSourceKind(path, content = "") {
   if (isSupportedDrillPath(path)) {
     return "drill";
@@ -28,6 +56,25 @@ export function getLayerSourceKind(path, content = "") {
     return "drill";
   }
   return "gerber";
+}
+
+export function looksLikeGerberContent(content) {
+  const text = String(content ?? "").slice(0, 65536).toUpperCase();
+  if (!text.trim()) {
+    return false;
+  }
+
+  const markerCount = [
+    text.includes("%FS"),
+    text.includes("%MO"),
+    /%ADD\d+/.test(text),
+    /(?:^|\*)G0?[123]\*/.test(text),
+    /(?:^|\*)D0?[123]\*/.test(text),
+    /(?:^|\*)M02\*/.test(text),
+    /[XY][+\-]?\d+/.test(text),
+  ].filter(Boolean).length;
+
+  return markerCount >= 3;
 }
 
 export function isArchiveMetadataPath(path) {
