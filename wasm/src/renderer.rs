@@ -624,7 +624,7 @@ impl Renderer {
             })?;
             for idx in 0..line_count {
                 let width = data.lines.width[idx];
-                if !width.is_finite() || width <= MIN_OUTLINE_WIDTH {
+                if !width.is_finite() || width < 0.0 {
                     continue;
                 }
 
@@ -659,7 +659,7 @@ impl Renderer {
             })?;
             for idx in 0..arc_count {
                 let thickness = data.arcs.thickness[idx];
-                if !thickness.is_finite() || thickness <= MIN_OUTLINE_WIDTH {
+                if !thickness.is_finite() || thickness < 0.0 {
                     continue;
                 }
                 let center = [data.arcs.x[idx], data.arcs.y[idx]];
@@ -5879,5 +5879,59 @@ M02*",
         assert!((fill_layers[0].boundary.max_x() - 4.0).abs() < 0.0001);
         assert!((fill_layers[0].boundary.min_y() - 0.0).abs() < 0.0001);
         assert!((fill_layers[0].boundary.max_y() - 4.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn inverted_outline_fill_uses_zero_width_aperture_lines() {
+        let outline_layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,0.0*%
+D10*
+X0000000Y0000000D02*
+X1000000Y0000000D01*
+X1000000Y1000000D01*
+X0000000Y1000000D01*
+X0000000Y0000000D01*
+M02*",
+        );
+
+        let (fill_layers, fill_contours) = Renderer::inverted_outline_fill_layers(&outline_layers)
+            .expect("zero-width line outline should build fill");
+
+        assert_eq!(fill_layers.len(), 1);
+        assert_eq!(fill_contours.len(), 1);
+        assert!((fill_layers[0].boundary.min_x() - 0.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.max_x() - 1.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.min_y() - 0.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.max_y() - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn inverted_outline_fill_uses_zero_width_aperture_arcs() {
+        let outline_layers = parse_gerber_with_source_contours(
+            "\
+%FSLAX26Y26*%
+%MOMM*%
+%ADD10C,0.0*%
+D10*
+G03*
+G75*
+X1000000Y0000000D02*
+X1000000Y0000000I-1000000J0000000D01*
+M02*",
+        );
+
+        let (fill_layers, fill_contours) = Renderer::inverted_outline_fill_layers(&outline_layers)
+            .expect("zero-width arc outline should build fill");
+
+        assert_eq!(fill_layers.len(), 1);
+        assert_eq!(fill_contours.len(), 1);
+        assert!(fill_contours[0].has_arc);
+        assert!((fill_layers[0].boundary.min_x() + 1.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.max_x() - 1.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.min_y() + 1.0).abs() < 0.0001);
+        assert!((fill_layers[0].boundary.max_y() - 1.0).abs() < 0.0001);
     }
 }
