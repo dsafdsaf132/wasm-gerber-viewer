@@ -1053,7 +1053,7 @@ impl Renderer {
 
         for sublayer in sublayers.iter() {
             let path_regions = Self::decode_path_region_metadata(&sublayer)?;
-            needs_stencil |= path_regions.has_geometry();
+            needs_stencil |= path_regions.region_count() > 0;
             let boundary = match Self::decode_render_payload_boundary(&sublayer) {
                 Ok(boundary) => boundary,
                 Err(error) => {
