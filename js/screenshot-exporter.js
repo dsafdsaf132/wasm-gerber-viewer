@@ -18,6 +18,24 @@ function hasLayerOffset(offset) {
   return offset.x !== 0 || offset.y !== 0;
 }
 
+function clampAlpha(alpha) {
+  const value = Number(alpha);
+  if (!Number.isFinite(value)) return 1;
+  return Math.min(1, Math.max(0, value));
+}
+
+function normalizeOptionalLayerAlpha(alpha) {
+  if (alpha === null || alpha === undefined) return null;
+  const value = Number(alpha);
+  if (!Number.isFinite(value)) return null;
+  return clampAlpha(value);
+}
+
+function resolveLayerAlpha(layer, defaultAlpha) {
+  const layerAlpha = normalizeOptionalLayerAlpha(layer?.alpha);
+  return layerAlpha === null ? clampAlpha(defaultAlpha) : layerAlpha;
+}
+
 function isDrillLayer(layer) {
   return layer?.kind === "drill";
 }
@@ -562,7 +580,7 @@ export class ScreenshotExporter {
       ? hexColorToRgb(renderState.backgroundColor)
       : [0, 0, 0];
     const drillFillBlendMode = includeBackground ? 1 : 2;
-    const drillAlpha = renderState.globalAlpha > 0 ? 1 / renderState.globalAlpha : 0;
+    const defaultLayerAlpha = clampAlpha(renderState.globalAlpha);
     const layers = this.getLayers();
     const boardOutlineSelection = this.getBoardOutlineSelection?.() ?? "auto";
     const rawBoardOutlineBoundsMarginMm = Number(
@@ -661,6 +679,7 @@ export class ScreenshotExporter {
         gerberRenderLayers.push({
           layerId,
           color: layer.color,
+          alpha: resolveLayerAlpha(layer, defaultLayerAlpha),
         });
         continue;
       }
@@ -678,15 +697,19 @@ export class ScreenshotExporter {
       gerberRenderLayers.push({
         layerId,
         color: layer.color,
+        alpha: resolveLayerAlpha(layer, defaultLayerAlpha),
       });
     }
 
     const orderedGerberRenderLayers = isStackCompositeMode
       ? [...gerberRenderLayers].reverse()
       : gerberRenderLayers;
+    const drillLayerAlpha = gerberRenderLayers.some((layer) => layer.alpha > 0)
+      ? 1
+      : 0;
     for (const layer of orderedGerberRenderLayers) {
       activeLayerIds.push(layer.layerId);
-      colorData.push(layer.color[0], layer.color[1], layer.color[2], 1);
+      colorData.push(layer.color[0], layer.color[1], layer.color[2], layer.alpha);
       blendModes.push(isStackCompositeMode ? 1 : 0);
     }
 
@@ -700,7 +723,7 @@ export class ScreenshotExporter {
           layer.color[0],
           layer.color[1],
           layer.color[2],
-          drillAlpha,
+          drillLayerAlpha,
         );
         blendModes.push(1);
       }
@@ -713,7 +736,7 @@ export class ScreenshotExporter {
           drillFillColor[0],
           drillFillColor[1],
           drillFillColor[2],
-          drillAlpha,
+          drillLayerAlpha,
         );
         blendModes.push(drillFillBlendMode);
       }
@@ -727,6 +750,7 @@ export class ScreenshotExporter {
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
       blendModes: new Uint8Array(blendModes),
+      alpha: 1,
     };
   }
 
@@ -1130,7 +1154,7 @@ export class ScreenshotExporter {
         renderState.viewScaleY,
         renderState.offsetX,
         renderState.offsetY,
-        renderState.globalAlpha,
+        screenshotRenderer.alpha,
       );
     } else {
       screenshotRenderer.processor.render_tile(
@@ -1146,7 +1170,7 @@ export class ScreenshotExporter {
         renderState.viewScaleY,
         renderState.offsetX,
         renderState.offsetY,
-        renderState.globalAlpha,
+        screenshotRenderer.alpha,
       );
     }
     screenshotRenderer.gl.finish();

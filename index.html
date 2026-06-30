@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WASM Gerber Viewer</title>
     <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./vendor/pickr-monolith-1.9.1.min.css" />
     <link rel="stylesheet" href="./css/style.css" />
   </head>
   <body>
@@ -232,7 +233,7 @@
                     <span>Global Alpha</span>
                     <strong id="alpha-value">70%</strong>
                   </label>
-                  <input type="range" id="alpha-slider" min="0" max="100" value="70" />
+                  <input type="range" id="alpha-slider" min="0" max="100" step="1" value="70" />
                 </div>
               </div>
               <div class="layer-list-scroll">
@@ -772,6 +773,7 @@
     </script>
     <script src="./vendor/lucide-1.16.0.min.js"></script>
     <script src="./vendor/jszip-3.10.1.min.js"></script>
+    <script src="./vendor/pickr-1.9.1.min.js"></script>
     <script type="module">
       import { GerberViewer } from "./js/main.js";
 

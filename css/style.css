@@ -886,22 +886,53 @@ button {
 }
 
 .layer-color-picker {
+  position: relative;
   width: 24px;
   height: 24px;
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
-  background: transparent;
+  background:
+    linear-gradient(
+      rgb(var(--layer-color-rgb, 0 255 0) / var(--layer-alpha, 1)),
+      rgb(var(--layer-color-rgb, 0 255 0) / var(--layer-alpha, 1))
+    ),
+    linear-gradient(45deg, #ffffff 25%, transparent 25%),
+    linear-gradient(-45deg, #ffffff 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #ffffff 75%),
+    linear-gradient(-45deg, transparent 75%, #ffffff 75%);
+  background-color: #94a3b8;
+  background-position:
+    0 0,
+    0 0,
+    0 6px,
+    6px -6px,
+    -6px 0;
+  background-size:
+    auto,
+    12px 12px,
+    12px 12px,
+    12px 12px,
+    12px 12px;
   cursor: pointer;
 }
 
-.layer-color-picker::-webkit-color-swatch-wrapper {
-  padding: 0;
+.layer-color-picker:focus-visible {
+  outline: 2px solid rgba(94, 234, 212, 0.72);
+  outline-offset: 2px;
 }
 
-.layer-color-picker::-webkit-color-swatch {
-  border: 0;
-  border-radius: 4px;
+.layer-color-picker.has-alpha-override::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--surface-2);
+  border-radius: 999px;
+  background: #ef4444;
+  box-shadow: 0 0 0 1px rgba(3, 7, 18, 0.72);
 }
 
 .layer-checkbox {
@@ -913,6 +944,59 @@ button {
 
 .layer-item-inverted .layer-checkbox {
   accent-color: #ea580c;
+}
+
+.pcr-app.layer-color-pickr {
+  z-index: 60;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.pcr-app.layer-color-pickr .pcr-selection,
+.pcr-app.layer-color-pickr .pcr-interaction {
+  background: var(--surface);
+}
+
+.pcr-app.layer-color-pickr .pcr-result {
+  border: 1px solid var(--line-strong);
+  background: #0f1724;
+  color: var(--text);
+}
+
+.pcr-app.layer-color-pickr .pcr-save {
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.pcr-app.layer-color-pickr .pcr-save {
+  border-color: rgba(94, 234, 212, 0.45);
+  background: #14313a;
+}
+
+.pcr-app.layer-color-pickr .pcr-layer-alpha-override {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0.8em 0;
+  color: #e7edf5;
+  font-size: 12px;
+  font-weight: 650;
+  user-select: none;
+}
+
+.pcr-app.layer-color-pickr .pcr-layer-alpha-override input {
+  appearance: auto;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  opacity: 1;
+  cursor: pointer;
 }
 
 .layer-label {
