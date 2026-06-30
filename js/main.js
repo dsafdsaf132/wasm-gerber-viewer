@@ -5146,10 +5146,7 @@ export class GerberViewer {
     const orderedGerberLayers = isStack
       ? [...gerberLayers].reverse()
       : gerberLayers;
-    const hasVisibleGerberAlpha = gerberLayers.some(
-      (layer) => this.resolveLayerAlpha(layer, defaultLayerAlpha) > 0,
-    );
-    const drillLayerAlpha = hasVisibleGerberAlpha ? 1 : 0;
+    const drillLayerAlpha = 1;
     orderedGerberLayers.forEach((layer) => {
       activeLayerIds.push(this.getInvertedRenderLayerId(layer, selectedLayerIds));
       colorData.push(

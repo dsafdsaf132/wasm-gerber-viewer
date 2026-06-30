@@ -704,9 +704,7 @@ export class ScreenshotExporter {
     const orderedGerberRenderLayers = isStackCompositeMode
       ? [...gerberRenderLayers].reverse()
       : gerberRenderLayers;
-    const drillLayerAlpha = gerberRenderLayers.some((layer) => layer.alpha > 0)
-      ? 1
-      : 0;
+    const drillLayerAlpha = 1;
     for (const layer of orderedGerberRenderLayers) {
       activeLayerIds.push(layer.layerId);
       colorData.push(layer.color[0], layer.color[1], layer.color[2], layer.alpha);
