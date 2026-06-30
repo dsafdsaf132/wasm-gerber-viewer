@@ -11,6 +11,11 @@ use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
 use i_triangle::float::triangulatable::Triangulatable;
+use lyon::math::{point, vector, Angle};
+use lyon::path::{FillRule as LyonFillRule, Path};
+use lyon::tessellation::{
+    geometry_builder::BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers,
+};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
@@ -1744,8 +1749,18 @@ fn append_path_region(
         clear_max_y,
     )?;
 
-    for contour in region_contours {
-        append_contour_segments(path_regions, contour, reference, offset_x, offset_y)?;
+    if region_contours_have_arcs(region_contours) {
+        append_lyon_path_region(
+            path_regions,
+            region_contours,
+            offset_x,
+            offset_y,
+            arc_tessellation_quality,
+        )?;
+    } else {
+        for contour in region_contours {
+            append_contour_segments(path_regions, contour, reference, offset_x, offset_y)?;
+        }
     }
 
     if collect_pick_contours {
@@ -1951,6 +1966,199 @@ fn append_contour_segments(
     }
 
     Ok(())
+}
+
+#[derive(Copy, Clone, Debug)]
+struct LyonPathVertex {
+    position: [f32; 2],
+}
+
+fn append_lyon_path_region(
+    path_regions: &mut PathRegions,
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+    arc_tessellation_quality: u32,
+) -> Result<(), String> {
+    let path = build_lyon_path(region_contours, offset_x, offset_y)?;
+    let (vertex_capacity, index_capacity) = lyon_geometry_capacity(region_contours);
+    let mut geometry: VertexBuffers<LyonPathVertex, u32> =
+        VertexBuffers::with_capacity(vertex_capacity, index_capacity);
+    let tolerance = lyon_fill_tolerance(region_contours, arc_tessellation_quality);
+    let options = FillOptions::tolerance(tolerance).with_fill_rule(LyonFillRule::EvenOdd);
+    let mut tessellator = FillTessellator::new();
+
+    tessellator
+        .tessellate_path(
+            &path,
+            &options,
+            &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| LyonPathVertex {
+                position: vertex.position().to_array(),
+            }),
+        )
+        .map_err(|error| format!("Gerber region with arcs failed to tessellate: {error:?}"))?;
+
+    let output_coord_count = geometry.indices.len().checked_mul(2).ok_or_else(|| {
+        "Gerber region with arcs is too large to render: tessellated vertex count overflow"
+            .to_string()
+    })?;
+    try_reserve_values(
+        &mut path_regions.wedge_vertices,
+        output_coord_count,
+        "path region lyon vertices",
+    )?;
+
+    for index in geometry.indices {
+        let Some(vertex) = geometry.vertices.get(index as usize) else {
+            return Err(
+                "Gerber region with arcs produced an invalid tessellation index".to_string(),
+            );
+        };
+        path_regions
+            .wedge_vertices
+            .extend_from_slice(&vertex.position);
+    }
+
+    Ok(())
+}
+
+fn build_lyon_path(
+    region_contours: &[RegionContour],
+    offset_x: f32,
+    offset_y: f32,
+) -> Result<Path, String> {
+    let mut builder = Path::builder().with_svg();
+    let (endpoint_capacity, control_point_capacity) = lyon_path_capacity(region_contours);
+    builder.reserve(endpoint_capacity, control_point_capacity);
+
+    for contour in region_contours {
+        if contour.segments.is_empty() {
+            let Some(first) = contour.points.first().copied() else {
+                continue;
+            };
+            builder.move_to(lyon_point(offset_point(first, offset_x, offset_y)));
+            for point in contour.points.iter().skip(1) {
+                builder.line_to(lyon_point(offset_point(*point, offset_x, offset_y)));
+            }
+            builder.close();
+            continue;
+        }
+
+        let Some(start) = contour_start_point(contour) else {
+            continue;
+        };
+        builder.move_to(lyon_point(offset_point(start, offset_x, offset_y)));
+        for segment in &contour.segments {
+            match *segment {
+                RegionSegment::Line { end, .. } => {
+                    builder.line_to(lyon_point(offset_point(end, offset_x, offset_y)));
+                }
+                RegionSegment::Arc {
+                    start,
+                    end,
+                    center,
+                    radius,
+                    sweep_angle,
+                    ..
+                } => {
+                    let start = offset_point(start, offset_x, offset_y);
+                    let end = offset_point(end, offset_x, offset_y);
+                    if radius > 0.0 && sweep_angle.is_finite() {
+                        builder.line_to(lyon_point(start));
+                        builder.arc(
+                            lyon_point(offset_point(center, offset_x, offset_y)),
+                            vector(radius, radius),
+                            Angle::radians(sweep_angle),
+                            Angle::radians(0.0),
+                        );
+                        builder.line_to(lyon_point(end));
+                    } else {
+                        builder.line_to(lyon_point(end));
+                    }
+                }
+            }
+        }
+        builder.close();
+    }
+
+    Ok(builder.build())
+}
+
+fn lyon_path_capacity(region_contours: &[RegionContour]) -> (usize, usize) {
+    let mut endpoints = region_contours.len();
+    let mut control_points = 0usize;
+
+    for contour in region_contours {
+        if contour.segments.is_empty() {
+            endpoints = endpoints.saturating_add(contour.points.len());
+            continue;
+        }
+
+        for segment in &contour.segments {
+            match *segment {
+                RegionSegment::Line { .. } => {
+                    endpoints = endpoints.saturating_add(1);
+                }
+                RegionSegment::Arc { sweep_angle, .. } => {
+                    let curve_count = lyon_arc_curve_count(sweep_angle);
+                    endpoints = endpoints.saturating_add(1 + curve_count);
+                    control_points = control_points.saturating_add(curve_count);
+                }
+            }
+        }
+    }
+
+    (endpoints.max(16), control_points)
+}
+
+fn lyon_geometry_capacity(region_contours: &[RegionContour]) -> (usize, usize) {
+    let (endpoint_capacity, _) = lyon_path_capacity(region_contours);
+    (
+        endpoint_capacity.max(512),
+        endpoint_capacity.saturating_mul(3).max(1024),
+    )
+}
+
+fn lyon_arc_curve_count(sweep_angle: f32) -> usize {
+    if !sweep_angle.is_finite() {
+        return 1;
+    }
+
+    let quarter_turns = (sweep_angle.abs() / (std::f32::consts::PI * 0.5)).ceil();
+    (quarter_turns as usize).clamp(1, 16)
+}
+
+fn contour_start_point(contour: &RegionContour) -> Option<[f32; 2]> {
+    contour.segments.first().map(|segment| match *segment {
+        RegionSegment::Line { start, .. } | RegionSegment::Arc { start, .. } => start,
+    })
+}
+
+fn lyon_point(position: [f32; 2]) -> lyon::math::Point {
+    point(position[0], position[1])
+}
+
+fn lyon_fill_tolerance(region_contours: &[RegionContour], arc_tessellation_quality: u32) -> f32 {
+    let mut max_radius = 0.0_f32;
+    for contour in region_contours {
+        for segment in &contour.segments {
+            if let RegionSegment::Arc { radius, .. } = *segment {
+                max_radius = max_radius.max(radius.abs());
+            }
+        }
+    }
+
+    let relative = match arc_tessellation_quality {
+        0 => 1.0 / 2048.0,
+        2 => 1.0 / 32768.0,
+        _ => 1.0 / 8192.0,
+    };
+    let minimum = match arc_tessellation_quality {
+        0 => 0.001,
+        2 => 0.00005,
+        _ => 0.00025,
+    };
+    (max_radius * relative).max(minimum)
 }
 
 fn path_region_bounds(

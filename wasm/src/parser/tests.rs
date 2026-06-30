@@ -477,8 +477,10 @@ M02*",
     let layer = &layers[0];
     assert!(layer.triangles.vertices.is_empty());
     assert_eq!(layer.path_regions.region_count(), 1);
-    assert_eq!(layer.path_regions.wedge_vertex_offsets, vec![0, 9]);
-    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 6]);
+    assert_eq!(layer.path_regions.wedge_vertex_offsets.len(), 2);
+    assert!(layer.path_regions.wedge_vertex_offsets[1] > 0);
+    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 0]);
+    assert!(layer.path_regions.sector_vertices.is_empty());
     assert_eq!(layer.path_regions.cover_vertices.len(), 12);
     assert_eq!(layer.path_regions.clear_vertices.len(), 12);
     assert!(layer.path_regions.pick_contours.is_empty());
@@ -802,6 +804,30 @@ M02*";
 }
 
 #[test]
+fn preserved_region_arc_quality_controls_lyon_tessellation_density() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*";
+    let low_layers =
+        parse_gerber_with_options(data, true, 0).expect("low quality path region arc should parse");
+    let high_layers = parse_gerber_with_options(data, true, 2)
+        .expect("high quality path region arc should parse");
+
+    assert!(
+        high_layers[0].path_regions.wedge_vertices.len()
+            > low_layers[0].path_regions.wedge_vertices.len(),
+        "high quality should produce more Lyon-filled path vertices than low quality"
+    );
+}
+
+#[test]
 fn aperture_block_region_arc_is_preserved_for_path_renderer() {
     let layers = parse_gerber(
         "\
@@ -945,7 +971,7 @@ M02*",
 }
 
 #[test]
-fn path_region_translate_moves_arc_sector_bounds_and_center() {
+fn path_region_translate_moves_lyon_path_vertices() {
     let mut layers = parse_gerber(
         "\
 %FSLAX24Y24*%
@@ -960,12 +986,17 @@ M02*",
     )
     .expect("region arc should parse");
 
+    let before = layers[0].path_regions.wedge_vertices.clone();
     layers[0].translate(10.0, 20.0);
-    let sector = &layers[0].path_regions.sector_vertices;
-    assert_approx_eq(sector[0], 9.0);
-    assert_approx_eq(sector[1], 20.0);
-    assert_approx_eq(sector[2], 10.0);
-    assert_approx_eq(sector[3], 20.0);
+    assert!(!before.is_empty());
+    assert!(layers[0].path_regions.sector_vertices.is_empty());
+    for (before, after) in before
+        .chunks_exact(2)
+        .zip(layers[0].path_regions.wedge_vertices.chunks_exact(2))
+    {
+        assert_approx_eq(after[0], before[0] + 10.0);
+        assert_approx_eq(after[1], before[1] + 20.0);
+    }
 }
 
 #[test]

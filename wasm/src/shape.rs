@@ -436,8 +436,8 @@ impl Thermals {
 /// Arc-containing region path data rendered by the WebGL stencil path renderer.
 ///
 /// Large regions are stored in flat buffers to avoid per-segment JS objects:
-/// - `wedge_vertices`: one or two stencil fan triangles per path segment
-/// - `sector_vertices`: expanded analytic arc-sector quads, 7 floats per vertex
+/// - `wedge_vertices`: stencil triangles for line-only fans or Lyon-filled arc regions
+/// - `sector_vertices`: legacy analytic arc-sector quads, 7 floats per vertex
 /// - `cover_vertices`: one screen-coverable bounding quad per region
 /// - `clear_vertices`: one quad covering all stencil writes per region
 #[derive(Clone, Debug)]

@@ -5817,7 +5817,8 @@ M02*",
 
         assert_eq!(fill_layers.len(), 1);
         assert!(fill_contours.iter().any(|contour| contour.has_arc));
-        assert!(!fill_layers[0].path_regions.sector_vertices.is_empty());
+        assert!(!fill_layers[0].path_regions.wedge_vertices.is_empty());
+        assert!(fill_layers[0].path_regions.sector_vertices.is_empty());
     }
 
     #[test]
