@@ -8,7 +8,10 @@ import {
   isNoGeometryError,
 } from "./file-utils.js";
 import { LayerFilterStore } from "./layer-filters.js";
-import { renderLayerList as renderLayerListView } from "./layer-list.js";
+import {
+  refreshLayerListInheritedAlpha,
+  renderLayerList as renderLayerListView,
+} from "./layer-list.js";
 import {
   drawMeasurementsOnContext,
   formatDimensionPair,
@@ -6412,7 +6415,7 @@ export class GerberViewer {
 
   updateGlobalAlpha(alpha) {
     this.globalAlpha = clampAlpha(alpha);
-    // Re-render with new alpha
+    refreshLayerListInheritedAlpha(this.layerList);
     this.requestRender();
   }
 

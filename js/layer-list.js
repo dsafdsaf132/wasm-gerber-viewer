@@ -17,6 +17,16 @@ function rgbToHex(rgb) {
   return `#${r}${g}${b}`;
 }
 
+function hexToRgb(hexColor) {
+  const match = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(hexColor);
+  if (!match) return null;
+  return [
+    parseInt(match[1], 16) / 255,
+    parseInt(match[2], 16) / 255,
+    parseInt(match[3], 16) / 255,
+  ];
+}
+
 function rgbToRgbaString(rgb, alpha = 1) {
   const r = Math.round(clampColorChannel(rgb[0]) * 255);
   const g = Math.round(clampColorChannel(rgb[1]) * 255);
@@ -47,9 +57,54 @@ function updateColorButtonAlphaOverride(button, hasOverride) {
   button.classList.toggle("has-alpha-override", Boolean(hasOverride));
 }
 
+function getColorPickerButtonLabel(layer) {
+  return `${layer.name} color`;
+}
+
+function getPickrRoot(pickr) {
+  return pickr?.getRoot?.() ?? null;
+}
+
 function getPickrRootElement(pickr) {
-  const root = pickr?.getRoot?.();
+  const root = getPickrRoot(pickr);
   return root?.app ?? root?.root ?? root?.interaction?.app ?? null;
+}
+
+function getPickrFocusTarget(pickr) {
+  const root = getPickrRoot(pickr);
+  return (
+    root?.palette?.palette ??
+    root?.interaction?.result ??
+    root?.hue?.slider ??
+    root?.opacity?.slider ??
+    root?.interaction?.save ??
+    null
+  );
+}
+
+let colorPickerDialogId = 0;
+
+function configurePickrAccessibility({ button, layer, pickr }) {
+  const root = getPickrRootElement(pickr);
+  if (!root) return;
+
+  if (!root.id) {
+    colorPickerDialogId += 1;
+    root.id = `layer-color-picker-dialog-${colorPickerDialogId}`;
+  }
+  root.setAttribute("role", "dialog");
+  root.setAttribute("aria-label", `${layer.name} color picker`);
+  button.setAttribute("aria-label", getColorPickerButtonLabel(layer));
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-controls", root.id);
+  button.setAttribute("aria-expanded", "false");
+}
+
+function focusPickrDialog(pickr) {
+  const root = pickr?.getRoot?.();
+  const target = getPickrFocusTarget(pickr);
+  if (!target?.focus || !root?.app?.classList.contains("visible")) return;
+  target.focus({ preventScroll: true });
 }
 
 function destroyContainerPickrs(container) {
@@ -63,6 +118,51 @@ function destroyContainerPickrs(container) {
   container._layerPickrs = [];
 }
 
+function attachNativeColorFallback({
+  button,
+  layer,
+  getGlobalAlpha,
+  lockOpacity,
+  onColorChange,
+}) {
+  button.title = `${button.title} (basic picker)`;
+  button.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "color";
+    input.value = rgbToHex(layer.color);
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    input.style.top = "0";
+
+    const cleanup = () => {
+      input.remove();
+    };
+    input.addEventListener("change", () => {
+      const rgb = hexToRgb(input.value);
+      if (!rgb) {
+        cleanup();
+        return;
+      }
+      const alpha = lockOpacity ? 1 : layer.alpha ?? getGlobalAlpha();
+      updateColorButton(button, rgb, alpha);
+      onColorChange(layer.id, input.value);
+      cleanup();
+    });
+    input.addEventListener("blur", cleanup, { once: true });
+
+    document.body.appendChild(input);
+    input.click();
+  });
+
+  return {
+    destroyAndRemove() {},
+    syncGlobalAlpha() {
+      if (lockOpacity || layer.alpha !== null && layer.alpha !== undefined) return;
+      updateColorButton(button, layer.color, getGlobalAlpha());
+    },
+  };
+}
+
 function createPickrInstance({
   button,
   layer,
@@ -71,7 +171,15 @@ function createPickrInstance({
   onColorChange,
 }) {
   const PickrConstructor = globalThis.Pickr;
-  if (!PickrConstructor?.create) return null;
+  if (!PickrConstructor?.create) {
+    return attachNativeColorFallback({
+      button,
+      layer,
+      getGlobalAlpha,
+      lockOpacity,
+      onColorChange,
+    });
+  }
 
   const getEffectiveAlpha = () =>
     lockOpacity
@@ -112,6 +220,7 @@ function createPickrInstance({
       },
     },
   });
+  configurePickrAccessibility({ button, layer, pickr });
 
   if (!lockOpacity) {
     attachAlphaOverrideControl({
@@ -127,6 +236,11 @@ function createPickrInstance({
     state.lastAlpha = getEffectiveAlpha();
     syncAlphaOverrideControl(state);
     pickr.setColor(rgbToRgbaString(layer.color, getEffectiveAlpha()), true);
+    button.setAttribute("aria-expanded", "true");
+    requestAnimationFrame(() => focusPickrDialog(pickr));
+  });
+  pickr.on("hide", () => {
+    button.setAttribute("aria-expanded", "false");
   });
   pickr.on("change", (color) => {
     if (lockOpacity || !state.useGlobalAlpha) return;
@@ -147,7 +261,7 @@ function createPickrInstance({
       : state.useGlobalAlpha
         ? null
         : clampAlpha(rgba[3]);
-    updateColorButton(button, rgb, alpha ?? getGlobalAlpha());
+    updateColorButton(button, rgb, lockOpacity ? 1 : alpha ?? getGlobalAlpha());
     updateColorButtonAlphaOverride(
       button,
       alpha !== null && alpha !== undefined,
@@ -156,7 +270,23 @@ function createPickrInstance({
     pickr.hide();
   });
 
-  return pickr;
+  return {
+    destroyAndRemove: () => pickr.destroyAndRemove(),
+    syncGlobalAlpha() {
+      if (lockOpacity || layer.alpha !== null && layer.alpha !== undefined) return;
+
+      const alpha = getEffectiveAlpha();
+      updateColorButton(button, layer.color, alpha);
+      if (!pickr.isOpen?.()) return;
+
+      state.lastAlpha = alpha;
+      if (!state.useGlobalAlpha) return;
+
+      const rgba = pickr.getColor().toRGBA();
+      const rgb = [rgba[0] / 255, rgba[1] / 255, rgba[2] / 255];
+      pickr.setColor(rgbToRgbaString(rgb, alpha), true);
+    },
+  };
 }
 
 function attachAlphaOverrideControl({
@@ -261,7 +391,7 @@ function createLayerItem({
   const colorPicker = document.createElement("button");
   colorPicker.type = "button";
   colorPicker.className = "layer-color-picker";
-  colorPicker.setAttribute("aria-label", `${layer.name} color`);
+  colorPicker.setAttribute("aria-label", getColorPickerButtonLabel(layer));
   colorPicker.title = "Layer color";
   updateColorButton(colorPicker, layer.color, layer.alpha ?? getGlobalAlpha());
   updateColorButtonAlphaOverride(
@@ -346,7 +476,7 @@ function createDrillItem({
   const colorPicker = document.createElement("button");
   colorPicker.type = "button";
   colorPicker.className = "layer-color-picker";
-  colorPicker.setAttribute("aria-label", `${layer.name} color`);
+  colorPicker.setAttribute("aria-label", getColorPickerButtonLabel(layer));
   colorPicker.title = "Layer color";
   updateColorButton(colorPicker, layer.color, 1);
   for (const eventName of ["click", "mousedown", "pointerdown", "touchstart"]) {
@@ -499,4 +629,10 @@ export function renderLayerList({
       }),
     )
     .filter(Boolean);
+}
+
+export function refreshLayerListInheritedAlpha(container) {
+  for (const controller of container._layerPickrs ?? []) {
+    controller.syncGlobalAlpha?.();
+  }
 }
