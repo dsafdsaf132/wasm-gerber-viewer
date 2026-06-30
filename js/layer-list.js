@@ -93,6 +93,7 @@ function createPickrInstance({
     useAsButton: true,
     default: rgbToRgbaString(layer.color, getEffectiveAlpha()),
     defaultRepresentation: "RGBA",
+    outputPrecision: 3,
     lockOpacity,
     comparison: true,
     padding: 8,
