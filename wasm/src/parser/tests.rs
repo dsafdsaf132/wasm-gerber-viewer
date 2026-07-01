@@ -805,7 +805,7 @@ M02*";
 }
 
 #[test]
-fn preserved_region_arc_quality_controls_lyon_tessellation_density() {
+fn preserved_region_arc_quality_does_not_change_analytic_payload() {
     let data = "\
 %FSLAX24Y24*%
 %MOMM*%
@@ -821,10 +821,13 @@ M02*";
     let high_layers = parse_gerber_with_options(data, true, 2)
         .expect("high quality path region arc should parse");
 
-    assert!(
-        high_layers[0].path_regions.wedge_vertices.len()
-            > low_layers[0].path_regions.wedge_vertices.len(),
-        "high quality should produce more Lyon-filled path vertices than low quality"
+    assert_eq!(
+        high_layers[0].path_regions.wedge_vertices.len(),
+        low_layers[0].path_regions.wedge_vertices.len()
+    );
+    assert_eq!(
+        high_layers[0].path_regions.sector_vertices.len(),
+        low_layers[0].path_regions.sector_vertices.len()
     );
 }
 

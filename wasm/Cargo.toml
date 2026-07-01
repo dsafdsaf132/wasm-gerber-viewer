@@ -20,7 +20,6 @@ default = ["console_error_panic_hook"]
 wasm-bindgen = "0.2"
 i_triangle = "^0.38.0"
 i_overlay = "~4.1.1"
-lyon = "1.0.19"
 console_error_panic_hook = { version = "0.1", optional = true }
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
