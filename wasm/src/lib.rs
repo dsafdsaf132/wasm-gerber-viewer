@@ -1020,23 +1020,20 @@ impl GerberProcessor {
             return Ok("highlight_skipped".to_string());
         }
 
-        let (feature, clear_features) = self
+        let interaction_layer = self
             .interaction_layers
             .get(layer_id as usize)
             .and_then(Option::as_ref)
-            .and_then(|layer| {
-                layer.feature(feature_id as usize).map(|feature| {
-                    (
-                        feature.clone(),
-                        layer.following_clear_features_for_highlight(feature_id as usize),
-                    )
-                })
-            })
+            .ok_or_else(|| JsValue::from_str("Interaction layer not found"))?;
+        let feature = interaction_layer
+            .feature(feature_id as usize)
             .ok_or_else(|| JsValue::from_str("Interaction feature not found"))?;
+        let clear_features =
+            interaction_layer.following_clear_features_for_highlight(feature_id as usize);
 
         if let Some(renderer) = &mut self.renderer {
             renderer.render_interaction_highlight(
-                &feature,
+                feature,
                 &clear_features,
                 zoom_x,
                 zoom_y,

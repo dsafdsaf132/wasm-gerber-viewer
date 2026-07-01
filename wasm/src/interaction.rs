@@ -249,7 +249,7 @@ impl InteractionLayer {
     pub fn following_clear_features_for_highlight(
         &self,
         feature_id: usize,
-    ) -> Vec<InteractionFeature> {
+    ) -> Vec<&InteractionFeature> {
         let Some(feature) = self.features.get(feature_id) else {
             return Vec::new();
         };
@@ -265,7 +265,6 @@ impl InteractionLayer {
                     && feature.bounds.intersects(&candidate.bounds)
                     && candidate.has_highlight_geometry()
             })
-            .cloned()
             .collect()
     }
 
@@ -675,6 +674,10 @@ impl FeaturePrimitives {
 
     fn append_highlight_batches(&self, batches: &mut Vec<HighlightBatch>) {
         self.for_each(|primitive| append_primitive_highlight_batches(batches, primitive));
+    }
+
+    fn append_coverage_batches(&self, batches: &mut Vec<HighlightBatch>) {
+        self.for_each(|primitive| append_primitive_coverage_batches(batches, primitive));
     }
 
     fn has_geometry(&self) -> bool {
@@ -1350,6 +1353,12 @@ impl InteractionFeature {
         batches
     }
 
+    pub fn coverage_batches(&self) -> Vec<HighlightBatch> {
+        let mut batches = Vec::new();
+        self.primitives.append_coverage_batches(&mut batches);
+        batches
+    }
+
     pub fn has_highlight_geometry(&self) -> bool {
         self.primitives.has_geometry()
             || self
@@ -1887,6 +1896,17 @@ fn append_primitive_highlight_batches(batches: &mut Vec<HighlightBatch>, primiti
         return;
     }
 
+    append_primitive_clear_sub_batches(batches, primitive);
+}
+
+fn append_primitive_coverage_batches(batches: &mut Vec<HighlightBatch>, primitive: &Primitive) {
+    let mut vertices = Vec::new();
+    append_primitive_triangles(&mut vertices, primitive);
+    append_highlight_batch(batches, vertices, false);
+    append_primitive_clear_sub_batches(batches, primitive);
+}
+
+fn append_primitive_clear_sub_batches(batches: &mut Vec<HighlightBatch>, primitive: &Primitive) {
     match primitive {
         Primitive::Circle {
             hole_x,
@@ -2583,5 +2603,33 @@ mod tests {
         assert!(!batches[0].clear);
         assert!(batches[1].clear);
         assert!(batches[1].vertices.len() > CIRCLE_SEGMENTS * 6);
+    }
+
+    #[test]
+    fn negative_coverage_batches_preserve_aperture_holes() {
+        let feature = InteractionFeature::from_primitives(
+            FeatureKind::Flash,
+            Some("D10".to_string()),
+            Some("circle".to_string()),
+            None,
+            Polarity::Negative,
+            vec![Primitive::Circle {
+                x: 0.0,
+                y: 0.0,
+                radius: 2.0,
+                exposure: 0.0,
+                hole_x: 0.0,
+                hole_y: 0.0,
+                hole_radius: 0.5,
+            }],
+            FeatureProperties::default(),
+        )
+        .expect("negative circle feature should have bounds");
+
+        let batches = feature.coverage_batches();
+
+        assert_eq!(batches.len(), 2);
+        assert!(!batches[0].clear);
+        assert!(batches[1].clear);
     }
 }

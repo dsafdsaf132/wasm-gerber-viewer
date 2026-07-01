@@ -2535,6 +2535,12 @@ impl Renderer {
             }
             previous = offset;
         }
+        if previous != vertex_count {
+            return Err(format!(
+                "Sublayer {} {} must end at the vertex buffer length",
+                sublayer_idx, label
+            ));
+        }
         Ok(())
     }
 
@@ -3330,7 +3336,6 @@ impl Renderer {
         batches: &[HighlightBatch],
         transform: &[f32; 9],
         stencil_program: &ShaderProgram,
-        force_clear: bool,
     ) -> Result<(), JsValue> {
         if batches.is_empty() {
             return Ok(());
@@ -3346,10 +3351,57 @@ impl Renderer {
             if batch.vertices.len() < 6 {
                 continue;
             }
-            let stencil_value = if force_clear || batch.clear { 0 } else { 1 };
+            let stencil_value = if batch.clear { 0 } else { 1 };
             self.gl.stencil_func(ALWAYS, stencil_value, 0x01);
             self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
         }
+
+        Ok(())
+    }
+
+    fn apply_coverage_batches_to_highlight_mask(
+        &self,
+        batches: &[HighlightBatch],
+        transform: &[f32; 9],
+        stencil_program: &ShaderProgram,
+    ) -> Result<(), JsValue> {
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        self.gl.color_mask(false, false, false, false);
+        self.gl.disable(BLEND);
+        self.gl.enable(STENCIL_TEST);
+
+        // Bit 1 is a temporary coverage mask. Clear it without touching the
+        // accumulated selected-feature mask in bit 0.
+        self.gl.stencil_mask(0x02);
+        self.gl.clear_stencil(0);
+        self.gl.clear(STENCIL_BUFFER_BIT);
+
+        self.gl.stencil_op(KEEP, KEEP, REPLACE);
+        for batch in batches {
+            if batch.vertices.len() < 6 {
+                continue;
+            }
+            let stencil_value = if batch.clear { 0 } else { 0x02 };
+            self.gl.stencil_func(ALWAYS, stencil_value, 0x02);
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+        }
+
+        self.gl.stencil_mask(0x01);
+        self.gl.stencil_func(EQUAL, 0x02, 0x02);
+        self.gl.stencil_op(KEEP, KEEP, ZERO);
+        for batch in batches {
+            if batch.vertices.len() < 6 {
+                continue;
+            }
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+        }
+
+        self.gl.stencil_mask(0x02);
+        self.gl.clear_stencil(0);
+        self.gl.clear(STENCIL_BUFFER_BIT);
 
         Ok(())
     }
@@ -3492,7 +3544,7 @@ impl Renderer {
     pub fn render_interaction_highlight(
         &mut self,
         feature: &InteractionFeature,
-        clear_features: &[InteractionFeature],
+        clear_features: &[&InteractionFeature],
         zoom_x: f32,
         zoom_y: f32,
         offset_x: f32,
@@ -3564,7 +3616,7 @@ impl Renderer {
             self.gl.disable(BLEND);
 
             if has_primitive_batches {
-                self.apply_highlight_batches_to_mask(&batches, &transform, stencil_program, false)?;
+                self.apply_highlight_batches_to_mask(&batches, &transform, stencil_program)?;
             }
 
             if let Some(path_regions) = path_regions {
@@ -3572,12 +3624,11 @@ impl Renderer {
             }
 
             for clear_feature in clear_features {
-                let clear_batches = clear_feature.highlight_batches();
-                self.apply_highlight_batches_to_mask(
+                let clear_batches = clear_feature.coverage_batches();
+                self.apply_coverage_batches_to_highlight_mask(
                     &clear_batches,
                     &transform,
                     stencil_program,
-                    true,
                 )?;
                 if let Some(path_regions) = clear_feature.path_regions.as_deref() {
                     self.apply_path_regions_to_highlight_mask(path_regions, &transform, false)?;
@@ -5680,6 +5731,9 @@ mod tests {
         assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[1, 9], 9).is_err());
         assert!(
             Renderer::validate_offsets_invariant("path sector offsets", 0, &[2, 6], 6).is_err()
+        );
+        assert!(
+            Renderer::validate_offsets_invariant("path sector offsets", 0, &[0, 5], 7).is_err()
         );
     }
 

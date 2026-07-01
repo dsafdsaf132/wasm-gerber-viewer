@@ -1036,6 +1036,27 @@ M02*",
 }
 
 #[test]
+fn path_region_canonicalization_preserves_major_arc_sweep() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X000000Y-010000I-010000J000000D01*
+G01*
+X010000Y000000D01*
+G37*
+M02*",
+    )
+    .expect("major arc region should parse");
+
+    assert_eq!(layers[0].path_regions.sector_vertex_offsets, vec![0, 18]);
+}
+
+#[test]
 fn clear_polarity_region_cuts_interaction_highlight_candidate() {
     let payload = parse_gerber_payload_with_options(
         "\
