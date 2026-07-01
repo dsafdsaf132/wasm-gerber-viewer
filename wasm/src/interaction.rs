@@ -242,6 +242,33 @@ impl InteractionLayer {
         self.pick_after(x, y, tolerance, None).0
     }
 
+    pub fn feature(&self, feature_id: usize) -> Option<&InteractionFeature> {
+        self.features.get(feature_id)
+    }
+
+    pub fn following_clear_features_for_highlight(
+        &self,
+        feature_id: usize,
+    ) -> Vec<InteractionFeature> {
+        let Some(feature) = self.features.get(feature_id) else {
+            return Vec::new();
+        };
+        if feature.descriptor.polarity == Polarity::Negative {
+            return Vec::new();
+        }
+
+        self.features
+            .iter()
+            .skip(feature_id.saturating_add(1))
+            .filter(|candidate| {
+                candidate.descriptor.polarity == Polarity::Negative
+                    && feature.bounds.intersects(&candidate.bounds)
+                    && candidate.has_highlight_geometry()
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn pick_after(
         &self,
         x: f32,
@@ -648,6 +675,10 @@ impl FeaturePrimitives {
 
     fn append_highlight_batches(&self, batches: &mut Vec<HighlightBatch>) {
         self.for_each(|primitive| append_primitive_highlight_batches(batches, primitive));
+    }
+
+    fn has_geometry(&self) -> bool {
+        !matches!(self.storage, FeaturePrimitiveStorage::Empty)
     }
 
     fn append_compact_primitives(
@@ -1317,6 +1348,14 @@ impl InteractionFeature {
         let mut batches = Vec::new();
         self.primitives.append_highlight_batches(&mut batches);
         batches
+    }
+
+    pub fn has_highlight_geometry(&self) -> bool {
+        self.primitives.has_geometry()
+            || self
+                .path_regions
+                .as_deref()
+                .is_some_and(PathRegions::has_geometry)
     }
 
     fn hit(&self, point: [f32; 2], tolerance: f32) -> bool {
@@ -2483,6 +2522,22 @@ mod tests {
         let (hit, saw_after) = layer.pick_after(0.0, 0.0, 0.0, None);
         assert!(hit.is_none());
         assert!(!saw_after);
+    }
+
+    #[test]
+    fn highlight_clear_features_follow_selected_dark_feature() {
+        let mut layer = InteractionLayer::new();
+        layer.push(circle_feature(0.0, 1.0, Polarity::Negative));
+        layer.push(circle_feature(0.0, 2.0, Polarity::Positive));
+        layer.push(circle_feature(0.0, 0.5, Polarity::Negative));
+        layer.push(circle_feature(10.0, 0.5, Polarity::Negative));
+        layer.push(circle_feature(0.0, 0.5, Polarity::Positive));
+
+        let clear_features = layer.following_clear_features_for_highlight(1);
+
+        assert_eq!(clear_features.len(), 1);
+        assert_eq!(clear_features[0].descriptor.polarity, Polarity::Negative);
+        assert!((clear_features[0].bounds.max_x() - 0.5).abs() < 0.0001);
     }
 
     #[test]

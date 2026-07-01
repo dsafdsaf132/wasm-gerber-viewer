@@ -927,6 +927,13 @@ impl Boundary {
         self.max_y = self.max_y.max(other.max_y);
     }
 
+    pub(crate) fn intersects(&self, other: &Boundary) -> bool {
+        self.min_x <= other.max_x
+            && self.max_x >= other.min_x
+            && self.min_y <= other.max_y
+            && self.max_y >= other.min_y
+    }
+
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
         set_property(&object, "minX", &JsValue::from_f64(self.min_x as f64))?;

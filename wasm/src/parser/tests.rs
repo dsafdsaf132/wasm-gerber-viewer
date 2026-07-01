@@ -1,5 +1,8 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
-use super::{format_count, parse_gerber, parse_gerber_with_options, GerberParser};
+use super::{
+    format_count, parse_gerber, parse_gerber_payload_with_options, parse_gerber_with_options,
+    GerberParser, Polarity,
+};
 use crate::interaction::FeatureKind;
 use crate::shape::{GerberData, PATH_SECTOR_VERTEX_FLOATS};
 use std::collections::HashMap;
@@ -1030,6 +1033,56 @@ M02*",
 
     assert_approx_eq(start_radius, radius);
     assert_approx_eq(end_radius, radius);
+}
+
+#[test]
+fn clear_polarity_region_cuts_interaction_highlight_candidate() {
+    let payload = parse_gerber_payload_with_options(
+        "\
+%FSLAX36Y36*%
+%MOMM*%
+%LPD*%
+G36*
+X5000000Y20000000D02*
+G01*
+Y37500000D01*
+X37500000D01*
+Y20000000D01*
+X5000000D01*
+G37*
+%LPC*%
+G36*
+X10000000Y25000000D02*
+Y30000000D01*
+G02*
+X12500000Y32500000I2500000J0D01*
+G01*
+X30000000D01*
+G02*
+X30000000Y25000000I0J-3750000D01*
+G01*
+X10000000D01*
+G37*
+M02*",
+        true,
+        1,
+    )
+    .expect("polarity region payload should parse");
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+
+    assert!(interaction_layer.pick(15.0, 28.75, 0.0).is_none());
+
+    let (outer_feature_id, outer_feature) = interaction_layer
+        .pick(6.0, 21.0, 0.0)
+        .expect("outer region should be selectable");
+    assert_eq!(outer_feature.descriptor.kind, FeatureKind::Region);
+
+    let clear_features = interaction_layer.following_clear_features_for_highlight(outer_feature_id);
+    assert_eq!(clear_features.len(), 1);
+    assert_eq!(clear_features[0].descriptor.kind, FeatureKind::Region);
+    assert_eq!(clear_features[0].descriptor.polarity, Polarity::Negative);
 }
 
 #[test]

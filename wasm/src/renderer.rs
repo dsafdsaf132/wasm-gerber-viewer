@@ -12,7 +12,7 @@ use shader::{
     STATIC_DRAW, STENCIL_BUFFER_BIT, STENCIL_TEST, STREAM_DRAW, TRIANGLES, ZERO,
 };
 
-use crate::interaction::InteractionFeature;
+use crate::interaction::{HighlightBatch, InteractionFeature};
 use crate::parser::geometry::{build_path_regions, canonical_arc_curve_bounds};
 use crate::parser::ParserState;
 use crate::region::{RegionContour, RegionSegment};
@@ -3325,12 +3325,40 @@ impl Renderer {
         Ok(())
     }
 
-    fn draw_highlight_path_regions(
+    fn apply_highlight_batches_to_mask(
+        &self,
+        batches: &[HighlightBatch],
+        transform: &[f32; 9],
+        stencil_program: &ShaderProgram,
+        force_clear: bool,
+    ) -> Result<(), JsValue> {
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        self.gl.color_mask(false, false, false, false);
+        self.gl.disable(BLEND);
+        self.gl.enable(STENCIL_TEST);
+        self.gl.stencil_mask(0x01);
+        self.gl.stencil_op(KEEP, KEEP, REPLACE);
+
+        for batch in batches {
+            if batch.vertices.len() < 6 {
+                continue;
+            }
+            let stencil_value = if force_clear || batch.clear { 0 } else { 1 };
+            self.gl.stencil_func(ALWAYS, stencil_value, 0x01);
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+        }
+
+        Ok(())
+    }
+
+    fn apply_path_regions_to_highlight_mask(
         &self,
         path_regions: &PathRegions,
         transform: &[f32; 9],
-        highlight_program: &ShaderProgram,
-        stencil_program: &ShaderProgram,
+        set_mask: bool,
     ) -> Result<(), JsValue> {
         let region_count = path_regions.region_count();
         if region_count == 0 {
@@ -3350,7 +3378,26 @@ impl Renderer {
 
         let result = (|| -> Result<(), JsValue> {
             for region_idx in 0..region_count {
+                let quad_start = Self::checked_path_region_quad_start(region_idx)?;
+
                 self.gl.color_mask(false, false, false, false);
+                self.gl.disable(BLEND);
+                self.gl.enable(STENCIL_TEST);
+
+                // Bit 1 is a temporary parity mask for this path region. Keep
+                // bit 0, the accumulated highlight mask, untouched.
+                self.gl.stencil_mask(0x02);
+                self.gl.stencil_func(ALWAYS, 0, 0xff);
+                self.gl.stencil_op(ZERO, ZERO, ZERO);
+                self.draw_path_solid_range(
+                    transform,
+                    &solid_color,
+                    buffer_cache.path_clear_vao.as_ref(),
+                    quad_start,
+                    6,
+                )?;
+
+                self.gl.stencil_mask(0x02);
                 self.gl.stencil_func(ALWAYS, 0, 0xff);
                 self.gl.stencil_op(KEEP, KEEP, INVERT);
 
@@ -3389,30 +3436,31 @@ impl Renderer {
                     )?;
                 }
 
-                self.gl.color_mask(true, true, true, true);
-                self.gl.stencil_func(NOTEQUAL, 0, 0xff);
-                self.gl.stencil_op(KEEP, KEEP, KEEP);
-                let clear_start = region_idx.checked_mul(12).ok_or_else(|| {
-                    JsValue::from_str("highlight path clear vertex start overflows")
-                })?;
-                let clear_end = clear_start + 12;
-                self.draw_highlight_vertices(
-                    highlight_program,
-                    &path_regions.clear_vertices[clear_start..clear_end],
+                self.gl.stencil_mask(0x01);
+                if set_mask {
+                    self.gl.stencil_func(EQUAL, 0x03, 0x02);
+                    self.gl.stencil_op(KEEP, KEEP, REPLACE);
+                } else {
+                    self.gl.stencil_func(EQUAL, 0x02, 0x02);
+                    self.gl.stencil_op(KEEP, KEEP, ZERO);
+                }
+                self.draw_path_solid_range(
                     transform,
+                    &solid_color,
+                    buffer_cache.path_cover_vao.as_ref(),
+                    quad_start,
+                    6,
                 )?;
 
-                self.gl.color_mask(false, false, false, false);
+                self.gl.stencil_mask(0x02);
                 self.gl.stencil_func(ALWAYS, 0, 0xff);
                 self.gl.stencil_op(ZERO, ZERO, ZERO);
-                let cover_start = region_idx.checked_mul(12).ok_or_else(|| {
-                    JsValue::from_str("highlight path cover vertex start overflows")
-                })?;
-                let cover_end = cover_start + 12;
-                self.draw_highlight_vertices(
-                    stencil_program,
-                    &path_regions.cover_vertices[cover_start..cover_end],
+                self.draw_path_solid_range(
                     transform,
+                    &solid_color,
+                    buffer_cache.path_clear_vao.as_ref(),
+                    quad_start,
+                    6,
                 )?;
             }
 
@@ -3444,6 +3492,7 @@ impl Renderer {
     pub fn render_interaction_highlight(
         &mut self,
         feature: &InteractionFeature,
+        clear_features: &[InteractionFeature],
         zoom_x: f32,
         zoom_y: f32,
         offset_x: f32,
@@ -3508,46 +3557,41 @@ impl Renderer {
                 .as_ref()
                 .ok_or_else(|| JsValue::from_str("Highlight program unavailable"))?;
 
+            self.gl.clear_stencil(0);
+            self.gl.stencil_mask(0xff);
+            self.gl.clear(STENCIL_BUFFER_BIT);
+            self.gl.enable(STENCIL_TEST);
+            self.gl.disable(BLEND);
+
             if has_primitive_batches {
-                self.gl.clear_stencil(0);
-                self.gl.stencil_mask(0xff);
-                self.gl.clear(STENCIL_BUFFER_BIT);
-                self.gl.enable(STENCIL_TEST);
-                self.gl.disable(BLEND);
-                self.gl.color_mask(false, false, false, false);
-                self.gl.stencil_op(KEEP, KEEP, REPLACE);
-
-                for batch in &batches {
-                    let stencil_value = if batch.clear { 0 } else { 1 };
-                    self.gl.stencil_func(ALWAYS, stencil_value, 0xff);
-                    self.draw_highlight_vertices(stencil_program, &batch.vertices, &transform)?;
-                }
-
-                self.gl.color_mask(true, true, true, true);
-                self.gl.enable(BLEND);
-                self.gl.blend_equation(FUNC_ADD);
-                self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
-                self.gl.stencil_func(EQUAL, 1, 0xff);
-                self.gl.stencil_mask(0x00);
-                self.gl.stencil_op(KEEP, KEEP, KEEP);
-                self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
+                self.apply_highlight_batches_to_mask(&batches, &transform, stencil_program, false)?;
             }
 
             if let Some(path_regions) = path_regions {
-                self.gl.clear_stencil(0);
-                self.gl.stencil_mask(0xff);
-                self.gl.clear(STENCIL_BUFFER_BIT);
-                self.gl.enable(STENCIL_TEST);
-                self.gl.enable(BLEND);
-                self.gl.blend_equation(FUNC_ADD);
-                self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
-                self.draw_highlight_path_regions(
-                    path_regions,
-                    &transform,
-                    highlight_program,
-                    stencil_program,
-                )?;
+                self.apply_path_regions_to_highlight_mask(path_regions, &transform, true)?;
             }
+
+            for clear_feature in clear_features {
+                let clear_batches = clear_feature.highlight_batches();
+                self.apply_highlight_batches_to_mask(
+                    &clear_batches,
+                    &transform,
+                    stencil_program,
+                    true,
+                )?;
+                if let Some(path_regions) = clear_feature.path_regions.as_deref() {
+                    self.apply_path_regions_to_highlight_mask(path_regions, &transform, false)?;
+                }
+            }
+
+            self.gl.color_mask(true, true, true, true);
+            self.gl.enable(BLEND);
+            self.gl.blend_equation(FUNC_ADD);
+            self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+            self.gl.stencil_func(EQUAL, 0x01, 0x01);
+            self.gl.stencil_mask(0x00);
+            self.gl.stencil_op(KEEP, KEEP, KEEP);
+            self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
             Ok(())
         })();
 
