@@ -129,6 +129,7 @@ type GerberLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      kind?: LayerKind;
     };
 ```
 
@@ -156,6 +157,7 @@ type GerberNodeLayer =
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
+      kind?: LayerKind;
     }
   | {
       path: string;
@@ -165,6 +167,7 @@ type GerberNodeLayer =
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
+      kind?: LayerKind;
     };
 ```
 
@@ -215,7 +218,7 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG 바이트를 `Uint8Array`로 반환합니다.
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG 바이트를 임시 파일에 스트리밍한 뒤 성공하면 `outputPath`를 교체합니다. 상위 directory는 미리 존재해야 합니다.
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG chunk를 Node writable stream에 씁니다.
-- `fileLayer(path, options)`: path 기반 Node layer config를 만듭니다. `options`는 `name`, `color`, `alpha`, `offsetX`, `offsetY`를 받습니다.
+- `fileLayer(path, options)`: path 기반 Node layer config를 만듭니다. `options`는 `name`, `color`, `alpha`, `offsetX`, `offsetY`, `inverted`, `kind`를 받습니다.
 - `packageRoot()`: 설치된 패키지 directory 경로를 반환합니다.
 - `renderer.loadLayer(layer, layerOptions)`: Node layer 하나를 한 번 파싱하고 여러 frame에서 재사용할 수 있는 prepared layer를 반환합니다.
 - `renderer.loadLayers(layers, options)`: 여러 layer를 파싱하고 `{ layers, loadedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뜁니다.
@@ -276,6 +279,11 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `globalAlpha`: `blend` 모드에서 명시적인 layer `alpha`가 없는 Gerber layer에 적용되는 opacity입니다. 기본값은 `0.7`입니다.
 - `compositeMode`: layer 합성 모드입니다. `"blend"` 또는 `"stack"`을 받으며 기본값은 `"blend"`입니다. `blend`는 alpha additive blending을 사용하고, `stack`은 Gerber layer를 입력 순서대로 source-over 합성하므로 뒤 Gerber layer가 앞 Gerber layer를 덮으며 기본 opacity는 `1`입니다. Drill overlay는 Gerber layer 이후에 렌더링됩니다.
 - `invertedOutline`: Node 전용 inverted layer 기준 outline입니다. `"auto"`는 board outline layer를 자동 감지하고, `"bounds"`는 현재 Gerber bounds를 채우며, layer index/name selector도 사용할 수 있습니다. 기본값은 `"auto"`입니다.
+- `maxBandBytes`: Node 전용 streamed PNG row-buffer budget입니다. 기본값은 `512 MiB`입니다.
+- `maxFullFrameBytes`: Node 전용 full-frame PNG export 선택 기준 memory budget입니다. 기본값은 `512 MiB`입니다.
+- `maxRenderTargetBytes`: Node 전용 per-render-target memory cap입니다. 기본적으로 사용 가능한 GPU/driver budget을 probe하고 실패하면 `2 GiB`를 사용합니다.
+- `framebufferMemorySafetyFactor`: Node 전용 full-frame framebuffer memory estimate multiplier입니다. 기본값은 `2`입니다.
+- `strategy`: Node 전용 PNG export strategy입니다. `"auto"`, `"full-frame"`, `"stream"` 중 하나이며 기본값은 `"auto"`입니다.
 - `layerErrorMode`: `"skip"`은 남은 유효한 layer를 계속 렌더링하고, `"throw"`는 첫 실패에서 Promise를 reject합니다. 기본값은 `"skip"`입니다.
 - `onLayerError`: `"skip"` mode에서 건너뛴 layer를 받는 callback입니다. 전달 값은 `{ layer, name, error }`입니다.
 - `rendererOptions`: 브라우저 one-shot helper 전용입니다. 렌더러 생성 시 그대로 전달됩니다.
@@ -290,12 +298,22 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `kind`: source filename이 없거나 모호할 때 `"gerber"` 또는 `"drill"`을 강제로 지정합니다.
 - `name`: `{ source, name }` 또는 `{ path, name }` 같은 config object에서 쓰는 layer 표시 이름입니다.
 
+`loadLayer()`와 `loadLayers()`는 parse/load option도 받습니다.
+
+- `preserveArcRegions`: prepared layer에서 exact region arc를 유지합니다. 기본값은 `true`입니다.
+- `arcTessellationQuality`: region arc를 approximate할 때 prepared layer의 arc quality를 지정합니다.
+- `retainSourceContentForInversion`: Node 전용입니다. prepared layer를 나중에 inverted layer나 explicit outline source로 사용할 수 있도록 원본 Gerber text를 유지합니다.
+
 `exportOptions`는 PNG export를 제어합니다.
 
 - `type`: 브라우저 전용 export MIME type입니다. 기본값은 `image/png`이며, Node는 항상 PNG를 씁니다.
 - `quality`: 브라우저 전용 encoder quality이며 `canvas.toBlob`에 전달됩니다.
 - `background`: export background 재정의입니다. `null`을 사용하면 transparency를 유지합니다. 기본값은 마지막 frame background입니다.
 - `maxBandBytes`: streamed PNG export의 approximate row-buffer budget입니다. Node는 high-resolution tiled rendering에도 이 값을 사용합니다.
+- `maxFullFrameBytes`: Node 전용 full-frame PNG export memory budget입니다.
+- `maxRenderTargetBytes`: Node 전용 per-render-target memory cap입니다.
+- `framebufferMemorySafetyFactor`: Node 전용 framebuffer memory estimate multiplier입니다.
+- `strategy`: Node 전용 PNG export strategy입니다. `"auto"`, `"full-frame"`, `"stream"` 중 하나입니다.
 
 `rendererOptions`는 renderer 생성을 제어합니다.
 
@@ -354,6 +372,10 @@ CLI 옵션:
 - `--composite-mode <blend|stack>`: layer 합성 모드입니다. 기본값은 `blend`입니다.
 - `--minimum-feature-pixels <px>`: line/arc의 최소 렌더링 폭입니다. 기본값은 `1`입니다.
 - `--max-render-target-bytes <size>`: render target별 memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
+- `--max-band-bytes <size>`: streamed PNG row-buffer cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
+- `--max-full-frame-bytes <size>`: full-frame PNG memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
+- `--framebuffer-memory-safety-factor <n>`: full-frame framebuffer memory estimate multiplier입니다. 기본값은 `2`입니다.
+- `--render-strategy <auto|full-frame|stream>`: PNG export strategy입니다. 기본값은 `auto`입니다.
 - `--approx-region-arcs`: 렌더링 전에 region arc를 line segment로 변환합니다.
 - `--arc-quality <0|1|2>`: arc 근사 품질입니다. 기본값은 `1`입니다.
 - `--invert-layer <selector>`: Gerber layer를 inverted/negative layer로 렌더링합니다. 여러 layer를 뒤집으려면 반복해서 지정합니다. Selector는 1-based layer index, exact layer name, basename을 지원합니다.

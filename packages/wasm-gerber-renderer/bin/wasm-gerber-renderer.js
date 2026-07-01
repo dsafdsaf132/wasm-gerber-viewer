@@ -17,6 +17,11 @@ Options:
   --composite-mode <blend|stack>   blend=additive, stack=ordered source-over
   --minimum-feature-pixels <px>    Minimum line/arc display width (default: 1)
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
+  --max-band-bytes <size>          Streamed PNG row-buffer cap, e.g. 512m
+  --max-full-frame-bytes <size>    Full-frame PNG memory cap, e.g. 512m
+  --framebuffer-memory-safety-factor <n>
+                                  Full-frame memory estimate safety factor
+  --render-strategy <strategy>     PNG strategy: auto, full-frame, or stream
   --approx-region-arcs             Approximate region arcs before rendering (default: false)
   --arc-quality <0|1|2>            Approx arc quality: low, normal, high (default: 1)
   --invert-layer <selector>        Invert a Gerber layer by 1-based index or name (repeatable)
@@ -112,6 +117,14 @@ function parseArgs(args) {
       frameOptions.minimumFeaturePixels = readNumber(args, ++index, arg);
     } else if (arg === "--max-render-target-bytes") {
       frameOptions.maxRenderTargetBytes = readByteSize(args, ++index, arg);
+    } else if (arg === "--max-band-bytes") {
+      frameOptions.maxBandBytes = readByteSize(args, ++index, arg);
+    } else if (arg === "--max-full-frame-bytes") {
+      frameOptions.maxFullFrameBytes = readByteSize(args, ++index, arg);
+    } else if (arg === "--framebuffer-memory-safety-factor") {
+      frameOptions.framebufferMemorySafetyFactor = readNumber(args, ++index, arg);
+    } else if (arg === "--render-strategy") {
+      frameOptions.strategy = readRenderStrategy(args, ++index, arg);
     } else if (arg === "--approx-region-arcs") {
       frameOptions.preserveArcRegions = false;
     } else if (arg === "--arc-quality") {
@@ -145,6 +158,14 @@ function readCompositeMode(args, index, flag) {
     return value;
   }
   throw new Error(`${flag} must be blend or stack.`);
+}
+
+function readRenderStrategy(args, index, flag) {
+  const value = readOptionValue(args, index, flag);
+  if (value === "auto" || value === "full-frame" || value === "stream") {
+    return value;
+  }
+  throw new Error(`${flag} must be auto, full-frame, or stream.`);
 }
 
 function inferOutputPath(inputs) {

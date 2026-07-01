@@ -69,6 +69,10 @@ Useful CLI options:
 - `--composite-mode <blend|stack>` sets additive blending or ordered stack compositing.
 - `--minimum-feature-pixels <px>` keeps thin lines/arcs visible.
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
+- `--max-band-bytes <size>` caps streamed PNG row-buffer memory.
+- `--max-full-frame-bytes <size>` caps full-frame PNG export memory.
+- `--framebuffer-memory-safety-factor <n>` adjusts full-frame memory estimates.
+- `--render-strategy <auto|full-frame|stream>` chooses the Node PNG export path.
 - `--approx-region-arcs` uses faster approximate region arcs.
 - `--arc-quality <0|1|2>` controls approximate arc quality.
 - `--invert-layer <selector>` renders a Gerber layer as an inverted/negative layer. Repeat it for multiple layers.
@@ -252,8 +256,15 @@ Layer options:
 - `alpha` overrides the frame default for that layer; in `stack` mode explicit Gerber alpha overrides the full-opacity default, and drill layers default to full opacity unless set
 - `offsetX`
 - `offsetY`
+- `kind` forces `"gerber"` or `"drill"` when a filename is unavailable or ambiguous
+- Node-only `inverted` renders a Gerber layer as an inverted/negative layer
 
 Colors are normalized RGB arrays in browser APIs, e.g. `[1, 0, 0]`. Node APIs also accept CSS-like color strings such as `"#ff3b30"` and `"rgba(255,0,0,0.8)"`.
+
+Node prepared layers can be loaded with `preserveArcRegions`,
+`arcTessellationQuality`, and `retainSourceContentForInversion`.
+Use `retainSourceContentForInversion: true` when a prepared layer must later be
+rendered as inverted or used as the explicit inverted outline source.
 
 ## Error Handling
 

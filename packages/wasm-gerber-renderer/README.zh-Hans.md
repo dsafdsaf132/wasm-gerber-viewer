@@ -129,6 +129,7 @@ type GerberLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      kind?: LayerKind;
     };
 ```
 
@@ -156,6 +157,7 @@ type GerberNodeLayer =
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
+      kind?: LayerKind;
     }
   | {
       path: string;
@@ -165,6 +167,7 @@ type GerberNodeLayer =
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
+      kind?: LayerKind;
     };
 ```
 
@@ -215,7 +218,7 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，并以 `Uint8Array` 返回 PNG 字节数据。
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，把 PNG 字节数据写入临时文件，成功后替换 `outputPath`。父目录必须已存在。
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，把 PNG 数据块写入 Node 可写流。
-- `fileLayer(path, options)`：创建基于路径的 Node 图层配置。`options` 接受 `name`、`color`、`alpha`、`offsetX`、`offsetY`。
+- `fileLayer(path, options)`：创建基于路径的 Node 图层配置。`options` 接受 `name`、`color`、`alpha`、`offsetX`、`offsetY`、`inverted`、`kind`。
 - `packageRoot()`：返回已安装包的目录路径。
 - `renderer.loadLayer(layer, layerOptions)`：解析一个 Node 图层，并返回可跨帧复用的预加载图层。
 - `renderer.loadLayers(layers, options)`：解析多个图层，并返回 `{ layers, loadedCount, failures }`。失败的图层默认会被跳过。
@@ -276,6 +279,11 @@ try {
 - `globalAlpha`：`blend` 模式下没有显式图层 `alpha` 的 Gerber 图层透明度。默认 `0.7`。
 - `compositeMode`：图层合成模式，取 `"blend"` 或 `"stack"`。默认 `"blend"`。`blend` 使用 alpha additive blending；`stack` 对 Gerber 图层按输入顺序使用 source-over 合成，因此后面的 Gerber 图层覆盖前面的 Gerber 图层，默认透明度为 `1`。钻孔叠加层会在 Gerber 图层之后渲染。
 - `invertedOutline`：仅 Node 使用的反相图层外框来源。`"auto"` 会自动检测 board outline 图层，`"bounds"` 会填充当前 Gerber bounds，也可以使用图层序号或名称 selector。默认 `"auto"`。
+- `maxBandBytes`：仅 Node 使用的 streamed PNG row-buffer budget。默认 `512 MiB`。
+- `maxFullFrameBytes`：仅 Node 使用的 full-frame PNG export 选择用 memory budget。默认 `512 MiB`。
+- `maxRenderTargetBytes`：仅 Node 使用的 per-render-target memory cap。默认会探测可用 GPU/driver budget，失败时回退到 `2 GiB`。
+- `framebufferMemorySafetyFactor`：仅 Node 使用的 full-frame framebuffer memory estimate multiplier。默认 `2`。
+- `strategy`：仅 Node 使用的 PNG export strategy，可为 `"auto"`、`"full-frame"` 或 `"stream"`。默认 `"auto"`。
 - `layerErrorMode`：`"skip"` 会继续渲染剩余有效图层；`"throw"` 会在第一次失败时中断。默认 `"skip"`。
 - `onLayerError`：`"skip"` 模式下接收被跳过图层的回调函数，参数为 `{ layer, name, error }`。
 - `rendererOptions`：仅用于浏览器一次性辅助函数；创建渲染器时会原样传入。
@@ -290,12 +298,22 @@ try {
 - `kind`：当输入源文件名不存在或含义不明确时，强制指定 `"gerber"` 或 `"drill"`。
 - `name`：用于 `{ source, name }` 或 `{ path, name }` 等配置对象的图层显示名称。
 
+`loadLayer()` 和 `loadLayers()` 也接受 parse/load 选项：
+
+- `preserveArcRegions`：为 prepared layer 保留 exact region arc。默认 `true`。
+- `arcTessellationQuality`：当 region arc 需要 approximate 时，指定 prepared layer 的 arc quality。
+- `retainSourceContentForInversion`：仅 Node 使用；保留原始 Gerber text，使 prepared layer 之后可作为 inverted layer 或 explicit outline source 使用。
+
 `exportOptions` 控制 PNG 导出：
 
 - `type`：仅浏览器使用的导出 MIME 类型。默认 `image/png`；Node 始终写 PNG。
 - `quality`：仅浏览器使用的编码质量，会传给 `canvas.toBlob`。
 - `background`：导出时使用的背景，可覆盖最后一帧的背景。使用 `null` 保持透明。
 - `maxBandBytes`：流式 PNG 导出的近似行缓冲预算。Node 也会在高分辨率分块渲染中使用它。
+- `maxFullFrameBytes`：仅 Node 使用的 full-frame PNG export memory budget。
+- `maxRenderTargetBytes`：仅 Node 使用的 per-render-target memory cap。
+- `framebufferMemorySafetyFactor`：仅 Node 使用的 framebuffer memory estimate multiplier。
+- `strategy`：仅 Node 使用的 PNG export strategy，可为 `"auto"`、`"full-frame"` 或 `"stream"`。
 
 `rendererOptions` 控制渲染器创建：
 
@@ -354,6 +372,10 @@ CLI 选项：
 - `--composite-mode <blend|stack>`：图层合成模式。默认 `blend`。
 - `--minimum-feature-pixels <px>`：线段/圆弧的最小渲染宽度。默认 `1`。
 - `--max-render-target-bytes <size>`：每个渲染目标的内存上限。接受字节数或 `512m`、`2g` 这样的后缀。
+- `--max-band-bytes <size>`：streamed PNG row-buffer cap。接受字节数或 `512m`、`2g` 这样的后缀。
+- `--max-full-frame-bytes <size>`：full-frame PNG memory cap。接受字节数或 `512m`、`2g` 这样的后缀。
+- `--framebuffer-memory-safety-factor <n>`：full-frame framebuffer memory estimate multiplier。默认 `2`。
+- `--render-strategy <auto|full-frame|stream>`：PNG export strategy。默认 `auto`。
 - `--approx-region-arcs`：渲染前把 region 圆弧转换为线段。
 - `--arc-quality <0|1|2>`：圆弧近似质量。默认 `1`。
 - `--invert-layer <selector>`：把 Gerber 图层渲染为反相/negative 图层。需要反相多个图层时可重复指定。Selector 支持 1-based 图层序号、完整图层名和 basename。

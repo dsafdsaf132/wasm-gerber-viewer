@@ -140,6 +140,7 @@ type GerberLayer =
       alpha?: number;
       offsetX?: number;
       offsetY?: number;
+      kind?: LayerKind;
     };
 ```
 
@@ -170,6 +171,7 @@ type GerberNodeLayer =
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
+      kind?: LayerKind;
     }
   | {
       path: string;
@@ -179,6 +181,7 @@ type GerberNodeLayer =
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
+      kind?: LayerKind;
     };
 ```
 
@@ -234,7 +237,7 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that returns PNG bytes as a `Uint8Array`.
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that streams PNG bytes to a temporary file, then replaces `outputPath` after success. Parent directories must already exist.
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG chunks to a Node writable stream.
-- `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, and `offsetY`.
+- `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, `offsetY`, `inverted`, and `kind`.
 - `packageRoot()`: returns the installed package directory path.
 - `renderer.loadLayer(layer, layerOptions)`: parses a Node layer once and returns a prepared layer that can be reused across frames.
 - `renderer.loadLayers(layers, options)`: parses multiple layers and returns `{ layers, loadedCount, failures }`. Failed layers are skipped by default.
@@ -301,6 +304,11 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `globalAlpha`: opacity for Gerber layers without an explicit layer `alpha` in `blend` mode. Defaults to `0.7`; drill layers render at full opacity unless their own `alpha` is set.
 - `compositeMode`: layer compositing mode, `"blend"` or `"stack"`. Defaults to `"blend"`. `blend` uses additive alpha blending; `stack` uses ordered source-over compositing for Gerber layers, so later Gerber layers cover earlier Gerber layers and default to opacity `1`. Drill overlays render after Gerber layers.
 - `invertedOutline`: Node-only outline source for inverted layers. Use `"auto"` to detect a board outline layer, `"bounds"` to fill the current Gerber bounds, or a layer index/name selector. Defaults to `"auto"`.
+- `maxBandBytes`: Node-only streamed PNG row-buffer budget. Defaults to `512 MiB`.
+- `maxFullFrameBytes`: Node-only memory budget for choosing full-frame PNG export. Defaults to `512 MiB`.
+- `maxRenderTargetBytes`: Node-only per-render-target memory cap. By default the renderer probes the available GPU/driver budget and falls back to `2 GiB`.
+- `framebufferMemorySafetyFactor`: Node-only multiplier for full-frame framebuffer memory estimates. Defaults to `2`.
+- `strategy`: Node-only PNG export strategy, `"auto"`, `"full-frame"`, or `"stream"`. Defaults to `"auto"`.
 - `layerErrorMode`: `"skip"` renders remaining valid layers; `"throw"` rejects on first failure. Defaults to `"skip"`.
 - `onLayerError`: callback for skipped layers in `"skip"` mode: `{ layer, name, error }`.
 - `rendererOptions`: browser one-shot helpers only; passed through when creating the renderer.
@@ -315,12 +323,22 @@ load. If every layer fails, the operation rejects with the first layer error.
 - `kind`: force `"gerber"` or `"drill"` when a source filename is unavailable or ambiguous.
 - `name`: layer display name for config objects such as `{ source, name }` or `{ path, name }`.
 
+`loadLayer()` and `loadLayers()` also accept parse/load options:
+
+- `preserveArcRegions`: keeps exact region arcs for prepared layers. Defaults to `true`.
+- `arcTessellationQuality`: arc approximation quality for prepared layers when region arcs are approximated.
+- `retainSourceContentForInversion`: Node-only; keeps the original Gerber text with a prepared layer so it can be used later as an inverted layer or selected outline source.
+
 `exportOptions` control PNG export:
 
 - `type`: browser-only export MIME type. Defaults to `image/png`; Node always writes PNG.
 - `quality`: browser-only encoder quality passed to `canvas.toBlob`.
 - `background`: export background override. Use `null` to keep transparency. Defaults to the last frame background.
 - `maxBandBytes`: approximate row-buffer budget for streamed PNG export. Node also uses it for high-resolution tiled rendering.
+- `maxFullFrameBytes`: Node-only memory budget for full-frame PNG export.
+- `maxRenderTargetBytes`: Node-only per-render-target memory cap.
+- `framebufferMemorySafetyFactor`: Node-only multiplier for framebuffer memory estimates.
+- `strategy`: Node-only PNG export strategy, `"auto"`, `"full-frame"`, or `"stream"`.
 
 `rendererOptions` control renderer creation:
 
@@ -379,6 +397,10 @@ CLI options:
 - `--composite-mode <blend|stack>`: layer compositing mode. Defaults to `blend`.
 - `--minimum-feature-pixels <px>`: minimum rendered line/arc width. Defaults to `1`.
 - `--max-render-target-bytes <size>`: per-render target memory cap. Accepts bytes or suffixes like `512m` and `2g`.
+- `--max-band-bytes <size>`: streamed PNG row-buffer cap. Accepts bytes or suffixes like `512m` and `2g`.
+- `--max-full-frame-bytes <size>`: full-frame PNG memory cap. Accepts bytes or suffixes like `512m` and `2g`.
+- `--framebuffer-memory-safety-factor <n>`: multiplier for full-frame framebuffer memory estimates. Defaults to `2`.
+- `--render-strategy <auto|full-frame|stream>`: PNG export strategy. Defaults to `auto`.
 - `--approx-region-arcs`: converts region arcs to line segments before rendering.
 - `--arc-quality <0|1|2>`: approximate arc quality. Defaults to `1`.
 - `--invert-layer <selector>`: renders a Gerber layer as an inverted/negative layer. Repeat for multiple layers. Selectors match 1-based layer index, exact layer name, or basename.
