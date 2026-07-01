@@ -477,10 +477,8 @@ M02*",
     let layer = &layers[0];
     assert!(layer.triangles.vertices.is_empty());
     assert_eq!(layer.path_regions.region_count(), 1);
-    assert_eq!(layer.path_regions.wedge_vertex_offsets.len(), 2);
-    assert!(layer.path_regions.wedge_vertex_offsets[1] > 0);
-    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 0]);
-    assert!(layer.path_regions.sector_vertices.is_empty());
+    assert_eq!(layer.path_regions.wedge_vertex_offsets, vec![0, 9]);
+    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 12]);
     assert_eq!(layer.path_regions.cover_vertices.len(), 12);
     assert_eq!(layer.path_regions.clear_vertices.len(), 12);
     assert!(layer.path_regions.pick_contours.is_empty());
@@ -988,12 +986,12 @@ M02*",
 
     layers[0].translate(10.0, 20.0);
     let sector = &layers[0].path_regions.sector_vertices;
-    assert_approx_eq(sector[0], 10.0);
+    assert_approx_eq(sector[0], 11.0);
     assert_approx_eq(sector[1], 20.0);
     assert_approx_eq(sector[2], 10.0);
     assert_approx_eq(sector[3], 20.0);
-    assert_approx_eq(sector[11], 11.5);
-    assert_approx_eq(sector[12], 20.0);
+    assert_approx_eq(sector[11], 10.0);
+    assert_approx_eq(sector[12], 21.0);
     assert_approx_eq(sector[7], 1.0);
     assert_approx_eq(sector[8], 0.0);
     assert_approx_eq(sector[9], 0.0);

@@ -2037,17 +2037,7 @@ fn append_contour_segments(
                 let center = offset_point(center, offset_x, offset_y);
                 let arc =
                     canonical_arc_geometry(start, end, center, radius, start_angle, sweep_angle);
-                push_wedge_triangle(&mut path_regions.wedge_vertices, reference, start, end)?;
-                push_wedge_triangle(&mut path_regions.wedge_vertices, arc.center, start, end)?;
-                push_sector_quad(
-                    &mut path_regions.sector_vertices,
-                    arc.center,
-                    arc.radius,
-                    arc.start_angle,
-                    arc.sweep_angle,
-                    start,
-                    end,
-                )?;
+                append_arc_segment_caps(path_regions, reference, start, end, arc)?;
             }
         }
     }
@@ -2389,7 +2379,51 @@ fn push_cover_quad(
     Ok(())
 }
 
-fn push_sector_quad(
+fn append_arc_segment_caps(
+    path_regions: &mut PathRegions,
+    reference: [f32; 2],
+    start: [f32; 2],
+    end: [f32; 2],
+    arc: CanonicalArc,
+) -> Result<(), String> {
+    let sweep = arc
+        .sweep_angle
+        .clamp(-std::f32::consts::TAU, std::f32::consts::TAU);
+    let segment_count = ((sweep.abs() / std::f32::consts::FRAC_PI_2).ceil() as usize).max(1);
+    let chunk_sweep = sweep / segment_count as f32;
+    let mut chunk_start = start;
+
+    for segment_idx in 0..segment_count {
+        let chunk_start_angle = arc.start_angle + chunk_sweep * segment_idx as f32;
+        let chunk_end_angle = chunk_start_angle + chunk_sweep;
+        let chunk_end = if segment_idx + 1 == segment_count {
+            end
+        } else {
+            angle_point(arc.center, arc.radius, chunk_end_angle)
+        };
+
+        push_wedge_triangle(
+            &mut path_regions.wedge_vertices,
+            reference,
+            chunk_start,
+            chunk_end,
+        )?;
+        push_sector_cap_quad(
+            &mut path_regions.sector_vertices,
+            arc.center,
+            arc.radius,
+            chunk_start_angle,
+            chunk_sweep,
+            chunk_start,
+            chunk_end,
+        )?;
+        chunk_start = chunk_end;
+    }
+
+    Ok(())
+}
+
+fn push_sector_cap_quad(
     vertices: &mut Vec<f32>,
     center: [f32; 2],
     radius: f32,
@@ -2398,66 +2432,45 @@ fn push_sector_quad(
     start: [f32; 2],
     end: [f32; 2],
 ) -> Result<(), String> {
-    let start_vector = arc_endpoint_local_vector(start, center, radius, start_angle);
-    let end_vector = arc_endpoint_local_vector(end, center, radius, start_angle + sweep_angle);
-    let sweep = sweep_angle.clamp(-std::f32::consts::TAU, std::f32::consts::TAU);
-    let segment_count = ((sweep.abs() / std::f32::consts::FRAC_PI_2).ceil() as usize).max(1);
+    let mid_angle = start_angle + sweep_angle * 0.5;
+    let outward = [mid_angle.cos(), mid_angle.sin()];
+    let cover_distance = radius * 2.0;
+    let start_outer = [
+        start[0] + outward[0] * cover_distance,
+        start[1] + outward[1] * cover_distance,
+    ];
+    let end_outer = [
+        end[0] + outward[0] * cover_distance,
+        end[1] + outward[1] * cover_distance,
+    ];
+    let start_vector = local_vector(start, center, radius, start_angle);
+    let end_vector = local_vector(end, center, radius, start_angle + sweep_angle);
 
     try_reserve_values(
         vertices,
-        segment_count * 3 * PATH_SECTOR_VERTEX_FLOATS,
+        6 * PATH_SECTOR_VERTEX_FLOATS,
         "path region arc sector vertices",
     )?;
-
-    let chunk_sweep = sweep / segment_count as f32;
-    for segment_idx in 0..segment_count {
-        let chunk_start_angle = start_angle + chunk_sweep * segment_idx as f32;
-        let chunk_end_angle = chunk_start_angle + chunk_sweep;
-        let chunk_start_vector = if segment_idx == 0 {
-            unit_arc_vector(start_vector, chunk_start_angle)
-        } else {
-            [chunk_start_angle.cos(), chunk_start_angle.sin()]
-        };
-        let chunk_end_vector = if segment_idx + 1 == segment_count {
-            unit_arc_vector(end_vector, chunk_end_angle)
-        } else {
-            [chunk_end_angle.cos(), chunk_end_angle.sin()]
-        };
-        let cover_scale = 1.5;
-        let start_cover = [
-            center[0] + radius * cover_scale * chunk_start_vector[0],
-            center[1] + radius * cover_scale * chunk_start_vector[1],
-        ];
-        let end_cover = [
-            center[0] + radius * cover_scale * chunk_end_vector[0],
-            center[1] + radius * cover_scale * chunk_end_vector[1],
-        ];
-
-        for point in [center, start_cover, end_cover] {
-            vertices.extend_from_slice(&[
-                point[0],
-                point[1],
-                center[0],
-                center[1],
-                radius,
-                chunk_start_angle,
-                chunk_sweep,
-                chunk_start_vector[0],
-                chunk_start_vector[1],
-                chunk_end_vector[0],
-                chunk_end_vector[1],
-            ]);
-        }
+    for point in [start, end, end_outer, start, end_outer, start_outer] {
+        vertices.extend_from_slice(&[
+            point[0],
+            point[1],
+            center[0],
+            center[1],
+            radius,
+            start_angle,
+            sweep_angle,
+            start_vector[0],
+            start_vector[1],
+            end_vector[0],
+            end_vector[1],
+        ]);
     }
+
     Ok(())
 }
 
-fn arc_endpoint_local_vector(
-    point: [f32; 2],
-    center: [f32; 2],
-    radius: f32,
-    fallback_angle: f32,
-) -> [f32; 2] {
+fn local_vector(point: [f32; 2], center: [f32; 2], radius: f32, fallback_angle: f32) -> [f32; 2] {
     if radius > 0.0 {
         let vector = [
             (point[0] - center[0]) / radius,
@@ -2471,13 +2484,11 @@ fn arc_endpoint_local_vector(
     [fallback_angle.cos(), fallback_angle.sin()]
 }
 
-fn unit_arc_vector(vector: [f32; 2], fallback_angle: f32) -> [f32; 2] {
-    let length = (vector[0] * vector[0] + vector[1] * vector[1]).sqrt();
-    if vector[0].is_finite() && vector[1].is_finite() && length.is_finite() && length > 0.0 {
-        return [vector[0] / length, vector[1] / length];
-    }
-
-    [fallback_angle.cos(), fallback_angle.sin()]
+fn angle_point(center: [f32; 2], radius: f32, angle: f32) -> [f32; 2] {
+    [
+        center[0] + radius * angle.cos(),
+        center[1] + radius * angle.sin(),
+    ]
 }
 
 pub(crate) fn arc_curve_bounds(
