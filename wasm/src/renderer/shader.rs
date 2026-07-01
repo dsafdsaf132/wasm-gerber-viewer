@@ -237,7 +237,7 @@ impl ShaderPrograms {
             gl,
             PATH_SECTOR_VERTEX_SHADER,
             PATH_SECTOR_FRAGMENT_SHADER,
-            &["position", "center", "radius", "startAngle", "sweepAngle"],
+            &["position", "center", "radius"],
             &["transform"],
         )?;
 

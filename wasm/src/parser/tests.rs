@@ -971,7 +971,7 @@ M02*",
 }
 
 #[test]
-fn path_region_translate_moves_lyon_path_vertices() {
+fn path_region_translate_moves_analytic_sector_vertices() {
     let mut layers = parse_gerber(
         "\
 %FSLAX24Y24*%
@@ -986,17 +986,18 @@ M02*",
     )
     .expect("region arc should parse");
 
-    let before = layers[0].path_regions.wedge_vertices.clone();
     layers[0].translate(10.0, 20.0);
-    assert!(!before.is_empty());
-    assert!(layers[0].path_regions.sector_vertices.is_empty());
-    for (before, after) in before
-        .chunks_exact(2)
-        .zip(layers[0].path_regions.wedge_vertices.chunks_exact(2))
-    {
-        assert_approx_eq(after[0], before[0] + 10.0);
-        assert_approx_eq(after[1], before[1] + 20.0);
-    }
+    let sector = &layers[0].path_regions.sector_vertices;
+    assert_approx_eq(sector[0], 10.0);
+    assert_approx_eq(sector[1], 20.0);
+    assert_approx_eq(sector[2], 10.0);
+    assert_approx_eq(sector[3], 20.0);
+    assert_approx_eq(sector[11], 11.5);
+    assert_approx_eq(sector[12], 20.0);
+    assert_approx_eq(sector[7], 1.0);
+    assert_approx_eq(sector[8], 0.0);
+    assert_approx_eq(sector[9], 0.0);
+    assert_approx_eq(sector[10], 1.0);
 }
 
 #[test]

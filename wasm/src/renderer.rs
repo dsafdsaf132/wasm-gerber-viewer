@@ -18,13 +18,15 @@ use crate::parser::ParserState;
 use crate::region::{RegionContour, RegionSegment};
 use crate::shape::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
-    Triangles,
+    Triangles, PATH_SECTOR_VERTEX_FLOATS,
 };
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{
     WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlTexture, WebGlVertexArrayObject,
 };
+
+const PATH_SECTOR_VERTEX_FLOATS_U32: u32 = PATH_SECTOR_VERTEX_FLOATS as u32;
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
 pub struct LayerMetadata {
@@ -1762,6 +1764,12 @@ impl Renderer {
                 "path region clear vertex buffer length must be a multiple of 12",
             ));
         }
+        if sector_vertices.length() % PATH_SECTOR_VERTEX_FLOATS_U32 != 0 {
+            return Err(JsValue::from_str(&format!(
+                "path region arc sector buffer length must be a multiple of {}",
+                PATH_SECTOR_VERTEX_FLOATS
+            )));
+        }
         let region_count = (cover_vertices.length() / 12) as usize;
         if clear_vertices.length() / 12 != cover_vertices.length() / 12 {
             return Err(JsValue::from_str(
@@ -1792,7 +1800,7 @@ impl Renderer {
             "path sector offsets",
             0,
             &sector_offsets,
-            (sector_vertices.length() / 7) as usize,
+            (sector_vertices.length() / PATH_SECTOR_VERTEX_FLOATS_U32) as usize,
         )?;
         Ok(PathRegions::new(
             Vec::new(),
@@ -1845,10 +1853,11 @@ impl Renderer {
         }
 
         if sector_vertices.length() > 0 {
-            if sector_vertices.length() % 7 != 0 {
-                return Err(JsValue::from_str(
-                    "path region arc sector buffer length must be a multiple of 7",
-                ));
+            if sector_vertices.length() % PATH_SECTOR_VERTEX_FLOATS_U32 != 0 {
+                return Err(JsValue::from_str(&format!(
+                    "path region arc sector buffer length must be a multiple of {}",
+                    PATH_SECTOR_VERTEX_FLOATS
+                )));
             }
             Self::validate_js_finite_array("path region arc sector vertices", &sector_vertices)?;
             let vao = self
@@ -1860,7 +1869,7 @@ impl Renderer {
             buffer_cache.path_sector_vao = Some(vao);
             buffer_cache.path_sector_vertex_count = Self::checked_u32_to_i32(
                 "path region sector vertex count",
-                sector_vertices.length() / 7,
+                sector_vertices.length() / PATH_SECTOR_VERTEX_FLOATS_U32,
             )?;
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
             self.gl.bind_vertex_array(None);
@@ -1935,12 +1944,10 @@ impl Renderer {
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         Self::upload_float_array_to_bound_buffer(&self.gl, data);
 
-        let stride = 7 * 4;
+        let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
         self.enable_path_sector_attribute("position", 2, stride, 0)?;
         self.enable_path_sector_attribute("center", 2, stride, 2 * 4)?;
         self.enable_path_sector_attribute("radius", 1, stride, 4 * 4)?;
-        self.enable_path_sector_attribute("startAngle", 1, stride, 5 * 4)?;
-        self.enable_path_sector_attribute("sweepAngle", 1, stride, 6 * 4)?;
         Ok(buffer)
     }
 
@@ -2391,13 +2398,17 @@ impl Renderer {
             &format!("Sublayer {} path wedge vertex count", sublayer_idx),
             wedge_vertex_count,
         )?;
-        if !path_regions.sector_vertices.len().is_multiple_of(7) {
+        if !path_regions
+            .sector_vertices
+            .len()
+            .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
+        {
             return Err(JsValue::from_str(&format!(
-                "Sublayer {} path sector vertex buffer length is not divisible by 7",
-                sublayer_idx
+                "Sublayer {} path sector vertex buffer length is not divisible by {}",
+                sublayer_idx, PATH_SECTOR_VERTEX_FLOATS
             )));
         }
-        let sector_vertex_count = path_regions.sector_vertices.len() / 7;
+        let sector_vertex_count = path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS;
         Self::checked_usize_to_i32(
             &format!("Sublayer {} path sector vertex count", sublayer_idx),
             sector_vertex_count,
@@ -4573,7 +4584,7 @@ impl Renderer {
             )?;
             buffer_cache.path_sector_vertex_count = Self::checked_usize_to_i32(
                 "path region sector vertex count",
-                path_regions.sector_vertices.len() / 7,
+                path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
             )?;
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
             buffer_cache.path_sector_vao = Some(vao);
@@ -4652,12 +4663,10 @@ impl Renderer {
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         Self::upload_f32_slice_to_bound_buffer(gl, data);
 
-        let stride = 7 * 4;
+        let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
         Self::enable_interleaved_attribute(gl, program, "position", 2, stride, 0)?;
         Self::enable_interleaved_attribute(gl, program, "center", 2, stride, 2 * 4)?;
         Self::enable_interleaved_attribute(gl, program, "radius", 1, stride, 4 * 4)?;
-        Self::enable_interleaved_attribute(gl, program, "startAngle", 1, stride, 5 * 4)?;
-        Self::enable_interleaved_attribute(gl, program, "sweepAngle", 1, stride, 6 * 4)?;
         Ok(buffer)
     }
 

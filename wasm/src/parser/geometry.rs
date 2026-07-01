@@ -5,7 +5,7 @@ use crate::interaction::{
 use crate::parse_common::{parse_coordinate_number, parse_g_code, read_word_value};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
 use crate::region::{RegionContour, RegionSegment};
-use crate::shape::PathRegions;
+use crate::shape::{PathRegions, PATH_SECTOR_VERTEX_FLOATS};
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
@@ -1784,7 +1784,7 @@ fn append_path_region(
         .push((path_regions.wedge_vertices.len() / 2) as u32);
     path_regions
         .sector_vertex_offsets
-        .push((path_regions.sector_vertices.len() / 7) as u32);
+        .push((path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS) as u32);
 
     Ok(())
 }
@@ -1949,6 +1949,8 @@ fn append_contour_segments(
                     radius,
                     start_angle,
                     sweep_angle,
+                    start,
+                    end,
                 )?;
             }
         }
@@ -2288,30 +2290,89 @@ fn push_sector_quad(
     radius: f32,
     start_angle: f32,
     sweep_angle: f32,
+    start: [f32; 2],
+    end: [f32; 2],
 ) -> Result<(), String> {
-    let (min_x, max_x, min_y, max_y) = arc_sector_bounds(center, radius, start_angle, sweep_angle);
-    let quad = [
-        [min_x, min_y],
-        [max_x, min_y],
-        [min_x, max_y],
-        [min_x, max_y],
-        [max_x, min_y],
-        [max_x, max_y],
-    ];
+    let start_vector = arc_endpoint_local_vector(start, center, radius, start_angle);
+    let end_vector = arc_endpoint_local_vector(end, center, radius, start_angle + sweep_angle);
+    let sweep = sweep_angle.clamp(-std::f32::consts::TAU, std::f32::consts::TAU);
+    let segment_count = ((sweep.abs() / std::f32::consts::FRAC_PI_2).ceil() as usize).max(1);
 
-    try_reserve_values(vertices, 42, "path region arc sector vertices")?;
-    for point in quad {
-        vertices.extend_from_slice(&[
-            point[0],
-            point[1],
-            center[0],
-            center[1],
-            radius,
-            start_angle,
-            sweep_angle,
-        ]);
+    try_reserve_values(
+        vertices,
+        segment_count * 3 * PATH_SECTOR_VERTEX_FLOATS,
+        "path region arc sector vertices",
+    )?;
+
+    let chunk_sweep = sweep / segment_count as f32;
+    for segment_idx in 0..segment_count {
+        let chunk_start_angle = start_angle + chunk_sweep * segment_idx as f32;
+        let chunk_end_angle = chunk_start_angle + chunk_sweep;
+        let chunk_start_vector = if segment_idx == 0 {
+            unit_arc_vector(start_vector, chunk_start_angle)
+        } else {
+            [chunk_start_angle.cos(), chunk_start_angle.sin()]
+        };
+        let chunk_end_vector = if segment_idx + 1 == segment_count {
+            unit_arc_vector(end_vector, chunk_end_angle)
+        } else {
+            [chunk_end_angle.cos(), chunk_end_angle.sin()]
+        };
+        let cover_scale = 1.5;
+        let start_cover = [
+            center[0] + radius * cover_scale * chunk_start_vector[0],
+            center[1] + radius * cover_scale * chunk_start_vector[1],
+        ];
+        let end_cover = [
+            center[0] + radius * cover_scale * chunk_end_vector[0],
+            center[1] + radius * cover_scale * chunk_end_vector[1],
+        ];
+
+        for point in [center, start_cover, end_cover] {
+            vertices.extend_from_slice(&[
+                point[0],
+                point[1],
+                center[0],
+                center[1],
+                radius,
+                chunk_start_angle,
+                chunk_sweep,
+                chunk_start_vector[0],
+                chunk_start_vector[1],
+                chunk_end_vector[0],
+                chunk_end_vector[1],
+            ]);
+        }
     }
     Ok(())
+}
+
+fn arc_endpoint_local_vector(
+    point: [f32; 2],
+    center: [f32; 2],
+    radius: f32,
+    fallback_angle: f32,
+) -> [f32; 2] {
+    if radius > 0.0 {
+        let vector = [
+            (point[0] - center[0]) / radius,
+            (point[1] - center[1]) / radius,
+        ];
+        if vector[0].is_finite() && vector[1].is_finite() {
+            return vector;
+        }
+    }
+
+    [fallback_angle.cos(), fallback_angle.sin()]
+}
+
+fn unit_arc_vector(vector: [f32; 2], fallback_angle: f32) -> [f32; 2] {
+    let length = (vector[0] * vector[0] + vector[1] * vector[1]).sqrt();
+    if vector[0].is_finite() && vector[1].is_finite() && length.is_finite() && length > 0.0 {
+        return [vector[0] / length, vector[1] / length];
+    }
+
+    [fallback_angle.cos(), fallback_angle.sin()]
 }
 
 pub(crate) fn arc_curve_bounds(

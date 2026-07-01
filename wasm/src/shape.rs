@@ -436,8 +436,8 @@ impl Thermals {
 /// Arc-containing region path data rendered by the WebGL stencil path renderer.
 ///
 /// Large regions are stored in flat buffers to avoid per-segment JS objects:
-/// - `wedge_vertices`: stencil triangles for line-only fans or Lyon-filled arc regions
-/// - `sector_vertices`: legacy analytic arc-sector quads, 7 floats per vertex
+/// - `wedge_vertices`: one or two stencil fan triangles per path segment
+/// - `sector_vertices`: expanded analytic arc-sector quads, 11 floats per vertex
 /// - `cover_vertices`: one screen-coverable bounding quad per region
 /// - `clear_vertices`: one quad covering all stencil writes per region
 #[derive(Clone, Debug)]
@@ -451,6 +451,8 @@ pub struct PathRegions {
     pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
     pub(crate) source_contours: Vec<Vec<RegionContour>>,
 }
+
+pub(crate) const PATH_SECTOR_VERTEX_FLOATS: usize = 11;
 
 impl PathRegions {
     pub fn new(
@@ -504,7 +506,7 @@ impl PathRegions {
         }
 
         let wedge_base = (self.wedge_vertices.len() / 2) as u32;
-        let sector_base = (self.sector_vertices.len() / 7) as u32;
+        let sector_base = (self.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS) as u32;
         self.wedge_vertices.extend(other.wedge_vertices);
         self.sector_vertices.extend(other.sector_vertices);
         self.cover_vertices.extend(other.cover_vertices);
@@ -546,7 +548,10 @@ impl PathRegions {
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_point_pairs(&mut self.wedge_vertices, dx, dy);
 
-        for vertex in self.sector_vertices.chunks_exact_mut(7) {
+        for vertex in self
+            .sector_vertices
+            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
+        {
             vertex[0] += dx;
             vertex[1] += dy;
             vertex[2] += dx;
@@ -583,7 +588,10 @@ impl PathRegions {
             point[1] = y;
         }
 
-        for vertex in self.sector_vertices.chunks_exact_mut(7) {
+        for vertex in self
+            .sector_vertices
+            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
+        {
             let (position_x, position_y) = transformed_point_for_flash(
                 vertex[0], vertex[1], scale, mirror_x, mirror_y, rotation, dx, dy,
             );
@@ -601,6 +609,25 @@ impl PathRegions {
                 transform_arc_angles(vertex[5], vertex[6], scale, mirror_x, mirror_y, rotation);
             vertex[5] = start_angle;
             vertex[6] = sweep_angle;
+
+            let start_vector = transformed_arc_local_vector_for_flash(
+                [vertex[7], vertex[8]],
+                scale,
+                mirror_x,
+                mirror_y,
+                rotation,
+            );
+            let end_vector = transformed_arc_local_vector_for_flash(
+                [vertex[9], vertex[10]],
+                scale,
+                mirror_x,
+                mirror_y,
+                rotation,
+            );
+            vertex[7] = start_vector[0];
+            vertex[8] = start_vector[1];
+            vertex[9] = end_vector[0];
+            vertex[10] = end_vector[1];
         }
 
         for point in self.cover_vertices.chunks_exact_mut(2) {
@@ -756,6 +783,29 @@ fn transform_arc_angles(
     start += rotation;
     end += rotation;
     (start, end - start)
+}
+
+fn transformed_arc_local_vector_for_flash(
+    vector: [f32; 2],
+    scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    rotation: f32,
+) -> [f32; 2] {
+    let scale_sign = if scale < 0.0 { -1.0 } else { 1.0 };
+    let mut tx = vector[0] * scale_sign;
+    let mut ty = vector[1] * scale_sign;
+
+    if mirror_x {
+        tx = -tx;
+    }
+    if mirror_y {
+        ty = -ty;
+    }
+
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    [tx * cos_r - ty * sin_r, tx * sin_r + ty * cos_r]
 }
 
 fn translate_region_contours(region_groups: &mut [Vec<RegionContour>], dx: f32, dy: f32) {
