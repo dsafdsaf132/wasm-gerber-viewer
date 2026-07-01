@@ -1659,17 +1659,25 @@ pub fn flatten_region_contours(
                         points.push(start);
                     }
 
+                    let arc = canonical_arc_geometry(
+                        start,
+                        end,
+                        center,
+                        radius,
+                        start_angle,
+                        sweep_angle,
+                    );
                     let max_angle_step =
                         region_arc_tessellation_max_angle_step(arc_tessellation_quality);
                     let segment_count =
-                        ((sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
+                        ((arc.sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
                     try_reserve_values(&mut points, segment_count, "region arc points")?;
                     for segment_idx in 1..segment_count {
                         let t = segment_idx as f32 / segment_count as f32;
-                        let angle = start_angle + sweep_angle * t;
+                        let angle = arc.start_angle + arc.sweep_angle * t;
                         points.push([
-                            center[0] + radius * angle.cos(),
-                            center[1] + radius * angle.sin(),
+                            arc.center[0] + arc.radius * angle.cos(),
+                            arc.center[1] + arc.radius * angle.sin(),
                         ]);
                     }
                     points.push(end);
@@ -1689,6 +1697,92 @@ fn region_arc_tessellation_max_angle_step(quality: u32) -> f32 {
         2 => std::f32::consts::PI / 72.0,
         _ => std::f32::consts::PI / 36.0,
     }
+}
+
+#[derive(Clone, Copy)]
+struct CanonicalArc {
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+}
+
+fn canonical_arc_geometry(
+    start: [f32; 2],
+    end: [f32; 2],
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+) -> CanonicalArc {
+    if radius <= 0.0 || sweep_angle.abs() >= std::f32::consts::TAU - 0.00001 {
+        return CanonicalArc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        };
+    }
+
+    let chord = [end[0] - start[0], end[1] - start[1]];
+    let chord_length = (chord[0] * chord[0] + chord[1] * chord[1]).sqrt();
+    if !chord_length.is_finite() || chord_length <= 0.0 {
+        return CanonicalArc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        };
+    }
+
+    let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
+    let normal = [-chord[1] / chord_length, chord[0] / chord_length];
+    let center_offset = [center[0] - midpoint[0], center[1] - midpoint[1]];
+    let signed_distance = center_offset[0] * normal[0] + center_offset[1] * normal[1];
+    let adjusted_center = [
+        midpoint[0] + normal[0] * signed_distance,
+        midpoint[1] + normal[1] * signed_distance,
+    ];
+    let adjusted_radius =
+        ((start[0] - adjusted_center[0]).powi(2) + (start[1] - adjusted_center[1]).powi(2)).sqrt();
+    if !adjusted_center[0].is_finite()
+        || !adjusted_center[1].is_finite()
+        || !adjusted_radius.is_finite()
+        || adjusted_radius <= 0.0
+    {
+        return CanonicalArc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        };
+    }
+
+    let adjusted_start_angle = (start[1] - adjusted_center[1]).atan2(start[0] - adjusted_center[0]);
+    let adjusted_end_angle = (end[1] - adjusted_center[1]).atan2(end[0] - adjusted_center[0]);
+    let adjusted_sweep_angle =
+        directed_sweep_angle(adjusted_start_angle, adjusted_end_angle, sweep_angle);
+
+    CanonicalArc {
+        center: adjusted_center,
+        radius: adjusted_radius,
+        start_angle: adjusted_start_angle,
+        sweep_angle: adjusted_sweep_angle,
+    }
+}
+
+fn directed_sweep_angle(start_angle: f32, end_angle: f32, reference_sweep: f32) -> f32 {
+    let mut sweep = end_angle - start_angle;
+    if reference_sweep >= 0.0 {
+        while sweep <= 0.0 {
+            sweep += std::f32::consts::TAU;
+        }
+    } else {
+        while sweep >= 0.0 {
+            sweep -= std::f32::consts::TAU;
+        }
+    }
+    sweep
 }
 
 pub fn build_path_regions(
@@ -1941,14 +2035,16 @@ fn append_contour_segments(
                 let start = offset_point(start, offset_x, offset_y);
                 let end = offset_point(end, offset_x, offset_y);
                 let center = offset_point(center, offset_x, offset_y);
+                let arc =
+                    canonical_arc_geometry(start, end, center, radius, start_angle, sweep_angle);
                 push_wedge_triangle(&mut path_regions.wedge_vertices, reference, start, end)?;
-                push_wedge_triangle(&mut path_regions.wedge_vertices, center, start, end)?;
+                push_wedge_triangle(&mut path_regions.wedge_vertices, arc.center, start, end)?;
                 push_sector_quad(
                     &mut path_regions.sector_vertices,
-                    center,
-                    radius,
-                    start_angle,
-                    sweep_angle,
+                    arc.center,
+                    arc.radius,
+                    arc.start_angle,
+                    arc.sweep_angle,
                     start,
                     end,
                 )?;
@@ -2185,6 +2281,8 @@ fn path_region_bounds(
 
         for segment in &contour.segments {
             if let RegionSegment::Arc {
+                start,
+                end,
                 center,
                 radius,
                 start_angle,
@@ -2192,12 +2290,13 @@ fn path_region_bounds(
                 ..
             } = *segment
             {
-                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = arc_curve_bounds(
-                    offset_point(center, offset_x, offset_y),
-                    radius,
-                    start_angle,
-                    sweep_angle,
-                );
+                let start = offset_point(start, offset_x, offset_y);
+                let end = offset_point(end, offset_x, offset_y);
+                let center = offset_point(center, offset_x, offset_y);
+                let arc =
+                    canonical_arc_geometry(start, end, center, radius, start_angle, sweep_angle);
+                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) =
+                    arc_curve_bounds(arc.center, arc.radius, arc.start_angle, arc.sweep_angle);
                 min_x = min_x.min(arc_min_x);
                 max_x = max_x.max(arc_max_x);
                 min_y = min_y.min(arc_min_y);
@@ -2233,6 +2332,8 @@ fn path_region_stencil_bounds(
 
         for segment in &contour.segments {
             if let RegionSegment::Arc {
+                start,
+                end,
                 center,
                 radius,
                 start_angle,
@@ -2240,10 +2341,14 @@ fn path_region_stencil_bounds(
                 ..
             } = *segment
             {
+                let start = offset_point(start, offset_x, offset_y);
+                let end = offset_point(end, offset_x, offset_y);
                 let center = offset_point(center, offset_x, offset_y);
-                include_point_bounds(&mut min_x, &mut max_x, &mut min_y, &mut max_y, center);
+                let arc =
+                    canonical_arc_geometry(start, end, center, radius, start_angle, sweep_angle);
+                include_point_bounds(&mut min_x, &mut max_x, &mut min_y, &mut max_y, arc.center);
                 let (sector_min_x, sector_max_x, sector_min_y, sector_max_y) =
-                    arc_sector_bounds(center, radius, start_angle, sweep_angle);
+                    arc_sector_bounds(arc.center, arc.radius, arc.start_angle, arc.sweep_angle);
                 min_x = min_x.min(sector_min_x);
                 max_x = max_x.max(sector_max_x);
                 min_y = min_y.min(sector_min_y);

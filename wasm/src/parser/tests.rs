@@ -1001,6 +1001,37 @@ M02*",
 }
 
 #[test]
+fn path_region_arc_radius_is_canonicalized_to_raw_endpoints() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOIN*%
+G75*
+G36*
+X00151463Y01226672D02*
+G02*
+X00149975Y01233567I00011698J00006133D01*
+G01*
+X00151463Y01226672D01*
+G37*
+M02*",
+    )
+    .expect("rounding-sensitive region arc should parse");
+
+    let sector = &layers[0].path_regions.sector_vertices;
+    let center = [sector[2], sector[3]];
+    let radius = sector[4];
+    let inch_to_mm = 25.4;
+    let start = [0.151463 * inch_to_mm, 1.226672 * inch_to_mm];
+    let end = [0.149975 * inch_to_mm, 1.233567 * inch_to_mm];
+    let start_radius = ((start[0] - center[0]).powi(2) + (start[1] - center[1]).powi(2)).sqrt();
+    let end_radius = ((end[0] - center[0]).powi(2) + (end[1] - center[1]).powi(2)).sqrt();
+
+    assert_approx_eq(start_radius, radius);
+    assert_approx_eq(end_radius, radius);
+}
+
+#[test]
 fn golden_step_repeat_output_matches_current_parser() {
     assert_gerber_snapshot(
         "\
