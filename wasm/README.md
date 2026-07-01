@@ -100,10 +100,10 @@ High-level flow:
 
 When `preserve_arc_regions` is enabled, regions that contain arcs stay in the
 path-region pipeline instead of being flattened into many line segments. The
-parser uses Lyon fill tessellation for these arc-containing regions and stores
-the filled triangles in `PathRegions.wedge_vertices`. The
-`arc_tessellation_quality` option controls the tessellation tolerance used for
-that conversion.
+parser stores line wedges and analytic circular cap geometry in `PathRegions`
+so the WebGL stencil renderer can rasterize true arc edges. The
+`arc_tessellation_quality` option is used when arc regions are flattened for the
+legacy triangle path, not for preserved analytic path regions.
 
 ### 3. Drill Parsing
 
@@ -136,11 +136,10 @@ Important types:
 - `PathRegions`: region/path based geometry.
 
 `PathRegions` is rendered with WebGL stencil state. `wedge_vertices` contains
-line-region fans and Lyon-filled arc-region triangles. `sector_vertices` is
-reserved for analytic sector path data. `cover_vertices` and `clear_vertices`
-define the quads used to apply and reset each stencil-filled region. Source
-contours may also be retained for interaction, outline, and inverted-layer
-workflows.
+line and chord wedge triangles. `sector_vertices` contains analytic circular
+cap quads for arc segments. `cover_vertices` and `clear_vertices` define the
+quads used to apply and reset each stencil-filled region. Source contours may
+also be retained for interaction, outline, and inverted-layer workflows.
 
 `GerberData` supports JS render-payload conversion. This lets a worker, or a
 main-thread pre-parse helper, parse geometry outside the stateful renderer
@@ -484,7 +483,7 @@ measurements after the WebGL render.
 - Final alpha must not be applied during the per-geometry layer pass.
 - Layer display policy should be implemented at the FBO composite stage, not in
   primitive drawing.
-- Lyon tessellation for preserved arc regions happens during parsing or render
-  payload construction, not on every render.
+- Preserved arc regions are converted to flat analytic path buffers during
+  parsing or render payload construction, not on every render.
 - Render payload layers with path regions must keep stencil-FBO behavior in
   parity with directly parsed layers.

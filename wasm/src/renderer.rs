@@ -1758,6 +1758,7 @@ impl Renderer {
 
     fn decode_path_region_metadata(sublayer: &JsValue) -> Result<PathRegions, JsValue> {
         let path_regions = Self::js_property(sublayer, "pathRegions")?;
+        Self::validate_path_sector_stride_marker(&path_regions)?;
         let wedge_vertices = Self::js_f32_array(&path_regions, "wedgeVertices")?;
         let sector_vertices = Self::js_f32_array(&path_regions, "sectorVertices")?;
         let cover_vertices = Self::js_f32_array(&path_regions, "coverVertices")?;
@@ -1778,6 +1779,7 @@ impl Renderer {
                 PATH_SECTOR_VERTEX_FLOATS
             )));
         }
+        Self::validate_js_path_sector_vertices(&sector_vertices)?;
         let region_count = (cover_vertices.length() / 12) as usize;
         if clear_vertices.length() / 12 != cover_vertices.length() / 12 {
             return Err(JsValue::from_str(
@@ -1826,6 +1828,7 @@ impl Renderer {
         sublayer: &JsValue,
     ) -> Result<(), JsValue> {
         let path_regions = Self::js_property(sublayer, "pathRegions")?;
+        Self::validate_path_sector_stride_marker(&path_regions)?;
         let wedge_vertices = Self::js_f32_array(&path_regions, "wedgeVertices")?;
         let sector_vertices = Self::js_f32_array(&path_regions, "sectorVertices")?;
         let cover_vertices = Self::js_f32_array(&path_regions, "coverVertices")?;
@@ -1867,7 +1870,7 @@ impl Renderer {
                     PATH_SECTOR_VERTEX_FLOATS
                 )));
             }
-            Self::validate_js_finite_array("path region arc sector vertices", &sector_vertices)?;
+            Self::validate_js_path_sector_vertices(&sector_vertices)?;
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -2149,6 +2152,18 @@ impl Renderer {
             JsValue::from_str(&format!("Render payload field `{key}` is not numeric"))
         })?;
         Ok(number as f32)
+    }
+
+    fn js_usize_property(value: &JsValue, key: &str) -> Result<usize, JsValue> {
+        let number = Self::js_property(value, key)?.as_f64().ok_or_else(|| {
+            JsValue::from_str(&format!("Render payload field `{key}` is not numeric"))
+        })?;
+        if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+            return Err(JsValue::from_str(&format!(
+                "Render payload field `{key}` must be a non-negative integer"
+            )));
+        }
+        Ok(number as usize)
     }
 
     fn js_bool_property(value: &JsValue, key: &str) -> bool {
@@ -2499,6 +2514,17 @@ impl Renderer {
                 sublayer_idx, PATH_SECTOR_VERTEX_FLOATS
             ));
         }
+        for vertex in path_regions
+            .sector_vertices
+            .chunks_exact(PATH_SECTOR_VERTEX_FLOATS)
+        {
+            if vertex[4] < 0.0 {
+                return Err(format!(
+                    "Sublayer {} path sector radius contains a negative value",
+                    sublayer_idx
+                ));
+            }
+        }
         Ok(path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS)
     }
 
@@ -2603,6 +2629,28 @@ impl Renderer {
     fn validate_js_finite_array(label: &str, values: &Float32Array) -> Result<(), JsValue> {
         for index in 0..values.length() {
             Self::validate_finite_value(label, values.get_index(index))?;
+        }
+        Ok(())
+    }
+
+    fn validate_path_sector_stride_marker(path_regions: &JsValue) -> Result<(), JsValue> {
+        let stride = Self::js_usize_property(path_regions, "sectorVertexStride")?;
+        if stride != PATH_SECTOR_VERTEX_FLOATS {
+            return Err(JsValue::from_str(
+                "Render payload path sector vertex stride is unsupported",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_js_path_sector_vertices(values: &Float32Array) -> Result<(), JsValue> {
+        Self::validate_js_finite_array("path region arc sector vertices", values)?;
+        for index in (4..values.length()).step_by(PATH_SECTOR_VERTEX_FLOATS) {
+            if values.get_index(index) < 0.0 {
+                return Err(JsValue::from_str(
+                    "path region arc sector radius contains a negative value",
+                ));
+            }
         }
         Ok(())
     }
@@ -4643,7 +4691,7 @@ impl Renderer {
                 self.draw_path_solid_range(
                     transform,
                     color,
-                    buffer_cache.path_cover_vao.as_ref(),
+                    buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
                 )?;
@@ -5779,6 +5827,27 @@ mod tests {
         );
 
         assert!(Renderer::validate_path_sector_vertices_invariant(&path_regions, 0).is_err());
+    }
+
+    #[test]
+    fn validate_path_region_data_rejects_negative_sector_radius() {
+        let path_regions = PathRegions::new(
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 3],
+            vec![1.0, 0.0, 0.0, 0.0, -1.0],
+            vec![0, 1],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        );
+
+        assert!(Renderer::validate_path_sector_vertices_invariant(&path_regions, 0).is_err());
+    }
+
+    #[test]
+    fn validate_path_region_data_rejects_stale_sector_offsets() {
+        assert!(
+            Renderer::validate_offsets_invariant("path sector offsets", 0, &[0, 5], 7).is_err()
+        );
     }
 
     #[test]

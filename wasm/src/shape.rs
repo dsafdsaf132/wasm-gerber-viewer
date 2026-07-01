@@ -47,6 +47,18 @@ fn f32_property_from_js(value: &JsValue, key: &str) -> Result<f32, JsValue> {
     }
 }
 
+fn usize_property_from_js(value: &JsValue, key: &str) -> Result<usize, JsValue> {
+    let number = get_property(value, key)?
+        .as_f64()
+        .ok_or_else(|| JsValue::from_str(&format!("Parsed layer field `{key}` is not numeric")))?;
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+        return Err(JsValue::from_str(&format!(
+            "Parsed layer field `{key}` must be a non-negative integer"
+        )));
+    }
+    Ok(number as usize)
+}
+
 fn translate_point_pairs(values: &mut [f32], dx: f32, dy: f32) {
     for point in values.chunks_exact_mut(2) {
         point[0] += dx;
@@ -677,6 +689,11 @@ impl PathRegions {
         )?;
         set_property(
             &object,
+            "sectorVertexStride",
+            &JsValue::from_f64(PATH_SECTOR_VERTEX_FLOATS as f64),
+        )?;
+        set_property(
+            &object,
             "sectorVertexOffsets",
             &u32_array_to_js(&self.sector_vertex_offsets),
         )?;
@@ -694,6 +711,12 @@ impl PathRegions {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<PathRegions, JsValue> {
+        let sector_vertex_stride = usize_property_from_js(value, "sectorVertexStride")?;
+        if sector_vertex_stride != PATH_SECTOR_VERTEX_FLOATS {
+            return Err(JsValue::from_str(
+                "Parsed layer path sector vertex stride is unsupported",
+            ));
+        }
         Ok(PathRegions::new(
             f32_array_from_js(value, "wedgeVertices")?,
             u32_array_from_js(value, "wedgeVertexOffsets")?,

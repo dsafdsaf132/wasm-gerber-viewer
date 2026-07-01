@@ -1,6 +1,6 @@
 use crate::parser::geometry::{offset_primitive_by, Primitive};
 use crate::parser::{Aperture, Polarity};
-use crate::shape::{Boundary, PathRegions};
+use crate::shape::{Boundary, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -10,7 +10,7 @@ const CIRCLE_SEGMENTS: usize = 48;
 const ARC_SEGMENT_RADIANS: f32 = std::f32::consts::PI / 48.0;
 const MAX_ARC_SEGMENTS: usize = 256;
 const TWO_PI: f32 = std::f32::consts::PI * 2.0;
-const COMPACT_INTERACTION_VERSION: u32 = 1;
+const COMPACT_INTERACTION_VERSION: u32 = 2;
 const COMPACT_NONE: u32 = u32::MAX;
 const COMPACT_PRIMITIVE_STRIDE: usize = 10;
 const PROPERTY_DIAMETER: u32 = 1 << 0;
@@ -2298,6 +2298,18 @@ fn u32_array_from_js(value: &JsValue, key: &str) -> Vec<u32> {
     Uint32Array::new(&get_property(value, key).unwrap_or(JsValue::UNDEFINED)).to_vec()
 }
 
+fn usize_property_from_js(value: &JsValue, key: &str) -> Result<usize, JsValue> {
+    let number = get_property(value, key)?
+        .as_f64()
+        .ok_or_else(|| JsValue::from_str(&format!("Interaction field `{key}` is not numeric")))?;
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+        return Err(JsValue::from_str(&format!(
+            "Interaction field `{key}` must be a non-negative integer"
+        )));
+    }
+    Ok(number as usize)
+}
+
 fn compact_strings_from_js(value: &JsValue) -> Result<Vec<Rc<str>>, JsValue> {
     let values = Array::from(value);
     let mut strings = Vec::with_capacity(values.length() as usize);
@@ -2363,6 +2375,11 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
     )?;
     set_property(
         &object,
+        "sectorVertexStride",
+        JsValue::from_f64(PATH_SECTOR_VERTEX_FLOATS as f64),
+    )?;
+    set_property(
+        &object,
         "sectorVertexOffsets",
         u32_array_to_js(&path_regions.sector_vertex_offsets),
     )?;
@@ -2404,6 +2421,12 @@ fn compact_path_regions_from_js(value: &JsValue) -> Result<Vec<Option<PathRegion
 }
 
 fn path_region_from_compact_js(value: &JsValue) -> Result<PathRegions, JsValue> {
+    let sector_vertex_stride = usize_property_from_js(value, "sectorVertexStride")?;
+    if sector_vertex_stride != PATH_SECTOR_VERTEX_FLOATS {
+        return Err(JsValue::from_str(
+            "Unsupported compact path sector vertex stride",
+        ));
+    }
     let mut path_regions = PathRegions::new(
         f32_array_from_js(value, "wedgeVertices"),
         u32_array_from_js(value, "wedgeVertexOffsets"),
@@ -2412,6 +2435,7 @@ fn path_region_from_compact_js(value: &JsValue) -> Result<PathRegions, JsValue> 
         f32_array_from_js(value, "coverVertices"),
         f32_array_from_js(value, "clearVertices"),
     );
+    validate_compact_path_region(&path_regions)?;
 
     let region_offsets = u32_array_from_js(value, "pickRegionContourOffsets");
     let contour_offsets = u32_array_from_js(value, "pickContourPointOffsets");
@@ -2454,6 +2478,90 @@ fn path_region_from_compact_js(value: &JsValue) -> Result<PathRegions, JsValue> 
 
     path_regions.pick_contours = pick_contours;
     Ok(path_regions)
+}
+
+fn validate_compact_path_region(path_regions: &PathRegions) -> Result<(), JsValue> {
+    validate_compact_path_region_invariant(path_regions)
+        .map_err(|message| JsValue::from_str(message))
+}
+
+fn validate_compact_path_region_invariant(path_regions: &PathRegions) -> Result<(), &'static str> {
+    if !path_regions.wedge_vertices.len().is_multiple_of(2) {
+        return Err("Invalid compact path wedge vertex buffer length");
+    }
+    if !path_regions
+        .sector_vertices
+        .len()
+        .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
+    {
+        return Err("Invalid compact path sector vertex buffer length");
+    }
+    if !path_regions.cover_vertices.len().is_multiple_of(12)
+        || !path_regions.clear_vertices.len().is_multiple_of(12)
+        || path_regions.cover_vertices.len() != path_regions.clear_vertices.len()
+    {
+        return Err("Invalid compact path region quad data");
+    }
+
+    let region_count = path_regions.cover_vertices.len() / 12;
+    validate_compact_offsets(
+        "compact path wedge offsets",
+        &path_regions.wedge_vertex_offsets,
+        path_regions.wedge_vertices.len() / 2,
+        region_count,
+    )?;
+    validate_compact_offsets(
+        "compact path sector offsets",
+        &path_regions.sector_vertex_offsets,
+        path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+        region_count,
+    )?;
+    validate_finite_slice("compact path wedge vertices", &path_regions.wedge_vertices)?;
+    validate_finite_slice(
+        "compact path sector vertices",
+        &path_regions.sector_vertices,
+    )?;
+    validate_finite_slice("compact path cover vertices", &path_regions.cover_vertices)?;
+    validate_finite_slice("compact path clear vertices", &path_regions.clear_vertices)?;
+    for vertex in path_regions
+        .sector_vertices
+        .chunks_exact(PATH_SECTOR_VERTEX_FLOATS)
+    {
+        if vertex[4] < 0.0 {
+            return Err("compact path sector radius contains a negative value");
+        }
+    }
+    Ok(())
+}
+
+fn validate_compact_offsets(
+    label: &'static str,
+    offsets: &[u32],
+    vertex_count: usize,
+    region_count: usize,
+) -> Result<(), &'static str> {
+    if offsets.len() != region_count + 1 || offsets.first().copied() != Some(0) {
+        return Err(label);
+    }
+    let mut previous = 0usize;
+    for &offset in offsets {
+        let offset = offset as usize;
+        if offset < previous || offset > vertex_count {
+            return Err(label);
+        }
+        previous = offset;
+    }
+    if previous != vertex_count {
+        return Err(label);
+    }
+    Ok(())
+}
+
+fn validate_finite_slice(label: &'static str, values: &[f32]) -> Result<(), &'static str> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(label);
+    }
+    Ok(())
 }
 
 fn set_property(object: &Object, key: &str, value: JsValue) -> Result<(), JsValue> {
@@ -2631,5 +2739,19 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert!(!batches[0].clear);
         assert!(batches[1].clear);
+    }
+
+    #[test]
+    fn compact_path_region_validation_rejects_negative_sector_radius() {
+        let path_regions = PathRegions::new(
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 3],
+            vec![1.0, 0.0, 0.0, 0.0, -1.0],
+            vec![0, 1],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        );
+
+        assert!(validate_compact_path_region_invariant(&path_regions).is_err());
     }
 }

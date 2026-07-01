@@ -542,9 +542,7 @@ M02*",
         )
         .expect("region arc payload should parse");
 
-    assert!(payload.render_layers[0]
-        .path_regions
-        .has_source_contours());
+    assert!(payload.render_layers[0].path_regions.has_source_contours());
     let interaction_layer = payload
         .interaction_layer
         .expect("interaction layer should be collected");
@@ -555,6 +553,93 @@ M02*",
 
     assert_eq!(path_regions.pick_contours.len(), 1);
     assert!(!path_regions.has_source_contours());
+}
+
+#[test]
+fn path_region_pick_respects_inner_hole_contour() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X000000Y000000D02*
+G01*
+X100000Y000000D01*
+G03*
+X100000Y100000I-050000J050000D01*
+G01*
+X000000Y100000D01*
+X000000Y000000D01*
+X040000Y040000D02*
+X060000Y040000D01*
+X060000Y060000D01*
+X040000Y060000D01*
+X040000Y040000D01*
+G37*
+M02*",
+        )
+        .expect("region with inner hole should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+
+    assert!(interaction_layer.pick(2.0, 2.0, 0.0).is_some());
+    assert!(interaction_layer.pick(5.0, 5.0, 0.0).is_none());
+}
+
+#[test]
+fn path_region_pick_contour_quality_tracks_arc_tessellation_quality() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*";
+    let mut low_parser = GerberParser::with_options_and_interactions(true, 0, true);
+    let mut high_parser = GerberParser::with_options_and_interactions(true, 2, true);
+    let low_payload = low_parser
+        .parse_payload(data)
+        .expect("low quality arc region interaction should parse");
+    let high_payload = high_parser
+        .parse_payload(data)
+        .expect("high quality arc region interaction should parse");
+
+    let low_feature = &low_payload
+        .interaction_layer
+        .expect("low quality interaction layer should exist")
+        .features[0];
+    let high_feature = &high_payload
+        .interaction_layer
+        .expect("high quality interaction layer should exist")
+        .features[0];
+    let low_points: usize = low_feature
+        .path_regions
+        .as_deref()
+        .expect("low quality path regions should exist")
+        .pick_contours
+        .iter()
+        .flatten()
+        .map(Vec::len)
+        .sum();
+    let high_points: usize = high_feature
+        .path_regions
+        .as_deref()
+        .expect("high quality path regions should exist")
+        .pick_contours
+        .iter()
+        .flatten()
+        .map(Vec::len)
+        .sum();
+
+    assert!(high_points > low_points);
 }
 
 #[test]

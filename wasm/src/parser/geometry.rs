@@ -1731,6 +1731,7 @@ fn canonical_arc_geometry(
     }
 
     let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
+    let original_end_radius = ((end[0] - center[0]).powi(2) + (end[1] - center[1]).powi(2)).sqrt();
     let normal = [-chord[1] / chord_length, chord[0] / chord_length];
     let center_offset = [center[0] - midpoint[0], center[1] - midpoint[1]];
     let signed_distance = center_offset[0] * normal[0] + center_offset[1] * normal[1];
@@ -1757,6 +1758,15 @@ fn canonical_arc_geometry(
     let adjusted_end_angle = (end[1] - adjusted_center[1]).atan2(end[0] - adjusted_center[0]);
     let adjusted_sweep_angle =
         directed_sweep_angle(adjusted_start_angle, adjusted_end_angle, sweep_angle);
+    let radius_tolerance = (radius.abs() * 1.0e-4).max(1.0e-5);
+    let original_radii_match =
+        original_end_radius.is_finite() && (original_end_radius - radius).abs() <= radius_tolerance;
+    let adjusted_sweep_angle =
+        if original_radii_match && adjusted_sweep_angle.abs() > sweep_angle.abs() + 0.001 {
+            sweep_angle
+        } else {
+            adjusted_sweep_angle
+        };
 
     CanonicalArc {
         center: adjusted_center,
@@ -2226,7 +2236,8 @@ fn push_sector_cap_quad(
 ) -> Result<(), String> {
     let mid_angle = start_angle + sweep_angle * 0.5;
     let outward = [mid_angle.cos(), mid_angle.sin()];
-    let cover_distance = radius * 2.0;
+    let sagitta = radius * (1.0 - (sweep_angle.abs() * 0.5).cos());
+    let cover_distance = sagitta + (radius.abs() * 1.0e-4).max(1.0e-5);
     let start_outer = [
         start[0] + outward[0] * cover_distance,
         start[1] + outward[1] * cover_distance,
@@ -3030,4 +3041,23 @@ pub fn parse_graphic_command(
     state.j = j;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_arc_preserves_clamped_equal_radius_sweep() {
+        let arc = canonical_arc_geometry(
+            [1.0, 0.0],
+            [0.0, -1.0],
+            [0.0, 0.0],
+            1.0,
+            0.0,
+            std::f32::consts::PI / 2.0,
+        );
+
+        assert!((arc.sweep_angle - std::f32::consts::PI / 2.0).abs() < 0.0001);
+    }
 }
