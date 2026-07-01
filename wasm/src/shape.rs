@@ -522,6 +522,19 @@ impl PathRegions {
         }
     }
 
+    pub(crate) fn clone_for_interaction(&self) -> PathRegions {
+        PathRegions {
+            wedge_vertices: self.wedge_vertices.clone(),
+            wedge_vertex_offsets: self.wedge_vertex_offsets.clone(),
+            sector_vertices: self.sector_vertices.clone(),
+            sector_vertex_offsets: self.sector_vertex_offsets.clone(),
+            cover_vertices: self.cover_vertices.clone(),
+            clear_vertices: self.clear_vertices.clone(),
+            pick_contours: self.pick_contours.clone(),
+            source_contours: Vec::new(),
+        }
+    }
+
     pub(crate) fn release_cpu_geometry(&mut self) {
         self.wedge_vertices = Vec::new();
         self.sector_vertices = Vec::new();

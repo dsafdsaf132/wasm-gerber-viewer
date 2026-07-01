@@ -2715,7 +2715,9 @@ pub fn parse_graphic_command(
                             collect_region_source_contours,
                         )?;
                         if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
-                            path_regions.append(region_path_regions.clone());
+                            let interaction_path_regions =
+                                region_path_regions.clone_for_interaction();
+                            path_regions.append(region_path_regions);
                             if let Some(feature) = InteractionFeature::from_geometry(
                                 FeatureKind::Region,
                                 None,
@@ -2723,7 +2725,7 @@ pub fn parse_graphic_command(
                                 None,
                                 state.polarity,
                                 Vec::new(),
-                                region_path_regions,
+                                interaction_path_regions,
                                 FeatureProperties::default(),
                             ) {
                                 interaction_layer.push(feature);

@@ -524,6 +524,40 @@ M02*",
 }
 
 #[test]
+fn region_arc_interaction_clone_omits_source_contours() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    parser.preserve_region_source_contours = true;
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+        )
+        .expect("region arc payload should parse");
+
+    assert!(payload.render_layers[0]
+        .path_regions
+        .has_source_contours());
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let path_regions = interaction_layer.features[0]
+        .path_regions
+        .as_deref()
+        .expect("region interaction should keep path regions");
+
+    assert_eq!(path_regions.pick_contours.len(), 1);
+    assert!(!path_regions.has_source_contours());
+}
+
+#[test]
 fn arc_draw_interactions_report_g02_and_g03_commands() {
     let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
     let payload = parser
