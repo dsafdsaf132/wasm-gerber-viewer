@@ -534,14 +534,14 @@ impl PathRegions {
         }
     }
 
-    pub(crate) fn clone_for_interaction(&self) -> PathRegions {
+    pub(crate) fn clone_for_interaction_pick(&self) -> PathRegions {
         PathRegions {
-            wedge_vertices: self.wedge_vertices.clone(),
-            wedge_vertex_offsets: self.wedge_vertex_offsets.clone(),
-            sector_vertices: self.sector_vertices.clone(),
-            sector_vertex_offsets: self.sector_vertex_offsets.clone(),
-            cover_vertices: self.cover_vertices.clone(),
-            clear_vertices: self.clear_vertices.clone(),
+            wedge_vertices: Vec::new(),
+            wedge_vertex_offsets: vec![0],
+            sector_vertices: Vec::new(),
+            sector_vertex_offsets: vec![0],
+            cover_vertices: Vec::new(),
+            clear_vertices: Vec::new(),
             pick_contours: self.pick_contours.clone(),
             source_contours: Vec::new(),
         }
@@ -864,6 +864,7 @@ fn transform_region_contours_for_flash(
                         radius,
                         start_angle,
                         sweep_angle,
+                        ..
                     } => {
                         *start = transformed_array_point_for_flash(
                             *start, scale, mirror_x, mirror_y, rotation, dx, dy,

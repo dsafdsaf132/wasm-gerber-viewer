@@ -819,6 +819,10 @@ impl GerberProcessor {
             .is_some()
     }
 
+    pub fn clear_interaction_layers(&mut self) {
+        self.interaction_layers.clear();
+    }
+
     /// Remove a layer from the renderer
     ///
     /// # Arguments
@@ -1033,6 +1037,7 @@ impl GerberProcessor {
 
         if let Some(renderer) = &mut self.renderer {
             renderer.render_interaction_highlight(
+                layer_id as usize,
                 feature,
                 &clear_features,
                 zoom_x,

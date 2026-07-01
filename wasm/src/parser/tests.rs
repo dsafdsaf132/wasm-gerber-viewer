@@ -4,6 +4,7 @@ use super::{
     GerberParser, Polarity,
 };
 use crate::interaction::FeatureKind;
+use crate::region::RegionSegment;
 use crate::shape::{GerberData, PATH_SECTOR_VERTEX_FLOATS};
 use std::collections::HashMap;
 
@@ -519,8 +520,18 @@ M02*",
         .path_regions
         .as_deref()
         .expect("region interaction should keep path regions");
-    assert_eq!(path_regions.region_count(), 1);
+    assert_eq!(path_regions.region_count(), 0);
+    assert!(path_regions.wedge_vertices.is_empty());
+    assert!(path_regions.sector_vertices.is_empty());
     assert_eq!(path_regions.pick_contours.len(), 1);
+    assert_eq!(
+        feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 0,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
 }
 
 #[test]
@@ -552,7 +563,9 @@ M02*",
         .expect("region interaction should keep path regions");
 
     assert_eq!(path_regions.pick_contours.len(), 1);
+    assert_eq!(path_regions.region_count(), 0);
     assert!(!path_regions.has_source_contours());
+    assert!(interaction_layer.features[0].path_region_ref.is_some());
 }
 
 #[test]
@@ -1008,8 +1021,118 @@ M02*",
         .path_regions
         .as_deref()
         .expect("aperture block region interaction should keep path regions");
-    assert_eq!(path_regions.region_count(), 1);
+    assert_eq!(path_regions.region_count(), 0);
+    assert!(path_regions.wedge_vertices.is_empty());
+    assert!(path_regions.sector_vertices.is_empty());
     assert_eq!(path_regions.pick_contours.len(), 1);
+    assert_eq!(
+        feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 0,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
+}
+
+#[test]
+fn aperture_block_path_region_interaction_ref_accounts_for_pending_primitives() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD11C,1.0*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+D11*
+X-030000Y000000D03*
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("aperture block after pending primitive should parse");
+
+    assert_eq!(payload.render_layers.len(), 2);
+    assert_eq!(payload.render_layers[0].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[1].path_regions.region_count(), 1);
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let block_feature = interaction_layer
+        .features
+        .iter()
+        .find(|feature| feature.path_region_ref.is_some())
+        .expect("block path region feature should keep render sublayer ref");
+
+    assert_eq!(
+        block_feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 1,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
+}
+
+#[test]
+fn aperture_block_path_region_interaction_ref_accounts_for_split_pending_sublayers() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD11C,1.0X0.25*%
+%ADD12C,1.0*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+D12*
+X-050000Y000000D03*
+D11*
+X-030000Y000000D03*
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("aperture block after split pending primitive should parse");
+
+    assert_eq!(payload.render_layers.len(), 3);
+    assert_eq!(payload.render_layers[0].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[1].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[2].path_regions.region_count(), 1);
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let block_feature = interaction_layer
+        .features
+        .iter()
+        .find(|feature| feature.path_region_ref.is_some())
+        .expect("block path region feature should keep render sublayer ref");
+
+    assert_eq!(
+        block_feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 2,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
 }
 
 #[test]
@@ -1176,6 +1299,41 @@ M02*",
     .expect("major arc region should parse");
 
     assert_eq!(layers[0].path_regions.sector_vertex_offsets, vec![0, 18]);
+}
+
+#[test]
+fn single_quadrant_region_arc_records_clamped_sweep() {
+    let mut parser = GerberParser::with_options(true, 1);
+    parser.preserve_region_source_contours = true;
+    let layers = parser
+        .parse(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G74*
+G36*
+X010000Y000000D02*
+G03*
+X000000Y-012000I010000J000000D01*
+G01*
+X010000Y000000D01*
+G37*
+M02*",
+        )
+        .expect("single-quadrant arc region should parse");
+
+    let segment = &layers[0].path_regions.source_contours[0][0].segments[0];
+    let RegionSegment::Arc {
+        sweep_angle,
+        clamp_sweep,
+        ..
+    } = segment
+    else {
+        panic!("first source segment should be an arc");
+    };
+
+    assert!(*clamp_sweep);
+    assert!(sweep_angle.abs() <= std::f32::consts::FRAC_PI_2 + 0.001);
 }
 
 #[test]

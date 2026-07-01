@@ -10,9 +10,10 @@ const CIRCLE_SEGMENTS: usize = 48;
 const ARC_SEGMENT_RADIANS: f32 = std::f32::consts::PI / 48.0;
 const MAX_ARC_SEGMENTS: usize = 256;
 const TWO_PI: f32 = std::f32::consts::PI * 2.0;
-const COMPACT_INTERACTION_VERSION: u32 = 2;
+const COMPACT_INTERACTION_VERSION: u32 = 3;
 const COMPACT_NONE: u32 = u32::MAX;
 const COMPACT_PRIMITIVE_STRIDE: usize = 10;
+const COMPACT_PATH_REGION_REF_STRIDE: usize = 3;
 const PROPERTY_DIAMETER: u32 = 1 << 0;
 const PROPERTY_WIDTH: u32 = 1 << 1;
 const PROPERTY_HEIGHT: u32 = 1 << 2;
@@ -35,7 +36,15 @@ pub struct InteractionFeature {
     pub descriptor: Rc<FeatureDescriptor>,
     pub primitives: FeaturePrimitives,
     pub path_regions: Option<Box<PathRegions>>,
+    pub path_region_ref: Option<PathRegionRef>,
     pub bounds: Boundary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathRegionRef {
+    pub sublayer_idx: usize,
+    pub region_start: usize,
+    pub region_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +247,21 @@ impl InteractionLayer {
         }
     }
 
+    pub(crate) fn remap_path_region_sublayers(
+        &mut self,
+        sublayer_map: &[usize],
+    ) -> Result<(), JsValue> {
+        for feature in &mut self.features {
+            let Some(path_region_ref) = &mut feature.path_region_ref else {
+                continue;
+            };
+            path_region_ref.sublayer_idx = *sublayer_map
+                .get(path_region_ref.sublayer_idx)
+                .ok_or_else(|| JsValue::from_str("Interaction path region sublayer is invalid"))?;
+        }
+        Ok(())
+    }
+
     pub fn pick(&self, x: f32, y: f32, tolerance: f32) -> Option<(usize, &InteractionFeature)> {
         self.pick_after(x, y, tolerance, None).0
     }
@@ -311,6 +335,8 @@ impl InteractionLayer {
         let mut feature_bounds = Vec::with_capacity(self.features.len() * 4);
         let mut feature_primitive_ranges = Vec::with_capacity(self.features.len() * 2);
         let mut feature_path_region_ids = Vec::with_capacity(self.features.len());
+        let mut path_region_ref_feature_ids = Vec::new();
+        let mut path_region_ref_data = Vec::new();
         let mut primitive_types = Vec::new();
         let mut primitive_data = Vec::new();
 
@@ -340,6 +366,25 @@ impl InteractionLayer {
                 feature_path_region_ids.push(path_region_id);
             } else {
                 feature_path_region_ids.push(COMPACT_NONE);
+            }
+
+            if let Some(path_region_ref) = feature.path_region_ref {
+                path_region_ref_feature_ids.push(compact_usize(
+                    feature_descriptors.len().saturating_sub(1),
+                    "path region ref feature",
+                )?);
+                path_region_ref_data.push(compact_usize(
+                    path_region_ref.sublayer_idx,
+                    "path region sublayer",
+                )?);
+                path_region_ref_data.push(compact_usize(
+                    path_region_ref.region_start,
+                    "path region start",
+                )?);
+                path_region_ref_data.push(compact_usize(
+                    path_region_ref.region_count,
+                    "path region count",
+                )?);
             }
         }
 
@@ -375,6 +420,16 @@ impl InteractionLayer {
             &object,
             "featurePathRegionIds",
             u32_array_to_js(&feature_path_region_ids),
+        )?;
+        set_property(
+            &object,
+            "pathRegionRefFeatureIds",
+            u32_array_to_js(&path_region_ref_feature_ids),
+        )?;
+        set_property(
+            &object,
+            "pathRegionRefData",
+            u32_array_to_js(&path_region_ref_data),
         )?;
         set_property(&object, "primitiveTypes", u32_array_to_js(&primitive_types))?;
         set_property(&object, "primitiveData", f32_array_to_js(&primitive_data))?;
@@ -431,6 +486,8 @@ impl InteractionLayer {
         let feature_bounds = f32_array_from_js(value, "featureBounds");
         let feature_primitive_ranges = u32_array_from_js(value, "featurePrimitiveRanges");
         let feature_path_region_ids = u32_array_from_js(value, "featurePathRegionIds");
+        let path_region_ref_feature_ids = u32_array_from_js(value, "pathRegionRefFeatureIds");
+        let path_region_ref_data = u32_array_from_js(value, "pathRegionRefData");
         let primitive_types = u32_array_from_js(value, "primitiveTypes");
         let primitive_data = f32_array_from_js(value, "primitiveData");
         let templates = compact_templates_from_js(
@@ -449,6 +506,11 @@ impl InteractionLayer {
         if primitive_data.len() != primitive_types.len() * COMPACT_PRIMITIVE_STRIDE {
             return Err(JsValue::from_str("Invalid compact primitive data"));
         }
+        let path_region_refs = compact_path_region_refs_from_parts(
+            &path_region_ref_feature_ids,
+            &path_region_ref_data,
+            feature_count,
+        )?;
 
         let mut features = Vec::with_capacity(feature_count);
         for feature_id in 0..feature_count {
@@ -475,6 +537,7 @@ impl InteractionLayer {
                     .and_then(Option::take)
                     .map(Box::new)
             };
+            let path_region_ref = path_region_refs[feature_id];
 
             features.push(InteractionFeature {
                 descriptor,
@@ -485,6 +548,7 @@ impl InteractionLayer {
                     &templates,
                 )?),
                 path_regions,
+                path_region_ref,
                 bounds: Boundary::new(
                     feature_bounds[feature_id * 4],
                     feature_bounds[feature_id * 4 + 1],
@@ -1188,6 +1252,7 @@ impl InteractionFeature {
             polarity,
             FeaturePrimitives::from_vec(primitives),
             None,
+            None,
             bounds,
             properties,
         ))
@@ -1211,12 +1276,13 @@ impl InteractionFeature {
             polarity,
             FeaturePrimitives::from_slice(primitives),
             None,
+            None,
             bounds,
             properties,
         ))
     }
 
-    pub fn from_geometry(
+    pub fn from_geometry_with_bounds(
         kind: FeatureKind,
         aperture: Option<String>,
         aperture_type: Option<String>,
@@ -1224,12 +1290,16 @@ impl InteractionFeature {
         polarity: Polarity,
         primitives: Vec<Primitive>,
         path_regions: PathRegions,
+        path_region_ref: Option<PathRegionRef>,
+        bounds: Boundary,
         properties: FeatureProperties,
-    ) -> Option<Self> {
-        let bounds = combined_bounds(&primitives, &path_regions)?;
-        let path_regions =
+    ) -> Self {
+        let mut path_regions =
             path_regions_has_interaction_geometry(&path_regions).then(|| Box::new(path_regions));
-        Some(Self::from_parts(
+        if let Some(path_regions) = &mut path_regions {
+            path_regions.cover_vertices = Vec::new();
+        }
+        Self::from_parts(
             kind,
             aperture,
             aperture_type,
@@ -1237,9 +1307,17 @@ impl InteractionFeature {
             polarity,
             FeaturePrimitives::from_vec(primitives),
             path_regions,
+            path_region_ref,
             bounds,
             properties,
-        ))
+        )
+    }
+
+    pub fn bounds_for_geometry(
+        primitives: &[Primitive],
+        path_regions: &PathRegions,
+    ) -> Option<Boundary> {
+        combined_bounds(primitives, path_regions)
     }
 
     fn from_parts(
@@ -1250,6 +1328,7 @@ impl InteractionFeature {
         polarity: Polarity,
         primitives: FeaturePrimitives,
         path_regions: Option<Box<PathRegions>>,
+        path_region_ref: Option<PathRegionRef>,
         bounds: Boundary,
         properties: FeatureProperties,
     ) -> Self {
@@ -1264,6 +1343,7 @@ impl InteractionFeature {
             }),
             primitives,
             path_regions,
+            path_region_ref,
             bounds,
         }
     }
@@ -1329,6 +1409,11 @@ impl InteractionFeature {
                 "dark"
             }),
         )?;
+        set_property(
+            &object,
+            "hasHighlightGeometry",
+            JsValue::from_bool(self.has_highlight_geometry()),
+        )?;
         if let Some(aperture) = &self.descriptor.aperture {
             set_property(&object, "aperture", JsValue::from_str(aperture.as_ref()))?;
         }
@@ -1361,6 +1446,7 @@ impl InteractionFeature {
 
     pub fn has_highlight_geometry(&self) -> bool {
         self.primitives.has_geometry()
+            || self.path_region_ref.is_some()
             || self
                 .path_regions
                 .as_deref()
@@ -1580,6 +1666,15 @@ fn path_regions_bounds(path_regions: &PathRegions) -> Option<Boundary> {
         include_point_bounds(
             point[0], point[1], &mut min_x, &mut max_x, &mut min_y, &mut max_y,
         );
+    }
+    for region in &path_regions.pick_contours {
+        for contour in region {
+            for point in contour {
+                include_point_bounds(
+                    point[0], point[1], &mut min_x, &mut max_x, &mut min_y, &mut max_y,
+                );
+            }
+        }
     }
 
     min_x
@@ -2340,6 +2435,63 @@ fn compact_templates_from_js(offsets: &[u32], data: &[f32]) -> Result<Vec<Rc<Vec
     Ok(templates)
 }
 
+fn compact_usize(value: usize, label: &str) -> Result<u32, JsValue> {
+    u32::try_from(value).map_err(|_| JsValue::from_str(&format!("{label} exceeds compact range")))
+}
+
+fn compact_path_region_refs_from_parts(
+    feature_ids: &[u32],
+    ref_data: &[u32],
+    feature_count: usize,
+) -> Result<Vec<Option<PathRegionRef>>, JsValue> {
+    compact_path_region_refs_from_parts_invariant(feature_ids, ref_data, feature_count)
+        .map_err(JsValue::from_str)
+}
+
+fn compact_path_region_refs_from_parts_invariant(
+    feature_ids: &[u32],
+    ref_data: &[u32],
+    feature_count: usize,
+) -> Result<Vec<Option<PathRegionRef>>, &'static str> {
+    if ref_data.len() != feature_ids.len() * COMPACT_PATH_REGION_REF_STRIDE {
+        return Err("Invalid compact path region ref data");
+    }
+
+    let mut refs = vec![None; feature_count];
+    for (ref_idx, feature_id) in feature_ids.iter().copied().enumerate() {
+        let feature_id = feature_id as usize;
+        if feature_id >= feature_count || refs[feature_id].is_some() {
+            return Err("Invalid compact path region ref feature");
+        }
+
+        refs[feature_id] = Some(compact_path_region_ref_from_parts(
+            &ref_data[ref_idx * COMPACT_PATH_REGION_REF_STRIDE
+                ..ref_idx * COMPACT_PATH_REGION_REF_STRIDE + COMPACT_PATH_REGION_REF_STRIDE],
+        )?);
+    }
+
+    Ok(refs)
+}
+
+fn compact_path_region_ref_from_parts(parts: &[u32]) -> Result<PathRegionRef, &'static str> {
+    let [sublayer_idx, region_start, region_count] = parts else {
+        return Err("Invalid compact path region ref data");
+    };
+    if *sublayer_idx == COMPACT_NONE
+        || *region_start == COMPACT_NONE
+        || *region_count == COMPACT_NONE
+        || *region_count == 0
+    {
+        return Err("Invalid compact path region ref");
+    }
+
+    Ok(PathRegionRef {
+        sublayer_idx: *sublayer_idx as usize,
+        region_start: *region_start as usize,
+        region_count: *region_count as usize,
+    })
+}
+
 fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsValue> {
     let mut pick_region_contour_offsets = Vec::with_capacity(path_regions.pick_contours.len() + 1);
     let mut pick_contour_point_offsets = Vec::new();
@@ -2440,12 +2592,13 @@ fn path_region_from_compact_js(value: &JsValue) -> Result<PathRegions, JsValue> 
     let region_offsets = u32_array_from_js(value, "pickRegionContourOffsets");
     let contour_offsets = u32_array_from_js(value, "pickContourPointOffsets");
     let points = f32_array_from_js(value, "pickContourPoints");
-    if region_offsets.is_empty() || contour_offsets.is_empty() {
+    if region_offsets.is_empty() && contour_offsets.is_empty() && points.is_empty() {
         return Ok(path_regions);
     }
     if !points.len().is_multiple_of(2) {
         return Err(JsValue::from_str("Invalid compact pick contour point data"));
     }
+    validate_compact_pick_offsets(&region_offsets, &contour_offsets, points.len() / 2)?;
 
     let mut pick_contours = Vec::with_capacity(region_offsets.len().saturating_sub(1));
     for pair in region_offsets.windows(2) {
@@ -2480,6 +2633,43 @@ fn path_region_from_compact_js(value: &JsValue) -> Result<PathRegions, JsValue> 
     Ok(path_regions)
 }
 
+fn validate_compact_pick_offsets(
+    region_offsets: &[u32],
+    contour_offsets: &[u32],
+    point_count: usize,
+) -> Result<(), JsValue> {
+    validate_compact_pick_offsets_invariant(region_offsets, contour_offsets, point_count)
+        .map_err(JsValue::from_str)
+}
+
+fn validate_compact_pick_offsets_invariant(
+    region_offsets: &[u32],
+    contour_offsets: &[u32],
+    point_count: usize,
+) -> Result<(), &'static str> {
+    if region_offsets.is_empty()
+        || contour_offsets.is_empty()
+        || region_offsets.first().copied() != Some(0)
+        || contour_offsets.first().copied() != Some(0)
+        || region_offsets.last().copied() != Some(contour_offsets.len().saturating_sub(1) as u32)
+        || contour_offsets.last().copied() != Some(point_count as u32)
+    {
+        return Err("Invalid compact pick contour offsets");
+    }
+    let contour_count = contour_offsets.len().saturating_sub(1);
+    for pair in region_offsets.windows(2) {
+        if pair[0] > pair[1] || pair[1] as usize > contour_count {
+            return Err("Invalid compact pick region offsets");
+        }
+    }
+    for pair in contour_offsets.windows(2) {
+        if pair[0] > pair[1] || pair[1] as usize > point_count {
+            return Err("Invalid compact pick point offsets");
+        }
+    }
+    Ok(())
+}
+
 fn validate_compact_path_region(path_regions: &PathRegions) -> Result<(), JsValue> {
     validate_compact_path_region_invariant(path_regions)
         .map_err(|message| JsValue::from_str(message))
@@ -2498,12 +2688,20 @@ fn validate_compact_path_region_invariant(path_regions: &PathRegions) -> Result<
     }
     if !path_regions.cover_vertices.len().is_multiple_of(12)
         || !path_regions.clear_vertices.len().is_multiple_of(12)
-        || path_regions.cover_vertices.len() != path_regions.clear_vertices.len()
     {
         return Err("Invalid compact path region quad data");
     }
 
-    let region_count = path_regions.cover_vertices.len() / 12;
+    let region_count = path_regions.region_count();
+    if region_count > 0 && path_regions.cover_vertices.len() != path_regions.clear_vertices.len() {
+        return Err("Invalid compact path region quad data");
+    }
+    if region_count > 0 && path_regions.cover_vertices.len() / 12 != region_count {
+        return Err("Invalid compact path region quad data");
+    }
+    if region_count > 0 && path_regions.clear_vertices.len() / 12 != region_count {
+        return Err("Invalid compact path region quad data");
+    }
     validate_compact_offsets(
         "compact path wedge offsets",
         &path_regions.wedge_vertex_offsets,
@@ -2742,6 +2940,51 @@ mod tests {
     }
 
     #[test]
+    fn path_region_feature_bounds_can_use_conservative_render_bounds() {
+        let mut full_path_regions = PathRegions::new(
+            vec![],
+            vec![0, 0],
+            vec![],
+            vec![0, 0],
+            vec![
+                -1.0, 0.0, 1.0, 0.0, -1.0, 1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 1.0,
+            ],
+            vec![
+                -1.0, 0.0, 1.0, 0.0, -1.0, 1.0, -1.0, 1.0, 1.0, 0.0, 1.0, 1.0,
+            ],
+        );
+        full_path_regions.pick_contours =
+            vec![vec![vec![[-1.0, 0.0], [1.0, 0.0], [0.0, 0.8], [-1.0, 0.0]]]];
+        let bounds = InteractionFeature::bounds_for_geometry(&[], &full_path_regions)
+            .expect("full path region should have conservative bounds");
+
+        let feature = InteractionFeature::from_geometry_with_bounds(
+            FeatureKind::Region,
+            None,
+            None,
+            None,
+            Polarity::Positive,
+            Vec::new(),
+            full_path_regions.clone_for_interaction_pick(),
+            Some(PathRegionRef {
+                sublayer_idx: 0,
+                region_start: 0,
+                region_count: 1,
+            }),
+            bounds,
+            FeatureProperties::default(),
+        );
+
+        assert_eq!(feature.bounds.max_y(), 1.0);
+        let stored_path_regions = feature
+            .path_regions
+            .as_deref()
+            .expect("pick contour should be retained");
+        assert!(stored_path_regions.cover_vertices.is_empty());
+        assert_eq!(stored_path_regions.pick_contours[0][0][2], [0.0, 0.8]);
+    }
+
+    #[test]
     fn compact_path_region_validation_rejects_negative_sector_radius() {
         let path_regions = PathRegions::new(
             vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
@@ -2753,5 +2996,35 @@ mod tests {
         );
 
         assert!(validate_compact_path_region_invariant(&path_regions).is_err());
+    }
+
+    #[test]
+    fn compact_pick_offsets_require_canonical_ranges() {
+        assert!(validate_compact_pick_offsets_invariant(&[0, 1], &[0, 3], 3).is_ok());
+        assert!(validate_compact_pick_offsets_invariant(&[1, 1], &[0, 3], 3).is_err());
+        assert!(validate_compact_pick_offsets_invariant(&[0, 2], &[0, 3], 3).is_err());
+        assert!(validate_compact_pick_offsets_invariant(&[0, 1], &[1, 3], 3).is_err());
+        assert!(validate_compact_pick_offsets_invariant(&[0, 1], &[0, 4], 3).is_err());
+    }
+
+    #[test]
+    fn compact_path_region_refs_are_sparse_and_reject_duplicates() {
+        let refs = compact_path_region_refs_from_parts_invariant(&[2], &[4, 5, 6], 4)
+            .expect("sparse path region refs should parse");
+
+        assert_eq!(refs[0], None);
+        assert_eq!(
+            refs[2],
+            Some(PathRegionRef {
+                sublayer_idx: 4,
+                region_start: 5,
+                region_count: 6,
+            })
+        );
+        assert!(
+            compact_path_region_refs_from_parts_invariant(&[2, 2], &[4, 5, 6, 7, 8, 9], 4).is_err()
+        );
+        assert!(compact_path_region_refs_from_parts_invariant(&[4], &[4, 5, 6], 4).is_err());
+        assert!(compact_path_region_refs_from_parts_invariant(&[1], &[4, 5], 4).is_err());
     }
 }

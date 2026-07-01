@@ -947,13 +947,24 @@ impl GerberParser {
             "Gerber data layer list",
         )?;
 
+        let mut sublayer_map = Vec::new();
+        try_reserve_exact(
+            &mut sublayer_map,
+            polarity_layers.len(),
+            "interaction path region sublayer map",
+        )?;
         for layer in polarity_layers {
+            let render_sublayer_idx = gerber_data_layers.len();
             let mut gerber_data = Self::primitives_to_gerber_data(
                 layer.primitives,
                 layer.path_regions,
                 layer.polarity == Polarity::Negative,
             )?;
+            sublayer_map.push(render_sublayer_idx);
             gerber_data_layers.append(&mut gerber_data);
+        }
+        if let Some(interaction_layer) = &mut self.interaction_layer {
+            interaction_layer.remap_path_region_sublayers(&sublayer_map)?;
         }
 
         Ok(gerber_data_layers)
