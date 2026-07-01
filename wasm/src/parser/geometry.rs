@@ -2443,8 +2443,6 @@ fn push_sector_cap_quad(
         end[0] + outward[0] * cover_distance,
         end[1] + outward[1] * cover_distance,
     ];
-    let start_vector = local_vector(start, center, radius, start_angle);
-    let end_vector = local_vector(end, center, radius, start_angle + sweep_angle);
 
     try_reserve_values(
         vertices,
@@ -2452,36 +2450,10 @@ fn push_sector_cap_quad(
         "path region arc sector vertices",
     )?;
     for point in [start, end, end_outer, start, end_outer, start_outer] {
-        vertices.extend_from_slice(&[
-            point[0],
-            point[1],
-            center[0],
-            center[1],
-            radius,
-            start_angle,
-            sweep_angle,
-            start_vector[0],
-            start_vector[1],
-            end_vector[0],
-            end_vector[1],
-        ]);
+        vertices.extend_from_slice(&[point[0], point[1], center[0], center[1], radius]);
     }
 
     Ok(())
-}
-
-fn local_vector(point: [f32; 2], center: [f32; 2], radius: f32, fallback_angle: f32) -> [f32; 2] {
-    if radius > 0.0 {
-        let vector = [
-            (point[0] - center[0]) / radius,
-            (point[1] - center[1]) / radius,
-        ];
-        if vector[0].is_finite() && vector[1].is_finite() {
-            return vector;
-        }
-    }
-
-    [fallback_angle.cos(), fallback_angle.sin()]
 }
 
 fn angle_point(center: [f32; 2], radius: f32, angle: f32) -> [f32; 2] {
@@ -2530,6 +2502,18 @@ pub(crate) fn arc_curve_bounds(
     }
 
     (min_x, max_x, min_y, max_y)
+}
+
+pub(crate) fn canonical_arc_curve_bounds(
+    start: [f32; 2],
+    end: [f32; 2],
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+) -> (f32, f32, f32, f32) {
+    let arc = canonical_arc_geometry(start, end, center, radius, start_angle, sweep_angle);
+    arc_curve_bounds(arc.center, arc.radius, arc.start_angle, arc.sweep_angle)
 }
 
 fn arc_sector_bounds(
@@ -2938,8 +2922,8 @@ pub fn parse_graphic_command(
                             collect_interactions,
                             collect_region_source_contours,
                         )?;
-                        path_regions.append(region_path_regions.clone());
                         if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
+                            path_regions.append(region_path_regions.clone());
                             if let Some(feature) = InteractionFeature::from_geometry(
                                 FeatureKind::Region,
                                 None,
@@ -2952,6 +2936,8 @@ pub fn parse_graphic_command(
                             ) {
                                 interaction_layer.push(feature);
                             }
+                        } else {
+                            path_regions.append(region_path_regions);
                         }
                     } else {
                         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;

@@ -1,7 +1,7 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
 use super::{format_count, parse_gerber, parse_gerber_with_options, GerberParser};
 use crate::interaction::FeatureKind;
-use crate::shape::GerberData;
+use crate::shape::{GerberData, PATH_SECTOR_VERTEX_FLOATS};
 use std::collections::HashMap;
 
 fn assert_approx_eq(actual: f32, expected: f32) {
@@ -986,16 +986,19 @@ M02*",
 
     layers[0].translate(10.0, 20.0);
     let sector = &layers[0].path_regions.sector_vertices;
-    assert_approx_eq(sector[0], 11.0);
-    assert_approx_eq(sector[1], 20.0);
-    assert_approx_eq(sector[2], 10.0);
-    assert_approx_eq(sector[3], 20.0);
-    assert_approx_eq(sector[11], 10.0);
-    assert_approx_eq(sector[12], 21.0);
-    assert_approx_eq(sector[7], 1.0);
-    assert_approx_eq(sector[8], 0.0);
-    assert_approx_eq(sector[9], 0.0);
-    assert_approx_eq(sector[10], 1.0);
+    assert_eq!(sector.len() % PATH_SECTOR_VERTEX_FLOATS, 0);
+    let first = &sector[0..PATH_SECTOR_VERTEX_FLOATS];
+    let second = &sector[PATH_SECTOR_VERTEX_FLOATS..PATH_SECTOR_VERTEX_FLOATS * 2];
+    assert_approx_eq(first[0], 11.0);
+    assert_approx_eq(first[1], 20.0);
+    assert_approx_eq(first[2], 10.0);
+    assert_approx_eq(first[3], 20.0);
+    assert_approx_eq(first[4], 1.0);
+    assert_approx_eq(second[0], 10.0);
+    assert_approx_eq(second[1], 21.0);
+    assert_approx_eq(second[2], 10.0);
+    assert_approx_eq(second[3], 20.0);
+    assert_approx_eq(second[4], 1.0);
 }
 
 #[test]

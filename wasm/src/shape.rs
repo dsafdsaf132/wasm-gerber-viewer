@@ -437,7 +437,7 @@ impl Thermals {
 ///
 /// Large regions are stored in flat buffers to avoid per-segment JS objects:
 /// - `wedge_vertices`: one or two stencil fan triangles per path segment
-/// - `sector_vertices`: expanded analytic arc-sector quads, 11 floats per vertex
+/// - `sector_vertices`: analytic arc cap quads, 5 floats per vertex
 /// - `cover_vertices`: one screen-coverable bounding quad per region
 /// - `clear_vertices`: one quad covering all stencil writes per region
 #[derive(Clone, Debug)]
@@ -452,7 +452,7 @@ pub struct PathRegions {
     pub(crate) source_contours: Vec<Vec<RegionContour>>,
 }
 
-pub(crate) const PATH_SECTOR_VERTEX_FLOATS: usize = 11;
+pub(crate) const PATH_SECTOR_VERTEX_FLOATS: usize = 5;
 
 impl PathRegions {
     pub fn new(
@@ -605,29 +605,6 @@ impl PathRegions {
             vertex[3] = center_y;
 
             vertex[4] *= scale.abs();
-            let (start_angle, sweep_angle) =
-                transform_arc_angles(vertex[5], vertex[6], scale, mirror_x, mirror_y, rotation);
-            vertex[5] = start_angle;
-            vertex[6] = sweep_angle;
-
-            let start_vector = transformed_arc_local_vector_for_flash(
-                [vertex[7], vertex[8]],
-                scale,
-                mirror_x,
-                mirror_y,
-                rotation,
-            );
-            let end_vector = transformed_arc_local_vector_for_flash(
-                [vertex[9], vertex[10]],
-                scale,
-                mirror_x,
-                mirror_y,
-                rotation,
-            );
-            vertex[7] = start_vector[0];
-            vertex[8] = start_vector[1];
-            vertex[9] = end_vector[0];
-            vertex[10] = end_vector[1];
         }
 
         for point in self.cover_vertices.chunks_exact_mut(2) {
@@ -783,29 +760,6 @@ fn transform_arc_angles(
     start += rotation;
     end += rotation;
     (start, end - start)
-}
-
-fn transformed_arc_local_vector_for_flash(
-    vector: [f32; 2],
-    scale: f32,
-    mirror_x: bool,
-    mirror_y: bool,
-    rotation: f32,
-) -> [f32; 2] {
-    let scale_sign = if scale < 0.0 { -1.0 } else { 1.0 };
-    let mut tx = vector[0] * scale_sign;
-    let mut ty = vector[1] * scale_sign;
-
-    if mirror_x {
-        tx = -tx;
-    }
-    if mirror_y {
-        ty = -ty;
-    }
-
-    let cos_r = rotation.cos();
-    let sin_r = rotation.sin();
-    [tx * cos_r - ty * sin_r, tx * sin_r + ty * cos_r]
 }
 
 fn translate_region_contours(region_groups: &mut [Vec<RegionContour>], dx: f32, dy: f32) {

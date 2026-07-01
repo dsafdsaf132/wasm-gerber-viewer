@@ -13,7 +13,7 @@ use shader::{
 };
 
 use crate::interaction::InteractionFeature;
-use crate::parser::geometry::{arc_curve_bounds, build_path_regions};
+use crate::parser::geometry::{build_path_regions, canonical_arc_curve_bounds};
 use crate::parser::ParserState;
 use crate::region::{RegionContour, RegionSegment};
 use crate::shape::{
@@ -971,6 +971,8 @@ impl Renderer {
 
         for segment in &contour.segments {
             if let RegionSegment::Arc {
+                start,
+                end,
                 center,
                 radius,
                 start_angle,
@@ -978,8 +980,14 @@ impl Renderer {
                 ..
             } = *segment
             {
-                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) =
-                    arc_curve_bounds(center, radius, start_angle, sweep_angle);
+                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = canonical_arc_curve_bounds(
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                );
                 *min_x = min_x.min(arc_min_x);
                 *max_x = max_x.max(arc_max_x);
                 *min_y = min_y.min(arc_min_y);
@@ -2398,17 +2406,9 @@ impl Renderer {
             &format!("Sublayer {} path wedge vertex count", sublayer_idx),
             wedge_vertex_count,
         )?;
-        if !path_regions
-            .sector_vertices
-            .len()
-            .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
-        {
-            return Err(JsValue::from_str(&format!(
-                "Sublayer {} path sector vertex buffer length is not divisible by {}",
-                sublayer_idx, PATH_SECTOR_VERTEX_FLOATS
-            )));
-        }
-        let sector_vertex_count = path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS;
+        let sector_vertex_count =
+            Self::validate_path_sector_vertices_invariant(path_regions, sublayer_idx)
+                .map_err(|message| JsValue::from_str(&message))?;
         Self::checked_usize_to_i32(
             &format!("Sublayer {} path sector vertex count", sublayer_idx),
             sector_vertex_count,
@@ -2483,6 +2483,23 @@ impl Renderer {
         Self::validate_finite_slice("path clear vertices", &path_regions.clear_vertices)?;
 
         Ok(())
+    }
+
+    fn validate_path_sector_vertices_invariant(
+        path_regions: &PathRegions,
+        sublayer_idx: usize,
+    ) -> Result<usize, String> {
+        if !path_regions
+            .sector_vertices
+            .len()
+            .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
+        {
+            return Err(format!(
+                "Sublayer {} path sector vertex buffer length is not divisible by {}",
+                sublayer_idx, PATH_SECTOR_VERTEX_FLOATS
+            ));
+        }
+        Ok(path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS)
     }
 
     fn validate_offsets(
@@ -5631,6 +5648,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_path_region_data_accepts_five_float_sector_vertices() {
+        let path_regions = PathRegions::new(
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 3],
+            vec![
+                1.0, 0.0, 0.0, 0.0, 1.0, //
+                0.0, 1.0, 0.0, 0.0, 1.0, //
+                2.0, 2.0, 0.0, 0.0, 1.0,
+            ],
+            vec![0, 3],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        );
+
+        assert!(Renderer::validate_path_region_data(&path_regions, 0).is_ok());
+    }
+
+    #[test]
+    fn validate_path_region_data_rejects_legacy_sector_stride() {
+        let path_regions = PathRegions::new(
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 3],
+            vec![
+                1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.5708, //
+                0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.5708, //
+                2.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.5708,
+            ],
+            vec![0, 3],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        );
+
+        assert!(Renderer::validate_path_sector_vertices_invariant(&path_regions, 0).is_err());
+    }
+
+    #[test]
     fn closed_outline_regions_preserve_multiple_contours() {
         let segments = vec![
             outline_line([0.0, 0.0], [10.0, 0.0]),
@@ -5684,6 +5737,28 @@ mod tests {
         assert!((boundary.max_x() - 7.0).abs() < 0.0001);
         assert!((boundary.min_y() - 3.0).abs() < 0.0001);
         assert!((boundary.max_y() - 7.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn outline_region_boundary_uses_canonical_arc_bounds() {
+        let mut contour = RegionContour::default();
+        contour
+            .push_arc(
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.25, 0.0],
+                0.75,
+                0.0,
+                std::f32::consts::FRAC_PI_2,
+            )
+            .expect("arc contour should build");
+
+        let boundary = Renderer::outline_regions_boundary(&[contour]).expect("finite boundary");
+
+        assert!((boundary.min_x() - 0.0).abs() < 0.0001);
+        assert!((boundary.min_y() - 0.0).abs() < 0.0001);
+        assert!(boundary.max_x() > 1.001);
+        assert!(boundary.max_y() > 1.001);
     }
 
     #[test]
