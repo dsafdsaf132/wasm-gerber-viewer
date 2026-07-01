@@ -1,7 +1,7 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
 use super::{format_count, parse_gerber, parse_gerber_with_options, GerberParser};
+use crate::geometry::GerberData;
 use crate::interaction::FeatureKind;
-use crate::shape::GerberData;
 use std::collections::HashMap;
 
 fn assert_approx_eq(actual: f32, expected: f32) {
@@ -49,7 +49,7 @@ fn layer_triangle_bounds(layer: &GerberData) -> (f32, f32, f32, f32) {
 }
 
 fn has_circle_at(
-    circles: &crate::shape::Circles,
+    circles: &crate::geometry::Circles,
     expected_x: f32,
     expected_y: f32,
     expected_radius: f32,

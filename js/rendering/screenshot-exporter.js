@@ -1,8 +1,8 @@
 import {
   MAX_SCREENSHOT_RENDER_TARGET_BYTES,
   MAX_SCREENSHOT_STREAM_BAND_BYTES,
-} from "./config.js";
-import { formatFileSize, getErrorMessage } from "./file-utils.js";
+} from "../core/config.js";
+import { formatFileSize, getErrorMessage } from "../loading/file-utils.js";
 
 function normalizeLayerOffset(offset = {}) {
   const x = Number(offset.x ?? 0);

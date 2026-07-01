@@ -1,9 +1,9 @@
 use super::geometry::Primitive;
 use super::PolarityLayer;
-use crate::parse_common::{
+use crate::geometry::PathRegions;
+use crate::parser::common::{
     CoordinateFormat as CommonCoordinateFormat, ZeroSuppression as CommonZeroSuppression,
 };
-use crate::shape::PathRegions;
 use std::mem::take;
 
 /// Polarity - Dark (positive) or Clear (negative)

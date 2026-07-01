@@ -111,67 +111,34 @@ Node.js 和 CLI 渲染通过
 wasm-gerber-viewer/
 ├── index.html                         # 应用外壳
 ├── package.json                       # 项目元数据和脚本
-├── css/
-│   └── style.css                      # UI 样式
+├── css/                               # UI 样式
 ├── js/
-│   ├── main.js                        # GerberViewer 流程编排和 UI 连接
-│   ├── config.js                      # 公共常量和默认值
-│   ├── diagnostics.js                 # 诊断面板
-│   ├── dom-elements.js                # DOM 元素查询
-│   ├── drawer-controller.js           # 抽屉交互
-│   ├── file-utils.js                  # 文件名和错误处理工具
-│   ├── gerber-parse-worker.js         # Gerber 解析 Web Worker
-│   ├── layer-filters.js               # 图层类型过滤器
-│   ├── layer-list.js                  # 图层列表渲染
-│   ├── measurements.js                # 标尺测量和单位显示
-│   ├── notifications.js               # Toast 通知
-│   ├── screenshot-exporter.js         # 截图导出
-│   ├── source-loader.js               # 本地文件、压缩包和 URL 输入加载
-│   ├── viewer-options.js              # 查看器选项保存和恢复
-│   └── viewport.js                    # 相机和 viewport 计算
-├── vendor/
-│   ├── README.md                      # 内置第三方库说明
-│   ├── jszip-3.10.1.min.js            # ZIP 压缩包加载
-│   ├── lucide-1.16.0.min.js           # UI 图标
-│   └── licenses/                      # 第三方库许可证
+│   ├── main.js                        # 浏览器入口
+│   ├── core/                          # GerberViewer 状态和流程编排
+│   ├── loading/                       # 文件、压缩包、URL、repeat 和 worker 加载
+│   ├── layers/                        # 图层列表 UI、过滤、颜色和右键操作
+│   ├── rendering/                     # viewport 计算、测量和截图导出
+│   └── ui/                            # DOM 查询、抽屉、通知、诊断和选项
+├── vendor/                            # 内置浏览器第三方库
 ├── packages/
-│   └── wasm-gerber-renderer/
-│       ├── package.json               # npm 包配置
-│       ├── index.js                   # 浏览器渲染器入口文件
-│       ├── node.js                    # Node.js/无界面渲染器入口文件
-│       ├── shared.js                  # 浏览器/Node 公共逻辑
-│       ├── index.d.ts                 # 浏览器类型定义
-│       ├── node.d.ts                  # Node.js 类型定义
-│       ├── bin/                       # gerber-renderer CLI
-│       ├── scripts/                   # 打包用 WASM stage/clean 脚本
-│       └── test/                      # 包测试
+│   └── wasm-gerber-renderer/          # npm 包和 Node CLI
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
-│   ├── Cargo.lock                     # Rust dependency lockfile
 │   ├── README.md                      # Rust/WASM 管线说明
 │   ├── pkg/                           # 生成的 wasm-pack 输出
 │   └── src/
 │       ├── lib.rs                     # WASM API 入口
-│       ├── drill.rs                   # Excellon/NC drill 解析器
-│       ├── interaction.rs             # 要素拾取和高亮数据
-│       ├── parse_common.rs            # 解析器数字处理公共函数
-│       ├── parser.rs                  # Gerber 解析器入口
-│       ├── parser/                    # aperture、macro、geometry、state、tests
-│       ├── renderer.rs                # WebGL 渲染器
-│       ├── renderer/                  # 渲染器模块
-│       │   ├── buffer.rs              # GPU 资源结构
-│       │   ├── camera.rs              # 变换计算
-│       │   ├── shader.rs              # 着色器程序
-│       │   └── shaders/               # GLSL 着色器源码
-│       ├── shape.rs                   # geometry 数据模型
-│       └── util.rs                    # 格式化和工具函数
+│       ├── tests.rs                   # crate 级测试
+│       ├── geometry/                  # 共享 geometry 模型和 region contour
+│       ├── parser/                    # Gerber 解析、aperture、命令处理和测试
+│       ├── drill/                     # Excellon/NC drill 解析和测试
+│       ├── interaction/               # picking、compact payload 和高亮数据
+│       ├── renderer/                  # WebGL 渲染器、GPU 资源、shader 和测试
+│       └── util/                      # 格式化和工具函数
 ├── demo/                              # 示例和性能测试 Gerber
-├── scripts/
-│   └── vercel-build.sh                # CI/Vercel WASM 构建脚本
-└── .github/workflows/
-    ├── build-and-deploy.yml           # 构建、测试和部署工作流
-    ├── renderer-compatibility.yml     # 渲染器包兼容性测试
-    └── release.yml                    # 手动 release 工作流
+├── docs/                              # README assets
+├── scripts/                           # 构建和部署脚本
+└── .github/workflows/                 # CI、部署和 release workflow
 ```
 
 ## 浏览器要求

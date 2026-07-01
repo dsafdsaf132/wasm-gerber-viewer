@@ -2,7 +2,7 @@ import {
   DRILL_FILE_EXTENSIONS,
   GERBER_FILE_EXTENSIONS,
   ZIP_MIME_TYPES,
-} from "./config.js";
+} from "../core/config.js";
 
 export function isZipFile(file) {
   return getFileExtension(file.name) === ".zip" || ZIP_MIME_TYPES.has(file.type);

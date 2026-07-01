@@ -1,4 +1,4 @@
-use crate::region::{RegionContour, RegionSegment};
+use crate::geometry::{RegionContour, RegionSegment};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 

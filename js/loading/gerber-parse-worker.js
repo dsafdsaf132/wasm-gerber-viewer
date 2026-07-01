@@ -58,7 +58,7 @@ function isWorkerUnavailableErrorMessage(message) {
 
 async function getWasmModule() {
   if (!wasmModulePromise) {
-    wasmModulePromise = import("../wasm/pkg/wasm_gerber_processor.js").then(
+    wasmModulePromise = import("../../wasm/pkg/wasm_gerber_processor.js").then(
       async (wasmModule) => {
         wasmExports = await wasmModule.default();
         wasmModule.init_panic_hook?.();

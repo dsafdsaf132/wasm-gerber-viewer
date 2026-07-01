@@ -111,67 +111,34 @@ Node.js 與 CLI 渲染透過
 wasm-gerber-viewer/
 ├── index.html                         # 應用程式外殼
 ├── package.json                       # 專案中繼資料與腳本
-├── css/
-│   └── style.css                      # UI 樣式
+├── css/                               # UI 樣式
 ├── js/
-│   ├── main.js                        # GerberViewer 流程編排與 UI 連接
-│   ├── config.js                      # 共用常數與預設值
-│   ├── diagnostics.js                 # 診斷面板
-│   ├── dom-elements.js                # DOM 元素查詢
-│   ├── drawer-controller.js           # 抽屜互動
-│   ├── file-utils.js                  # 檔名與錯誤處理工具
-│   ├── gerber-parse-worker.js         # Gerber 解析 Web Worker
-│   ├── layer-filters.js               # 圖層類型篩選器
-│   ├── layer-list.js                  # 圖層清單渲染
-│   ├── measurements.js                # 尺規測量與單位顯示
-│   ├── notifications.js               # Toast 通知
-│   ├── screenshot-exporter.js         # 截圖匯出
-│   ├── source-loader.js               # 本機檔案、壓縮檔與 URL 輸入載入
-│   ├── viewer-options.js              # 檢視器選項儲存與還原
-│   └── viewport.js                    # 相機與 viewport 計算
-├── vendor/
-│   ├── README.md                      # 內建第三方函式庫說明
-│   ├── jszip-3.10.1.min.js            # ZIP 壓縮檔載入
-│   ├── lucide-1.16.0.min.js           # UI 圖示
-│   └── licenses/                      # 第三方函式庫授權條款
+│   ├── main.js                        # 瀏覽器進入點
+│   ├── core/                          # GerberViewer 狀態與流程編排
+│   ├── loading/                       # 檔案、壓縮檔、URL、repeat 與 worker 載入
+│   ├── layers/                        # 圖層清單 UI、篩選、顏色與右鍵操作
+│   ├── rendering/                     # viewport 計算、測量與截圖匯出
+│   └── ui/                            # DOM 查詢、抽屜、通知、診斷與選項
+├── vendor/                            # 內建瀏覽器第三方函式庫
 ├── packages/
-│   └── wasm-gerber-renderer/
-│       ├── package.json               # npm 套件設定
-│       ├── index.js                   # 瀏覽器渲染器進入點
-│       ├── node.js                    # Node.js/無介面渲染器進入點
-│       ├── shared.js                  # 瀏覽器/Node 共用邏輯
-│       ├── index.d.ts                 # 瀏覽器型別定義
-│       ├── node.d.ts                  # Node.js 型別定義
-│       ├── bin/                       # gerber-renderer CLI
-│       ├── scripts/                   # 打包用 WASM stage/clean 腳本
-│       └── test/                      # 套件測試
+│   └── wasm-gerber-renderer/          # npm 套件與 Node CLI
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
-│   ├── Cargo.lock                     # Rust dependency lockfile
 │   ├── README.md                      # Rust/WASM 管線說明
 │   ├── pkg/                           # 產生的 wasm-pack 輸出
 │   └── src/
 │       ├── lib.rs                     # WASM API 入口
-│       ├── drill.rs                   # Excellon/NC drill 解析器
-│       ├── interaction.rs             # 特徵選取與醒目提示資料
-│       ├── parse_common.rs            # 解析器數字處理共用函式
-│       ├── parser.rs                  # Gerber 解析器入口
-│       ├── parser/                    # aperture、macro、geometry、state、tests
-│       ├── renderer.rs                # WebGL 渲染器
-│       ├── renderer/                  # 渲染器模組
-│       │   ├── buffer.rs              # GPU 資源結構
-│       │   ├── camera.rs              # 變換計算
-│       │   ├── shader.rs              # 著色器程式
-│       │   └── shaders/               # GLSL 著色器原始碼
-│       ├── shape.rs                   # geometry 資料模型
-│       └── util.rs                    # 格式化與工具函式
+│       ├── tests.rs                   # crate 層級測試
+│       ├── geometry/                  # 共用 geometry 模型與 region contour
+│       ├── parser/                    # Gerber 解析、aperture、命令處理與測試
+│       ├── drill/                     # Excellon/NC drill 解析與測試
+│       ├── interaction/               # picking、compact payload 與 highlight 資料
+│       ├── renderer/                  # WebGL 渲染器、GPU 資源、shader 與測試
+│       └── util/                      # 格式化與工具函式
 ├── demo/                              # 範例與效能測試 Gerber
-├── scripts/
-│   └── vercel-build.sh                # CI/Vercel WASM 建置腳本
-└── .github/workflows/
-    ├── build-and-deploy.yml           # 建置、測試與部署工作流程
-    ├── renderer-compatibility.yml     # 渲染器套件相容性測試
-    └── release.yml                    # 手動 release 工作流程
+├── docs/                              # README assets
+├── scripts/                           # 建置與部署腳本
+└── .github/workflows/                 # CI、部署與 release workflow
 ```
 
 ## 瀏覽器需求

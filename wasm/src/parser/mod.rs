@@ -1,5 +1,6 @@
 mod aperture;
 mod aperture_macro;
+pub(crate) mod common;
 pub mod geometry;
 mod state;
 
@@ -15,12 +16,12 @@ use state::{
 };
 
 use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive};
-use crate::interaction::InteractionLayer;
-use crate::region::RegionContour;
-use crate::shape::{
+use crate::geometry::RegionContour;
+use crate::geometry::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
     Triangles,
 };
+use crate::interaction::InteractionLayer;
 use crate::util::{format_bytes, format_count};
 use std::collections::HashMap;
 use std::mem::size_of;

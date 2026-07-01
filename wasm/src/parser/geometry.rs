@@ -1,11 +1,11 @@
+use crate::geometry::PathRegions;
+use crate::geometry::{RegionContour, RegionSegment};
 use crate::interaction::{
     aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
     InteractionFeature, InteractionLayer,
 };
-use crate::parse_common::{parse_coordinate_number, parse_g_code, read_word_value};
+use crate::parser::common::{parse_coordinate_number, parse_g_code, read_word_value};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
-use crate::region::{RegionContour, RegionSegment};
-use crate::shape::PathRegions;
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;

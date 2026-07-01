@@ -1,19 +1,17 @@
 mod drill;
+mod geometry;
 mod interaction;
-mod parse_common;
 mod parser;
-mod region;
 mod renderer;
-mod shape;
 mod util;
 
 use crate::drill::{
     parse_drill_with_offset, parse_drill_with_offset_and_interactions, DrillParseResult,
 };
+use crate::geometry::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::interaction::InteractionLayer;
 use crate::parser::{parse_gerber_payload_with_options, GerberParser, ParsedGerberLayer};
 use crate::renderer::Renderer;
-use crate::shape::{gerber_data_layers_from_js, gerber_data_layers_to_js, Boundary, GerberData};
 use crate::util::format_bytes;
 use js_sys::{Object, Reflect};
 use wasm_bindgen::prelude::*;
@@ -29,33 +27,7 @@ pub fn init_panic_hook() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const REGION_OUTLINE: &str = "\
-%FSLAX24Y24*%
-%MOMM*%
-%LPD*%
-G36*
-X000000Y000000D02*
-G01*
-X010000Y000000D01*
-X010000Y010000D01*
-X000000Y010000D01*
-G37*
-M02*";
-
-    #[test]
-    fn parse_layer_data_preserves_region_sources_only_when_requested() {
-        let normal_layers = parse_layer_data(REGION_OUTLINE, 0.0, 0.0, true, 1, false)
-            .expect("normal region outline should parse");
-        assert!(!normal_layers[0].path_regions.has_source_contours());
-
-        let outline_layers = parse_layer_data(REGION_OUTLINE, 0.0, 0.0, true, 1, true)
-            .expect("outline region source should parse");
-        assert!(outline_layers[0].path_regions.has_source_contours());
-    }
-}
+mod tests;
 
 /// Preflight a large JS-to-WASM input copy with catchable allocation failure.
 #[wasm_bindgen]

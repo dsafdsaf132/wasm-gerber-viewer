@@ -108,27 +108,21 @@ Node.js and CLI rendering are supported via
 
 ## Project Structure
 
+For the Rust/WASM pipeline and module details, see
+[wasm/README.md](wasm/README.md).
+
 ```text
 wasm-gerber-viewer/
 ├── index.html                         # Application shell
-├── css/
-│   └── style.css                      # UI styles
+├── package.json                       # Project metadata and scripts
+├── css/                               # UI styles
 ├── js/
-│   ├── main.js                        # GerberViewer orchestration
-│   ├── config.js                      # Shared constants
-│   ├── diagnostics.js                 # Diagnostics panel
-│   ├── dom-elements.js                # DOM lookup helpers
-│   ├── drawer-controller.js           # Drawer interactions
-│   ├── file-utils.js                  # File and error helpers
-│   ├── gerber-parse-worker.js         # Web Worker host for WASM parsing
-│   ├── layer-filters.js               # Layer type filters
-│   ├── layer-list.js                  # Layer list rendering
-│   ├── measurements.js                # Ruler measurements
-│   ├── notifications.js               # Toast notifications
-│   ├── screenshot-exporter.js         # Screenshot export
-│   ├── source-loader.js               # Local, archive, and URL loading
-│   ├── viewer-options.js              # Persisted viewer options
-│   └── viewport.js                    # Camera and viewport math
+│   ├── main.js                        # Browser entry point
+│   ├── core/                          # GerberViewer state and orchestration
+│   ├── loading/                       # File, archive, URL, repeat, and worker loading
+│   ├── layers/                        # Layer list UI, filters, colors, and context actions
+│   ├── rendering/                     # Viewport math, measurements, and screenshot export
+│   └── ui/                            # DOM lookup, drawer, notifications, diagnostics, options
 ├── vendor/                            # Vendored browser libraries
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm package and Node CLI
@@ -138,32 +132,17 @@ wasm-gerber-viewer/
 │   ├── pkg/                           # Generated wasm-pack output
 │   └── src/
 │       ├── lib.rs                     # WASM API entry point
-│       ├── drill.rs                   # Excellon/NC drill parser
-│       ├── interaction.rs             # Feature picking and highlight data
-│       ├── parse_common.rs            # Shared parser number helpers
-│       ├── parser.rs                  # Gerber parser entry point
-│       ├── parser/                    # Parser modules
-│       │   ├── aperture.rs            # Apertures
-│       │   ├── aperture_macro.rs      # Aperture macros
-│       │   ├── geometry.rs            # Geometry helpers
-│       │   ├── state.rs               # Parser state
-│       │   └── tests.rs               # Parser tests
-│       ├── renderer.rs                # WebGL renderer
-│       ├── renderer/                  # Renderer modules
-│       │   ├── buffer.rs              # GPU resource structs
-│       │   ├── camera.rs              # Transform math
-│       │   ├── shader.rs              # Shader programs
-│       │   └── shaders/               # GLSL shader sources
-│       ├── shape.rs                   # Geometry data model
-│       └── util.rs                    # Formatting and utility helpers
+│       ├── tests.rs                   # Crate-level tests
+│       ├── geometry/                  # Shared geometry model and region contours
+│       ├── parser/                    # Gerber parser, apertures, commands, and tests
+│       ├── drill/                     # Excellon/NC drill parser and tests
+│       ├── interaction/               # Picking, compact payloads, and highlight data
+│       ├── renderer/                  # WebGL renderer, GPU resources, shaders, and tests
+│       └── util/                      # Formatting and utility helpers
 ├── demo/                              # Sample and performance Gerbers
 ├── docs/                              # README assets
-├── scripts/
-│   └── vercel-build.sh                # WASM build script for CI/Vercel
-└── .github/workflows/
-    ├── build-and-deploy.yml           # Build, test, and deploy workflow
-    ├── renderer-compatibility.yml     # Renderer package smoke tests
-    └── release.yml                    # Manual release workflow
+├── scripts/                           # Build and deployment scripts
+└── .github/workflows/                 # CI, deploy, and release workflows
 ```
 
 ## Browser Requirements

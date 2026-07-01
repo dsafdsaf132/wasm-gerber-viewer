@@ -111,67 +111,34 @@ Node.js와 CLI 렌더링은
 wasm-gerber-viewer/
 ├── index.html                         # 애플리케이션 셸
 ├── package.json                       # 프로젝트 메타데이터와 스크립트
-├── css/
-│   └── style.css                      # UI 스타일
+├── css/                               # UI 스타일
 ├── js/
-│   ├── main.js                        # GerberViewer 실행 흐름과 UI 연결
-│   ├── config.js                      # 공통 상수와 기본값
-│   ├── diagnostics.js                 # 진단 패널
-│   ├── dom-elements.js                # DOM 요소 조회
-│   ├── drawer-controller.js           # 드로어 열기/닫기 동작
-│   ├── file-utils.js                  # 파일 이름과 오류 처리 유틸리티
-│   ├── gerber-parse-worker.js         # Gerber 파싱 Web Worker
-│   ├── layer-filters.js               # 레이어 종류 필터
-│   ├── layer-list.js                  # 레이어 목록 렌더링
-│   ├── measurements.js                # 자 측정과 단위 표시
-│   ├── notifications.js               # 토스트 알림
-│   ├── screenshot-exporter.js         # 스크린샷 내보내기
-│   ├── source-loader.js               # 로컬 파일, 압축 파일, URL 입력 로딩
-│   ├── viewer-options.js              # 뷰어 옵션 저장과 복원
-│   └── viewport.js                    # 카메라와 viewport 계산
-├── vendor/
-│   ├── README.md                      # vendored 라이브러리 설명
-│   ├── jszip-3.10.1.min.js            # ZIP 압축 파일 로딩
-│   ├── lucide-1.16.0.min.js           # UI 아이콘
-│   └── licenses/                      # vendored 라이선스
+│   ├── main.js                        # 브라우저 진입점
+│   ├── core/                          # GerberViewer 상태와 실행 흐름
+│   ├── loading/                       # 파일, 압축, URL, repeat, worker 로딩
+│   ├── layers/                        # 레이어 목록 UI, 필터, 색상, 컨텍스트 동작
+│   ├── rendering/                     # viewport 계산, 측정, 스크린샷 내보내기
+│   └── ui/                            # DOM 조회, 드로어, 알림, 진단, 옵션
+├── vendor/                            # vendored 브라우저 라이브러리
 ├── packages/
-│   └── wasm-gerber-renderer/
-│       ├── package.json               # npm 패키지 설정
-│       ├── index.js                   # 브라우저 렌더러 진입점
-│       ├── node.js                    # Node.js/headless 렌더러 진입점
-│       ├── shared.js                  # 브라우저/Node 공통 로직
-│       ├── index.d.ts                 # 브라우저 타입 정의
-│       ├── node.d.ts                  # Node.js 타입 정의
-│       ├── bin/                       # gerber-renderer CLI
-│       ├── scripts/                   # 패키징용 WASM stage/clean 스크립트
-│       └── test/                      # 패키지 테스트
+│   └── wasm-gerber-renderer/          # npm 패키지와 Node CLI
 ├── wasm/
 │   ├── Cargo.toml                     # Rust crate manifest
-│   ├── Cargo.lock                     # Rust dependency lockfile
 │   ├── README.md                      # Rust/WASM 파이프라인 설명
 │   ├── pkg/                           # 생성된 wasm-pack 출력
 │   └── src/
 │       ├── lib.rs                     # WASM API 진입점
-│       ├── drill.rs                   # Excellon/NC drill 파서
-│       ├── interaction.rs             # 도형 선택과 강조 표시 데이터
-│       ├── parse_common.rs            # 파서 숫자 처리 공통 함수
-│       ├── parser.rs                  # Gerber 파서 진입점
-│       ├── parser/                    # aperture, macro, geometry, state, tests
-│       ├── renderer.rs                # WebGL 렌더러
-│       ├── renderer/                  # 렌더러 모듈
-│       │   ├── buffer.rs              # GPU 리소스 구조체
-│       │   ├── camera.rs              # 변환 계산
-│       │   ├── shader.rs              # 셰이더 프로그램
-│       │   └── shaders/               # GLSL 셰이더 소스
-│       ├── shape.rs                   # geometry 데이터 모델
-│       └── util.rs                    # 포맷팅과 유틸리티
+│       ├── tests.rs                   # crate 단위 테스트
+│       ├── geometry/                  # 공용 geometry 모델과 region contour
+│       ├── parser/                    # Gerber 파서, aperture, 명령 처리, 테스트
+│       ├── drill/                     # Excellon/NC drill 파서와 테스트
+│       ├── interaction/               # picking, compact payload, highlight 데이터
+│       ├── renderer/                  # WebGL 렌더러, GPU 리소스, 셰이더, 테스트
+│       └── util/                      # 포맷팅과 유틸리티
 ├── demo/                              # 샘플과 성능 테스트 Gerber
-├── scripts/
-│   └── vercel-build.sh                # CI/Vercel WASM 빌드 스크립트
-└── .github/workflows/
-    ├── build-and-deploy.yml           # 빌드, 테스트, 배포 워크플로
-    ├── renderer-compatibility.yml     # 렌더러 패키지 호환성 테스트
-    └── release.yml                    # 수동 release 워크플로
+├── docs/                              # README assets
+├── scripts/                           # 빌드와 배포 스크립트
+└── .github/workflows/                 # CI, 배포, release 워크플로
 ```
 
 ## 브라우저 요구 사항

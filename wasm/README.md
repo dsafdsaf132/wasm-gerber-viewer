@@ -5,6 +5,24 @@ and workers provide input, options, layer order, and camera state. Rust/WASM
 handles parsing, geometry storage, WebGL rendering, CPU picking, and highlight
 rendering.
 
+## Source Layout
+
+```text
+wasm/src/
+├── lib.rs             # wasm-bindgen API boundary and GerberProcessor facade
+├── tests.rs           # crate-level API tests
+├── geometry/          # shared geometry buffers, boundaries, and region contours
+├── parser/            # Gerber parser, aperture handling, command geometry, tests
+├── drill/             # Excellon/NC drill parser, metadata, tests
+├── interaction/       # picking, compact interaction payloads, highlight batches
+├── renderer/          # WebGL renderer, GPU buffers, shaders, render tests
+└── util/              # formatting and small utility helpers
+```
+
+Each Rust module keeps its implementation in `mod.rs` or focused submodules.
+Unit tests live in sibling `tests.rs` files so production files stay focused
+while tests can still access module-private helpers.
+
 ## Overall Rust/WASM Pipeline
 
 ```mermaid
@@ -72,7 +90,7 @@ Key APIs:
 
 ### 2. Gerber Parsing
 
-Gerber parsing starts in `wasm/src/parser.rs`.
+Gerber parsing starts in `wasm/src/parser/mod.rs`.
 
 Important functions:
 
@@ -107,7 +125,7 @@ that conversion.
 
 ### 3. Drill Parsing
 
-Drill parsing lives in `wasm/src/drill.rs`.
+Drill parsing lives in `wasm/src/drill/mod.rs`.
 
 Important functions:
 
@@ -126,7 +144,7 @@ updates, and returns `outlineLayerId`, `fillLayerId`, and metadata to JS.
 
 ### 4. Geometry Model
 
-The shared geometry model is in `wasm/src/shape.rs`.
+The shared geometry model is in `wasm/src/geometry/shape.rs`.
 
 Important types:
 
@@ -145,7 +163,7 @@ workflows.
 `GerberData` supports JS render-payload conversion. This lets a worker, or a
 main-thread pre-parse helper, parse geometry outside the stateful renderer
 instance and pass render buffers into `add_render_payload()`. Feature picking
-data uses a separate compact interaction payload from `wasm/src/interaction.rs`
+data uses a separate compact interaction payload from `wasm/src/interaction/mod.rs`
 so aperture strings, descriptors, templates, primitives, and path-region data
 can remain table-based across the JS boundary.
 
@@ -196,7 +214,7 @@ Layer-add flow:
 
 ### 6. Interaction Pipeline
 
-Interaction data is implemented in `wasm/src/interaction.rs`.
+Interaction data is implemented in `wasm/src/interaction/mod.rs`.
 
 Important types:
 
@@ -252,7 +270,7 @@ Highlight flow:
 
 ## Rendering Pipeline
 
-Rendering is implemented by `Renderer` in `wasm/src/renderer.rs`.
+Rendering is implemented by `Renderer` in `wasm/src/renderer/mod.rs`.
 
 ```mermaid
 flowchart TD

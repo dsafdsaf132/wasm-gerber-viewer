@@ -3,10 +3,10 @@ import test from "node:test";
 
 import {
   getLayerSourceKind,
-} from "../../../js/file-utils.js";
+} from "../../../js/loading/file-utils.js";
 import {
   collectLayerSources,
-} from "../../../js/source-loader.js";
+} from "../../../js/loading/source-loader.js";
 import { GerberRenderer } from "../index.js";
 import { fileLayer, NodeGerberRenderer } from "../node.js";
 import {
