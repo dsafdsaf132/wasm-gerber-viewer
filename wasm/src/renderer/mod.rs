@@ -14,17 +14,19 @@ use shader::{
 
 use crate::geometry::{
     Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
-    Triangles,
+    Triangles, PATH_SECTOR_VERTEX_FLOATS,
 };
 use crate::geometry::{RegionContour, RegionSegment};
-use crate::interaction::InteractionFeature;
-use crate::parser::geometry::{arc_curve_bounds, build_path_regions};
+use crate::interaction::{HighlightBatch, InteractionFeature, PathRegionRef};
+use crate::parser::geometry::{build_path_regions, canonical_arc_curve_bounds};
 use crate::parser::ParserState;
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{
     WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlTexture, WebGlVertexArrayObject,
 };
+
+const PATH_SECTOR_VERTEX_FLOATS_U32: u32 = PATH_SECTOR_VERTEX_FLOATS as u32;
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
 pub struct LayerMetadata {
@@ -683,6 +685,7 @@ impl Renderer {
                         radius,
                         start_angle,
                         sweep_angle,
+                        clamp_sweep: false,
                     },
                 });
             }
@@ -863,6 +866,7 @@ impl Renderer {
                 radius,
                 start_angle,
                 sweep_angle,
+                clamp_sweep,
             } => RegionSegment::Arc {
                 start: end,
                 end: start,
@@ -870,6 +874,7 @@ impl Renderer {
                 radius,
                 start_angle: start_angle + sweep_angle,
                 sweep_angle: -sweep_angle,
+                clamp_sweep,
             },
         }
     }
@@ -969,15 +974,25 @@ impl Renderer {
 
         for segment in &contour.segments {
             if let RegionSegment::Arc {
+                start,
+                end,
                 center,
                 radius,
                 start_angle,
                 sweep_angle,
+                clamp_sweep,
                 ..
             } = *segment
             {
-                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) =
-                    arc_curve_bounds(center, radius, start_angle, sweep_angle);
+                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = canonical_arc_curve_bounds(
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                    clamp_sweep,
+                );
                 *min_x = min_x.min(arc_min_x);
                 *max_x = max_x.max(arc_max_x);
                 *min_y = min_y.min(arc_min_y);
@@ -1748,6 +1763,7 @@ impl Renderer {
 
     fn decode_path_region_metadata(sublayer: &JsValue) -> Result<PathRegions, JsValue> {
         let path_regions = Self::js_property(sublayer, "pathRegions")?;
+        Self::validate_path_sector_stride_marker(&path_regions)?;
         let wedge_vertices = Self::js_f32_array(&path_regions, "wedgeVertices")?;
         let sector_vertices = Self::js_f32_array(&path_regions, "sectorVertices")?;
         let cover_vertices = Self::js_f32_array(&path_regions, "coverVertices")?;
@@ -1762,6 +1778,13 @@ impl Renderer {
                 "path region clear vertex buffer length must be a multiple of 12",
             ));
         }
+        if sector_vertices.length() % PATH_SECTOR_VERTEX_FLOATS_U32 != 0 {
+            return Err(JsValue::from_str(&format!(
+                "path region arc sector buffer length must be a multiple of {}",
+                PATH_SECTOR_VERTEX_FLOATS
+            )));
+        }
+        Self::validate_js_path_sector_vertices(&sector_vertices)?;
         let region_count = (cover_vertices.length() / 12) as usize;
         if clear_vertices.length() / 12 != cover_vertices.length() / 12 {
             return Err(JsValue::from_str(
@@ -1792,7 +1815,7 @@ impl Renderer {
             "path sector offsets",
             0,
             &sector_offsets,
-            (sector_vertices.length() / 7) as usize,
+            (sector_vertices.length() / PATH_SECTOR_VERTEX_FLOATS_U32) as usize,
         )?;
         Ok(PathRegions::new(
             Vec::new(),
@@ -1810,6 +1833,7 @@ impl Renderer {
         sublayer: &JsValue,
     ) -> Result<(), JsValue> {
         let path_regions = Self::js_property(sublayer, "pathRegions")?;
+        Self::validate_path_sector_stride_marker(&path_regions)?;
         let wedge_vertices = Self::js_f32_array(&path_regions, "wedgeVertices")?;
         let sector_vertices = Self::js_f32_array(&path_regions, "sectorVertices")?;
         let cover_vertices = Self::js_f32_array(&path_regions, "coverVertices")?;
@@ -1845,12 +1869,13 @@ impl Renderer {
         }
 
         if sector_vertices.length() > 0 {
-            if sector_vertices.length() % 7 != 0 {
-                return Err(JsValue::from_str(
-                    "path region arc sector buffer length must be a multiple of 7",
-                ));
+            if sector_vertices.length() % PATH_SECTOR_VERTEX_FLOATS_U32 != 0 {
+                return Err(JsValue::from_str(&format!(
+                    "path region arc sector buffer length must be a multiple of {}",
+                    PATH_SECTOR_VERTEX_FLOATS
+                )));
             }
-            Self::validate_js_finite_array("path region arc sector vertices", &sector_vertices)?;
+            Self::validate_js_path_sector_vertices(&sector_vertices)?;
             let vao = self
                 .gl
                 .create_vertex_array()
@@ -1860,7 +1885,7 @@ impl Renderer {
             buffer_cache.path_sector_vao = Some(vao);
             buffer_cache.path_sector_vertex_count = Self::checked_u32_to_i32(
                 "path region sector vertex count",
-                sector_vertices.length() / 7,
+                sector_vertices.length() / PATH_SECTOR_VERTEX_FLOATS_U32,
             )?;
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
             self.gl.bind_vertex_array(None);
@@ -1935,12 +1960,10 @@ impl Renderer {
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         Self::upload_float_array_to_bound_buffer(&self.gl, data);
 
-        let stride = 7 * 4;
+        let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
         self.enable_path_sector_attribute("position", 2, stride, 0)?;
         self.enable_path_sector_attribute("center", 2, stride, 2 * 4)?;
         self.enable_path_sector_attribute("radius", 1, stride, 4 * 4)?;
-        self.enable_path_sector_attribute("startAngle", 1, stride, 5 * 4)?;
-        self.enable_path_sector_attribute("sweepAngle", 1, stride, 6 * 4)?;
         Ok(buffer)
     }
 
@@ -2134,6 +2157,18 @@ impl Renderer {
             JsValue::from_str(&format!("Render payload field `{key}` is not numeric"))
         })?;
         Ok(number as f32)
+    }
+
+    fn js_usize_property(value: &JsValue, key: &str) -> Result<usize, JsValue> {
+        let number = Self::js_property(value, key)?.as_f64().ok_or_else(|| {
+            JsValue::from_str(&format!("Render payload field `{key}` is not numeric"))
+        })?;
+        if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+            return Err(JsValue::from_str(&format!(
+                "Render payload field `{key}` must be a non-negative integer"
+            )));
+        }
+        Ok(number as usize)
     }
 
     fn js_bool_property(value: &JsValue, key: &str) -> bool {
@@ -2391,13 +2426,9 @@ impl Renderer {
             &format!("Sublayer {} path wedge vertex count", sublayer_idx),
             wedge_vertex_count,
         )?;
-        if !path_regions.sector_vertices.len().is_multiple_of(7) {
-            return Err(JsValue::from_str(&format!(
-                "Sublayer {} path sector vertex buffer length is not divisible by 7",
-                sublayer_idx
-            )));
-        }
-        let sector_vertex_count = path_regions.sector_vertices.len() / 7;
+        let sector_vertex_count =
+            Self::validate_path_sector_vertices_invariant(path_regions, sublayer_idx)
+                .map_err(|message| JsValue::from_str(&message))?;
         Self::checked_usize_to_i32(
             &format!("Sublayer {} path sector vertex count", sublayer_idx),
             sector_vertex_count,
@@ -2474,6 +2505,34 @@ impl Renderer {
         Ok(())
     }
 
+    fn validate_path_sector_vertices_invariant(
+        path_regions: &PathRegions,
+        sublayer_idx: usize,
+    ) -> Result<usize, String> {
+        if !path_regions
+            .sector_vertices
+            .len()
+            .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
+        {
+            return Err(format!(
+                "Sublayer {} path sector vertex buffer length is not divisible by {}",
+                sublayer_idx, PATH_SECTOR_VERTEX_FLOATS
+            ));
+        }
+        for vertex in path_regions
+            .sector_vertices
+            .chunks_exact(PATH_SECTOR_VERTEX_FLOATS)
+        {
+            if vertex[4] < 0.0 {
+                return Err(format!(
+                    "Sublayer {} path sector radius contains a negative value",
+                    sublayer_idx
+                ));
+            }
+        }
+        Ok(path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS)
+    }
+
     fn validate_offsets(
         label: &str,
         sublayer_idx: usize,
@@ -2506,6 +2565,12 @@ impl Renderer {
                 ));
             }
             previous = offset;
+        }
+        if previous != vertex_count {
+            return Err(format!(
+                "Sublayer {} {} must end at the vertex buffer length",
+                sublayer_idx, label
+            ));
         }
         Ok(())
     }
@@ -2569,6 +2634,28 @@ impl Renderer {
     fn validate_js_finite_array(label: &str, values: &Float32Array) -> Result<(), JsValue> {
         for index in 0..values.length() {
             Self::validate_finite_value(label, values.get_index(index))?;
+        }
+        Ok(())
+    }
+
+    fn validate_path_sector_stride_marker(path_regions: &JsValue) -> Result<(), JsValue> {
+        let stride = Self::js_usize_property(path_regions, "sectorVertexStride")?;
+        if stride != PATH_SECTOR_VERTEX_FLOATS {
+            return Err(JsValue::from_str(
+                "Render payload path sector vertex stride is unsupported",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_js_path_sector_vertices(values: &Float32Array) -> Result<(), JsValue> {
+        Self::validate_js_finite_array("path region arc sector vertices", values)?;
+        for index in (4..values.length()).step_by(PATH_SECTOR_VERTEX_FLOATS) {
+            if values.get_index(index) < 0.0 {
+                return Err(JsValue::from_str(
+                    "path region arc sector radius contains a negative value",
+                ));
+            }
         }
         Ok(())
     }
@@ -2804,6 +2891,75 @@ impl Renderer {
         if let Some(buf) = cache.path_clear_vertex_buffer {
             gl.delete_buffer(Some(&buf));
         }
+    }
+
+    fn delete_path_region_cache(gl: &WebGl2RenderingContext, cache: &mut BufferCache) {
+        if let Some(vao) = cache.path_wedge_vao.take() {
+            gl.delete_vertex_array(Some(&vao));
+        }
+        if let Some(buf) = cache.path_wedge_vertex_buffer.take() {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(vao) = cache.path_sector_vao.take() {
+            gl.delete_vertex_array(Some(&vao));
+        }
+        if let Some(buf) = cache.path_sector_vertex_buffer.take() {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(vao) = cache.path_cover_vao.take() {
+            gl.delete_vertex_array(Some(&vao));
+        }
+        if let Some(buf) = cache.path_cover_vertex_buffer.take() {
+            gl.delete_buffer(Some(&buf));
+        }
+        if let Some(vao) = cache.path_clear_vao.take() {
+            gl.delete_vertex_array(Some(&vao));
+        }
+        if let Some(buf) = cache.path_clear_vertex_buffer.take() {
+            gl.delete_buffer(Some(&buf));
+        }
+        cache.path_wedge_vertex_count = 0;
+        cache.path_sector_vertex_count = 0;
+        cache.path_cover_vertex_count = 0;
+        cache.path_clear_vertex_count = 0;
+    }
+
+    fn path_region_cache_complete(cache: &BufferCache, path_regions: &PathRegions) -> bool {
+        if path_regions.region_count() == 0 {
+            return true;
+        }
+        let needs_wedge_cache = path_regions
+            .wedge_vertex_offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            > 0;
+        let needs_sector_cache = path_regions
+            .sector_vertex_offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            > 0;
+
+        cache.path_cover_vao.is_some()
+            && cache.path_clear_vao.is_some()
+            && (!needs_wedge_cache || cache.path_wedge_vao.is_some())
+            && (!needs_sector_cache || cache.path_sector_vao.is_some())
+    }
+
+    fn install_path_region_cache_fields(cache: &mut BufferCache, mut built_cache: BufferCache) {
+        cache.path_wedge_vao = built_cache.path_wedge_vao.take();
+        cache.path_wedge_vertex_count = built_cache.path_wedge_vertex_count;
+        cache.path_wedge_vertex_buffer = built_cache.path_wedge_vertex_buffer.take();
+        cache.path_sector_vao = built_cache.path_sector_vao.take();
+        cache.path_sector_vertex_count = built_cache.path_sector_vertex_count;
+        cache.path_sector_vertex_buffer = built_cache.path_sector_vertex_buffer.take();
+        cache.path_cover_vao = built_cache.path_cover_vao.take();
+        cache.path_cover_vertex_count = built_cache.path_cover_vertex_count;
+        cache.path_cover_vertex_buffer = built_cache.path_cover_vertex_buffer.take();
+        cache.path_clear_vao = built_cache.path_clear_vao.take();
+        cache.path_clear_vertex_count = built_cache.path_clear_vertex_count;
+        cache.path_clear_vertex_buffer = built_cache.path_clear_vertex_buffer.take();
     }
 
     fn create_fbo(
@@ -3297,102 +3453,260 @@ impl Renderer {
         Ok(())
     }
 
-    fn draw_highlight_path_regions(
+    fn apply_highlight_batches_to_mask(
         &self,
-        path_regions: &PathRegions,
+        batches: &[HighlightBatch],
         transform: &[f32; 9],
-        highlight_program: &ShaderProgram,
         stencil_program: &ShaderProgram,
     ) -> Result<(), JsValue> {
-        let region_count = path_regions.region_count();
-        if region_count == 0 {
+        if batches.is_empty() {
             return Ok(());
         }
 
-        Self::validate_path_region_data(path_regions, 0)?;
-        let mut guard = BufferCacheBuildGuard::new(&self.gl);
-        Self::create_path_region_gpu_cache(
-            &self.gl,
-            &self.programs,
-            &mut guard.cache,
+        self.gl.color_mask(false, false, false, false);
+        self.gl.disable(BLEND);
+        self.gl.enable(STENCIL_TEST);
+        self.gl.stencil_mask(0x01);
+        self.gl.stencil_op(KEEP, KEEP, REPLACE);
+
+        for batch in batches {
+            if batch.vertices.len() < 6 {
+                continue;
+            }
+            let stencil_value = if batch.clear { 0 } else { 1 };
+            self.gl.stencil_func(ALWAYS, stencil_value, 0x01);
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+        }
+
+        Ok(())
+    }
+
+    fn apply_coverage_batches_to_highlight_mask(
+        &self,
+        batches: &[HighlightBatch],
+        transform: &[f32; 9],
+        stencil_program: &ShaderProgram,
+    ) -> Result<(), JsValue> {
+        if batches.is_empty() {
+            return Ok(());
+        }
+
+        self.gl.color_mask(false, false, false, false);
+        self.gl.disable(BLEND);
+        self.gl.enable(STENCIL_TEST);
+
+        // Bit 1 is a temporary coverage mask. Clear it without touching the
+        // accumulated selected-feature mask in bit 0.
+        self.gl.stencil_mask(0x02);
+        self.gl.clear_stencil(0);
+        self.gl.clear(STENCIL_BUFFER_BIT);
+
+        self.gl.stencil_op(KEEP, KEEP, REPLACE);
+        for batch in batches {
+            if batch.vertices.len() < 6 {
+                continue;
+            }
+            let stencil_value = if batch.clear { 0 } else { 0x02 };
+            self.gl.stencil_func(ALWAYS, stencil_value, 0x02);
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+        }
+
+        self.gl.stencil_mask(0x01);
+        self.gl.stencil_func(EQUAL, 0x02, 0x02);
+        self.gl.stencil_op(KEEP, KEEP, ZERO);
+        for batch in batches {
+            if batch.vertices.len() < 6 {
+                continue;
+            }
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+        }
+
+        self.gl.stencil_mask(0x02);
+        self.gl.clear_stencil(0);
+        self.gl.clear(STENCIL_BUFFER_BIT);
+
+        Ok(())
+    }
+
+    fn ensure_layer_path_region_gpu_cache(
+        &mut self,
+        layer_id: usize,
+        sublayer_idx: usize,
+    ) -> Result<(), JsValue> {
+        let gl = &self.gl;
+        let programs = &self.programs;
+        let layer = self
+            .layers
+            .get_mut(layer_id)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| JsValue::from_str("Layer not found"))?;
+        if sublayer_idx >= layer.gerber_data.len() {
+            return Err(JsValue::from_str(
+                "Interaction path region sublayer not found",
+            ));
+        }
+        let path_regions = &layer.gerber_data[sublayer_idx].path_regions;
+        if path_regions.region_count() == 0 {
+            return Ok(());
+        }
+
+        if !Self::path_region_cache_complete(&layer.buffer_caches[sublayer_idx], path_regions) {
+            Self::validate_path_region_data(path_regions, sublayer_idx)?;
+            Self::delete_path_region_cache(gl, &mut layer.buffer_caches[sublayer_idx]);
+            let mut pending_cache = BufferCacheBuildGuard::new(gl);
+            Self::create_path_region_gpu_cache(
+                gl,
+                programs,
+                &mut pending_cache.cache,
+                path_regions,
+            )?;
+            let cache = &mut layer.buffer_caches[sublayer_idx];
+            Self::install_path_region_cache_fields(cache, pending_cache.commit());
+            if !Self::path_region_cache_complete(cache, path_regions) {
+                return Err(JsValue::from_str(
+                    "Interaction path region GPU cache is incomplete",
+                ));
+            }
+            layer.gerber_data[sublayer_idx]
+                .path_regions
+                .release_cpu_geometry();
+            layer.cpu_geometry_released = true;
+        }
+
+        Ok(())
+    }
+
+    fn apply_layer_path_region_ref_to_highlight_mask(
+        &mut self,
+        layer_id: usize,
+        path_region_ref: PathRegionRef,
+        transform: &[f32; 9],
+        set_mask: bool,
+    ) -> Result<(), JsValue> {
+        self.ensure_layer_path_region_gpu_cache(layer_id, path_region_ref.sublayer_idx)?;
+        let layer = self.get_layer(layer_id)?;
+        let path_regions = &layer.gerber_data[path_region_ref.sublayer_idx].path_regions;
+        let buffer_cache = &layer.buffer_caches[path_region_ref.sublayer_idx];
+        self.apply_path_region_range_to_highlight_mask(
             path_regions,
-        )?;
-        let buffer_cache = guard.commit();
+            buffer_cache,
+            path_region_ref.region_start,
+            path_region_ref.region_count,
+            transform,
+            set_mask,
+        )
+    }
+
+    fn apply_path_region_range_to_highlight_mask(
+        &self,
+        path_regions: &PathRegions,
+        buffer_cache: &BufferCache,
+        region_start: usize,
+        region_count: usize,
+        transform: &[f32; 9],
+        set_mask: bool,
+    ) -> Result<(), JsValue> {
+        if region_count == 0 {
+            return Ok(());
+        }
+        let region_end = region_start
+            .checked_add(region_count)
+            .ok_or_else(|| JsValue::from_str("Interaction path region range overflow"))?;
+        if region_end > path_regions.region_count() {
+            return Err(JsValue::from_str(
+                "Interaction path region range is invalid",
+            ));
+        }
         let solid_color = [1.0, 1.0, 1.0, 1.0];
 
-        let result = (|| -> Result<(), JsValue> {
-            for region_idx in 0..region_count {
-                self.gl.color_mask(false, false, false, false);
-                self.gl.stencil_func(ALWAYS, 0, 0xff);
-                self.gl.stencil_op(KEEP, KEEP, INVERT);
+        for region_idx in region_start..region_end {
+            let quad_start = Self::checked_path_region_quad_start(region_idx)?;
 
-                let wedge_start = Self::checked_u32_to_i32(
-                    "highlight path wedge vertex start",
-                    path_regions.wedge_vertex_offsets[region_idx],
-                )?;
-                let wedge_end = Self::checked_u32_to_i32(
-                    "highlight path wedge vertex end",
-                    path_regions.wedge_vertex_offsets[region_idx + 1],
-                )?;
-                if wedge_end > wedge_start {
-                    self.draw_path_solid_range(
-                        transform,
-                        &solid_color,
-                        buffer_cache.path_wedge_vao.as_ref(),
-                        wedge_start,
-                        wedge_end - wedge_start,
-                    )?;
-                }
+            self.gl.color_mask(false, false, false, false);
+            self.gl.disable(BLEND);
+            self.gl.enable(STENCIL_TEST);
 
-                let sector_start = Self::checked_u32_to_i32(
-                    "highlight path sector vertex start",
-                    path_regions.sector_vertex_offsets[region_idx],
-                )?;
-                let sector_end = Self::checked_u32_to_i32(
-                    "highlight path sector vertex end",
-                    path_regions.sector_vertex_offsets[region_idx + 1],
-                )?;
-                if sector_end > sector_start {
-                    self.draw_path_sector_range(
-                        transform,
-                        &buffer_cache,
-                        sector_start,
-                        sector_end - sector_start,
-                    )?;
-                }
+            // Bit 1 is a temporary parity mask for this path region. Keep
+            // bit 0, the accumulated highlight mask, untouched.
+            self.gl.stencil_mask(0x02);
+            self.gl.stencil_func(ALWAYS, 0, 0xff);
+            self.gl.stencil_op(ZERO, ZERO, ZERO);
+            self.draw_path_solid_range(
+                transform,
+                &solid_color,
+                buffer_cache.path_clear_vao.as_ref(),
+                quad_start,
+                6,
+            )?;
 
-                self.gl.color_mask(true, true, true, true);
-                self.gl.stencil_func(NOTEQUAL, 0, 0xff);
-                self.gl.stencil_op(KEEP, KEEP, KEEP);
-                let clear_start = region_idx.checked_mul(12).ok_or_else(|| {
-                    JsValue::from_str("highlight path clear vertex start overflows")
-                })?;
-                let clear_end = clear_start + 12;
-                self.draw_highlight_vertices(
-                    highlight_program,
-                    &path_regions.clear_vertices[clear_start..clear_end],
+            self.gl.stencil_mask(0x02);
+            self.gl.stencil_func(ALWAYS, 0, 0xff);
+            self.gl.stencil_op(KEEP, KEEP, INVERT);
+
+            let wedge_start = Self::checked_u32_to_i32(
+                "highlight path wedge vertex start",
+                path_regions.wedge_vertex_offsets[region_idx],
+            )?;
+            let wedge_end = Self::checked_u32_to_i32(
+                "highlight path wedge vertex end",
+                path_regions.wedge_vertex_offsets[region_idx + 1],
+            )?;
+            if wedge_end > wedge_start {
+                self.draw_path_solid_range(
                     transform,
-                )?;
-
-                self.gl.color_mask(false, false, false, false);
-                self.gl.stencil_func(ALWAYS, 0, 0xff);
-                self.gl.stencil_op(ZERO, ZERO, ZERO);
-                let cover_start = region_idx.checked_mul(12).ok_or_else(|| {
-                    JsValue::from_str("highlight path cover vertex start overflows")
-                })?;
-                let cover_end = cover_start + 12;
-                self.draw_highlight_vertices(
-                    stencil_program,
-                    &path_regions.cover_vertices[cover_start..cover_end],
-                    transform,
+                    &solid_color,
+                    buffer_cache.path_wedge_vao.as_ref(),
+                    wedge_start,
+                    wedge_end - wedge_start,
                 )?;
             }
 
-            Ok(())
-        })();
+            let sector_start = Self::checked_u32_to_i32(
+                "highlight path sector vertex start",
+                path_regions.sector_vertex_offsets[region_idx],
+            )?;
+            let sector_end = Self::checked_u32_to_i32(
+                "highlight path sector vertex end",
+                path_regions.sector_vertex_offsets[region_idx + 1],
+            )?;
+            if sector_end > sector_start {
+                self.draw_path_sector_range(
+                    transform,
+                    buffer_cache,
+                    sector_start,
+                    sector_end - sector_start,
+                )?;
+            }
 
-        Self::delete_buffer_cache(&self.gl, buffer_cache);
-        result
+            self.gl.stencil_mask(0x01);
+            if set_mask {
+                self.gl.stencil_func(EQUAL, 0x03, 0x02);
+                self.gl.stencil_op(KEEP, KEEP, REPLACE);
+            } else {
+                self.gl.stencil_func(EQUAL, 0x02, 0x02);
+                self.gl.stencil_op(KEEP, KEEP, ZERO);
+            }
+            self.draw_path_solid_range(
+                transform,
+                &solid_color,
+                buffer_cache.path_cover_vao.as_ref(),
+                quad_start,
+                6,
+            )?;
+
+            self.gl.stencil_mask(0x02);
+            self.gl.stencil_func(ALWAYS, 0, 0xff);
+            self.gl.stencil_op(ZERO, ZERO, ZERO);
+            self.draw_path_solid_range(
+                transform,
+                &solid_color,
+                buffer_cache.path_clear_vao.as_ref(),
+                quad_start,
+                6,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn bounds_rect_triangles(bounds: &Boundary) -> [f32; 12] {
@@ -3415,7 +3729,9 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub fn render_interaction_highlight(
         &mut self,
+        layer_id: usize,
         feature: &InteractionFeature,
+        clear_features: &[&InteractionFeature],
         zoom_x: f32,
         zoom_y: f32,
         offset_x: f32,
@@ -3432,8 +3748,8 @@ impl Renderer {
 
         let batches = feature.highlight_batches();
         let has_primitive_batches = batches.iter().any(|batch| batch.vertices.len() >= 6);
-        let path_regions = feature.path_regions.as_deref();
-        let has_path_regions = path_regions.is_some_and(PathRegions::has_geometry);
+        let path_region_ref = feature.path_region_ref;
+        let has_path_regions = path_region_ref.is_some();
         if !has_primitive_batches && !has_path_regions {
             return Ok(());
         }
@@ -3471,55 +3787,64 @@ impl Renderer {
                 return Ok(());
             }
 
-            let stencil_program = self
-                .highlight_stencil_program
-                .as_ref()
-                .ok_or_else(|| JsValue::from_str("Highlight stencil program unavailable"))?;
+            self.gl.clear_stencil(0);
+            self.gl.stencil_mask(0xff);
+            self.gl.clear(STENCIL_BUFFER_BIT);
+            self.gl.enable(STENCIL_TEST);
+            self.gl.disable(BLEND);
+
+            if has_primitive_batches {
+                let stencil_program = self
+                    .highlight_stencil_program
+                    .as_ref()
+                    .ok_or_else(|| JsValue::from_str("Highlight stencil program unavailable"))?;
+                self.apply_highlight_batches_to_mask(&batches, &transform, stencil_program)?;
+            }
+
+            if let Some(path_region_ref) = path_region_ref {
+                self.apply_layer_path_region_ref_to_highlight_mask(
+                    layer_id,
+                    path_region_ref,
+                    &transform,
+                    true,
+                )?;
+            }
+
+            for clear_feature in clear_features {
+                let clear_batches = clear_feature.coverage_batches();
+                if !clear_batches.is_empty() {
+                    let stencil_program =
+                        self.highlight_stencil_program.as_ref().ok_or_else(|| {
+                            JsValue::from_str("Highlight stencil program unavailable")
+                        })?;
+                    self.apply_coverage_batches_to_highlight_mask(
+                        &clear_batches,
+                        &transform,
+                        stencil_program,
+                    )?;
+                }
+                if let Some(path_region_ref) = clear_feature.path_region_ref {
+                    self.apply_layer_path_region_ref_to_highlight_mask(
+                        layer_id,
+                        path_region_ref,
+                        &transform,
+                        false,
+                    )?;
+                }
+            }
+
+            self.gl.color_mask(true, true, true, true);
+            self.gl.enable(BLEND);
+            self.gl.blend_equation(FUNC_ADD);
+            self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+            self.gl.stencil_func(EQUAL, 0x01, 0x01);
+            self.gl.stencil_mask(0x00);
+            self.gl.stencil_op(KEEP, KEEP, KEEP);
             let highlight_program = self
                 .highlight_program
                 .as_ref()
                 .ok_or_else(|| JsValue::from_str("Highlight program unavailable"))?;
-
-            if has_primitive_batches {
-                self.gl.clear_stencil(0);
-                self.gl.stencil_mask(0xff);
-                self.gl.clear(STENCIL_BUFFER_BIT);
-                self.gl.enable(STENCIL_TEST);
-                self.gl.disable(BLEND);
-                self.gl.color_mask(false, false, false, false);
-                self.gl.stencil_op(KEEP, KEEP, REPLACE);
-
-                for batch in &batches {
-                    let stencil_value = if batch.clear { 0 } else { 1 };
-                    self.gl.stencil_func(ALWAYS, stencil_value, 0xff);
-                    self.draw_highlight_vertices(stencil_program, &batch.vertices, &transform)?;
-                }
-
-                self.gl.color_mask(true, true, true, true);
-                self.gl.enable(BLEND);
-                self.gl.blend_equation(FUNC_ADD);
-                self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
-                self.gl.stencil_func(EQUAL, 1, 0xff);
-                self.gl.stencil_mask(0x00);
-                self.gl.stencil_op(KEEP, KEEP, KEEP);
-                self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
-            }
-
-            if let Some(path_regions) = path_regions {
-                self.gl.clear_stencil(0);
-                self.gl.stencil_mask(0xff);
-                self.gl.clear(STENCIL_BUFFER_BIT);
-                self.gl.enable(STENCIL_TEST);
-                self.gl.enable(BLEND);
-                self.gl.blend_equation(FUNC_ADD);
-                self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
-                self.draw_highlight_path_regions(
-                    path_regions,
-                    &transform,
-                    highlight_program,
-                    stencil_program,
-                )?;
-            }
+            self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
             Ok(())
         })();
 
@@ -4436,13 +4761,21 @@ impl Renderer {
                 return Ok(());
             }
 
-            if layer.buffer_caches[sublayer_idx].path_cover_vao.is_none() {
+            if !Self::path_region_cache_complete(&layer.buffer_caches[sublayer_idx], path_regions) {
+                Self::validate_path_region_data(path_regions, sublayer_idx)?;
+                Self::delete_path_region_cache(&self.gl, &mut layer.buffer_caches[sublayer_idx]);
+                let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                 Self::create_path_region_gpu_cache(
                     &self.gl,
                     &self.programs,
-                    &mut layer.buffer_caches[sublayer_idx],
+                    &mut pending_cache.cache,
                     path_regions,
                 )?;
+                let cache = &mut layer.buffer_caches[sublayer_idx];
+                Self::install_path_region_cache_fields(cache, pending_cache.commit());
+                if !Self::path_region_cache_complete(cache, path_regions) {
+                    return Err(JsValue::from_str("Path region GPU cache is incomplete"));
+                }
                 layer.gerber_data[sublayer_idx]
                     .path_regions
                     .release_cpu_geometry();
@@ -4520,7 +4853,7 @@ impl Renderer {
                 self.draw_path_solid_range(
                     transform,
                     color,
-                    buffer_cache.path_cover_vao.as_ref(),
+                    buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
                 )?;
@@ -4542,10 +4875,15 @@ impl Renderer {
         path_regions: &PathRegions,
     ) -> Result<(), JsValue> {
         if !path_regions.wedge_vertices.is_empty() {
+            buffer_cache.path_wedge_vertex_count = Self::checked_usize_to_i32(
+                "path region wedge vertex count",
+                path_regions.wedge_vertices.len() / 2,
+            )?;
             let vao = gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path wedge VAO"))?;
             gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_wedge_vao = Some(vao);
             let buffer = Self::create_vertex_buffer_from_slice(
                 gl,
                 &path_regions.wedge_vertices,
@@ -4553,37 +4891,37 @@ impl Renderer {
                 "position",
                 2,
             )?;
-            buffer_cache.path_wedge_vertex_count = Self::checked_usize_to_i32(
-                "path region wedge vertex count",
-                path_regions.wedge_vertices.len() / 2,
-            )?;
             buffer_cache.path_wedge_vertex_buffer = Some(buffer);
-            buffer_cache.path_wedge_vao = Some(vao);
         }
 
         if !path_regions.sector_vertices.is_empty() {
+            buffer_cache.path_sector_vertex_count = Self::checked_usize_to_i32(
+                "path region sector vertex count",
+                path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+            )?;
             let vao = gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path sector VAO"))?;
             gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_sector_vao = Some(vao);
             let buffer = Self::create_path_sector_buffer_from_slice(
                 gl,
                 &programs.path_sector,
                 &path_regions.sector_vertices,
             )?;
-            buffer_cache.path_sector_vertex_count = Self::checked_usize_to_i32(
-                "path region sector vertex count",
-                path_regions.sector_vertices.len() / 7,
-            )?;
             buffer_cache.path_sector_vertex_buffer = Some(buffer);
-            buffer_cache.path_sector_vao = Some(vao);
         }
 
         if !path_regions.cover_vertices.is_empty() {
+            buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
+                "path region cover vertex count",
+                path_regions.cover_vertices.len() / 2,
+            )?;
             let vao = gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path cover VAO"))?;
             gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_cover_vao = Some(vao);
             let buffer = Self::create_vertex_buffer_from_slice(
                 gl,
                 &path_regions.cover_vertices,
@@ -4591,19 +4929,19 @@ impl Renderer {
                 "position",
                 2,
             )?;
-            buffer_cache.path_cover_vertex_count = Self::checked_usize_to_i32(
-                "path region cover vertex count",
-                path_regions.cover_vertices.len() / 2,
-            )?;
             buffer_cache.path_cover_vertex_buffer = Some(buffer);
-            buffer_cache.path_cover_vao = Some(vao);
         }
 
         if !path_regions.clear_vertices.is_empty() {
+            buffer_cache.path_clear_vertex_count = Self::checked_usize_to_i32(
+                "path region clear vertex count",
+                path_regions.clear_vertices.len() / 2,
+            )?;
             let vao = gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path clear VAO"))?;
             gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_clear_vao = Some(vao);
             let buffer = Self::create_vertex_buffer_from_slice(
                 gl,
                 &path_regions.clear_vertices,
@@ -4611,12 +4949,7 @@ impl Renderer {
                 "position",
                 2,
             )?;
-            buffer_cache.path_clear_vertex_count = Self::checked_usize_to_i32(
-                "path region clear vertex count",
-                path_regions.clear_vertices.len() / 2,
-            )?;
             buffer_cache.path_clear_vertex_buffer = Some(buffer);
-            buffer_cache.path_clear_vao = Some(vao);
         }
 
         gl.bind_vertex_array(None);
@@ -4635,7 +4968,14 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         Self::upload_f32_slice_to_bound_buffer(gl, data);
-        let loc = Self::shader_attribute(program, attr_name)?;
+        let loc = match Self::shader_attribute(program, attr_name) {
+            Ok(loc) => loc,
+            Err(error) => {
+                gl.bind_buffer(ARRAY_BUFFER, None);
+                gl.delete_buffer(Some(&buffer));
+                return Err(error);
+            }
+        };
         gl.enable_vertex_attrib_array(loc);
         gl.vertex_attrib_pointer_with_i32(loc, components, FLOAT, false, 0, 0);
         Ok(buffer)
@@ -4652,12 +4992,18 @@ impl Renderer {
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         Self::upload_f32_slice_to_bound_buffer(gl, data);
 
-        let stride = 7 * 4;
-        Self::enable_interleaved_attribute(gl, program, "position", 2, stride, 0)?;
-        Self::enable_interleaved_attribute(gl, program, "center", 2, stride, 2 * 4)?;
-        Self::enable_interleaved_attribute(gl, program, "radius", 1, stride, 4 * 4)?;
-        Self::enable_interleaved_attribute(gl, program, "startAngle", 1, stride, 5 * 4)?;
-        Self::enable_interleaved_attribute(gl, program, "sweepAngle", 1, stride, 6 * 4)?;
+        let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
+        let setup_result = (|| {
+            Self::enable_interleaved_attribute(gl, program, "position", 2, stride, 0)?;
+            Self::enable_interleaved_attribute(gl, program, "center", 2, stride, 2 * 4)?;
+            Self::enable_interleaved_attribute(gl, program, "radius", 1, stride, 4 * 4)?;
+            Ok(())
+        })();
+        if let Err(error) = setup_result {
+            gl.bind_buffer(ARRAY_BUFFER, None);
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
         Ok(buffer)
     }
 

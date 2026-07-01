@@ -47,6 +47,18 @@ fn f32_property_from_js(value: &JsValue, key: &str) -> Result<f32, JsValue> {
     }
 }
 
+fn usize_property_from_js(value: &JsValue, key: &str) -> Result<usize, JsValue> {
+    let number = get_property(value, key)?
+        .as_f64()
+        .ok_or_else(|| JsValue::from_str(&format!("Parsed layer field `{key}` is not numeric")))?;
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+        return Err(JsValue::from_str(&format!(
+            "Parsed layer field `{key}` must be a non-negative integer"
+        )));
+    }
+    Ok(number as usize)
+}
+
 fn translate_point_pairs(values: &mut [f32], dx: f32, dy: f32) {
     for point in values.chunks_exact_mut(2) {
         point[0] += dx;
@@ -436,8 +448,8 @@ impl Thermals {
 /// Arc-containing region path data rendered by the WebGL stencil path renderer.
 ///
 /// Large regions are stored in flat buffers to avoid per-segment JS objects:
-/// - `wedge_vertices`: stencil triangles for line-only fans or Lyon-filled arc regions
-/// - `sector_vertices`: legacy analytic arc-sector quads, 7 floats per vertex
+/// - `wedge_vertices`: one or two stencil fan triangles per path segment
+/// - `sector_vertices`: analytic arc cap quads, 5 floats per vertex
 /// - `cover_vertices`: one screen-coverable bounding quad per region
 /// - `clear_vertices`: one quad covering all stencil writes per region
 #[derive(Clone, Debug)]
@@ -451,6 +463,8 @@ pub struct PathRegions {
     pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
     pub(crate) source_contours: Vec<Vec<RegionContour>>,
 }
+
+pub(crate) const PATH_SECTOR_VERTEX_FLOATS: usize = 5;
 
 impl PathRegions {
     pub fn new(
@@ -504,7 +518,7 @@ impl PathRegions {
         }
 
         let wedge_base = (self.wedge_vertices.len() / 2) as u32;
-        let sector_base = (self.sector_vertices.len() / 7) as u32;
+        let sector_base = (self.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS) as u32;
         self.wedge_vertices.extend(other.wedge_vertices);
         self.sector_vertices.extend(other.sector_vertices);
         self.cover_vertices.extend(other.cover_vertices);
@@ -517,6 +531,19 @@ impl PathRegions {
         }
         for offset in other.sector_vertex_offsets.iter().skip(1) {
             self.sector_vertex_offsets.push(sector_base + offset);
+        }
+    }
+
+    pub(crate) fn clone_for_interaction_pick(&self) -> PathRegions {
+        PathRegions {
+            wedge_vertices: Vec::new(),
+            wedge_vertex_offsets: vec![0],
+            sector_vertices: Vec::new(),
+            sector_vertex_offsets: vec![0],
+            cover_vertices: Vec::new(),
+            clear_vertices: Vec::new(),
+            pick_contours: self.pick_contours.clone(),
+            source_contours: Vec::new(),
         }
     }
 
@@ -546,7 +573,10 @@ impl PathRegions {
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_point_pairs(&mut self.wedge_vertices, dx, dy);
 
-        for vertex in self.sector_vertices.chunks_exact_mut(7) {
+        for vertex in self
+            .sector_vertices
+            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
+        {
             vertex[0] += dx;
             vertex[1] += dy;
             vertex[2] += dx;
@@ -583,7 +613,10 @@ impl PathRegions {
             point[1] = y;
         }
 
-        for vertex in self.sector_vertices.chunks_exact_mut(7) {
+        for vertex in self
+            .sector_vertices
+            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
+        {
             let (position_x, position_y) = transformed_point_for_flash(
                 vertex[0], vertex[1], scale, mirror_x, mirror_y, rotation, dx, dy,
             );
@@ -597,10 +630,6 @@ impl PathRegions {
             vertex[3] = center_y;
 
             vertex[4] *= scale.abs();
-            let (start_angle, sweep_angle) =
-                transform_arc_angles(vertex[5], vertex[6], scale, mirror_x, mirror_y, rotation);
-            vertex[5] = start_angle;
-            vertex[6] = sweep_angle;
         }
 
         for point in self.cover_vertices.chunks_exact_mut(2) {
@@ -660,6 +689,11 @@ impl PathRegions {
         )?;
         set_property(
             &object,
+            "sectorVertexStride",
+            &JsValue::from_f64(PATH_SECTOR_VERTEX_FLOATS as f64),
+        )?;
+        set_property(
+            &object,
             "sectorVertexOffsets",
             &u32_array_to_js(&self.sector_vertex_offsets),
         )?;
@@ -677,6 +711,12 @@ impl PathRegions {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<PathRegions, JsValue> {
+        let sector_vertex_stride = usize_property_from_js(value, "sectorVertexStride")?;
+        if sector_vertex_stride != PATH_SECTOR_VERTEX_FLOATS {
+            return Err(JsValue::from_str(
+                "Parsed layer path sector vertex stride is unsupported",
+            ));
+        }
         Ok(PathRegions::new(
             f32_array_from_js(value, "wedgeVertices")?,
             u32_array_from_js(value, "wedgeVertexOffsets")?,
@@ -824,6 +864,7 @@ fn transform_region_contours_for_flash(
                         radius,
                         start_angle,
                         sweep_angle,
+                        ..
                     } => {
                         *start = transformed_array_point_for_flash(
                             *start, scale, mirror_x, mirror_y, rotation, dx, dy,
@@ -921,6 +962,13 @@ impl Boundary {
         self.max_x = self.max_x.max(other.max_x);
         self.min_y = self.min_y.min(other.min_y);
         self.max_y = self.max_y.max(other.max_y);
+    }
+
+    pub(crate) fn intersects(&self, other: &Boundary) -> bool {
+        self.min_x <= other.max_x
+            && self.max_x >= other.min_x
+            && self.min_y <= other.max_y
+            && self.max_y >= other.min_y
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {

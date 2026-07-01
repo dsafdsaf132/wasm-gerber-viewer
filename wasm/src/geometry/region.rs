@@ -11,6 +11,7 @@ pub(crate) enum RegionSegment {
         radius: f32,
         start_angle: f32,
         sweep_angle: f32,
+        clamp_sweep: bool,
     },
 }
 
@@ -50,6 +51,7 @@ impl RegionContour {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn push_arc(
         &mut self,
         start: [f32; 2],
@@ -58,6 +60,19 @@ impl RegionContour {
         radius: f32,
         start_angle: f32,
         sweep_angle: f32,
+    ) -> Result<(), String> {
+        self.push_arc_with_sweep_clamp(start, end, center, radius, start_angle, sweep_angle, false)
+    }
+
+    pub(crate) fn push_arc_with_sweep_clamp(
+        &mut self,
+        start: [f32; 2],
+        end: [f32; 2],
+        center: [f32; 2],
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+        clamp_sweep: bool,
     ) -> Result<(), String> {
         self.points.try_reserve(1).map_err(|_| {
             "Gerber region is too large to render: not enough memory for region points".to_string()
@@ -77,6 +92,7 @@ impl RegionContour {
             radius,
             start_angle,
             sweep_angle,
+            clamp_sweep,
         });
         self.has_arc = true;
         Ok(())

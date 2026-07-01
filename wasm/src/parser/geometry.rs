@@ -1,8 +1,8 @@
-use crate::geometry::PathRegions;
+use crate::geometry::{Boundary, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
 use crate::geometry::{RegionContour, RegionSegment};
 use crate::interaction::{
     aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
-    InteractionFeature, InteractionLayer,
+    InteractionFeature, InteractionLayer, PathRegionRef,
 };
 use crate::parser::common::{parse_coordinate_number, parse_g_code, read_word_value};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
@@ -11,11 +11,6 @@ use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
 use i_triangle::float::triangulatable::Triangulatable;
-use lyon::math::{point, vector, Angle};
-use lyon::path::{FillRule as LyonFillRule, Path};
-use lyon::tessellation::{
-    geometry_builder::BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers,
-};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
@@ -1044,6 +1039,84 @@ fn transform_primitive_for_flash(
     offset_primitive_by(&transformed, x, y)
 }
 
+fn transformed_boundary_for_flash(
+    boundary: Boundary,
+    x: f32,
+    y: f32,
+    layer_scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    layer_rotation: f32,
+) -> Boundary {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+
+    for [corner_x, corner_y] in [
+        [boundary.min_x(), boundary.min_y()],
+        [boundary.min_x(), boundary.max_y()],
+        [boundary.max_x(), boundary.min_y()],
+        [boundary.max_x(), boundary.max_y()],
+    ] {
+        let (transformed_x, transformed_y) = transformed_flash_point(
+            corner_x,
+            corner_y,
+            layer_scale,
+            mirror_x,
+            mirror_y,
+            layer_rotation,
+            x,
+            y,
+        );
+        min_x = min_x.min(transformed_x);
+        max_x = max_x.max(transformed_x);
+        min_y = min_y.min(transformed_y);
+        max_y = max_y.max(transformed_y);
+    }
+
+    Boundary::new(min_x, max_x, min_y, max_y)
+}
+
+fn transformed_flash_point(
+    x: f32,
+    y: f32,
+    scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    rotation: f32,
+    dx: f32,
+    dy: f32,
+) -> (f32, f32) {
+    let mut tx = x * scale;
+    let mut ty = y * scale;
+
+    if mirror_x {
+        tx = -tx;
+    }
+    if mirror_y {
+        ty = -ty;
+    }
+
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+    (tx * cos_r - ty * sin_r + dx, tx * sin_r + ty * cos_r + dy)
+}
+
+fn combine_interaction_bounds(
+    primitive_bounds: Option<Boundary>,
+    path_region_bounds: Option<Boundary>,
+) -> Option<Boundary> {
+    match (primitive_bounds, path_region_bounds) {
+        (Some(mut primitive_bounds), Some(path_region_bounds)) => {
+            primitive_bounds.include_boundary(&path_region_bounds);
+            Some(primitive_bounds)
+        }
+        (Some(bounds), None) | (None, Some(bounds)) => Some(bounds),
+        (None, None) => None,
+    }
+}
+
 fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
     path_regions: &mut PathRegions,
@@ -1154,6 +1227,7 @@ fn flash_block_aperture(
 fn record_block_flash_interaction(
     interaction_layer: Option<&mut InteractionLayer>,
     block_layers: &[PolarityLayer],
+    first_sublayer_idx: usize,
     aperture_code: &str,
     aperture: &Aperture,
     state: &ParserState,
@@ -1171,6 +1245,7 @@ fn record_block_flash_interaction(
         state.mirror_y,
         state.layer_rotation,
     );
+    let mut sublayer_idx = first_sublayer_idx;
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {
             let flash_x = x + sx as f32 * state.sr_i;
@@ -1196,32 +1271,70 @@ fn record_block_flash_interaction(
                     ));
                 }
 
-                let mut transformed_path_regions = block_layer.path_regions.clone();
-                transformed_path_regions.transform_for_flash(
-                    state.layer_scale,
-                    state.mirror_x,
-                    state.mirror_y,
-                    state.layer_rotation,
-                    flash_x,
-                    flash_y,
-                );
-
-                if transformed.is_empty() && !transformed_path_regions.has_geometry() {
+                let has_path_regions = block_layer.path_regions.has_geometry();
+                let emitted_sublayer = !transformed.is_empty() || has_path_regions;
+                if !emitted_sublayer {
                     continue;
                 }
+                let path_region_bounds = has_path_regions
+                    .then(|| {
+                        InteractionFeature::bounds_for_geometry(&[], &block_layer.path_regions)
+                    })
+                    .flatten()
+                    .map(|bounds| {
+                        transformed_boundary_for_flash(
+                            bounds,
+                            flash_x,
+                            flash_y,
+                            state.layer_scale,
+                            state.mirror_x,
+                            state.mirror_y,
+                            state.layer_rotation,
+                        )
+                    });
+                let Some(bounds) = combine_interaction_bounds(
+                    InteractionFeature::bounds_for_geometry(&transformed, &PathRegions::empty()),
+                    path_region_bounds,
+                ) else {
+                    sublayer_idx += 1;
+                    continue;
+                };
+                let path_region_count = block_layer.path_regions.region_count();
+                let path_region_ref = has_path_regions.then_some(PathRegionRef {
+                    sublayer_idx,
+                    region_start: 0,
+                    region_count: path_region_count,
+                });
+                let mut interaction_path_regions = if has_path_regions {
+                    block_layer.path_regions.clone_for_interaction_pick()
+                } else {
+                    PathRegions::empty()
+                };
+                if has_path_regions {
+                    interaction_path_regions.transform_for_flash(
+                        state.layer_scale,
+                        state.mirror_x,
+                        state.mirror_y,
+                        state.layer_rotation,
+                        flash_x,
+                        flash_y,
+                    );
+                }
 
-                if let Some(feature) = InteractionFeature::from_geometry(
+                let feature = InteractionFeature::from_geometry_with_bounds(
                     FeatureKind::Flash,
                     aperture_name(aperture_code),
                     Some(aperture_type(aperture)),
                     aperture.macro_name.clone(),
                     toggled_block_polarity(block_layer.polarity, state.polarity),
                     transformed,
-                    transformed_path_regions,
+                    interaction_path_regions,
+                    path_region_ref,
+                    bounds,
                     properties.clone(),
-                ) {
-                    interaction_layer.push(feature);
-                }
+                );
+                interaction_layer.push(feature);
+                sublayer_idx += 1;
             }
         }
     }
@@ -1653,23 +1766,33 @@ pub fn flatten_region_contours(
                     radius,
                     start_angle,
                     sweep_angle,
+                    clamp_sweep,
                 } => {
                     if points.is_empty() {
                         try_reserve_values(&mut points, 1, "region points")?;
                         points.push(start);
                     }
 
+                    let arc = canonical_arc_geometry(
+                        start,
+                        end,
+                        center,
+                        radius,
+                        start_angle,
+                        sweep_angle,
+                        clamp_sweep,
+                    );
                     let max_angle_step =
                         region_arc_tessellation_max_angle_step(arc_tessellation_quality);
                     let segment_count =
-                        ((sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
+                        ((arc.sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512);
                     try_reserve_values(&mut points, segment_count, "region arc points")?;
                     for segment_idx in 1..segment_count {
                         let t = segment_idx as f32 / segment_count as f32;
-                        let angle = start_angle + sweep_angle * t;
+                        let angle = arc.start_angle + arc.sweep_angle * t;
                         points.push([
-                            center[0] + radius * angle.cos(),
-                            center[1] + radius * angle.sin(),
+                            arc.center[0] + arc.radius * angle.cos(),
+                            arc.center[1] + arc.radius * angle.sin(),
                         ]);
                     }
                     points.push(end);
@@ -1689,6 +1812,99 @@ fn region_arc_tessellation_max_angle_step(quality: u32) -> f32 {
         2 => std::f32::consts::PI / 72.0,
         _ => std::f32::consts::PI / 36.0,
     }
+}
+
+#[derive(Clone, Copy)]
+struct CanonicalArc {
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+}
+
+fn canonical_arc_geometry(
+    start: [f32; 2],
+    end: [f32; 2],
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+    clamp_sweep: bool,
+) -> CanonicalArc {
+    if radius <= 0.0 || sweep_angle.abs() >= std::f32::consts::TAU - 0.00001 {
+        return CanonicalArc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        };
+    }
+
+    let chord = [end[0] - start[0], end[1] - start[1]];
+    let chord_length = (chord[0] * chord[0] + chord[1] * chord[1]).sqrt();
+    if !chord_length.is_finite() || chord_length <= 0.0 {
+        return CanonicalArc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        };
+    }
+
+    let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
+    let normal = [-chord[1] / chord_length, chord[0] / chord_length];
+    let center_offset = [center[0] - midpoint[0], center[1] - midpoint[1]];
+    let signed_distance = center_offset[0] * normal[0] + center_offset[1] * normal[1];
+    let adjusted_center = [
+        midpoint[0] + normal[0] * signed_distance,
+        midpoint[1] + normal[1] * signed_distance,
+    ];
+    let adjusted_radius =
+        ((start[0] - adjusted_center[0]).powi(2) + (start[1] - adjusted_center[1]).powi(2)).sqrt();
+    if !adjusted_center[0].is_finite()
+        || !adjusted_center[1].is_finite()
+        || !adjusted_radius.is_finite()
+        || adjusted_radius <= 0.0
+    {
+        return CanonicalArc {
+            center,
+            radius,
+            start_angle,
+            sweep_angle,
+        };
+    }
+
+    let adjusted_start_angle = (start[1] - adjusted_center[1]).atan2(start[0] - adjusted_center[0]);
+    let adjusted_end_angle = (end[1] - adjusted_center[1]).atan2(end[0] - adjusted_center[0]);
+    let adjusted_sweep_angle =
+        directed_sweep_angle(adjusted_start_angle, adjusted_end_angle, sweep_angle);
+    let adjusted_sweep_angle =
+        if clamp_sweep && adjusted_sweep_angle.abs() > sweep_angle.abs() + 0.001 {
+            sweep_angle
+        } else {
+            adjusted_sweep_angle
+        };
+
+    CanonicalArc {
+        center: adjusted_center,
+        radius: adjusted_radius,
+        start_angle: adjusted_start_angle,
+        sweep_angle: adjusted_sweep_angle,
+    }
+}
+
+fn directed_sweep_angle(start_angle: f32, end_angle: f32, reference_sweep: f32) -> f32 {
+    let mut sweep = end_angle - start_angle;
+    if reference_sweep >= 0.0 {
+        while sweep <= 0.0 {
+            sweep += std::f32::consts::TAU;
+        }
+    } else {
+        while sweep >= 0.0 {
+            sweep -= std::f32::consts::TAU;
+        }
+    }
+    sweep
 }
 
 pub fn build_path_regions(
@@ -1749,18 +1965,8 @@ fn append_path_region(
         clear_max_y,
     )?;
 
-    if region_contours_have_arcs(region_contours) {
-        append_lyon_path_region(
-            path_regions,
-            region_contours,
-            offset_x,
-            offset_y,
-            arc_tessellation_quality,
-        )?;
-    } else {
-        for contour in region_contours {
-            append_contour_segments(path_regions, contour, reference, offset_x, offset_y)?;
-        }
+    for contour in region_contours {
+        append_contour_segments(path_regions, contour, reference, offset_x, offset_y)?;
     }
 
     if collect_pick_contours {
@@ -1784,7 +1990,7 @@ fn append_path_region(
         .push((path_regions.wedge_vertices.len() / 2) as u32);
     path_regions
         .sector_vertex_offsets
-        .push((path_regions.sector_vertices.len() / 7) as u32);
+        .push((path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS) as u32);
 
     Ok(())
 }
@@ -1849,6 +2055,7 @@ fn offset_region_contours(
                     radius,
                     start_angle,
                     sweep_angle,
+                    clamp_sweep,
                 } => RegionSegment::Arc {
                     start: [start[0] + offset_x, start[1] + offset_y],
                     end: [end[0] + offset_x, end[1] + offset_y],
@@ -1856,6 +2063,7 @@ fn offset_region_contours(
                     radius,
                     start_angle,
                     sweep_angle,
+                    clamp_sweep,
                 },
             });
         }
@@ -1937,19 +2145,21 @@ fn append_contour_segments(
                 radius,
                 start_angle,
                 sweep_angle,
+                clamp_sweep,
             } => {
                 let start = offset_point(start, offset_x, offset_y);
                 let end = offset_point(end, offset_x, offset_y);
                 let center = offset_point(center, offset_x, offset_y);
-                push_wedge_triangle(&mut path_regions.wedge_vertices, reference, start, end)?;
-                push_wedge_triangle(&mut path_regions.wedge_vertices, center, start, end)?;
-                push_sector_quad(
-                    &mut path_regions.sector_vertices,
+                let arc = canonical_arc_geometry(
+                    start,
+                    end,
                     center,
                     radius,
                     start_angle,
                     sweep_angle,
-                )?;
+                    clamp_sweep,
+                );
+                append_arc_segment_caps(path_regions, reference, start, end, arc)?;
             }
         }
     }
@@ -1966,199 +2176,6 @@ fn append_contour_segments(
     }
 
     Ok(())
-}
-
-#[derive(Copy, Clone, Debug)]
-struct LyonPathVertex {
-    position: [f32; 2],
-}
-
-fn append_lyon_path_region(
-    path_regions: &mut PathRegions,
-    region_contours: &[RegionContour],
-    offset_x: f32,
-    offset_y: f32,
-    arc_tessellation_quality: u32,
-) -> Result<(), String> {
-    let path = build_lyon_path(region_contours, offset_x, offset_y)?;
-    let (vertex_capacity, index_capacity) = lyon_geometry_capacity(region_contours);
-    let mut geometry: VertexBuffers<LyonPathVertex, u32> =
-        VertexBuffers::with_capacity(vertex_capacity, index_capacity);
-    let tolerance = lyon_fill_tolerance(region_contours, arc_tessellation_quality);
-    let options = FillOptions::tolerance(tolerance).with_fill_rule(LyonFillRule::EvenOdd);
-    let mut tessellator = FillTessellator::new();
-
-    tessellator
-        .tessellate_path(
-            &path,
-            &options,
-            &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| LyonPathVertex {
-                position: vertex.position().to_array(),
-            }),
-        )
-        .map_err(|error| format!("Gerber region with arcs failed to tessellate: {error:?}"))?;
-
-    let output_coord_count = geometry.indices.len().checked_mul(2).ok_or_else(|| {
-        "Gerber region with arcs is too large to render: tessellated vertex count overflow"
-            .to_string()
-    })?;
-    try_reserve_values(
-        &mut path_regions.wedge_vertices,
-        output_coord_count,
-        "path region lyon vertices",
-    )?;
-
-    for index in geometry.indices {
-        let Some(vertex) = geometry.vertices.get(index as usize) else {
-            return Err(
-                "Gerber region with arcs produced an invalid tessellation index".to_string(),
-            );
-        };
-        path_regions
-            .wedge_vertices
-            .extend_from_slice(&vertex.position);
-    }
-
-    Ok(())
-}
-
-fn build_lyon_path(
-    region_contours: &[RegionContour],
-    offset_x: f32,
-    offset_y: f32,
-) -> Result<Path, String> {
-    let mut builder = Path::builder().with_svg();
-    let (endpoint_capacity, control_point_capacity) = lyon_path_capacity(region_contours);
-    builder.reserve(endpoint_capacity, control_point_capacity);
-
-    for contour in region_contours {
-        if contour.segments.is_empty() {
-            let Some(first) = contour.points.first().copied() else {
-                continue;
-            };
-            builder.move_to(lyon_point(offset_point(first, offset_x, offset_y)));
-            for point in contour.points.iter().skip(1) {
-                builder.line_to(lyon_point(offset_point(*point, offset_x, offset_y)));
-            }
-            builder.close();
-            continue;
-        }
-
-        let Some(start) = contour_start_point(contour) else {
-            continue;
-        };
-        builder.move_to(lyon_point(offset_point(start, offset_x, offset_y)));
-        for segment in &contour.segments {
-            match *segment {
-                RegionSegment::Line { end, .. } => {
-                    builder.line_to(lyon_point(offset_point(end, offset_x, offset_y)));
-                }
-                RegionSegment::Arc {
-                    start,
-                    end,
-                    center,
-                    radius,
-                    sweep_angle,
-                    ..
-                } => {
-                    let start = offset_point(start, offset_x, offset_y);
-                    let end = offset_point(end, offset_x, offset_y);
-                    if radius > 0.0 && sweep_angle.is_finite() {
-                        builder.line_to(lyon_point(start));
-                        builder.arc(
-                            lyon_point(offset_point(center, offset_x, offset_y)),
-                            vector(radius, radius),
-                            Angle::radians(sweep_angle),
-                            Angle::radians(0.0),
-                        );
-                        builder.line_to(lyon_point(end));
-                    } else {
-                        builder.line_to(lyon_point(end));
-                    }
-                }
-            }
-        }
-        builder.close();
-    }
-
-    Ok(builder.build())
-}
-
-fn lyon_path_capacity(region_contours: &[RegionContour]) -> (usize, usize) {
-    let mut endpoints = region_contours.len();
-    let mut control_points = 0usize;
-
-    for contour in region_contours {
-        if contour.segments.is_empty() {
-            endpoints = endpoints.saturating_add(contour.points.len());
-            continue;
-        }
-
-        for segment in &contour.segments {
-            match *segment {
-                RegionSegment::Line { .. } => {
-                    endpoints = endpoints.saturating_add(1);
-                }
-                RegionSegment::Arc { sweep_angle, .. } => {
-                    let curve_count = lyon_arc_curve_count(sweep_angle);
-                    endpoints = endpoints.saturating_add(1 + curve_count);
-                    control_points = control_points.saturating_add(curve_count);
-                }
-            }
-        }
-    }
-
-    (endpoints.max(16), control_points)
-}
-
-fn lyon_geometry_capacity(region_contours: &[RegionContour]) -> (usize, usize) {
-    let (endpoint_capacity, _) = lyon_path_capacity(region_contours);
-    (
-        endpoint_capacity.max(512),
-        endpoint_capacity.saturating_mul(3).max(1024),
-    )
-}
-
-fn lyon_arc_curve_count(sweep_angle: f32) -> usize {
-    if !sweep_angle.is_finite() {
-        return 1;
-    }
-
-    let quarter_turns = (sweep_angle.abs() / (std::f32::consts::PI * 0.5)).ceil();
-    (quarter_turns as usize).clamp(1, 16)
-}
-
-fn contour_start_point(contour: &RegionContour) -> Option<[f32; 2]> {
-    contour.segments.first().map(|segment| match *segment {
-        RegionSegment::Line { start, .. } | RegionSegment::Arc { start, .. } => start,
-    })
-}
-
-fn lyon_point(position: [f32; 2]) -> lyon::math::Point {
-    point(position[0], position[1])
-}
-
-fn lyon_fill_tolerance(region_contours: &[RegionContour], arc_tessellation_quality: u32) -> f32 {
-    let mut max_radius = 0.0_f32;
-    for contour in region_contours {
-        for segment in &contour.segments {
-            if let RegionSegment::Arc { radius, .. } = *segment {
-                max_radius = max_radius.max(radius.abs());
-            }
-        }
-    }
-
-    let relative = match arc_tessellation_quality {
-        0 => 1.0 / 2048.0,
-        2 => 1.0 / 32768.0,
-        _ => 1.0 / 8192.0,
-    };
-    let minimum = match arc_tessellation_quality {
-        0 => 0.001,
-        2 => 0.00005,
-        _ => 0.00025,
-    };
-    (max_radius * relative).max(minimum)
 }
 
 fn path_region_bounds(
@@ -2183,19 +2200,30 @@ fn path_region_bounds(
 
         for segment in &contour.segments {
             if let RegionSegment::Arc {
+                start,
+                end,
                 center,
                 radius,
                 start_angle,
                 sweep_angle,
+                clamp_sweep,
                 ..
             } = *segment
             {
-                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = arc_curve_bounds(
-                    offset_point(center, offset_x, offset_y),
+                let start = offset_point(start, offset_x, offset_y);
+                let end = offset_point(end, offset_x, offset_y);
+                let center = offset_point(center, offset_x, offset_y);
+                let arc = canonical_arc_geometry(
+                    start,
+                    end,
+                    center,
                     radius,
                     start_angle,
                     sweep_angle,
+                    clamp_sweep,
                 );
+                let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) =
+                    arc_curve_bounds(arc.center, arc.radius, arc.start_angle, arc.sweep_angle);
                 min_x = min_x.min(arc_min_x);
                 max_x = max_x.max(arc_max_x);
                 min_y = min_y.min(arc_min_y);
@@ -2231,17 +2259,31 @@ fn path_region_stencil_bounds(
 
         for segment in &contour.segments {
             if let RegionSegment::Arc {
+                start,
+                end,
                 center,
                 radius,
                 start_angle,
                 sweep_angle,
+                clamp_sweep,
                 ..
             } = *segment
             {
+                let start = offset_point(start, offset_x, offset_y);
+                let end = offset_point(end, offset_x, offset_y);
                 let center = offset_point(center, offset_x, offset_y);
-                include_point_bounds(&mut min_x, &mut max_x, &mut min_y, &mut max_y, center);
+                let arc = canonical_arc_geometry(
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                    clamp_sweep,
+                );
+                include_point_bounds(&mut min_x, &mut max_x, &mut min_y, &mut max_y, arc.center);
                 let (sector_min_x, sector_max_x, sector_min_y, sector_max_y) =
-                    arc_sector_bounds(center, radius, start_angle, sweep_angle);
+                    arc_sector_bounds(arc.center, arc.radius, arc.start_angle, arc.sweep_angle);
                 min_x = min_x.min(sector_min_x);
                 max_x = max_x.max(sector_max_x);
                 min_y = min_y.min(sector_min_y);
@@ -2282,36 +2324,89 @@ fn push_cover_quad(
     Ok(())
 }
 
-fn push_sector_quad(
+fn append_arc_segment_caps(
+    path_regions: &mut PathRegions,
+    reference: [f32; 2],
+    start: [f32; 2],
+    end: [f32; 2],
+    arc: CanonicalArc,
+) -> Result<(), String> {
+    let sweep = arc
+        .sweep_angle
+        .clamp(-std::f32::consts::TAU, std::f32::consts::TAU);
+    let segment_count = ((sweep.abs() / std::f32::consts::FRAC_PI_2).ceil() as usize).max(1);
+    let chunk_sweep = sweep / segment_count as f32;
+    let mut chunk_start = start;
+
+    for segment_idx in 0..segment_count {
+        let chunk_start_angle = arc.start_angle + chunk_sweep * segment_idx as f32;
+        let chunk_end_angle = chunk_start_angle + chunk_sweep;
+        let chunk_end = if segment_idx + 1 == segment_count {
+            end
+        } else {
+            angle_point(arc.center, arc.radius, chunk_end_angle)
+        };
+
+        push_wedge_triangle(
+            &mut path_regions.wedge_vertices,
+            reference,
+            chunk_start,
+            chunk_end,
+        )?;
+        push_sector_cap_quad(
+            &mut path_regions.sector_vertices,
+            arc.center,
+            arc.radius,
+            chunk_start_angle,
+            chunk_sweep,
+            chunk_start,
+            chunk_end,
+        )?;
+        chunk_start = chunk_end;
+    }
+
+    Ok(())
+}
+
+fn push_sector_cap_quad(
     vertices: &mut Vec<f32>,
     center: [f32; 2],
     radius: f32,
     start_angle: f32,
     sweep_angle: f32,
+    start: [f32; 2],
+    end: [f32; 2],
 ) -> Result<(), String> {
-    let (min_x, max_x, min_y, max_y) = arc_sector_bounds(center, radius, start_angle, sweep_angle);
-    let quad = [
-        [min_x, min_y],
-        [max_x, min_y],
-        [min_x, max_y],
-        [min_x, max_y],
-        [max_x, min_y],
-        [max_x, max_y],
+    let mid_angle = start_angle + sweep_angle * 0.5;
+    let outward = [mid_angle.cos(), mid_angle.sin()];
+    let sagitta = radius * (1.0 - (sweep_angle.abs() * 0.5).cos());
+    let cover_distance = sagitta + (radius.abs() * 1.0e-4).max(1.0e-5);
+    let start_outer = [
+        start[0] + outward[0] * cover_distance,
+        start[1] + outward[1] * cover_distance,
+    ];
+    let end_outer = [
+        end[0] + outward[0] * cover_distance,
+        end[1] + outward[1] * cover_distance,
     ];
 
-    try_reserve_values(vertices, 42, "path region arc sector vertices")?;
-    for point in quad {
-        vertices.extend_from_slice(&[
-            point[0],
-            point[1],
-            center[0],
-            center[1],
-            radius,
-            start_angle,
-            sweep_angle,
-        ]);
+    try_reserve_values(
+        vertices,
+        6 * PATH_SECTOR_VERTEX_FLOATS,
+        "path region arc sector vertices",
+    )?;
+    for point in [start, end, end_outer, start, end_outer, start_outer] {
+        vertices.extend_from_slice(&[point[0], point[1], center[0], center[1], radius]);
     }
+
     Ok(())
+}
+
+fn angle_point(center: [f32; 2], radius: f32, angle: f32) -> [f32; 2] {
+    [
+        center[0] + radius * angle.cos(),
+        center[1] + radius * angle.sin(),
+    ]
 }
 
 pub(crate) fn arc_curve_bounds(
@@ -2353,6 +2448,27 @@ pub(crate) fn arc_curve_bounds(
     }
 
     (min_x, max_x, min_y, max_y)
+}
+
+pub(crate) fn canonical_arc_curve_bounds(
+    start: [f32; 2],
+    end: [f32; 2],
+    center: [f32; 2],
+    radius: f32,
+    start_angle: f32,
+    sweep_angle: f32,
+    clamp_sweep: bool,
+) -> (f32, f32, f32, f32) {
+    let arc = canonical_arc_geometry(
+        start,
+        end,
+        center,
+        radius,
+        start_angle,
+        sweep_angle,
+        clamp_sweep,
+    );
+    arc_curve_bounds(arc.center, arc.radius, arc.start_angle, arc.sweep_angle)
 }
 
 fn arc_sector_bounds(
@@ -2454,13 +2570,14 @@ fn append_region_segment(
     if let Some((center_x, center_y, radius, start_angle, sweep_angle)) =
         calculate_arc_parameters(state, start_x, start_y, end_x, end_y, i, j)
     {
-        contour.push_arc(
+        contour.push_arc_with_sweep_clamp(
             start,
             end,
             [center_x, center_y],
             radius,
             start_angle,
             sweep_angle,
+            state.quadrant_mode == "single",
         )?;
     } else {
         contour.push_line(start, end)?;
@@ -2761,20 +2878,34 @@ pub fn parse_graphic_command(
                             collect_interactions,
                             collect_region_source_contours,
                         )?;
-                        path_regions.append(region_path_regions.clone());
                         if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
-                            if let Some(feature) = InteractionFeature::from_geometry(
-                                FeatureKind::Region,
-                                None,
-                                None,
-                                None,
-                                state.polarity,
-                                Vec::new(),
-                                region_path_regions,
-                                FeatureProperties::default(),
-                            ) {
+                            let path_region_ref = PathRegionRef {
+                                sublayer_idx: polarity_layers.len(),
+                                region_start: path_regions.region_count(),
+                                region_count: region_path_regions.region_count(),
+                            };
+                            let interaction_bounds =
+                                InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
+                            let interaction_path_regions =
+                                region_path_regions.clone_for_interaction_pick();
+                            path_regions.append(region_path_regions);
+                            if let Some(bounds) = interaction_bounds {
+                                let feature = InteractionFeature::from_geometry_with_bounds(
+                                    FeatureKind::Region,
+                                    None,
+                                    None,
+                                    None,
+                                    state.polarity,
+                                    Vec::new(),
+                                    interaction_path_regions,
+                                    Some(path_region_ref),
+                                    bounds,
+                                    FeatureProperties::default(),
+                                );
                                 interaction_layer.push(feature);
                             }
+                        } else {
+                            path_regions.append(region_path_regions);
                         }
                     } else {
                         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
@@ -2995,6 +3126,19 @@ pub fn parse_graphic_command(
                 3 if !state.region_mode => {
                     // D03: Flash aperture at current position
                     flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+                    if apertures
+                        .get(&state.current_aperture)
+                        .and_then(|aperture| aperture.block_layers.as_ref())
+                        .is_some()
+                    {
+                        flush_primitives_to_layer(
+                            primitives,
+                            path_regions,
+                            state.polarity,
+                            polarity_layers,
+                        )?;
+                    }
+                    let block_sublayer_start = polarity_layers.len();
                     flash_aperture(
                         state,
                         apertures,
@@ -3010,6 +3154,7 @@ pub fn parse_graphic_command(
                             record_block_flash_interaction(
                                 interaction_layer.as_deref_mut(),
                                 block_layers,
+                                block_sublayer_start,
                                 &state.current_aperture,
                                 aperture,
                                 state,
@@ -3074,3 +3219,6 @@ pub fn parse_graphic_command(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

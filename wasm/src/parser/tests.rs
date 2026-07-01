@@ -1,6 +1,10 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
-use super::{format_count, parse_gerber, parse_gerber_with_options, GerberParser};
-use crate::geometry::GerberData;
+use super::{
+    format_count, parse_gerber, parse_gerber_payload_with_options, parse_gerber_with_options,
+    GerberParser, Polarity,
+};
+use crate::geometry::RegionSegment;
+use crate::geometry::{GerberData, PATH_SECTOR_VERTEX_FLOATS};
 use crate::interaction::FeatureKind;
 use std::collections::HashMap;
 
@@ -477,10 +481,8 @@ M02*",
     let layer = &layers[0];
     assert!(layer.triangles.vertices.is_empty());
     assert_eq!(layer.path_regions.region_count(), 1);
-    assert_eq!(layer.path_regions.wedge_vertex_offsets.len(), 2);
-    assert!(layer.path_regions.wedge_vertex_offsets[1] > 0);
-    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 0]);
-    assert!(layer.path_regions.sector_vertices.is_empty());
+    assert_eq!(layer.path_regions.wedge_vertex_offsets, vec![0, 9]);
+    assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 12]);
     assert_eq!(layer.path_regions.cover_vertices.len(), 12);
     assert_eq!(layer.path_regions.clear_vertices.len(), 12);
     assert!(layer.path_regions.pick_contours.is_empty());
@@ -518,8 +520,139 @@ M02*",
         .path_regions
         .as_deref()
         .expect("region interaction should keep path regions");
-    assert_eq!(path_regions.region_count(), 1);
+    assert_eq!(path_regions.region_count(), 0);
+    assert!(path_regions.wedge_vertices.is_empty());
+    assert!(path_regions.sector_vertices.is_empty());
     assert_eq!(path_regions.pick_contours.len(), 1);
+    assert_eq!(
+        feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 0,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
+}
+
+#[test]
+fn region_arc_interaction_clone_omits_source_contours() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    parser.preserve_region_source_contours = true;
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*",
+        )
+        .expect("region arc payload should parse");
+
+    assert!(payload.render_layers[0].path_regions.has_source_contours());
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let path_regions = interaction_layer.features[0]
+        .path_regions
+        .as_deref()
+        .expect("region interaction should keep path regions");
+
+    assert_eq!(path_regions.pick_contours.len(), 1);
+    assert_eq!(path_regions.region_count(), 0);
+    assert!(!path_regions.has_source_contours());
+    assert!(interaction_layer.features[0].path_region_ref.is_some());
+}
+
+#[test]
+fn path_region_pick_respects_inner_hole_contour() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X000000Y000000D02*
+G01*
+X100000Y000000D01*
+G03*
+X100000Y100000I-050000J050000D01*
+G01*
+X000000Y100000D01*
+X000000Y000000D01*
+X040000Y040000D02*
+X060000Y040000D01*
+X060000Y060000D01*
+X040000Y060000D01*
+X040000Y040000D01*
+G37*
+M02*",
+        )
+        .expect("region with inner hole should parse");
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+
+    assert!(interaction_layer.pick(2.0, 2.0, 0.0).is_some());
+    assert!(interaction_layer.pick(5.0, 5.0, 0.0).is_none());
+}
+
+#[test]
+fn path_region_pick_contour_quality_tracks_arc_tessellation_quality() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+M02*";
+    let mut low_parser = GerberParser::with_options_and_interactions(true, 0, true);
+    let mut high_parser = GerberParser::with_options_and_interactions(true, 2, true);
+    let low_payload = low_parser
+        .parse_payload(data)
+        .expect("low quality arc region interaction should parse");
+    let high_payload = high_parser
+        .parse_payload(data)
+        .expect("high quality arc region interaction should parse");
+
+    let low_feature = &low_payload
+        .interaction_layer
+        .expect("low quality interaction layer should exist")
+        .features[0];
+    let high_feature = &high_payload
+        .interaction_layer
+        .expect("high quality interaction layer should exist")
+        .features[0];
+    let low_points: usize = low_feature
+        .path_regions
+        .as_deref()
+        .expect("low quality path regions should exist")
+        .pick_contours
+        .iter()
+        .flatten()
+        .map(Vec::len)
+        .sum();
+    let high_points: usize = high_feature
+        .path_regions
+        .as_deref()
+        .expect("high quality path regions should exist")
+        .pick_contours
+        .iter()
+        .flatten()
+        .map(Vec::len)
+        .sum();
+
+    assert!(high_points > low_points);
 }
 
 #[test]
@@ -804,7 +937,7 @@ M02*";
 }
 
 #[test]
-fn preserved_region_arc_quality_controls_lyon_tessellation_density() {
+fn preserved_region_arc_quality_does_not_change_analytic_payload() {
     let data = "\
 %FSLAX24Y24*%
 %MOMM*%
@@ -820,10 +953,13 @@ M02*";
     let high_layers = parse_gerber_with_options(data, true, 2)
         .expect("high quality path region arc should parse");
 
-    assert!(
-        high_layers[0].path_regions.wedge_vertices.len()
-            > low_layers[0].path_regions.wedge_vertices.len(),
-        "high quality should produce more Lyon-filled path vertices than low quality"
+    assert_eq!(
+        high_layers[0].path_regions.wedge_vertices.len(),
+        low_layers[0].path_regions.wedge_vertices.len()
+    );
+    assert_eq!(
+        high_layers[0].path_regions.sector_vertices.len(),
+        low_layers[0].path_regions.sector_vertices.len()
     );
 }
 
@@ -885,8 +1021,118 @@ M02*",
         .path_regions
         .as_deref()
         .expect("aperture block region interaction should keep path regions");
-    assert_eq!(path_regions.region_count(), 1);
+    assert_eq!(path_regions.region_count(), 0);
+    assert!(path_regions.wedge_vertices.is_empty());
+    assert!(path_regions.sector_vertices.is_empty());
     assert_eq!(path_regions.pick_contours.len(), 1);
+    assert_eq!(
+        feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 0,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
+}
+
+#[test]
+fn aperture_block_path_region_interaction_ref_accounts_for_pending_primitives() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD11C,1.0*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+D11*
+X-030000Y000000D03*
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("aperture block after pending primitive should parse");
+
+    assert_eq!(payload.render_layers.len(), 2);
+    assert_eq!(payload.render_layers[0].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[1].path_regions.region_count(), 1);
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let block_feature = interaction_layer
+        .features
+        .iter()
+        .find(|feature| feature.path_region_ref.is_some())
+        .expect("block path region feature should keep render sublayer ref");
+
+    assert_eq!(
+        block_feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 1,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
+}
+
+#[test]
+fn aperture_block_path_region_interaction_ref_accounts_for_split_pending_sublayers() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser
+        .parse_payload(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD11C,1.0X0.25*%
+%ADD12C,1.0*%
+%ABD10*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X-010000Y000000I-010000J000000D01*
+G37*
+%AB*%
+D12*
+X-050000Y000000D03*
+D11*
+X-030000Y000000D03*
+D10*
+X000000Y000000D03*
+M02*",
+        )
+        .expect("aperture block after split pending primitive should parse");
+
+    assert_eq!(payload.render_layers.len(), 3);
+    assert_eq!(payload.render_layers[0].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[1].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[2].path_regions.region_count(), 1);
+
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+    let block_feature = interaction_layer
+        .features
+        .iter()
+        .find(|feature| feature.path_region_ref.is_some())
+        .expect("block path region feature should keep render sublayer ref");
+
+    assert_eq!(
+        block_feature.path_region_ref,
+        Some(crate::interaction::PathRegionRef {
+            sublayer_idx: 2,
+            region_start: 0,
+            region_count: 1,
+        })
+    );
 }
 
 #[test]
@@ -971,7 +1217,7 @@ M02*",
 }
 
 #[test]
-fn path_region_translate_moves_lyon_path_vertices() {
+fn path_region_translate_moves_analytic_sector_vertices() {
     let mut layers = parse_gerber(
         "\
 %FSLAX24Y24*%
@@ -986,17 +1232,158 @@ M02*",
     )
     .expect("region arc should parse");
 
-    let before = layers[0].path_regions.wedge_vertices.clone();
     layers[0].translate(10.0, 20.0);
-    assert!(!before.is_empty());
-    assert!(layers[0].path_regions.sector_vertices.is_empty());
-    for (before, after) in before
-        .chunks_exact(2)
-        .zip(layers[0].path_regions.wedge_vertices.chunks_exact(2))
-    {
-        assert_approx_eq(after[0], before[0] + 10.0);
-        assert_approx_eq(after[1], before[1] + 20.0);
-    }
+    let sector = &layers[0].path_regions.sector_vertices;
+    assert_eq!(sector.len() % PATH_SECTOR_VERTEX_FLOATS, 0);
+    let first = &sector[0..PATH_SECTOR_VERTEX_FLOATS];
+    let second = &sector[PATH_SECTOR_VERTEX_FLOATS..PATH_SECTOR_VERTEX_FLOATS * 2];
+    assert_approx_eq(first[0], 11.0);
+    assert_approx_eq(first[1], 20.0);
+    assert_approx_eq(first[2], 10.0);
+    assert_approx_eq(first[3], 20.0);
+    assert_approx_eq(first[4], 1.0);
+    assert_approx_eq(second[0], 10.0);
+    assert_approx_eq(second[1], 21.0);
+    assert_approx_eq(second[2], 10.0);
+    assert_approx_eq(second[3], 20.0);
+    assert_approx_eq(second[4], 1.0);
+}
+
+#[test]
+fn path_region_arc_radius_is_canonicalized_to_raw_endpoints() {
+    let layers = parse_gerber(
+        "\
+%FSLAX26Y26*%
+%MOIN*%
+G75*
+G36*
+X00151463Y01226672D02*
+G02*
+X00149975Y01233567I00011698J00006133D01*
+G01*
+X00151463Y01226672D01*
+G37*
+M02*",
+    )
+    .expect("rounding-sensitive region arc should parse");
+
+    let sector = &layers[0].path_regions.sector_vertices;
+    let center = [sector[2], sector[3]];
+    let radius = sector[4];
+    let inch_to_mm = 25.4;
+    let start = [0.151463 * inch_to_mm, 1.226672 * inch_to_mm];
+    let end = [0.149975 * inch_to_mm, 1.233567 * inch_to_mm];
+    let start_radius = ((start[0] - center[0]).powi(2) + (start[1] - center[1]).powi(2)).sqrt();
+    let end_radius = ((end[0] - center[0]).powi(2) + (end[1] - center[1]).powi(2)).sqrt();
+
+    assert_approx_eq(start_radius, radius);
+    assert_approx_eq(end_radius, radius);
+}
+
+#[test]
+fn path_region_canonicalization_preserves_major_arc_sweep() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+G75*
+G36*
+X010000Y000000D02*
+G03*
+X000000Y-010000I-010000J000000D01*
+G01*
+X010000Y000000D01*
+G37*
+M02*",
+    )
+    .expect("major arc region should parse");
+
+    assert_eq!(layers[0].path_regions.sector_vertex_offsets, vec![0, 18]);
+}
+
+#[test]
+fn single_quadrant_region_arc_records_clamped_sweep() {
+    let mut parser = GerberParser::with_options(true, 1);
+    parser.preserve_region_source_contours = true;
+    let layers = parser
+        .parse(
+            "\
+%FSLAX24Y24*%
+%MOMM*%
+G74*
+G36*
+X010000Y000000D02*
+G03*
+X000000Y-012000I010000J000000D01*
+G01*
+X010000Y000000D01*
+G37*
+M02*",
+        )
+        .expect("single-quadrant arc region should parse");
+
+    let segment = &layers[0].path_regions.source_contours[0][0].segments[0];
+    let RegionSegment::Arc {
+        sweep_angle,
+        clamp_sweep,
+        ..
+    } = segment
+    else {
+        panic!("first source segment should be an arc");
+    };
+
+    assert!(*clamp_sweep);
+    assert!(sweep_angle.abs() <= std::f32::consts::FRAC_PI_2 + 0.001);
+}
+
+#[test]
+fn clear_polarity_region_cuts_interaction_highlight_candidate() {
+    let payload = parse_gerber_payload_with_options(
+        "\
+%FSLAX36Y36*%
+%MOMM*%
+%LPD*%
+G36*
+X5000000Y20000000D02*
+G01*
+Y37500000D01*
+X37500000D01*
+Y20000000D01*
+X5000000D01*
+G37*
+%LPC*%
+G36*
+X10000000Y25000000D02*
+Y30000000D01*
+G02*
+X12500000Y32500000I2500000J0D01*
+G01*
+X30000000D01*
+G02*
+X30000000Y25000000I0J-3750000D01*
+G01*
+X10000000D01*
+G37*
+M02*",
+        true,
+        1,
+    )
+    .expect("polarity region payload should parse");
+    let interaction_layer = payload
+        .interaction_layer
+        .expect("interaction layer should be collected");
+
+    assert!(interaction_layer.pick(15.0, 28.75, 0.0).is_none());
+
+    let (outer_feature_id, outer_feature) = interaction_layer
+        .pick(6.0, 21.0, 0.0)
+        .expect("outer region should be selectable");
+    assert_eq!(outer_feature.descriptor.kind, FeatureKind::Region);
+
+    let clear_features = interaction_layer.following_clear_features_for_highlight(outer_feature_id);
+    assert_eq!(clear_features.len(), 1);
+    assert_eq!(clear_features[0].descriptor.kind, FeatureKind::Region);
+    assert_eq!(clear_features[0].descriptor.polarity, Polarity::Negative);
 }
 
 #[test]

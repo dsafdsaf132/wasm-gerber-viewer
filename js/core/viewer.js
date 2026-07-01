@@ -3915,15 +3915,14 @@ export class GerberViewer {
       return;
     }
 
-    let processor = this.interactionProcessor;
+    let processor = this.wasmProcessor;
     try {
-      if (!processor) {
-        processor = this.createInteractionProcessor();
-        this.interactionProcessor = processor;
-      }
-      if (typeof processor.add_interaction_payload !== "function") {
+      if (typeof processor?.add_interaction_payload !== "function") {
         throw new Error("Feature picking requires an updated WASM module");
       }
+      this.configureWasmProcessorOptions(processor, {
+        interactionsEnabled: true,
+      });
 
       this.featurePickingAvailable = false;
       this.clearSelectedFeature({ refresh: false });
@@ -3950,11 +3949,21 @@ export class GerberViewer {
     } catch (error) {
       const message = getErrorMessage(error);
       console.error("[Interaction] Failed to build picking index:", error);
+      const abandon = isFatalWasmRuntimeError(error);
       this.disableFeaturePickingForCurrentDocument(
         "Feature picking failed",
         `Picking data could not be built; feature picking is disabled for this document: ${message}`,
-        { abandon: isFatalWasmRuntimeError(error) },
+        { abandon },
       );
+      if (abandon) {
+        await this.recoverWasmProcessorAfterFatalError("feature picking", error);
+      } else if (typeof processor?.clear_interaction_layers === "function") {
+        try {
+          processor.clear_interaction_layers();
+        } catch (clearError) {
+          console.warn("[Interaction] Failed to clear partial picking index:", clearError);
+        }
+      }
     } finally {
       this.clearInteractionPayloads(layerRecords);
       this.updateUiState();
@@ -4716,12 +4725,9 @@ export class GerberViewer {
   }
 
   renderSelectedFeatureHighlight() {
-    const pickingProcessor = this.getFeaturePickingProcessorForLayer(
-      this.selectedFeature?.layer,
-    );
     if (
       !this.selectedFeature ||
-      typeof pickingProcessor?.render_interaction_highlight !== "function"
+      typeof this.wasmProcessor?.render_interaction_highlight !== "function"
     ) {
       return;
     }
@@ -4730,7 +4736,7 @@ export class GerberViewer {
       if (this.clearSelectedFeatureIfUnavailable()) {
         return;
       }
-      pickingProcessor.render_interaction_highlight(
+      this.wasmProcessor.render_interaction_highlight(
         this.selectedFeature.layerId,
         this.selectedFeature.featureId,
         this.getViewScaleX(),

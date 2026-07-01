@@ -1,3 +1,4 @@
+
 use super::*;
 use crate::parser::GerberParser;
 
@@ -58,6 +59,7 @@ fn validate_offsets_rejects_nonzero_initial_offset() {
     assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[0, 9], 9).is_ok());
     assert!(Renderer::validate_offsets_invariant("path wedge offsets", 0, &[1, 9], 9).is_err());
     assert!(Renderer::validate_offsets_invariant("path sector offsets", 0, &[2, 6], 6).is_err());
+    assert!(Renderer::validate_offsets_invariant("path sector offsets", 0, &[0, 5], 7).is_err());
 }
 
 #[test]
@@ -66,6 +68,61 @@ fn validate_path_region_data_accepts_normalized_empty_offsets() {
     assert_eq!(path_regions.wedge_vertex_offsets, vec![0]);
     assert_eq!(path_regions.sector_vertex_offsets, vec![0]);
     assert!(Renderer::validate_path_region_data(&path_regions, 0).is_ok());
+}
+
+#[test]
+fn validate_path_region_data_accepts_five_float_sector_vertices() {
+    let path_regions = PathRegions::new(
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        vec![0, 3],
+        vec![
+            1.0, 0.0, 0.0, 0.0, 1.0, //
+            0.0, 1.0, 0.0, 0.0, 1.0, //
+            2.0, 2.0, 0.0, 0.0, 1.0,
+        ],
+        vec![0, 3],
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+    );
+
+    assert!(Renderer::validate_path_region_data(&path_regions, 0).is_ok());
+}
+
+#[test]
+fn validate_path_region_data_rejects_legacy_sector_stride() {
+    let path_regions = PathRegions::new(
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        vec![0, 3],
+        vec![
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.5708, //
+            0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.5708, //
+            2.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.5708,
+        ],
+        vec![0, 3],
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+    );
+
+    assert!(Renderer::validate_path_sector_vertices_invariant(&path_regions, 0).is_err());
+}
+
+#[test]
+fn validate_path_region_data_rejects_negative_sector_radius() {
+    let path_regions = PathRegions::new(
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+        vec![0, 3],
+        vec![1.0, 0.0, 0.0, 0.0, -1.0],
+        vec![0, 1],
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+    );
+
+    assert!(Renderer::validate_path_sector_vertices_invariant(&path_regions, 0).is_err());
+}
+
+#[test]
+fn validate_path_region_data_rejects_stale_sector_offsets() {
+    assert!(Renderer::validate_offsets_invariant("path sector offsets", 0, &[0, 5], 7).is_err());
 }
 
 #[test]
@@ -110,6 +167,7 @@ fn closed_outline_regions_accept_arc_only_circle() {
             radius,
             start_angle,
             sweep_angle,
+            clamp_sweep: false,
         },
     }];
 
@@ -122,6 +180,28 @@ fn closed_outline_regions_accept_arc_only_circle() {
     assert!((boundary.max_x() - 7.0).abs() < 0.0001);
     assert!((boundary.min_y() - 3.0).abs() < 0.0001);
     assert!((boundary.max_y() - 7.0).abs() < 0.0001);
+}
+
+#[test]
+fn outline_region_boundary_uses_canonical_arc_bounds() {
+    let mut contour = RegionContour::default();
+    contour
+        .push_arc(
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.25, 0.0],
+            0.75,
+            0.0,
+            std::f32::consts::FRAC_PI_2,
+        )
+        .expect("arc contour should build");
+
+    let boundary = Renderer::outline_regions_boundary(&[contour]).expect("finite boundary");
+
+    assert!((boundary.min_x() - 0.0).abs() < 0.0001);
+    assert!((boundary.min_y() - 0.0).abs() < 0.0001);
+    assert!(boundary.max_x() > 1.001);
+    assert!(boundary.max_y() > 1.001);
 }
 
 #[test]
@@ -265,7 +345,7 @@ M02*",
     assert_eq!(fill_layers.len(), 1);
     assert!(fill_contours.iter().any(|contour| contour.has_arc));
     assert!(!fill_layers[0].path_regions.wedge_vertices.is_empty());
-    assert!(fill_layers[0].path_regions.sector_vertices.is_empty());
+    assert!(!fill_layers[0].path_regions.sector_vertices.is_empty());
 }
 
 #[test]
