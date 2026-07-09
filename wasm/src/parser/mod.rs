@@ -1084,7 +1084,7 @@ fn parse_command(
         .map_err(|message| JsValue::from_str(&message))?;
     } else if line.starts_with("%SR") {
         // Step and repeat: %SRX3Y2I10J20*%
-        parse_sr(&line, state);
+        parse_sr(&line, state).map_err(|message| JsValue::from_str(&message))?;
     } else if line.starts_with("%IF") {
         // Image polarity: %IFPOS*% or %IFNEG*%
         parse_if(&line, state);
@@ -1234,7 +1234,9 @@ fn parse_aperture_block(
                 collect_region_source_contours,
             )?;
             if let Some(enclosing_state) = nested_block_state {
+                let generated_items = state.generated_items();
                 *state = enclosing_state;
+                state.set_generated_items(generated_items);
             }
         } else if block_line.starts_with('G')
             || block_line.starts_with('D')

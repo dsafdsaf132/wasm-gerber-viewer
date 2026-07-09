@@ -23,10 +23,12 @@ use crate::parser::ParserState;
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{
-    WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlTexture, WebGlVertexArrayObject,
+    WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlRenderbuffer, WebGlTexture,
+    WebGlVertexArrayObject,
 };
 
 const PATH_SECTOR_VERTEX_FLOATS_U32: u32 = PATH_SECTOR_VERTEX_FLOATS as u32;
+type OutlineFillLayers = (Vec<GerberData>, Vec<RegionContour>);
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
 pub struct LayerMetadata {
@@ -62,6 +64,25 @@ struct BufferCacheBuildGuard {
     gl: WebGl2RenderingContext,
     cache: BufferCache,
     committed: bool,
+}
+
+struct FboBuildGuard {
+    gl: WebGl2RenderingContext,
+    framebuffer: Option<WebGlFramebuffer>,
+    texture: Option<WebGlTexture>,
+    stencil: Option<WebGlRenderbuffer>,
+}
+
+struct FboListBuildGuard {
+    gl: WebGl2RenderingContext,
+    fbos: Vec<Option<Fbo>>,
+}
+
+struct RendererResourcesBuildGuard {
+    gl: WebGl2RenderingContext,
+    programs: Option<ShaderPrograms>,
+    quad_buffer: Option<WebGlBuffer>,
+    fbos: Vec<Option<Fbo>>,
 }
 
 #[derive(Clone)]
@@ -114,6 +135,120 @@ impl Drop for BufferCacheBuildGuard {
     }
 }
 
+impl FboBuildGuard {
+    fn new(gl: &WebGl2RenderingContext) -> Self {
+        Self {
+            gl: gl.clone(),
+            framebuffer: None,
+            texture: None,
+            stencil: None,
+        }
+    }
+
+    fn commit(mut self) -> Fbo {
+        Fbo {
+            framebuffer: self
+                .framebuffer
+                .take()
+                .expect("completed FBO must have a framebuffer"),
+            texture: self
+                .texture
+                .take()
+                .expect("completed FBO must have a texture"),
+            stencil: self.stencil.take(),
+        }
+    }
+}
+
+impl Drop for FboBuildGuard {
+    fn drop(&mut self) {
+        self.gl
+            .bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+        self.gl
+            .bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
+        self.gl
+            .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
+        if let Some(stencil) = self.stencil.take() {
+            self.gl.delete_renderbuffer(Some(&stencil));
+        }
+        if let Some(framebuffer) = self.framebuffer.take() {
+            self.gl.delete_framebuffer(Some(&framebuffer));
+        }
+        if let Some(texture) = self.texture.take() {
+            self.gl.delete_texture(Some(&texture));
+        }
+    }
+}
+
+impl FboListBuildGuard {
+    fn new(gl: &WebGl2RenderingContext, capacity: usize) -> Result<Self, JsValue> {
+        let mut fbos = Vec::new();
+        fbos.try_reserve(capacity).map_err(|_| {
+            JsValue::from_str("Unable to reserve memory for replacement framebuffers")
+        })?;
+        Ok(Self {
+            gl: gl.clone(),
+            fbos,
+        })
+    }
+
+    fn push(&mut self, fbo: Option<Fbo>) {
+        self.fbos.push(fbo);
+    }
+
+    fn commit(mut self) -> Vec<Option<Fbo>> {
+        std::mem::take(&mut self.fbos)
+    }
+}
+
+impl Drop for FboListBuildGuard {
+    fn drop(&mut self) {
+        for fbo in self.fbos.drain(..).flatten() {
+            Renderer::delete_fbo(&self.gl, fbo);
+        }
+    }
+}
+
+impl RendererResourcesBuildGuard {
+    fn new(gl: &WebGl2RenderingContext, fbo_capacity: usize) -> Result<Self, JsValue> {
+        let mut fbos = Vec::new();
+        fbos.try_reserve(fbo_capacity)
+            .map_err(|_| JsValue::from_str("Unable to reserve renderer resource build state"))?;
+        Ok(Self {
+            gl: gl.clone(),
+            programs: None,
+            quad_buffer: None,
+            fbos,
+        })
+    }
+
+    fn commit(mut self) -> (ShaderPrograms, WebGlBuffer, Vec<Option<Fbo>>) {
+        (
+            self.programs
+                .take()
+                .expect("completed renderer resources must have shader programs"),
+            self.quad_buffer
+                .take()
+                .expect("completed renderer resources must have a quad buffer"),
+            std::mem::take(&mut self.fbos),
+        )
+    }
+}
+
+impl Drop for RendererResourcesBuildGuard {
+    fn drop(&mut self) {
+        for fbo in self.fbos.drain(..).flatten() {
+            Renderer::delete_fbo(&self.gl, fbo);
+        }
+        if let Some(quad_buffer) = self.quad_buffer.take() {
+            self.gl.delete_buffer(Some(&quad_buffer));
+        }
+        if let Some(programs) = self.programs.take() {
+            Renderer::delete_shader_programs(&self.gl, &programs);
+        }
+    }
+}
+
 impl Renderer {
     /// Create a new renderer with WebGL context (no layers initially)
     pub fn new(gl: WebGl2RenderingContext) -> Result<Renderer, JsValue> {
@@ -134,11 +269,10 @@ impl Renderer {
         gl: WebGl2RenderingContext,
         explicit_size: Option<(u32, u32)>,
     ) -> Result<Renderer, JsValue> {
-        // Compile shader programs
-        let programs = ShaderPrograms::new(&gl)?;
-
-        // Create quad buffer for instanced rendering (shared across all layers)
-        let quad_buffer = Self::create_quad_buffer(&gl)?;
+        let mut pending = RendererResourcesBuildGuard::new(&gl, 0)?;
+        pending.programs = Some(ShaderPrograms::new(&gl)?);
+        pending.quad_buffer = Some(Self::create_quad_buffer(&gl)?);
+        let (programs, quad_buffer, _) = pending.commit();
 
         Ok(Renderer {
             gl,
@@ -237,15 +371,22 @@ impl Renderer {
         }
 
         let boundary = Boundary::new(min_x, max_x, min_y, max_y);
+        let free_slot = self.layers.iter().position(|layer| layer.is_none());
+        if free_slot.is_none() {
+            self.layers
+                .try_reserve(1)
+                .map_err(|_| JsValue::from_str("Unable to reserve memory for renderer layers"))?;
+        }
+
+        // Create buffer caches before allocating GPU resources so a CPU
+        // allocation failure cannot leak a completed framebuffer.
+        let buffer_caches = Self::create_buffer_caches(gerber_data.len())?;
 
         // Create FBO for this layer. Arc-containing path regions need stencil fill.
         let needs_stencil = gerber_data
             .iter()
             .any(|data| data.path_regions.has_geometry());
         let fbo = Self::create_fbo(&self.gl, width, height, needs_stencil)?;
-
-        // Create buffer caches for each polarity sublayer
-        let buffer_caches = Self::create_buffer_caches(gerber_data.len())?;
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -261,7 +402,7 @@ impl Renderer {
         };
 
         // Find next free slot or extend vec
-        if let Some(free_slot) = self.layers.iter().position(|layer| layer.is_none()) {
+        if let Some(free_slot) = free_slot {
             self.layers[free_slot] = Some(layer_metadata);
             self.layer_count += 1;
             Ok(free_slot)
@@ -305,7 +446,7 @@ impl Renderer {
 
     fn inverted_outline_fill_layers(
         outline_data: &[GerberData],
-    ) -> Result<(Vec<GerberData>, Vec<RegionContour>), JsValue> {
+    ) -> Result<OutlineFillLayers, JsValue> {
         match Self::outline_fill_layer_with_contours(outline_data) {
             Ok((fill_layer, fill_contours)) => Ok((vec![fill_layer], fill_contours)),
             Err(outline_error) => match Self::region_outline_fill_layers(outline_data)? {
@@ -317,7 +458,7 @@ impl Renderer {
 
     fn region_outline_fill_layers(
         outline_data: &[GerberData],
-    ) -> Result<Option<(Vec<GerberData>, Vec<RegionContour>)>, JsValue> {
+    ) -> Result<Option<OutlineFillLayers>, JsValue> {
         let mut fill_layers = Vec::new();
         let mut all_contours = Vec::new();
 
@@ -2984,26 +3125,22 @@ impl Renderer {
         }
         let width_i32 = Self::checked_u32_to_i32("FBO width", width)?;
         let height_i32 = Self::checked_u32_to_i32("FBO height", height)?;
+        let mut pending = FboBuildGuard::new(gl);
 
         let texture = gl.create_texture().ok_or("Failed to create texture")?;
+        pending.texture = Some(texture.clone());
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
-        if let Err(error) = gl
-            .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-                WebGl2RenderingContext::TEXTURE_2D,
-                0,
-                WebGl2RenderingContext::RGBA as i32,
-                width_i32,
-                height_i32,
-                0,
-                WebGl2RenderingContext::RGBA,
-                WebGl2RenderingContext::UNSIGNED_BYTE,
-                None,
-            )
-        {
-            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-            gl.delete_texture(Some(&texture));
-            return Err(error);
-        }
+        gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+            WebGl2RenderingContext::TEXTURE_2D,
+            0,
+            WebGl2RenderingContext::RGBA as i32,
+            width_i32,
+            height_i32,
+            0,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            None,
+        )?;
         gl.tex_parameteri(
             WebGl2RenderingContext::TEXTURE_2D,
             WebGl2RenderingContext::TEXTURE_MIN_FILTER,
@@ -3026,6 +3163,7 @@ impl Renderer {
         );
 
         let framebuffer = gl.create_framebuffer().ok_or("Failed to create FBO")?;
+        pending.framebuffer = Some(framebuffer.clone());
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&framebuffer));
         gl.framebuffer_texture_2d(
             WebGl2RenderingContext::FRAMEBUFFER,
@@ -3035,10 +3173,11 @@ impl Renderer {
             0,
         );
 
-        let stencil = if with_stencil {
+        if with_stencil {
             let stencil = gl
                 .create_renderbuffer()
                 .ok_or_else(|| JsValue::from_str("Failed to create stencil renderbuffer"))?;
+            pending.stencil = Some(stencil.clone());
             gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&stencil));
             gl.renderbuffer_storage(
                 WebGl2RenderingContext::RENDERBUFFER,
@@ -3052,21 +3191,10 @@ impl Renderer {
                 WebGl2RenderingContext::RENDERBUFFER,
                 Some(&stencil),
             );
-            Some(stencil)
-        } else {
-            None
-        };
+        }
 
         let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
         if status != WebGl2RenderingContext::FRAMEBUFFER_COMPLETE {
-            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
-            gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
-            gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
-            if let Some(stencil) = stencil {
-                gl.delete_renderbuffer(Some(&stencil));
-            }
-            gl.delete_framebuffer(Some(&framebuffer));
-            gl.delete_texture(Some(&texture));
             return Err(JsValue::from_str(&format!(
                 "Framebuffer is incomplete: 0x{:x}",
                 status
@@ -3077,11 +3205,7 @@ impl Renderer {
         gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
-        Ok(Fbo {
-            framebuffer,
-            texture,
-            stencil,
-        })
+        Ok(pending.commit())
     }
 
     /// Create and bind a single-channel instance buffer
@@ -5791,19 +5915,32 @@ impl Renderer {
     /// Resize framebuffers to explicit dimensions.
     pub fn resize_to(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
         Self::validate_framebuffer_size(width, height)?;
+        let mut pending_fbos = FboListBuildGuard::new(&self.gl, self.layers.len())?;
+
+        for layer in &self.layers {
+            let fbo = match layer {
+                Some(layer) => Some(Self::create_fbo(
+                    &self.gl,
+                    width,
+                    height,
+                    layer.has_path_regions,
+                )?),
+                None => None,
+            };
+            pending_fbos.push(fbo);
+        }
+
+        let replacements = pending_fbos.commit();
         if self.explicit_size.is_some() {
             self.explicit_size = Some((width, height));
         }
-
-        // Recreate FBO for each active layer
-        for layer in self.layers.iter_mut().flatten() {
-            let old_fbo = std::mem::replace(
-                &mut layer.fbo,
-                Self::create_fbo(&self.gl, width, height, layer.has_path_regions)?,
-            );
-            Self::delete_fbo(&self.gl, old_fbo);
-            layer.fbo_dirty = true;
-            layer.fbo_transform = None;
+        for (layer, replacement) in self.layers.iter_mut().zip(replacements) {
+            if let (Some(layer), Some(replacement)) = (layer, replacement) {
+                let old_fbo = std::mem::replace(&mut layer.fbo, replacement);
+                Self::delete_fbo(&self.gl, old_fbo);
+                layer.fbo_dirty = true;
+                layer.fbo_transform = None;
+            }
         }
 
         Ok(())
@@ -5823,47 +5960,53 @@ impl Renderer {
             ));
         }
 
-        let programs = ShaderPrograms::new(&gl)?;
-        let quad_buffer = Self::create_quad_buffer(&gl)?;
+        let mut new_buffer_caches =
+            Self::reserved_vec("restored buffer caches", self.layers.len())?;
+        for layer in &self.layers {
+            new_buffer_caches.push(match layer {
+                Some(layer) => Some(Self::create_buffer_caches(layer.gerber_data.len())?),
+                None => None,
+            });
+        }
+
         let (width, height) = match self.explicit_size {
             Some(size) => size,
             None => Self::get_canvas_size_from_gl(&gl)?,
         };
-        let mut new_fbos = Self::reserved_vec("restored framebuffers", self.layers.len())?;
+        let mut pending = RendererResourcesBuildGuard::new(&gl, self.layers.len())?;
+        pending.programs = Some(ShaderPrograms::new(&gl)?);
+        pending.quad_buffer = Some(Self::create_quad_buffer(&gl)?);
 
         for layer in &self.layers {
             if layer.is_some() {
                 let has_path_regions = layer.as_ref().is_some_and(|layer| layer.has_path_regions);
-                let fbo = match Self::create_fbo(&gl, width, height, has_path_regions) {
-                    Ok(fbo) => fbo,
-                    Err(error) => {
-                        for fbo in new_fbos.into_iter().flatten() {
-                            Self::delete_fbo(&gl, fbo);
-                        }
-                        gl.delete_buffer(Some(&quad_buffer));
-                        Self::delete_shader_programs(&gl, &programs);
-                        return Err(error);
-                    }
-                };
-                new_fbos.push(Some(fbo));
+                pending.fbos.push(Some(Self::create_fbo(
+                    &gl,
+                    width,
+                    height,
+                    has_path_regions,
+                )?));
             } else {
-                new_fbos.push(None);
+                pending.fbos.push(None);
             }
         }
+        let (programs, quad_buffer, new_fbos) = pending.commit();
 
         let old_gl = self.gl.clone();
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
 
-        for (layer, new_fbo) in self.layers.iter_mut().zip(new_fbos) {
-            if let (Some(layer), Some(new_fbo)) = (layer, new_fbo) {
+        for ((layer, new_fbo), new_caches) in
+            self.layers.iter_mut().zip(new_fbos).zip(new_buffer_caches)
+        {
+            if let (Some(layer), Some(new_fbo), Some(new_caches)) = (layer, new_fbo, new_caches) {
                 let old_fbo = std::mem::replace(&mut layer.fbo, new_fbo);
                 Self::delete_fbo(&old_gl, old_fbo);
 
                 for cache in std::mem::take(&mut layer.buffer_caches) {
                     Self::delete_buffer_cache(&old_gl, cache);
                 }
-                layer.buffer_caches = Self::create_buffer_caches(layer.gerber_data.len())?;
+                layer.buffer_caches = new_caches;
                 layer.fbo_dirty = true;
                 layer.fbo_transform = None;
             }

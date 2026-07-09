@@ -551,8 +551,15 @@ pub fn parse_aperture(
                 if params.len() >= 2 {
                     if let (Ok(diameter), Ok(num_vertices)) = (
                         params[0].trim().parse::<f32>(),
-                        params[1].trim().parse::<f32>(),
+                        params[1].trim().parse::<f64>(),
                     ) {
+                        if !num_vertices.is_finite()
+                            || num_vertices.fract() != 0.0
+                            || !(3.0..=12.0).contains(&num_vertices)
+                        {
+                            return;
+                        }
+                        let num_vertices = num_vertices as u32;
                         let diameter_mm = diameter * unit_multiplier;
 
                         // Parse rotation (degrees, defaults to 0)
@@ -578,11 +585,10 @@ pub fn parse_aperture(
                             aperture.width = diameter_mm;
                             aperture.height = diameter_mm;
                             aperture.hole_diameter = hole_diameter_mm;
-                            aperture.vertices = num_vertices.max(0.0) as u32;
+                            aperture.vertices = num_vertices;
                             aperture.rotation = rotation_radians;
                         }
                         let radius = diameter_mm / 2.0;
-                        let num_vertices = num_vertices as u32;
                         let angle_step = 2.0 * std::f32::consts::PI / num_vertices as f32;
 
                         // Fan triangulation with rotation

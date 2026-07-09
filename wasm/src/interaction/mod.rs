@@ -2671,8 +2671,7 @@ fn validate_compact_pick_offsets_invariant(
 }
 
 fn validate_compact_path_region(path_regions: &PathRegions) -> Result<(), JsValue> {
-    validate_compact_path_region_invariant(path_regions)
-        .map_err(|message| JsValue::from_str(message))
+    validate_compact_path_region_invariant(path_regions).map_err(JsValue::from_str)
 }
 
 fn validate_compact_path_region_invariant(path_regions: &PathRegions) -> Result<(), &'static str> {

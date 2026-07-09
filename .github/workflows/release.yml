@@ -123,8 +123,12 @@ jobs:
 
       - name: Set up Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
+
+      - name: Check Rust formatting and lint
+        run: |
+          cargo fmt --manifest-path wasm/Cargo.toml --all -- --check
+          cargo clippy --manifest-path wasm/Cargo.toml --all-targets -- -D warnings
 
       - name: Test Rust crate
         run: cargo test --manifest-path wasm/Cargo.toml --verbose

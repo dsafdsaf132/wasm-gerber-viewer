@@ -1376,7 +1376,7 @@ export class GerberViewer {
 
     this.fileInput.addEventListener("change", (e) => {
       if (e.target.files.length > 0) {
-        this.handleFileUpload(e.target.files);
+        this.startFileUpload(e.target.files);
       }
     });
 
@@ -3125,10 +3125,9 @@ export class GerberViewer {
       this.isInitialUrlLoading = false;
       return;
     }
-    const repeat = getInitialSourceRepeat();
-    const repeatOffset = getInitialSourceRepeatOffset();
-
     try {
+      const repeat = getInitialSourceRepeat();
+      const repeatOffset = getInitialSourceRepeatOffset();
       this.isInitialUrlLoading = true;
       this.updateUiState();
       const url = new URL(sourceUrl);
@@ -3193,38 +3192,38 @@ export class GerberViewer {
       return;
     }
 
-    const oversizedFiles = [];
-    const validFiles = [];
+    try {
+      const oversizedFiles = [];
+      const validFiles = [];
 
-    this.setWorkspaceStatus("Loading files");
+      this.setWorkspaceStatus("Loading files");
 
-    // Validate file sizes
-    for (const file of files) {
-      if (file.size > MAX_FILE_SIZE_BYTES) {
-        oversizedFiles.push({
-          name: file.name,
-          size: formatFileSize(file.size),
-          limit: formatFileSize(MAX_FILE_SIZE_BYTES),
-        });
-      } else {
-        validFiles.push(file);
+      // Validate file sizes
+      for (const file of files) {
+        if (file.size > MAX_FILE_SIZE_BYTES) {
+          oversizedFiles.push({
+            name: file.name,
+            size: formatFileSize(file.size),
+            limit: formatFileSize(MAX_FILE_SIZE_BYTES),
+          });
+        } else {
+          validFiles.push(file);
+        }
       }
-    }
 
-    // Show warning for oversized files
-    if (oversizedFiles.length > 0) {
-      this.showFileSizeWarning(oversizedFiles);
-    }
+      // Show warning for oversized files
+      if (oversizedFiles.length > 0) {
+        this.showFileSizeWarning(oversizedFiles);
+      }
 
-    if (validFiles.length > 0) {
-      this.showLoadingModal({
-        title: "Loading files",
-        stage: "Preparing",
-        current: 0,
-        total: validFiles.length,
-      });
+      if (validFiles.length > 0) {
+        this.showLoadingModal({
+          title: "Loading files",
+          stage: "Preparing",
+          current: 0,
+          total: validFiles.length,
+        });
 
-      try {
         const layerSources = await this.collectLayerSources(validFiles);
 
         if (layerSources.length > 0) {
@@ -3240,15 +3239,18 @@ export class GerberViewer {
             this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
           }
         }
-      } finally {
-        this.hideLoadingModal();
       }
+    } finally {
+      this.hideLoadingModal();
+      this.updateUiState();
+      this.fileInput.value = "";
     }
+  }
 
-    this.updateUiState();
-
-    // Clear file input
-    this.fileInput.value = "";
+  startFileUpload(files) {
+    void this.handleFileUpload(files).catch((error) => {
+      this.handleLayerLoadError("File upload", error);
+    });
   }
 
   async loadLayerSources(layerSources, { title = "Loading files" } = {}) {
@@ -7043,7 +7045,7 @@ export class GerberViewer {
 
     const files = e.dataTransfer?.files;
     if (files?.length > 0) {
-      this.handleFileUpload(files);
+      this.startFileUpload(files);
     }
   }
 

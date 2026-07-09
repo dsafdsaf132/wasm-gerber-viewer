@@ -16,6 +16,11 @@ use std::mem::size_of;
 use std::mem::take;
 use std::rc::Rc;
 
+const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 5_000_000;
+const PATH_WEDGE_VERTEX_FLOATS: usize = 6;
+const PATH_COVER_VERTEX_FLOATS: usize = 12;
+const PATH_SECTOR_QUAD_VERTICES: usize = 6;
+
 fn format_primitive_allocation(additional: usize) -> String {
     let primitives = format_count(additional);
     match additional.checked_mul(size_of::<Primitive>()) {
@@ -35,6 +40,196 @@ fn checked_primitive_count(
             context
         )
     })
+}
+
+fn consume_expansion(
+    state: &ParserState,
+    count: usize,
+    multiplier: usize,
+    context: &str,
+) -> Result<usize, String> {
+    let total = checked_primitive_count(count, multiplier, context)?;
+    if total > MAX_GENERATED_ITEMS_PER_COMMAND {
+        return Err(format!(
+            "Gerber {context} expands to {total} items, exceeding the per-command limit of {MAX_GENERATED_ITEMS_PER_COMMAND}"
+        ));
+    }
+    state.consume_generated_items(total, context)?;
+    Ok(total)
+}
+
+fn aperture_flash_work_items(aperture: &Aperture) -> Result<usize, String> {
+    if aperture.triangle_template.is_some() && !aperture.has_negative {
+        return Ok(1);
+    }
+
+    let count = aperture.primitives.len().max(1);
+    if aperture.has_negative {
+        checked_primitive_count(count, 64, "negative aperture flash")
+    } else {
+        Ok(count)
+    }
+}
+
+fn block_flash_work_items(block_layers: &[PolarityLayer]) -> Result<usize, String> {
+    block_layers.iter().try_fold(0usize, |total, layer| {
+        let layer_items = layer
+            .primitives
+            .len()
+            .checked_add(layer.path_regions.work_item_count())
+            .ok_or_else(|| "Gerber aperture block work item count overflow".to_string())?
+            .max(1);
+        total
+            .checked_add(layer_items)
+            .ok_or_else(|| "Gerber aperture block work item count overflow".to_string())
+    })
+}
+
+fn checked_work_item_sum(total: usize, additional: usize, context: &str) -> Result<usize, String> {
+    total
+        .checked_add(additional)
+        .ok_or_else(|| format!("Gerber {context} work item count overflow"))
+}
+
+fn region_source_work_items(region_contours: &[RegionContour]) -> Result<usize, String> {
+    region_contours.iter().try_fold(0usize, |total, contour| {
+        let contour_items = contour
+            .points
+            .len()
+            .checked_add(contour.segments.len())
+            .ok_or_else(|| "Gerber region source work item count overflow".to_string())?;
+        checked_work_item_sum(total, contour_items, "region source")
+    })
+}
+
+fn flattened_contour_point_count(
+    contour: &RegionContour,
+    arc_tessellation_quality: u32,
+) -> Result<usize, String> {
+    if contour.segments.is_empty() {
+        return Ok(contour.points.len());
+    }
+
+    let mut count = 0usize;
+    for segment in &contour.segments {
+        if count == 0 {
+            count = 1;
+        }
+        let additional = match *segment {
+            RegionSegment::Line { .. } => 1,
+            RegionSegment::Arc {
+                start,
+                end,
+                center,
+                radius,
+                start_angle,
+                sweep_angle,
+                clamp_sweep,
+            } => {
+                let arc = canonical_arc_geometry(
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                    clamp_sweep,
+                );
+                let max_angle_step =
+                    region_arc_tessellation_max_angle_step(arc_tessellation_quality);
+                ((arc.sweep_angle.abs() / max_angle_step).ceil() as usize).clamp(1, 512)
+            }
+        };
+        count = checked_work_item_sum(count, additional, "region pick contour")?;
+    }
+    Ok(count)
+}
+
+fn path_region_work_items_per_copy(
+    region_contours: &[RegionContour],
+    arc_tessellation_quality: u32,
+    collect_pick_contours: bool,
+    collect_source_contours: bool,
+) -> Result<usize, String> {
+    if path_region_bounds(region_contours, 0.0, 0.0).is_none() {
+        return Ok(1);
+    }
+
+    let mut total = PATH_COVER_VERTEX_FLOATS
+        .checked_mul(2)
+        .ok_or_else(|| "Gerber path region work item count overflow".to_string())?;
+    let flatten_pick_contours = region_contours_have_arcs(region_contours);
+
+    for contour in region_contours {
+        for segment in &contour.segments {
+            let segment_items = match *segment {
+                RegionSegment::Line { .. } => PATH_WEDGE_VERTEX_FLOATS,
+                RegionSegment::Arc {
+                    start,
+                    end,
+                    center,
+                    radius,
+                    start_angle,
+                    sweep_angle,
+                    clamp_sweep,
+                } => {
+                    let arc = canonical_arc_geometry(
+                        start,
+                        end,
+                        center,
+                        radius,
+                        start_angle,
+                        sweep_angle,
+                        clamp_sweep,
+                    );
+                    let sweep = arc
+                        .sweep_angle
+                        .clamp(-std::f32::consts::TAU, std::f32::consts::TAU);
+                    let chunk_count =
+                        ((sweep.abs() / std::f32::consts::FRAC_PI_2).ceil() as usize).max(1);
+                    let items_per_chunk = PATH_WEDGE_VERTEX_FLOATS
+                        .checked_add(
+                            PATH_SECTOR_QUAD_VERTICES
+                                .checked_mul(PATH_SECTOR_VERTEX_FLOATS)
+                                .ok_or_else(|| {
+                                    "Gerber path region work item count overflow".to_string()
+                                })?,
+                        )
+                        .ok_or_else(|| "Gerber path region work item count overflow".to_string())?;
+                    checked_primitive_count(chunk_count, items_per_chunk, "path region arc")?
+                }
+            };
+            total = checked_work_item_sum(total, segment_items, "path region")?;
+        }
+
+        if let (Some(first), Some(last)) = (contour.points.first(), contour.points.last()) {
+            if !points_coincide(first[0], first[1], last[0], last[1]) {
+                total =
+                    checked_work_item_sum(total, PATH_WEDGE_VERTEX_FLOATS, "path region closure")?;
+            }
+        }
+
+        if collect_pick_contours {
+            let pick_points = if flatten_pick_contours {
+                flattened_contour_point_count(contour, arc_tessellation_quality)?
+            } else {
+                contour.points.len()
+            };
+            if pick_points >= 3 {
+                total = checked_work_item_sum(total, pick_points, "region pick contour")?;
+            }
+        }
+    }
+
+    if collect_source_contours {
+        total = checked_work_item_sum(
+            total,
+            region_source_work_items(region_contours)?,
+            "region source",
+        )?;
+    }
+
+    Ok(total.max(1))
 }
 
 fn try_reserve_primitives(
@@ -1353,7 +1548,14 @@ pub fn flash_aperture(
     y: f32,
 ) -> Result<(), String> {
     if let Some(aperture) = apertures.get(&state.current_aperture) {
+        let repeat_count = state.step_repeat_count("aperture flash")?;
         if let Some(block_layers) = aperture.block_layers.as_ref() {
+            consume_expansion(
+                state,
+                block_flash_work_items(block_layers)?,
+                repeat_count,
+                "aperture block flash",
+            )?;
             flash_block_aperture(
                 block_layers,
                 state,
@@ -1372,11 +1574,7 @@ pub fn flash_aperture(
             state.mirror_y,
             state.layer_rotation,
         ) {
-            let repeat_count = checked_primitive_count(
-                state.sr_x as usize,
-                state.sr_y as usize,
-                "aperture triangle template flash step repeat",
-            )?;
+            consume_expansion(state, 1, repeat_count, "aperture triangle template flash")?;
             try_reserve_primitives(primitives, repeat_count, "aperture triangle template flash")?;
             for sy in 0..state.sr_y {
                 for sx in 0..state.sr_x {
@@ -1389,6 +1587,13 @@ pub fn flash_aperture(
             }
             return Ok(());
         }
+
+        consume_expansion(
+            state,
+            aperture_flash_work_items(aperture)?,
+            repeat_count,
+            "aperture flash",
+        )?;
 
         // Step and Repeat iteration
         for sy in 0..state.sr_y {
@@ -1426,6 +1631,17 @@ pub fn execute_interpolation(
     let start_y = state.y;
 
     if let Some(aperture) = apertures.get(&state.current_aperture) {
+        let repeat_count = state.step_repeat_count("interpolation")?;
+        let per_copy = if points_coincide(start_x, start_y, end_x, end_y) {
+            aperture_flash_work_items(aperture)?
+        } else if aperture.is_solid_circle {
+            3
+        } else {
+            0
+        };
+        if per_copy > 0 {
+            consume_expansion(state, per_copy, repeat_count, "interpolation")?;
+        }
         for sy in 0..state.sr_y {
             for sx in 0..state.sr_x {
                 let offset_x = sx as f32 * state.sr_i;
@@ -1915,6 +2131,14 @@ pub fn build_path_regions(
     collect_source_contours: bool,
 ) -> Result<PathRegions, String> {
     let mut path_regions = PathRegions::empty();
+    let repeat_count = state.step_repeat_count("path region")?;
+    let work_items = path_region_work_items_per_copy(
+        region_contours,
+        arc_tessellation_quality,
+        collect_pick_contours,
+        collect_source_contours,
+    )?;
+    consume_expansion(state, work_items, repeat_count, "path region")?;
 
     for sy in 0..state.sr_y {
         for sx in 0..state.sr_x {
@@ -2305,7 +2529,11 @@ fn push_wedge_triangle(
     b: [f32; 2],
     c: [f32; 2],
 ) -> Result<(), String> {
-    try_reserve_values(vertices, 6, "path region wedge vertices")?;
+    try_reserve_values(
+        vertices,
+        PATH_WEDGE_VERTEX_FLOATS,
+        "path region wedge vertices",
+    )?;
     vertices.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
     Ok(())
 }
@@ -2317,7 +2545,11 @@ fn push_cover_quad(
     min_y: f32,
     max_y: f32,
 ) -> Result<(), String> {
-    try_reserve_values(vertices, 12, "path region cover vertices")?;
+    try_reserve_values(
+        vertices,
+        PATH_COVER_VERTEX_FLOATS,
+        "path region cover vertices",
+    )?;
     vertices.extend_from_slice(&[
         min_x, min_y, max_x, min_y, min_x, max_y, min_x, max_y, max_x, min_y, max_x, max_y,
     ]);
@@ -2392,7 +2624,7 @@ fn push_sector_cap_quad(
 
     try_reserve_values(
         vertices,
-        6 * PATH_SECTOR_VERTEX_FLOATS,
+        PATH_SECTOR_QUAD_VERTICES * PATH_SECTOR_VERTEX_FLOATS,
         "path region arc sector vertices",
     )?;
     for point in [start, end, end_outer, start, end_outer, start_outer] {
@@ -2939,6 +3171,7 @@ pub fn parse_graphic_command(
                                             repeat_count,
                                             "region",
                                         )?;
+                                        consume_expansion(state, additional, 1, "region")?;
                                         try_reserve_primitives(primitives, additional, "region")?;
 
                                         for sy in 0..state.sr_y {

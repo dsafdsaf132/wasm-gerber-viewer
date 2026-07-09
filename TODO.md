@@ -16,7 +16,7 @@ Priority definitions:
 
 ## P1: Input Workload Limits
 
-### [ ] P1-1 Add parser-wide work and allocation budgets
+### [x] P1-1 Add parser-wide work and allocation budgets
 
 Affected code:
 
@@ -48,7 +48,7 @@ Completion criteria:
 - Parser limit failures leave the processor reusable.
 - Normal performance fixtures continue to parse without reduced coverage.
 
-### [ ] P1-2 Apply ingestion limits to remote, archive, and repeat paths
+### [x] P1-2 Apply ingestion limits to remote, archive, and repeat paths
 
 Affected code:
 
@@ -81,7 +81,7 @@ Completion criteria:
 
 ## P2: Renderer Reliability
 
-### [ ] P2-1 Make framebuffer replacement transactional
+### [x] P2-1 Make framebuffer replacement transactional
 
 Affected code: `wasm/src/renderer/mod.rs`
 
@@ -104,7 +104,11 @@ Completion criteria:
 - Failed resize/restore calls can be retried without rebuilding the processor.
 - Every failed WebGL allocation releases resources created by that attempt.
 
-### [ ] P2-2 Abort failed browser PNG streams
+Residual test gap: transactional resource ownership is implemented, but direct
+failure injection remains a follow-up because the renderer currently owns a
+concrete `web_sys::WebGl2RenderingContext` rather than an injectable factory.
+
+### [x] P2-2 Abort failed browser PNG streams
 
 Affected code:
 
@@ -125,7 +129,7 @@ Required work:
 
 ## P2: CI and Build Integrity
 
-### [ ] P2-3 Check every deployed JavaScript module
+### [x] P2-3 Check every deployed JavaScript module
 
 Affected code: `.github/workflows/build-and-deploy.yml`
 
@@ -144,7 +148,7 @@ Completion criteria:
 - A syntax error in any deployed module fails the pull-request workflow.
 - Viewer helper tests run when their source files change.
 
-### [ ] P2-4 Validate rendered pixels, not only PNG byte length
+### [x] P2-4 Validate rendered pixels, not only PNG byte length
 
 Affected code: `.github/workflows/renderer-compatibility.yml`
 
@@ -159,11 +163,13 @@ Required work:
 - Include a fixture that covers polarity, holes, analytic arc regions, drills,
   and inverted rendering.
 - Store a compact image signature or bounded pixel-difference baseline where
-  exact output is stable.
+  exact output is stable. The cross-platform gate currently uses dimensions
+  and a minimum non-background pixel count to avoid driver-specific image
+  diffs.
 - Keep a native context clear/readPixels test separate from renderer output
   validation.
 
-### [ ] P2-5 Make the WASM build toolchain reproducible
+### [x] P2-5 Make the WASM build toolchain reproducible
 
 Affected code:
 
@@ -183,7 +189,7 @@ Required work:
 - Include tool versions in the WASM source hash or build metadata.
 - Test that local `npm pack` and CI release builds use the same versions.
 
-### [ ] P2-6 Add real macOS x64 validation or correct the support claim
+### [x] P2-6 Add real macOS x64 validation or correct the support claim
 
 Affected code:
 
@@ -204,7 +210,7 @@ Required work:
 
 ## P3: UI Error Handling and Quality Gates
 
-### [ ] P3-1 Handle file-upload promises at event boundaries
+### [x] P3-1 Handle file-upload promises at event boundaries
 
 Affected code: `js/core/viewer.js`
 
@@ -219,7 +225,7 @@ Required work:
   cleanup path that always runs.
 - Add tests for archive-read failure and non-recoverable worker failure.
 
-### [ ] P3-2 Enforce formatting and linting in CI
+### [x] P3-2 Enforce formatting and linting in CI
 
 Current baseline:
 
@@ -239,16 +245,17 @@ Required work:
 
 The following checks passed during the review:
 
-- `cargo test --manifest-path wasm/Cargo.toml --all-targets`: 154 tests passed.
-- `npm run check` in `packages/wasm-gerber-renderer`: 21 tests passed.
+- `cargo test --manifest-path wasm/Cargo.toml --all-targets`: 161 tests passed.
+- `npm run check` in `packages/wasm-gerber-renderer`: 34 tests passed.
 - `./scripts/vercel-build.sh`: WASM release build completed.
 - `npm pack --dry-run`: package contained 15 files and packed successfully.
 - Recursive `node --check` over `js/**/*.js`: passed.
 - Required DOM IDs: no missing or duplicate IDs were detected.
 
-Remaining runtime validation:
+Remaining CI and runtime validation:
 
 - Run browser interaction and visual checks at desktop and mobile viewports.
-- Run the native Node/CLI pixel smoke on supported Linux, macOS, and Windows
-  runners. The review environment installed `node-gles-webgl2` successfully,
-  but its PRoot/Xvfb display could not initialize a native context.
+- Confirm the native Node/CLI pixel smoke on the Linux, macOS ARM64, macOS x64,
+  and Windows compatibility runners. The review environment installed
+  `node-gles-webgl2` successfully, but its PRoot/Xvfb display could not
+  initialize a native context.

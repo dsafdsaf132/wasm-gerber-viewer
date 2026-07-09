@@ -9,6 +9,14 @@ import {
   looksLikeDrillContent,
   looksLikeGerberContent,
 } from "./file-utils.js";
+import {
+  MAX_ARCHIVE_COMPRESSION_RATIO,
+  MAX_ARCHIVE_ENTRY_COUNT,
+  MAX_ARCHIVE_TOTAL_SIZE_BYTES,
+  MAX_FILE_SIZE_BYTES,
+  MAX_LAYER_COUNT,
+  MAX_SOURCE_REPEAT,
+} from "../core/config.js";
 
 const UNKNOWN_ZIP_LAYER_SNIFF_LINES = 30;
 
@@ -22,8 +30,12 @@ export function getInitialSourceRepeat(search = globalThis.location?.search ?? "
   const rawRepeat = params.get("repeat");
   if (!rawRepeat) return 1;
 
-  const repeat = Number.parseInt(rawRepeat, 10);
-  if (!Number.isFinite(repeat)) return 1;
+  if (!/^\d+$/.test(rawRepeat)) return 1;
+  const repeat = Number(rawRepeat);
+  if (!Number.isSafeInteger(repeat)) return 1;
+  if (repeat > MAX_SOURCE_REPEAT) {
+    throw new RangeError(`Source repeat cannot exceed ${MAX_SOURCE_REPEAT}`);
+  }
 
   return Math.max(repeat, 1);
 }
@@ -39,30 +51,69 @@ export function getInitialSourceRepeatOffset(
   };
 }
 
-export async function fetchRemoteFile(url, { onProgress = () => {} } = {}) {
-  const response = await fetch(url.href);
+export async function fetchRemoteFile(
+  url,
+  {
+    onProgress = () => {},
+    maxBytes = MAX_FILE_SIZE_BYTES,
+    fetchImpl = globalThis.fetch,
+  } = {},
+) {
+  if (typeof fetchImpl !== "function") {
+    throw new Error("Remote file loading requires fetch support");
+  }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+    throw new RangeError("Remote file byte limit must be a positive safe integer");
+  }
+  const response = await fetchImpl(url.href);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} while loading ${url.href}`);
   }
 
-  const contentLength = Number(response.headers.get("content-length"));
+  const contentLengthHeader = response.headers.get("content-length");
+  const contentLength =
+    contentLengthHeader == null ? null : Number(contentLengthHeader);
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    try {
+      await response.body?.cancel?.();
+    } catch (_cancelError) {
+      // Preserve the size-limit error.
+    }
+    throw createFileSizeLimitError(url.href, contentLength, maxBytes);
+  }
+
   let blob;
-  if (!response.body || !Number.isFinite(contentLength) || contentLength <= 0) {
+  if (!response.body) {
     blob = await response.blob();
+    if (blob.size > maxBytes) {
+      throw createFileSizeLimitError(url.href, blob.size, maxBytes);
+    }
     onProgress(1);
   } else {
     const reader = response.body.getReader();
     const chunks = [];
     let receivedLength = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      chunks.push(value);
-      receivedLength += value.length;
-      onProgress(Math.min(receivedLength / contentLength, 1));
+        receivedLength += value.length;
+        if (receivedLength > maxBytes) {
+          const error = createFileSizeLimitError(url.href, receivedLength, maxBytes);
+          await reader.cancel(error).catch(() => {});
+          throw error;
+        }
+        chunks.push(value);
+        if (Number.isFinite(contentLength) && contentLength > 0) {
+          onProgress(Math.min(receivedLength / contentLength, 1));
+        }
+      }
+    } finally {
+      reader.releaseLock?.();
     }
+    onProgress(1);
 
     blob = new Blob(chunks, {
       type: response.headers.get("content-type") || "",
@@ -78,14 +129,23 @@ export async function fetchRemoteFile(url, { onProgress = () => {} } = {}) {
 export async function collectLayerSources(files, callbacks = {}) {
   const layerSources = [];
 
+  if (files.length > MAX_LAYER_COUNT) {
+    throw new RangeError(`Cannot load more than ${MAX_LAYER_COUNT} files at once`);
+  }
+
   for (let index = 0; index < files.length; index++) {
     const file = typeof files.item === "function" ? files.item(index) : files[index];
     if (!file) continue;
 
     callbacks.onFileStart?.(file.name, index + 1, files.length);
 
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      throw createFileSizeLimitError(file.name, file.size, MAX_FILE_SIZE_BYTES);
+    }
+
     if (isZipFile(file)) {
       layerSources.push(...(await collectZipLayerSources(file, callbacks)));
+      assertLayerCount(layerSources.length);
       continue;
     }
 
@@ -95,12 +155,20 @@ export async function collectLayerSources(files, callbacks = {}) {
       sizeBytes: file.size,
       readText: (onProgress) => readFileText(file, onProgress),
     });
+    assertLayerCount(layerSources.length);
   }
 
   return layerSources;
 }
 
 export function repeatLayerSources(layerSources, repeat, { offset = {} } = {}) {
+  if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > MAX_SOURCE_REPEAT) {
+    throw new RangeError(`Source repeat must be an integer from 1 to ${MAX_SOURCE_REPEAT}`);
+  }
+  const repeatedLayerCount = layerSources.length * repeat;
+  if (!Number.isSafeInteger(repeatedLayerCount) || repeatedLayerCount > MAX_LAYER_COUNT) {
+    throw new RangeError(`Repeated sources cannot exceed ${MAX_LAYER_COUNT} layers`);
+  }
   if (repeat <= 1) {
     return layerSources;
   }
@@ -213,7 +281,9 @@ async function collectZipLayerSources(
   try {
     onArchiveStart(file.name);
     const zip = await jsZip.loadAsync(file);
-    const entries = Object.values(zip.files)
+    const archiveEntries = Object.values(zip.files);
+    validateZipEntries(archiveEntries, file.name);
+    const entries = archiveEntries
       .filter(
         (entry) =>
           !entry.dir &&
@@ -233,6 +303,7 @@ async function collectZipLayerSources(
         : await createUnknownZipLayerSource(entry, file.name, onArchiveWarning);
       if (source) {
         sources.push(source);
+        assertLayerCount(sources.length);
       }
     }
 
@@ -368,4 +439,58 @@ function getZipEntrySizeBytes(entry) {
     entry._data?.uncompressedSize ?? entry._data?.compressedSize,
   );
   return Number.isFinite(size) && size > 0 ? size : null;
+}
+
+function getZipEntryCompressedSizeBytes(entry) {
+  const size = Number(entry._data?.compressedSize);
+  return Number.isFinite(size) && size > 0 ? size : null;
+}
+
+function validateZipEntries(entries, archiveName) {
+  if (entries.length > MAX_ARCHIVE_ENTRY_COUNT) {
+    throw new RangeError(
+      `${archiveName} contains ${entries.length} entries; the limit is ${MAX_ARCHIVE_ENTRY_COUNT}`,
+    );
+  }
+
+  let totalSize = 0;
+  for (const entry of entries) {
+    const size = getZipEntrySizeBytes(entry);
+    if (size == null) continue;
+    if (size > MAX_FILE_SIZE_BYTES) {
+      throw createFileSizeLimitError(
+        `${archiveName}:${entry.name}`,
+        size,
+        MAX_FILE_SIZE_BYTES,
+      );
+    }
+    totalSize += size;
+    if (!Number.isSafeInteger(totalSize) || totalSize > MAX_ARCHIVE_TOTAL_SIZE_BYTES) {
+      throw createFileSizeLimitError(
+        `${archiveName} uncompressed contents`,
+        totalSize,
+        MAX_ARCHIVE_TOTAL_SIZE_BYTES,
+      );
+    }
+
+    const compressedSize = getZipEntryCompressedSizeBytes(entry);
+    if (
+      compressedSize != null &&
+      size / compressedSize > MAX_ARCHIVE_COMPRESSION_RATIO
+    ) {
+      throw new RangeError(
+        `${archiveName}:${entry.name} exceeds the supported ZIP compression ratio`,
+      );
+    }
+  }
+}
+
+function assertLayerCount(count) {
+  if (count > MAX_LAYER_COUNT) {
+    throw new RangeError(`Cannot load more than ${MAX_LAYER_COUNT} layers at once`);
+  }
+}
+
+function createFileSizeLimitError(name, size, limit) {
+  return new RangeError(`${name} is ${size} bytes; the limit is ${limit} bytes`);
 }

@@ -12,6 +12,7 @@ export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 WASM_PACK_VERSION="0.14.0"
+RUST_TOOLCHAIN_VERSION="1.97.0"
 
 for rust_env in "$CARGO_HOME/env" "$RUSTUP_HOME/env" /rust/env; do
   if [[ -f "$rust_env" ]]; then
@@ -25,7 +26,7 @@ wasm_package_hash() {
   (
     cd "$REPO_ROOT"
     {
-      printf '%s\0' scripts/vercel-build.sh wasm/Cargo.lock wasm/Cargo.toml
+      printf '%s\0' scripts/vercel-build.sh rust-toolchain.toml wasm/Cargo.lock wasm/Cargo.toml
       find wasm/src -type f -print0 | sort -z
     } | xargs -0 sha256sum
   ) | sha256sum | cut -d ' ' -f1
@@ -44,11 +45,18 @@ if [[
   exit 0
 fi
 
-rustup toolchain install stable --profile minimal
-rustup default stable
-rustup target add wasm32-unknown-unknown --toolchain stable
+installed_rustc_version="$(RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN_VERSION" rustc --version 2>/dev/null || true)"
+if [[ "$installed_rustc_version" != "rustc $RUST_TOOLCHAIN_VERSION "* ]]; then
+  rustup toolchain install "$RUST_TOOLCHAIN_VERSION" --profile minimal
+fi
+export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN_VERSION"
+rust_sysroot="$(rustc --print sysroot)"
+if [[ ! -d "$rust_sysroot/lib/rustlib/wasm32-unknown-unknown" ]]; then
+  rustup target add wasm32-unknown-unknown --toolchain "$RUST_TOOLCHAIN_VERSION"
+fi
 
-if ! command -v wasm-pack >/dev/null 2>&1; then
+installed_wasm_pack_version="$(wasm-pack --version 2>/dev/null || true)"
+if [[ "$installed_wasm_pack_version" != "wasm-pack $WASM_PACK_VERSION" ]]; then
   case "$(uname -m)" in
     x86_64 | amd64)
       wasm_pack_arch="x86_64"
@@ -74,6 +82,11 @@ if ! command -v wasm-pack >/dev/null 2>&1; then
     "$wasm_pack_tmp/wasm-pack-v${WASM_PACK_VERSION}-${wasm_pack_target}/wasm-pack" \
     "$CARGO_HOME/bin/wasm-pack"
   rm -rf "$wasm_pack_tmp"
+fi
+
+if [[ "$(wasm-pack --version)" != "wasm-pack $WASM_PACK_VERSION" ]]; then
+  echo "Failed to activate wasm-pack $WASM_PACK_VERSION" >&2
+  exit 1
 fi
 
 cd "$REPO_ROOT/wasm"

@@ -593,8 +593,19 @@ async function streamCanvasToPng(canvas, gl, writable, background, exportOptions
     });
     await sink.write(pngChunk("IEND", new Uint8Array(0)));
     await sink.close();
+  } catch (error) {
+    try {
+      await sink.abort(error);
+    } catch (_abortError) {
+      // Preserve the rendering or write error.
+    }
+    throw error;
   } finally {
-    sink.release();
+    try {
+      sink.release();
+    } catch (_releaseError) {
+      // Cleanup must not replace the rendering or write result.
+    }
   }
 }
 
@@ -634,6 +645,7 @@ function createWebWritablePngSink(writable) {
     return {
       write: (chunk) => writer.write(chunk),
       close: () => writer.close(),
+      abort: (error) => writer.abort(error),
       release: () => writer.releaseLock(),
     };
   }
@@ -641,6 +653,7 @@ function createWebWritablePngSink(writable) {
     return {
       write: (chunk) => writable.write(chunk),
       close: () => writable.close?.(),
+      abort: (error) => writable.abort?.(error),
       release: () => {},
     };
   }
@@ -690,8 +703,16 @@ async function deflatePngRowsToWebSink(sink, writeRows) {
     }
     throw error;
   } finally {
-    writer.releaseLock();
-    reader.releaseLock();
+    try {
+      writer.releaseLock();
+    } catch (_releaseError) {
+      // Cleanup must not replace the compression result.
+    }
+    try {
+      reader.releaseLock();
+    } catch (_releaseError) {
+      // Cleanup must not replace the compression result.
+    }
   }
 }
 

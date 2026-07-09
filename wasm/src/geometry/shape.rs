@@ -504,6 +504,28 @@ impl PathRegions {
         self.wedge_vertex_offsets.len().saturating_sub(1)
     }
 
+    pub(crate) fn work_item_count(&self) -> usize {
+        self.wedge_vertices
+            .len()
+            .saturating_add(self.sector_vertices.len())
+            .saturating_add(self.cover_vertices.len())
+            .saturating_add(self.clear_vertices.len())
+            .saturating_add(
+                self.pick_contours
+                    .iter()
+                    .flat_map(|region| region.iter())
+                    .map(Vec::len)
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.source_contours
+                    .iter()
+                    .flat_map(|region| region.iter())
+                    .map(|contour| contour.points.len().saturating_add(contour.segments.len()))
+                    .sum::<usize>(),
+            )
+    }
+
     pub(crate) fn has_geometry(&self) -> bool {
         self.region_count() > 0
             && (!self.wedge_vertices.is_empty()

@@ -23,8 +23,8 @@ npm install wasm-gerber-renderer node-gles-webgl2
 
 Node.js and CLI rendering are supported via
 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) on Linux
-x64/arm64, macOS arm64/x64, and Windows x64/arm64. macOS x64 is build-only in
-the renderer compatibility workflow.
+x64/arm64, macOS arm64/x64, and Windows x64/arm64. All listed platforms run
+the renderer compatibility smoke test.
 
 For global CLI usage:
 
@@ -178,7 +178,8 @@ const blob = await renderGerberToPng(canvas, file, {
 
 For browser file streaming, pass a `WritableStream` to `renderer.exportPngStream()`
 or `renderGerberToPngStream()`. This requires `CompressionStream` support,
-closes the stream after `IEND`, and avoids building a PNG `Blob`.
+closes the stream after `IEND` on success, aborts it on failure, and avoids
+building a PNG `Blob`.
 
 ## Reusable Renderer
 
@@ -300,7 +301,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 ## Notes
 
 - Node.js rendering requires a WebGL2-capable native module; use `node-gles-webgl2`.
-- Node.js and CLI rendering are supported via [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) on Linux x64/arm64, macOS arm64/x64, and Windows x64/arm64. macOS x64 is build-only in the renderer compatibility workflow.
+- Node.js and CLI rendering are supported and smoke-tested via [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) on Linux x64/arm64, macOS arm64/x64, and Windows x64/arm64.
 - Parent directories for output PNG files must already exist.
 - Very large Gerber files can fail with memory limits; report the error and avoid retry loops.
 - Drill, job, image, text, and metadata files are not Gerber image layers and may be skipped.

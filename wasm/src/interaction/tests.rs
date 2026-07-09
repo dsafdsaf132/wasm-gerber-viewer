@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn circle_feature(x: f32, radius: f32, polarity: Polarity) -> InteractionFeature {

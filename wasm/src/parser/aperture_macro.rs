@@ -2,6 +2,11 @@ use super::geometry::{line_to_triangles, rotate_point, triangulate_outline, Prim
 use std::collections::HashMap;
 use std::mem::take;
 
+const MIN_OUTLINE_VERTICES: usize = 3;
+const MAX_OUTLINE_VERTICES: usize = 5_000;
+const MIN_POLYGON_VERTICES: usize = 3;
+const MAX_POLYGON_VERTICES: usize = 12;
+
 /// Aperture macro definition - kept as statements until parameters arrive
 #[derive(Clone, Debug)]
 pub struct ApertureMacro {
@@ -392,6 +397,20 @@ fn same_point(a: [f32; 2], b: [f32; 2]) -> bool {
     (a[0] - b[0]).abs() < 0.000001 && (a[1] - b[1]).abs() < 0.000001
 }
 
+fn evaluate_integer_parameter(
+    expr: &str,
+    variables: &HashMap<String, f32>,
+    minimum: usize,
+    maximum: usize,
+) -> Option<usize> {
+    let value = evaluate_expression(expr, variables).ok()?;
+    if !value.is_finite() || value.fract() != 0.0 {
+        return None;
+    }
+    let value = value as usize;
+    (minimum..=maximum).contains(&value).then_some(value)
+}
+
 /// Parse primitive statement: 1,1,$7,$5-$3,$6-$3,$4*
 pub fn parse_primitive_statement(
     stmt: &str,
@@ -447,14 +466,19 @@ pub fn parse_primitive_statement(
                 return None;
             }
             let exposure: f32 = evaluate_expression(parts[1], variables).ok()?;
-            let num_vertices: u32 = evaluate_expression(parts[2], variables).ok()? as u32;
-            let closed_point_count = num_vertices as usize + 1;
-            let closed_rotation_idx = 3 + closed_point_count * 2;
-            let open_rotation_idx = 3 + (num_vertices as usize) * 2;
+            let num_vertices = evaluate_integer_parameter(
+                parts[2],
+                variables,
+                MIN_OUTLINE_VERTICES,
+                MAX_OUTLINE_VERTICES,
+            )?;
+            let closed_point_count = num_vertices.checked_add(1)?;
+            let closed_rotation_idx = 3usize.checked_add(closed_point_count.checked_mul(2)?)?;
+            let open_rotation_idx = 3usize.checked_add(num_vertices.checked_mul(2)?)?;
             let (point_count, rotation_idx) = if parts.len() > closed_rotation_idx {
                 (closed_point_count, closed_rotation_idx)
             } else {
-                (num_vertices as usize, open_rotation_idx)
+                (num_vertices, open_rotation_idx)
             };
             let rotation: f32 = if parts.len() > rotation_idx {
                 degrees_to_radians(evaluate_expression(parts[rotation_idx], variables).ok()?)
@@ -464,6 +488,7 @@ pub fn parse_primitive_statement(
 
             // Collect vertices
             let mut vertices = Vec::new();
+            vertices.try_reserve_exact(point_count).ok()?;
             for i in 0..point_count {
                 let x_idx = 3 + i * 2;
                 let y_idx = 3 + i * 2 + 1;
@@ -510,7 +535,12 @@ pub fn parse_primitive_statement(
                 return None;
             }
             let exposure: f32 = evaluate_expression(parts[1], variables).ok()?;
-            let num_vertices: u32 = evaluate_expression(parts[2], variables).ok()? as u32;
+            let num_vertices = evaluate_integer_parameter(
+                parts[2],
+                variables,
+                MIN_POLYGON_VERTICES,
+                MAX_POLYGON_VERTICES,
+            )?;
             let center_x: f32 = evaluate_expression(parts[3], variables).ok()?;
             let center_y: f32 = evaluate_expression(parts[4], variables).ok()?;
             let diameter: f32 = evaluate_expression(parts[5], variables).ok()?;
@@ -524,8 +554,9 @@ pub fn parse_primitive_statement(
             let radius = diameter / 2.0;
             let mut vertices = Vec::new();
             let angle_step = 2.0 * std::f32::consts::PI / num_vertices as f32;
+            vertices.try_reserve_exact(num_vertices).ok()?;
 
-            for i in 0..num_vertices as usize {
+            for i in 0..num_vertices {
                 let angle = angle_step * i as f32;
                 let x = center_x + radius * angle.cos();
                 let y = center_y + radius * angle.sin();
@@ -533,8 +564,8 @@ pub fn parse_primitive_statement(
             }
 
             // Fan triangulation: create triangles from center to all adjacent vertices
-            for i in 0..(num_vertices as usize) {
-                let next_i = (i + 1) % (num_vertices as usize);
+            for i in 0..num_vertices {
+                let next_i = (i + 1) % num_vertices;
                 let mut triangle = Primitive::Triangle {
                     vertices: [[center_x, center_y], vertices[i], vertices[next_i]],
                     exposure,

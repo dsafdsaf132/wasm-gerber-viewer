@@ -81,6 +81,14 @@ export type ExportOptions = {
 
 export type GerberCanvas = HTMLCanvasElement;
 
+export type BrowserPngWritable =
+  | WritableStream<Uint8Array>
+  | {
+      write(chunk: Uint8Array): Promise<void> | void;
+      close?(): Promise<void> | void;
+      abort?(error?: unknown): Promise<void> | void;
+    };
+
 export declare function createGerberRenderer(
   canvas: GerberCanvas,
   rendererOptions?: RendererOptions,
@@ -101,7 +109,7 @@ export declare function renderGerberToPng(
 
 export declare function renderGerberToPngStream(
   canvas: GerberCanvas,
-  writable: WritableStream<Uint8Array> | { write(chunk: Uint8Array): Promise<void> | void },
+  writable: BrowserPngWritable,
   layers: GerberLayer | GerberLayer[] | FileList,
   frameOptions?: FrameOptions,
   exportOptions?: ExportOptions,
@@ -123,7 +131,7 @@ export declare class GerberRenderer {
   exportPng(exportOptions?: ExportOptions): Promise<Blob>;
 
   exportPngStream(
-    writable: WritableStream<Uint8Array> | { write(chunk: Uint8Array): Promise<void> | void },
+    writable: BrowserPngWritable,
     exportOptions?: ExportOptions,
   ): Promise<void>;
 

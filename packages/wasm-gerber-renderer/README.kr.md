@@ -68,11 +68,9 @@ Node.js와 CLI 렌더링은 [`node-gles-webgl2`](https://github.com/dsafdsaf132/
 | Linux x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Linux arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | macOS arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-| macOS x64     | ![build only](https://img.shields.io/badge/CI-build%20only-yellow) |
+| macOS x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows x64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows arm64 | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-
-macOS x64는 `node-gles-webgl2` 지원 matrix에 포함되지만, 현재 renderer compatibility workflow에서는 build-only 검증만 수행합니다.
 
 ## 브라우저 사용
 
@@ -177,13 +175,13 @@ Node.js API에서도 일반 `string`은 Gerber 내용으로 취급됩니다. 파
 
 - `renderGerberToCanvas(canvas, layers, frameOptions)`: WebGL2를 지원하는 기존 canvas에 한 번에 배치 렌더링합니다. `layers`는 단일 `GerberLayer`, 배열, 또는 `FileList`가 될 수 있습니다. 실패한 layer는 기본적으로 건너뜁니다.
 - `renderGerberToPng(canvas, layers, frameOptions, exportOptions)`: 브라우저에서 한 번 렌더링한 뒤 PNG `Blob`을 반환합니다.
-- `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`: PNG chunk를 `WritableStream`에 쓰고 stream을 닫습니다. 브라우저의 `CompressionStream` 지원이 필요합니다.
+- `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`: PNG chunk를 `WritableStream`에 쓰고 성공 시 닫으며 실패 시 중단합니다. 브라우저의 `CompressionStream` 지원이 필요합니다.
 - `createGerberRenderer(canvas, rendererOptions)`: 여러 frame이나 layer를 렌더링할 수 있는 재사용 렌더러를 만듭니다.
 - `renderer.withFrame(frameOptions, callback)`: frame을 시작하고 canvas/view 옵션을 적용한 뒤 callback이 끝나면 렌더링된 layer를 표시합니다.
 - `renderer.renderLayer(layer, layerOptions)`: 활성 frame에 layer 하나를 추가하고 숫자 layer ID를 반환합니다. 반드시 `withFrame()` 안에서 호출해야 하며, 이 엄격 API는 실패 시 Promise를 reject합니다.
 - `renderer.renderLayers(layers, options)`: 여러 layer를 추가하고 `{ renderedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뛰며, 엄격 모드가 필요하면 `layerErrorMode: "throw"`를 사용하세요.
 - `renderer.exportPng(exportOptions)`: 마지막 브라우저 frame을 PNG `Blob`으로 내보냅니다.
-- `renderer.exportPngStream(writable, exportOptions)`: 마지막 브라우저 frame을 `Blob`으로 조립하지 않고 `WritableStream`에 내보냅니다.
+- `renderer.exportPngStream(writable, exportOptions)`: 마지막 브라우저 frame을 `Blob`으로 조립하지 않고 `WritableStream`에 내보내며 성공 시 닫고 실패 시 중단합니다.
 - `renderer.dispose()`: WebGL context를 해제합니다.
 
 ## Node.js 사용

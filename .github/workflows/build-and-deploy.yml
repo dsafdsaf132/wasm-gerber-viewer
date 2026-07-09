@@ -25,6 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -45,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: wasm/target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('wasm/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('rust-toolchain.toml', 'wasm/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-target-
 
@@ -54,27 +59,31 @@ jobs:
         uses: actions/cache@v4
         with:
           path: wasm/pkg
-          key: ${{ runner.os }}-wasm-pkg-release-${{ hashFiles('scripts/vercel-build.sh', 'wasm/Cargo.lock', 'wasm/Cargo.toml', 'wasm/src/**') }}
+          key: ${{ runner.os }}-wasm-pkg-release-${{ hashFiles('scripts/vercel-build.sh', 'rust-toolchain.toml', 'wasm/Cargo.lock', 'wasm/Cargo.toml', 'wasm/src/**') }}
 
       - name: Build or reuse WASM package
         run: ./scripts/vercel-build.sh
 
       - name: Check JavaScript syntax
         run: |
-          for file in js/*.js; do
-            node --check "$file"
-          done
+          find js -type f -name '*.js' -print0 | sort -z | xargs -0 -n1 node --check
+
+      - name: Check renderer package and viewer helpers
+        run: npm run check --prefix packages/wasm-gerber-renderer
 
       - name: Install Rust toolchain for tests
-        if: steps.wasm-pkg-cache.outputs.cache-hit != 'true'
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.97.0 --profile minimal --component clippy --component rustfmt
 
       - name: Run tests
-        if: steps.wasm-pkg-cache.outputs.cache-hit != 'true'
         working-directory: ./wasm
         run: cargo test --verbose
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path wasm/Cargo.toml --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path wasm/Cargo.toml --all-targets -- -D warnings
 
       - name: Upload WASM package artifact
         uses: actions/upload-artifact@v4

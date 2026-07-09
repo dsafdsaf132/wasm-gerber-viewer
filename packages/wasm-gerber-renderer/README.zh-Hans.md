@@ -68,11 +68,9 @@ Node.js 和 CLI 渲染通过 [`node-gles-webgl2`](https://github.com/dsafdsaf132
 | Linux x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Linux arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | macOS arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-| macOS x64     | ![build only](https://img.shields.io/badge/CI-build%20only-yellow) |
+| macOS x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows x64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows arm64 | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-
-macOS x64 包含在 `node-gles-webgl2` 支持矩阵中，但当前 renderer compatibility workflow 只对该平台执行 build-only 验证。
 
 ## 浏览器用法
 
@@ -177,13 +175,13 @@ type GerberNodeLayer =
 
 - `renderGerberToCanvas(canvas, layers, frameOptions)`：一次调用即可将图层批量渲染到现有的 WebGL2 canvas。`layers` 可以是单个 `GerberLayer`、数组或 `FileList`。失败的图层默认会被跳过。
 - `renderGerberToPng(canvas, layers, frameOptions, exportOptions)`：在浏览器中完成一次性渲染，并返回 PNG `Blob`。
-- `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`：把 PNG 数据块写入 `WritableStream` 并关闭它。需要浏览器支持 `CompressionStream`。
+- `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`：把 PNG 数据块写入 `WritableStream`，成功时关闭，失败时中止。需要浏览器支持 `CompressionStream`。
 - `createGerberRenderer(canvas, rendererOptions)`：创建可复用渲染器，用于渲染多个帧或多个图层。
 - `renderer.withFrame(frameOptions, callback)`：开始一个渲染帧，应用 canvas 和视图选项，并在回调函数结束后显示渲染后的图层。
 - `renderer.renderLayer(layer, layerOptions)`：向当前帧添加一个图层，并返回数值型图层 ID。必须在 `withFrame()` 内调用；这是严格接口，失败时会以该错误 reject。
 - `renderer.renderLayers(layers, options)`：添加多个图层，并返回 `{ renderedCount, failures }`。失败的图层默认会被跳过；需要严格行为时使用 `layerErrorMode: "throw"`。
 - `renderer.exportPng(exportOptions)`：把最后一个浏览器帧导出为 PNG `Blob`。
-- `renderer.exportPngStream(writable, exportOptions)`：把最后一个浏览器帧导出到 `WritableStream`，无需先组装成 `Blob`。
+- `renderer.exportPngStream(writable, exportOptions)`：把最后一个浏览器帧导出到 `WritableStream`，成功时关闭，失败时中止，无需先组装成 `Blob`。
 - `renderer.dispose()`：释放 WebGL 上下文。
 
 ## Node.js 用法

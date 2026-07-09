@@ -7,16 +7,22 @@ on:
     paths:
       - ".github/workflows/renderer-compatibility.yml"
       - "demo/*.gbr"
+      - "demo/*.drl"
       - "packages/wasm-gerber-renderer/**"
+      - "scripts/assert-png-content.mjs"
       - "scripts/vercel-build.sh"
+      - "rust-toolchain.toml"
       - "wasm/**"
   pull_request:
     branches: ["main"]
     paths:
       - ".github/workflows/renderer-compatibility.yml"
       - "demo/*.gbr"
+      - "demo/*.drl"
       - "packages/wasm-gerber-renderer/**"
+      - "scripts/assert-png-content.mjs"
       - "scripts/vercel-build.sh"
+      - "rust-toolchain.toml"
       - "wasm/**"
 
 permissions:
@@ -72,6 +78,8 @@ jobs:
             runner: ubuntu-24.04-arm
           - platform: macOS arm64
             runner: macos-latest
+          - platform: macOS x64
+            runner: macos-15-intel
           - platform: Windows x64
             runner: windows-latest
           - platform: Windows arm64
@@ -169,7 +177,7 @@ jobs:
             --height 360 \
             --background '#05070c' \
             --alpha 1
-          node -e "const { statSync } = require('node:fs'); const size = statSync('out-cli.png').size; if (size < 100) throw new Error('CLI PNG output is unexpectedly small'); console.log('CLI PNG bytes:', size);"
+          node "${GITHUB_WORKSPACE}/scripts/assert-png-content.mjs" out-cli.png '#05070c' 100 640 360
 
       - name: Render through Node API
         run: |
@@ -177,25 +185,37 @@ jobs:
           cd "${RUNNER_TEMP}/renderer-smoke"
           cat > smoke-node.mjs <<'NODE'
           import { fileLayer, renderGerberToPngBuffer } from "wasm-gerber-renderer/node";
+          import { writeFile } from "node:fs/promises";
           import { resolve } from "node:path";
 
           const png = await renderGerberToPngBuffer(
-            [fileLayer(resolve(process.env.GITHUB_WORKSPACE, "demo/gerber-feature-test.gbr"))],
+            [
+              fileLayer(resolve(process.env.GITHUB_WORKSPACE, "demo/gerber-feature-test.gbr")),
+              fileLayer(resolve(process.env.GITHUB_WORKSPACE, "demo/gerber-feature-test.gbr"), {
+                name: "inverted-mask.gbs",
+                inverted: true,
+                offsetX: 80,
+              }),
+              fileLayer(resolve(process.env.GITHUB_WORKSPACE, "demo/smoke-test.drl"), {
+                kind: "drill",
+                offsetX: 160,
+              }),
+            ],
             {
               width: 640,
               height: 360,
               background: "#ffffff",
               globalAlpha: 1,
+              invertedOutline: "bounds",
             },
           );
 
-          if (!(png instanceof Uint8Array) || png.length < 100) {
-            throw new Error("Node API PNG output is unexpectedly small");
-          }
-          console.log("Node API PNG bytes:", png.length);
+          if (!(png instanceof Uint8Array)) throw new Error("Node API did not return bytes");
+          await writeFile("out-node.png", png);
           NODE
           node_cmd=(node)
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             node_cmd=(xvfb-run -a node)
           fi
           "${node_cmd[@]}" smoke-node.mjs
+          node "${GITHUB_WORKSPACE}/scripts/assert-png-content.mjs" out-node.png '#ffffff' 100 640 360

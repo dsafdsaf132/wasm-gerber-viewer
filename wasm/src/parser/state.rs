@@ -2,9 +2,14 @@ use super::geometry::Primitive;
 use super::PolarityLayer;
 use crate::geometry::PathRegions;
 use crate::parser::common::{
-    CoordinateFormat as CommonCoordinateFormat, ZeroSuppression as CommonZeroSuppression,
+    read_word_value, CoordinateFormat as CommonCoordinateFormat,
+    ZeroSuppression as CommonZeroSuppression,
 };
+use std::cell::Cell;
 use std::mem::take;
+
+pub(crate) const MAX_STEP_REPEAT_COPIES: usize = 100_000;
+pub(crate) const MAX_GENERATED_ITEMS: usize = 5_000_000;
 
 /// Polarity - Dark (positive) or Clear (negative)
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,6 +102,7 @@ pub struct ParserState {
     pub mirror_y: bool,
     // Layer Rotation
     pub layer_rotation: f32,
+    generated_items: Cell<usize>,
 }
 
 impl Default for ParserState {
@@ -124,7 +130,49 @@ impl Default for ParserState {
             mirror_x: false,
             mirror_y: false,
             layer_rotation: 0.0,
+            generated_items: Cell::new(0),
         }
+    }
+}
+
+impl ParserState {
+    pub(crate) fn step_repeat_count(&self, context: &str) -> Result<usize, String> {
+        let count = (self.sr_x as usize)
+            .checked_mul(self.sr_y as usize)
+            .ok_or_else(|| format!("Gerber {context} step-repeat count overflow"))?;
+        if count > MAX_STEP_REPEAT_COPIES {
+            return Err(format!(
+                "Gerber {context} step-repeat count {count} exceeds the supported limit of {MAX_STEP_REPEAT_COPIES}"
+            ));
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn consume_generated_items(
+        &self,
+        additional: usize,
+        context: &str,
+    ) -> Result<(), String> {
+        let next = self
+            .generated_items
+            .get()
+            .checked_add(additional)
+            .ok_or_else(|| format!("Gerber {context} generated geometry count overflow"))?;
+        if next > MAX_GENERATED_ITEMS {
+            return Err(format!(
+                "Gerber generated geometry exceeds the supported limit of {MAX_GENERATED_ITEMS} items while processing {context}"
+            ));
+        }
+        self.generated_items.set(next);
+        Ok(())
+    }
+
+    pub(crate) fn generated_items(&self) -> usize {
+        self.generated_items.get()
+    }
+
+    pub(crate) fn set_generated_items(&self, value: usize) {
+        self.generated_items.set(value);
     }
 }
 
@@ -216,7 +264,7 @@ pub fn parse_format_spec(line: &str, state: &mut ParserState) {
 /// Parse Step and Repeat - %SRX3Y2I10J20*%
 /// Format: %SR[X count][Y count][I x_step][J y_step]*%
 /// %SR* without parameters disables step and repeat
-pub fn parse_sr(line: &str, state: &mut ParserState) {
+pub fn parse_sr(line: &str, state: &mut ParserState) -> Result<(), String> {
     // Extract SRX3Y2I10J20 part from %SRX3Y2I10J20*% format
     let spec_str = line
         .trim_start_matches('%')
@@ -224,7 +272,7 @@ pub fn parse_sr(line: &str, state: &mut ParserState) {
         .trim_end_matches('*');
 
     if !spec_str.starts_with("SR") {
-        return;
+        return Ok(());
     }
 
     let spec_content = &spec_str[2..]; // "X3Y2I10J20" part
@@ -235,52 +283,66 @@ pub fn parse_sr(line: &str, state: &mut ParserState) {
         state.sr_y = 1;
         state.sr_i = 0.0;
         state.sr_j = 0.0;
-        return;
+        return Ok(());
     }
 
-    // Extract X count
-    if let Some(x_pos) = spec_content.find('X') {
-        let x_part = &spec_content[x_pos + 1..];
-        let x_end = x_part
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(x_part.len());
-        if let Ok(x_count) = x_part[..x_end].parse::<u32>() {
-            state.sr_x = x_count;
+    let parse_count = |word: char, current: u32| -> Result<u32, String> {
+        let Some(raw) = read_word_value(spec_content, word, false) else {
+            if spec_content.contains(word) {
+                return Err(format!(
+                    "Invalid Gerber step-repeat {word} count: missing numeric value"
+                ));
+            }
+            return Ok(current);
+        };
+        let value = raw
+            .parse::<u32>()
+            .map_err(|_| format!("Invalid Gerber step-repeat {word} count `{raw}`"))?;
+        if value == 0 {
+            return Err(format!(
+                "Gerber step-repeat {word} count must be at least 1"
+            ));
         }
+        Ok(value)
+    };
+    let parse_step = |word: char, current: f32| -> Result<f32, String> {
+        let Some(raw) = read_word_value(spec_content, word, true) else {
+            if spec_content.contains(word) {
+                return Err(format!(
+                    "Invalid Gerber step-repeat {word} distance: missing numeric value"
+                ));
+            }
+            return Ok(current);
+        };
+        let value = raw
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid Gerber step-repeat {word} distance `{raw}`"))?;
+        if !value.is_finite() || value < 0.0 {
+            return Err(format!(
+                "Gerber step-repeat {word} distance must be finite and non-negative"
+            ));
+        }
+        Ok(value * state.unit_multiplier)
+    };
+
+    let next_x = parse_count('X', state.sr_x)?;
+    let next_y = parse_count('Y', state.sr_y)?;
+    let next_i = parse_step('I', state.sr_i)?;
+    let next_j = parse_step('J', state.sr_j)?;
+    let repeat_count = (next_x as usize)
+        .checked_mul(next_y as usize)
+        .ok_or_else(|| "Gerber step-repeat count overflow".to_string())?;
+    if repeat_count > MAX_STEP_REPEAT_COPIES {
+        return Err(format!(
+            "Gerber step-repeat count {repeat_count} exceeds the supported limit of {MAX_STEP_REPEAT_COPIES}"
+        ));
     }
 
-    // Extract Y count
-    if let Some(y_pos) = spec_content.find('Y') {
-        let y_part = &spec_content[y_pos + 1..];
-        let y_end = y_part
-            .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.')
-            .unwrap_or(y_part.len());
-        if let Ok(y_count) = y_part[..y_end].parse::<u32>() {
-            state.sr_y = y_count;
-        }
-    }
-
-    // Extract I step (X direction spacing)
-    if let Some(i_pos) = spec_content.find('I') {
-        let i_part = &spec_content[i_pos + 1..];
-        let i_end = i_part
-            .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.')
-            .unwrap_or(i_part.len());
-        if let Ok(i_step) = i_part[..i_end].parse::<f32>() {
-            state.sr_i = i_step * state.unit_multiplier;
-        }
-    }
-
-    // Extract J step (Y direction spacing)
-    if let Some(j_pos) = spec_content.find('J') {
-        let j_part = &spec_content[j_pos + 1..];
-        let j_end = j_part
-            .find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.')
-            .unwrap_or(j_part.len());
-        if let Ok(j_step) = j_part[..j_end].parse::<f32>() {
-            state.sr_j = j_step * state.unit_multiplier;
-        }
-    }
+    state.sr_x = next_x;
+    state.sr_y = next_y;
+    state.sr_i = next_i;
+    state.sr_j = next_j;
+    Ok(())
 }
 
 /// Parse Polarity - %LPD* (positive) or %LPC* (negative)

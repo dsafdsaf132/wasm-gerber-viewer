@@ -1,10 +1,10 @@
 use super::aperture_macro::{evaluate_expression, parse_macro};
+use super::state::{parse_sr, MAX_GENERATED_ITEMS, MAX_STEP_REPEAT_COPIES};
 use super::{
     format_count, parse_gerber, parse_gerber_payload_with_options, parse_gerber_with_options,
-    GerberParser, Polarity,
+    GerberParser, ParserState, Polarity,
 };
-use crate::geometry::RegionSegment;
-use crate::geometry::{GerberData, PATH_SECTOR_VERTEX_FLOATS};
+use crate::geometry::{GerberData, RegionContour, RegionSegment, PATH_SECTOR_VERTEX_FLOATS};
 use crate::interaction::FeatureKind;
 use std::collections::HashMap;
 
@@ -79,6 +79,124 @@ fn allocation_count_formatting_groups_digits_without_underflow() {
     assert_eq!(format_count(12_345), "12,345");
     assert_eq!(format_count(123_456), "123,456");
     assert_eq!(format_count(24_000_000), "24,000,000");
+}
+
+#[test]
+fn rejects_step_repeat_counts_above_parser_limit() {
+    let mut state = ParserState::default();
+    let command = format!("%SRX{}Y1I1J0*%", MAX_STEP_REPEAT_COPIES + 1);
+
+    let error = parse_sr(&command, &mut state).expect_err("oversized SR must fail");
+
+    assert!(error.contains("exceeds the supported limit"));
+    assert_eq!(state.sr_x, 1);
+    assert_eq!(state.sr_y, 1);
+}
+
+#[test]
+fn rejects_malformed_step_repeat_without_changing_state() {
+    let mut state = ParserState::default();
+
+    let error = parse_sr("%SRX2YI1J1*%", &mut state).expect_err("missing Y count must fail");
+
+    assert!(error.contains("missing numeric value"));
+    assert_eq!(state.sr_x, 1);
+    assert_eq!(state.sr_y, 1);
+    assert_eq!(state.sr_i, 0.0);
+    assert_eq!(state.sr_j, 0.0);
+}
+
+#[test]
+fn generated_geometry_budget_is_cumulative() {
+    let state = ParserState::default();
+
+    state
+        .consume_generated_items(MAX_GENERATED_ITEMS, "test")
+        .expect("budget boundary should be accepted");
+    let error = state
+        .consume_generated_items(1, "test")
+        .expect_err("budget overflow must fail");
+
+    assert!(error.contains("generated geometry exceeds"));
+}
+
+#[test]
+fn rejects_standard_polygon_vertex_counts_outside_specification() {
+    let data = "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10P,1.0X4294967295*%
+D10*
+X000000Y000000D03*
+M02*";
+    let mut parser = GerberParser::with_options(true, 1);
+
+    let layers = parser
+        .parse(data)
+        .expect("invalid polygon should be ignored safely");
+
+    assert!(layers.is_empty());
+    assert!(!parser.apertures.contains_key("10"));
+}
+
+#[test]
+fn accepts_decimal_notation_for_integral_polygon_vertex_counts() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%ADD10P,1.0X6.0*%
+D10*
+X000000Y000000D03*
+M02*",
+    )
+    .expect("integral decimal vertex count should remain supported");
+
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].triangle_templates.len(), 1);
+    assert_eq!(layers[0].triangle_templates[0].vertices.len(), 36);
+    assert_eq!(layers[0].triangle_templates[0].instance_x.len(), 1);
+}
+
+#[test]
+fn rejects_macro_vertex_counts_before_allocation() {
+    let mut macros = HashMap::new();
+    parse_macro(
+        "%AMLIMITS*5,1,4294967295,0,0,1,0*4,1,4294967295,0,0,0,0*%",
+        &mut macros,
+    );
+
+    let primitives = macros
+        .get("LIMITS")
+        .expect("macro should be parsed")
+        .instantiate(&[]);
+
+    assert!(primitives.is_empty());
+}
+
+#[test]
+fn rejects_repeated_arc_region_before_interaction_tessellation() {
+    let mut contour = RegionContour::default();
+    contour
+        .push_arc(
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, 0.0],
+            1.0,
+            0.0,
+            std::f32::consts::PI,
+        )
+        .expect("test arc should be valid");
+    let mut state = ParserState::default();
+    state.sr_x = MAX_STEP_REPEAT_COPIES as u32;
+
+    let error = match super::geometry::build_path_regions(&[contour], &state, 2, true, false) {
+        Ok(_) => panic!("repeated arc region must be rejected before expansion"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("path region expands"));
+    assert_eq!(state.generated_items(), 0);
 }
 
 #[test]

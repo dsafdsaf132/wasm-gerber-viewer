@@ -97,9 +97,49 @@ pub struct ShaderPrograms {
     pub path_sector: ShaderProgram,
 }
 
+struct ShaderProgramsBuildGuard {
+    gl: WebGl2RenderingContext,
+    programs: Vec<WebGlProgram>,
+    committed: bool,
+}
+
+impl ShaderProgramsBuildGuard {
+    fn new(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
+        let mut programs = Vec::new();
+        programs
+            .try_reserve(10)
+            .map_err(|_| JsValue::from_str("Unable to reserve shader program build state"))?;
+        Ok(Self {
+            gl: gl.clone(),
+            programs,
+            committed: false,
+        })
+    }
+
+    fn track(&mut self, program: &ShaderProgram) {
+        self.programs.push(program.program.clone());
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ShaderProgramsBuildGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for program in self.programs.drain(..) {
+            self.gl.delete_program(Some(&program));
+        }
+    }
+}
+
 impl ShaderPrograms {
     /// Compile all shader programs
     pub fn new(gl: &WebGl2RenderingContext) -> Result<ShaderPrograms, JsValue> {
+        let mut pending = ShaderProgramsBuildGuard::new(gl)?;
         let triangle = compile_program(
             gl,
             TRIANGLE_VERTEX_SHADER,
@@ -112,6 +152,7 @@ impl ShaderPrograms {
             ],
             &["transform", "color"],
         )?;
+        pending.track(&triangle);
 
         let triangle_template = compile_program(
             gl,
@@ -120,6 +161,7 @@ impl ShaderPrograms {
             &["position", "instance_x", "instance_y"],
             &["transform", "color"],
         )?;
+        pending.track(&triangle_template);
 
         let line = compile_program(
             gl,
@@ -142,6 +184,7 @@ impl ShaderPrograms {
                 "inner_outline_world",
             ],
         )?;
+        pending.track(&line);
 
         let circle = compile_program(
             gl,
@@ -161,6 +204,7 @@ impl ShaderPrograms {
                 "inner_outline_world",
             ],
         )?;
+        pending.track(&circle);
 
         let circle_holed = compile_program(
             gl,
@@ -177,6 +221,7 @@ impl ShaderPrograms {
             ],
             &["transform", "color"],
         )?;
+        pending.track(&circle_holed);
 
         let arc = compile_program(
             gl,
@@ -200,6 +245,7 @@ impl ShaderPrograms {
                 "inner_outline_world",
             ],
         )?;
+        pending.track(&arc);
 
         let thermal = compile_program(
             gl,
@@ -216,6 +262,7 @@ impl ShaderPrograms {
             ],
             &["transform", "color"],
         )?;
+        pending.track(&thermal);
 
         let texture = compile_program(
             gl,
@@ -224,6 +271,7 @@ impl ShaderPrograms {
             &["position"],
             &["u_texture", "u_color"],
         )?;
+        pending.track(&texture);
 
         let path_solid = compile_program(
             gl,
@@ -232,6 +280,7 @@ impl ShaderPrograms {
             &["position"],
             &["transform", "color"],
         )?;
+        pending.track(&path_solid);
 
         let path_sector = compile_program(
             gl,
@@ -240,8 +289,9 @@ impl ShaderPrograms {
             &["position", "center", "radius"],
             &["transform"],
         )?;
+        pending.track(&path_sector);
 
-        Ok(ShaderPrograms {
+        let programs = ShaderPrograms {
             triangle,
             triangle_template,
             line,
@@ -252,7 +302,9 @@ impl ShaderPrograms {
             texture,
             path_solid,
             path_sector,
-        })
+        };
+        pending.commit();
+        Ok(programs)
     }
 }
 

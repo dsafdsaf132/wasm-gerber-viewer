@@ -5,8 +5,19 @@ import {
   getLayerSourceKind,
 } from "../../../js/loading/file-utils.js";
 import {
+  fetchRemoteFile,
+  getInitialSourceRepeat,
   collectLayerSources,
+  repeatLayerSources,
 } from "../../../js/loading/source-loader.js";
+import {
+  MAX_ARCHIVE_COMPRESSION_RATIO,
+  MAX_ARCHIVE_ENTRY_COUNT,
+  MAX_ARCHIVE_TOTAL_SIZE_BYTES,
+  MAX_FILE_SIZE_BYTES,
+  MAX_LAYER_COUNT,
+  MAX_SOURCE_REPEAT,
+} from "../../../js/core/config.js";
 import { GerberRenderer } from "../index.js";
 import { fileLayer, NodeGerberRenderer } from "../node.js";
 import {
@@ -198,6 +209,184 @@ M02*`;
   assert.equal(sources.length, 0);
 });
 
+test("viewer source repeat enforces repeat and resulting layer limits", () => {
+  assert.equal(getInitialSourceRepeat(`?repeat=${MAX_SOURCE_REPEAT}`), MAX_SOURCE_REPEAT);
+  assert.throws(
+    () => getInitialSourceRepeat(`?repeat=${MAX_SOURCE_REPEAT + 1}`),
+    /cannot exceed/,
+  );
+  assert.throws(
+    () => repeatLayerSources([{ name: "layer.gbr" }], MAX_SOURCE_REPEAT + 1),
+    /must be an integer/,
+  );
+
+  const sources = Array.from(
+    { length: Math.floor(MAX_LAYER_COUNT / MAX_SOURCE_REPEAT) + 1 },
+    (_, index) => ({ name: `layer-${index}.gbr` }),
+  );
+  assert.throws(
+    () => repeatLayerSources(sources, MAX_SOURCE_REPEAT),
+    /cannot exceed.*layers/,
+  );
+});
+
+test("viewer remote loader rejects oversized Content-Length before reading", async () => {
+  let cancelled = false;
+  const response = {
+    ok: true,
+    headers: makeHeaders({ "content-length": String(MAX_FILE_SIZE_BYTES + 1) }),
+    body: {
+      async cancel() {
+        cancelled = true;
+      },
+    },
+  };
+
+  await assert.rejects(
+    fetchRemoteFile(new URL("https://example.test/board.gbr"), {
+      fetchImpl: async () => response,
+    }),
+    /limit is/,
+  );
+  assert.equal(cancelled, true);
+});
+
+test("viewer remote loader cancels streams that exceed the byte limit", async () => {
+  let readIndex = 0;
+  let cancelled = false;
+  const chunks = [new Uint8Array(6), new Uint8Array(6)];
+  const response = {
+    ok: true,
+    headers: makeHeaders({ "content-length": "5" }),
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (readIndex >= chunks.length) return { done: true };
+            return { done: false, value: chunks[readIndex++] };
+          },
+          async cancel() {
+            cancelled = true;
+          },
+        };
+      },
+    },
+  };
+
+  await assert.rejects(
+    fetchRemoteFile(new URL("https://example.test/board.gbr"), {
+      maxBytes: 10,
+      fetchImpl: async () => response,
+    }),
+    /limit is 10 bytes/,
+  );
+  assert.equal(cancelled, true);
+});
+
+test("viewer rejects oversized ZIP files before opening the archive", async () => {
+  let opened = false;
+  const archive = makeFile("zip", "layers.zip", "application/zip");
+  archive.size = MAX_FILE_SIZE_BYTES + 1;
+
+  await assert.rejects(
+    collectLayerSources([archive], {
+      jsZip: {
+        async loadAsync() {
+          opened = true;
+          return { files: {} };
+        },
+      },
+    }),
+    /limit is/,
+  );
+  assert.equal(opened, false);
+});
+
+test("viewer ZIP rejects oversized entries before decompression", async () => {
+  const errors = [];
+  const entry = makeZipEntry(GERBER_CONTENT, "board.gbr", {
+    uncompressedSize: MAX_FILE_SIZE_BYTES + 1,
+    unreadable: true,
+  });
+
+  const sources = await collectLayerSources(
+    [makeFile("zip", "layers.zip", "application/zip")],
+    {
+      jsZip: {
+        async loadAsync() {
+          return { files: { "board.gbr": entry } };
+        },
+      },
+      onArchiveError(_name, error) {
+        errors.push(error);
+      },
+    },
+  );
+
+  assert.deepEqual(sources, []);
+  assert.match(errors[0].message, /limit is/);
+});
+
+test("viewer ZIP rejects excessive entry counts", async () => {
+  const files = Object.fromEntries(
+    Array.from({ length: MAX_ARCHIVE_ENTRY_COUNT + 1 }, (_, index) => {
+      const name = `layer-${index}.gbr`;
+      return [name, makeZipEntry(GERBER_CONTENT, name, { unreadable: true })];
+    }),
+  );
+  const errors = [];
+
+  const sources = await collectLayerSources(
+    [makeFile("zip", "layers.zip", "application/zip")],
+    {
+      jsZip: { async loadAsync() { return { files }; } },
+      onArchiveError(_name, error) {
+        errors.push(error);
+      },
+    },
+  );
+
+  assert.deepEqual(sources, []);
+  assert.match(errors[0].message, /contains 1001 entries/);
+});
+
+test("viewer ZIP rejects excessive total expansion and compression ratios", async () => {
+  const halfTotal = Math.floor(MAX_ARCHIVE_TOTAL_SIZE_BYTES / 2) + 1;
+  const expansionFiles = {
+    "first.gbr": makeZipEntry(GERBER_CONTENT, "first.gbr", {
+      uncompressedSize: halfTotal,
+    }),
+    "second.gbr": makeZipEntry(GERBER_CONTENT, "second.gbr", {
+      uncompressedSize: halfTotal,
+    }),
+  };
+  const ratioFiles = {
+    "ratio.gbr": makeZipEntry(GERBER_CONTENT, "ratio.gbr", {
+      uncompressedSize: MAX_ARCHIVE_COMPRESSION_RATIO + 1,
+      compressedSize: 1,
+    }),
+  };
+
+  for (const [files, expected] of [
+    [expansionFiles, /uncompressed contents.*limit is/],
+    [ratioFiles, /compression ratio/],
+  ]) {
+    const errors = [];
+    const sources = await collectLayerSources(
+      [makeFile("zip", "layers.zip", "application/zip")],
+      {
+        jsZip: { async loadAsync() { return { files }; } },
+        onArchiveError(_name, error) {
+          errors.push(error);
+        },
+      },
+    );
+
+    assert.deepEqual(sources, []);
+    assert.match(errors[0].message, expected);
+  }
+});
+
 function makeFile(content, name, type = "") {
   const blob = new Blob([content], { type });
   return {
@@ -220,7 +409,10 @@ function makeZipEntry(content, name, options = {}) {
   return {
     dir: false,
     name,
-    _data: { uncompressedSize: options.uncompressedSize ?? bytes.byteLength },
+    _data: {
+      uncompressedSize: options.uncompressedSize ?? bytes.byteLength,
+      compressedSize: options.compressedSize,
+    },
     async async(type, onProgress) {
       if (options.unreadable) {
         throw new Error("entry should not be read");
@@ -230,6 +422,17 @@ function makeZipEntry(content, name, options = {}) {
         return bytes;
       }
       return text;
+    },
+  };
+}
+
+function makeHeaders(values = {}) {
+  const normalized = new Map(
+    Object.entries(values).map(([key, value]) => [key.toLowerCase(), value]),
+  );
+  return {
+    get(name) {
+      return normalized.get(name.toLowerCase()) ?? null;
     },
   };
 }
