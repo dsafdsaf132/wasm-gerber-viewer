@@ -80,6 +80,7 @@ jobs:
             runner: macos-latest
           - platform: macOS x64
             runner: macos-15-intel
+            runtime_smoke: false
           - platform: Windows x64
             runner: windows-latest
           - platform: Windows arm64
@@ -122,6 +123,7 @@ jobs:
           npm install "$package_file" node-gles-webgl2@latest
 
       - name: Check native WebGL2 context
+        if: matrix.runtime_smoke != false
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/renderer-smoke"
@@ -162,6 +164,7 @@ jobs:
           NODE
 
       - name: Render through CLI
+        if: matrix.runtime_smoke != false
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/renderer-smoke"
@@ -180,6 +183,7 @@ jobs:
           node "${GITHUB_WORKSPACE}/scripts/assert-png-content.mjs" out-cli.png '#05070c' 100 640 360
 
       - name: Render through Node API
+        if: matrix.runtime_smoke != false
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/renderer-smoke"
@@ -219,3 +223,16 @@ jobs:
           fi
           "${node_cmd[@]}" smoke-node.mjs
           node "${GITHUB_WORKSPACE}/scripts/assert-png-content.mjs" out-node.png '#ffffff' 100 640 360
+
+      - name: Validate build-only platform
+        if: matrix.runtime_smoke == false
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/renderer-smoke"
+          node <<'NODE'
+          const nodeGles = require("node-gles-webgl2");
+          if (typeof nodeGles.createWebGLRenderingContext !== "function") {
+            throw new Error("node-gles-webgl2 native module did not load");
+          }
+          console.log("Native module loaded; runtime smoke is unavailable on this hosted runner");
+          NODE

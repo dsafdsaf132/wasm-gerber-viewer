@@ -68,9 +68,12 @@ Node.js 和 CLI 渲染通过 [`node-gles-webgl2`](https://github.com/dsafdsaf132
 | Linux x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Linux arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | macOS arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-| macOS x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
+| macOS x64     | ![build only](https://img.shields.io/badge/CI-build%20only-yellow) |
 | Windows x64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows arm64 | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
+
+macOS x64 仅验证安装和原生模块加载，因为 GitHub 托管的 Intel runner 无法创建
+运行时渲染所需的 ANGLE EGL display。
 
 ## 浏览器用法
 

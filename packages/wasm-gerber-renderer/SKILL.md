@@ -23,8 +23,8 @@ npm install wasm-gerber-renderer node-gles-webgl2
 
 Node.js and CLI rendering are supported via
 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) on Linux
-x64/arm64, macOS arm64/x64, and Windows x64/arm64. All listed platforms run
-the renderer compatibility smoke test.
+x64/arm64, macOS arm64/x64, and Windows x64/arm64. macOS x64 is build-only in
+the renderer compatibility workflow because the hosted runner has no EGL display.
 
 For global CLI usage:
 
@@ -301,7 +301,7 @@ Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when 
 ## Notes
 
 - Node.js rendering requires a WebGL2-capable native module; use `node-gles-webgl2`.
-- Node.js and CLI rendering are supported and smoke-tested via [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) on Linux x64/arm64, macOS arm64/x64, and Windows x64/arm64.
+- Node.js and CLI rendering are supported via [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) on Linux x64/arm64, macOS arm64/x64, and Windows x64/arm64. macOS x64 receives build-only validation because the hosted runner has no EGL display.
 - Parent directories for output PNG files must already exist.
 - Very large Gerber files can fail with memory limits; report the error and avoid retry loops.
 - Drill, job, image, text, and metadata files are not Gerber image layers and may be skipped.

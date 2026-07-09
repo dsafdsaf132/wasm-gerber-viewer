@@ -75,9 +75,13 @@ Node.js and CLI rendering are supported via
 | Linux x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Linux arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | macOS arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-| macOS x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
+| macOS x64     | ![build only](https://img.shields.io/badge/CI-build%20only-yellow) |
 | Windows x64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows arm64 | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
+
+macOS x64 validates installation and native module loading only because the
+GitHub-hosted Intel runner cannot create the ANGLE EGL display required for
+runtime rendering.
 
 ## Browser Usage
 

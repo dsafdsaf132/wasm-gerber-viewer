@@ -68,9 +68,12 @@ Node.js와 CLI 렌더링은 [`node-gles-webgl2`](https://github.com/dsafdsaf132/
 | Linux x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Linux arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | macOS arm64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
-| macOS x64     | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
+| macOS x64     | ![build only](https://img.shields.io/badge/CI-build%20only-yellow) |
 | Windows x64   | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
 | Windows arm64 | ![tested](https://img.shields.io/badge/CI-tested-brightgreen)      |
+
+macOS x64는 GitHub 호스팅 Intel runner에서 runtime 렌더링에 필요한 ANGLE
+EGL display를 생성할 수 없어 설치와 native module load만 검증합니다.
 
 ## 브라우저 사용
 
