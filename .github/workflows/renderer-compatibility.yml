@@ -74,17 +74,22 @@ jobs:
         include:
           - platform: Linux x64
             runner: ubuntu-latest
+            runtime_smoke: true
           - platform: Linux arm64
             runner: ubuntu-24.04-arm
+            runtime_smoke: true
           - platform: macOS arm64
             runner: macos-latest
+            runtime_smoke: true
           - platform: macOS x64
             runner: macos-15-intel
             runtime_smoke: false
           - platform: Windows x64
             runner: windows-latest
+            runtime_smoke: true
           - platform: Windows arm64
             runner: windows-11-arm
+            runtime_smoke: true
 
     defaults:
       run:
