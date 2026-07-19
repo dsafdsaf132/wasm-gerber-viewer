@@ -2984,6 +2984,7 @@ export class GerberViewer {
   toggleCanvasTheme() {
     this.isCanvasLight = !this.isCanvasLight;
     this.updateCanvasTheme();
+    this.requestRender();
   }
 
   updateCanvasTheme() {
@@ -3177,7 +3178,6 @@ export class GerberViewer {
 
       if (loadedCount > 0) {
         this.renderLayerList();
-        this.requestRender();
         this.fitView();
         this.addDiagnostic("info", "Remote file loaded", `${loadedCount} processed`);
       }
@@ -3234,7 +3234,6 @@ export class GerberViewer {
 
           if (loadedCount > 0) {
             this.renderLayerList();
-            this.requestRender();
             this.fitView();
             this.addDiagnostic("info", "Files loaded", `${loadedCount} processed`);
           }
@@ -5235,10 +5234,19 @@ export class GerberViewer {
   }
 
   fitView() {
-    this.flushLazyViewportRender();
-    this.flushPendingRenderFrame();
+    const hadLazyViewportState =
+      this.isLazyViewportPreviewActive() || this.isViewportTransformActive;
+    this.cancelLazyViewportRender();
     const fitView = this.calculateFitView();
-    if (!fitView) return;
+    if (!fitView) {
+      if (hadLazyViewportState) {
+        this.requestRender();
+      }
+      return;
+    }
+
+    // Supersede stale viewport work so only the fitted view is rendered.
+    this.cancelPendingRenderFrame();
 
     this.camera.zoom = this.clampZoom(fitView.zoom);
     this.fitViewZoom = this.camera.zoom;
