@@ -144,8 +144,16 @@ export class GerberRenderer {
       throw new TypeError("A canvas with getContext() is required.");
     }
 
+    const requestedBackend = rendererOptions.executionBackend ?? "auto";
+    if (!["auto", "serial", "threaded"].includes(requestedBackend)) {
+      throw new TypeError('executionBackend must be "auto", "serial", or "threaded"');
+    }
     this.canvas = canvas;
     this.rendererOptions = { ...rendererOptions };
+    // The portable npm entry point cannot assume isolation headers or helper
+    // asset hosting; keep its documented fallback deterministic.
+    this.executionBackend = "serial";
+    this.requestedExecutionBackend = requestedBackend;
     this.wasmModule = wasmModule;
     this.gl = null;
     this.frame = null;

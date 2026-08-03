@@ -23,6 +23,7 @@ export type LayerKind = "gerber" | "drill";
 export type CompositeMode = "blend" | "stack";
 
 export type RendererOptions = {
+  executionBackend?: "auto" | "serial" | "threaded";
   wasmModule?: unknown;
   wasmModuleUrl?: string | URL;
   wasmInitInput?: unknown;

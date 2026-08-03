@@ -14,7 +14,7 @@ use i_triangle::float::triangulatable::Triangulatable;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::mem::take;
-use std::rc::Rc;
+use std::sync::Arc as Rc;
 
 const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 5_000_000;
 const PATH_WEDGE_VERTEX_FLOATS: usize = 6;

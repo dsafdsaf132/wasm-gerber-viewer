@@ -13,9 +13,15 @@ use crate::interaction::InteractionLayer;
 use crate::parser::{parse_gerber_payload_with_options, GerberParser, ParsedGerberLayer};
 use crate::renderer::Renderer;
 use crate::util::format_bytes;
-use js_sys::{Object, Reflect};
+use js_sys::{Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
+
+#[cfg(feature = "threaded")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+#[cfg(feature = "threaded")]
+use rayon::prelude::*;
 
 const DRILL_OUTLINE_WIDTH_MM: f32 = 0.0;
 
@@ -204,6 +210,186 @@ pub fn parse_drill_layer(
     drill_parse_result_to_js(drill)
 }
 
+struct SourceBatchJob {
+    sequence: u32,
+    kind: String,
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+    interactions_enabled: bool,
+}
+
+enum ParsedBatchSource {
+    Gerber(ParsedGerberLayer),
+    Drill(DrillParseResult),
+}
+
+fn source_job_property(source: &JsValue, name: &str) -> Result<JsValue, JsValue> {
+    Reflect::get(source, &JsValue::from_str(name))
+        .map_err(|_| JsValue::from_str(&format!("Unable to read source job `{name}`")))
+}
+
+fn source_batch_jobs(sources: &Array) -> Result<Vec<SourceBatchJob>, JsValue> {
+    sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let sequence_value = source_job_property(&source, "sequence")?;
+            let sequence_number = sequence_value.as_f64().unwrap_or(index as f64);
+            if !sequence_number.is_finite()
+                || sequence_number < 0.0
+                || sequence_number.fract() != 0.0
+                || sequence_number > u32::MAX as f64
+            {
+                return Err(JsValue::from_str(
+                    "Source sequence must be a non-negative integer",
+                ));
+            }
+            let offset = source_job_property(&source, "offset")?;
+            let number = |name: &str| -> f32 {
+                Reflect::get(&offset, &JsValue::from_str(name))
+                    .ok()
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0) as f32
+            };
+            let bool_or = |name: &str, fallback: bool| -> bool {
+                source_job_property(&source, name)
+                    .ok()
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(fallback)
+            };
+            Ok(SourceBatchJob {
+                sequence: sequence_number as u32,
+                kind: source_job_property(&source, "kind")?
+                    .as_string()
+                    .unwrap_or_else(|| "gerber".to_string()),
+                content: source_job_property(&source, "content")?
+                    .as_string()
+                    .ok_or_else(|| JsValue::from_str("Source content must be a string"))?,
+                offset_x: number("x"),
+                offset_y: number("y"),
+                preserve_arc_regions: bool_or("preserveArcRegions", true),
+                arc_tessellation_quality: source_job_property(&source, "arcTessellationQuality")?
+                    .as_f64()
+                    .unwrap_or(1.0) as u32,
+                interactions_enabled: bool_or("interactionsEnabled", false),
+            })
+        })
+        .collect()
+}
+
+fn parse_source_job(job: &SourceBatchJob) -> Result<ParsedBatchSource, String> {
+    let error_string = |error: JsValue| {
+        error
+            .as_string()
+            .unwrap_or_else(|| "Unable to parse source".to_string())
+    };
+    if job.kind == "drill" {
+        let result = if job.interactions_enabled {
+            parse_drill_with_offset_and_interactions(
+                &job.content,
+                DRILL_OUTLINE_WIDTH_MM,
+                job.offset_x,
+                job.offset_y,
+            )
+        } else {
+            parse_drill_with_offset(
+                &job.content,
+                DRILL_OUTLINE_WIDTH_MM,
+                job.offset_x,
+                job.offset_y,
+            )
+        };
+        return result.map(ParsedBatchSource::Drill).map_err(error_string);
+    }
+    parse_layer_payload_data(
+        &job.content,
+        job.offset_x,
+        job.offset_y,
+        job.preserve_arc_regions,
+        job.arc_tessellation_quality,
+    )
+    .map(ParsedBatchSource::Gerber)
+    .map_err(error_string)
+}
+
+/// Parse independent source files in the shared Rayon pool. Modal interpretation
+/// remains sequential within each source and JS conversion happens after the pool
+/// boundary in stable source sequence order.
+#[wasm_bindgen]
+pub fn parse_source_batch(sources: Array) -> Result<Array, JsValue> {
+    let mut jobs = source_batch_jobs(&sources)?;
+    jobs.sort_by_key(|job| job.sequence);
+    #[cfg(feature = "threaded")]
+    let parsed: Vec<Result<ParsedBatchSource, String>> =
+        jobs.par_iter().map(parse_source_job).collect();
+    #[cfg(not(feature = "threaded"))]
+    let parsed: Vec<Result<ParsedBatchSource, String>> =
+        jobs.iter().map(parse_source_job).collect();
+
+    let output = Array::new();
+    for (job, result) in jobs.iter().zip(parsed) {
+        let parsed_source = result.map_err(|error| JsValue::from_str(&error))?;
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &JsValue::from_str("sequence"),
+            &JsValue::from_f64(job.sequence as f64),
+        )?;
+        Reflect::set(
+            &object,
+            &JsValue::from_str("kind"),
+            &JsValue::from_str(&job.kind),
+        )?;
+        match parsed_source {
+            ParsedBatchSource::Gerber(payload) => {
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("renderPayload"),
+                    &gerber_data_layers_to_js(&payload.render_layers)?,
+                )?;
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("interactionPayload"),
+                    &match payload.interaction_layer {
+                        Some(layer) => layer.to_compact_js()?,
+                        None => JsValue::NULL,
+                    },
+                )?;
+            }
+            ParsedBatchSource::Drill(drill) => {
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("outlineLayer"),
+                    &gerber_data_layers_to_js(&[drill.outline_layer])?,
+                )?;
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("fillLayer"),
+                    &gerber_data_layers_to_js(&[drill.fill_layer])?,
+                )?;
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("metadata"),
+                    &drill.metadata.to_js()?,
+                )?;
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("interactionPayload"),
+                    &match drill.interaction_layer {
+                        Some(layer) => layer.to_compact_js()?,
+                        None => JsValue::NULL,
+                    },
+                )?;
+            }
+        }
+        output.push(&object);
+    }
+    Ok(output)
+}
+
 /// Main Gerber processor with stateful WebGL renderer
 #[wasm_bindgen]
 pub struct GerberProcessor {
@@ -215,6 +401,10 @@ pub struct GerberProcessor {
     drill_outline_layer_ids: Vec<u32>,
     interaction_enabled: bool,
     interaction_layers: Vec<Option<InteractionLayer>>,
+    retained_layer_ids: Vec<u32>,
+    retained_color_data: Vec<f32>,
+    retained_blend_modes: Vec<u8>,
+    retained_alpha: f32,
 }
 
 impl Default for GerberProcessor {
@@ -228,6 +418,10 @@ impl Default for GerberProcessor {
             drill_outline_layer_ids: Vec::new(),
             interaction_enabled: false,
             interaction_layers: Vec::new(),
+            retained_layer_ids: Vec::new(),
+            retained_color_data: Vec::new(),
+            retained_blend_modes: Vec::new(),
+            retained_alpha: 1.0,
         }
     }
 }
@@ -741,6 +935,45 @@ impl GerberProcessor {
         }
     }
 
+    /// Upload a worker-produced Drill outline/fill pair without reparsing it.
+    pub fn add_drill_render_payload(
+        &mut self,
+        outline_payload: JsValue,
+        fill_payload: JsValue,
+        interaction_payload: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let outline_layer_id = self.add_render_payload(outline_payload)?;
+        let fill_layer_id = match self.add_render_payload(fill_payload) {
+            Ok(layer_id) => layer_id,
+            Err(error) => {
+                if let Some(renderer) = &mut self.renderer {
+                    let _ = renderer.remove_layer(outline_layer_id as usize);
+                }
+                return Err(error);
+            }
+        };
+        if self.interaction_enabled
+            && !interaction_payload.is_null()
+            && !interaction_payload.is_undefined()
+        {
+            let interaction_layer = InteractionLayer::from_compact_js(&interaction_payload)?;
+            self.set_interaction_layer(outline_layer_id as usize, Some(interaction_layer));
+        }
+        self.set_interaction_layer(fill_layer_id as usize, None);
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &JsValue::from_str("outlineLayerId"),
+            &JsValue::from_f64(outline_layer_id as f64),
+        )?;
+        Reflect::set(
+            &object,
+            &JsValue::from_str("fillLayerId"),
+            &JsValue::from_f64(fill_layer_id as f64),
+        )?;
+        Ok(object.into())
+    }
+
     pub fn add_interaction_payload(
         &mut self,
         layer_id: u32,
@@ -951,6 +1184,92 @@ impl GerberProcessor {
             Err(JsValue::from_str(
                 "Renderer not initialized. Call init() first.",
             ))
+        }
+    }
+
+    /// Store immutable layer/color/blend state so pan and zoom frames only cross
+    /// the JS/WASM boundary with camera values.
+    pub fn set_retained_render_state(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        alpha: f32,
+    ) -> Result<(), JsValue> {
+        if blend_modes.len() != active_layer_ids.len() {
+            return Err(JsValue::from_str("Blend mode data length mismatch"));
+        }
+        self.retained_layer_ids.clear();
+        self.retained_layer_ids.extend_from_slice(active_layer_ids);
+        self.retained_color_data.clear();
+        self.retained_color_data.extend_from_slice(color_data);
+        self.retained_blend_modes.clear();
+        self.retained_blend_modes.extend_from_slice(blend_modes);
+        self.retained_alpha = alpha;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_camera(
+        &mut self,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        clear_canvas: bool,
+    ) -> Result<String, JsValue> {
+        let Self {
+            renderer,
+            retained_layer_ids,
+            retained_color_data,
+            retained_blend_modes,
+            retained_alpha,
+            ..
+        } = self;
+        let renderer = renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?;
+        renderer.render_with_clear_and_blend_modes(
+            retained_layer_ids,
+            retained_color_data,
+            retained_blend_modes,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            *retained_alpha,
+            clear_canvas,
+        )?;
+        Ok("render_done".to_string())
+    }
+
+    pub fn profiling_counters(&self) -> Result<JsValue, JsValue> {
+        let object = Object::new();
+        let (draw_calls, layer_geometry_ms, path_stencil_ms, composite_ms) = self
+            .renderer
+            .as_ref()
+            .map(Renderer::profiling_counters)
+            .unwrap_or((0, 0.0, 0.0, 0.0));
+        Reflect::set(&object, &"drawCalls".into(), &(draw_calls as f64).into())?;
+        Reflect::set(&object, &"stateChanges".into(), &JsValue::NULL)?;
+        Reflect::set(
+            &object,
+            &"layerGeometryMs".into(),
+            &layer_geometry_ms.into(),
+        )?;
+        Reflect::set(&object, &"pathStencilMs".into(), &path_stencil_ms.into())?;
+        Reflect::set(&object, &"compositeMs".into(), &composite_ms.into())?;
+        Reflect::set(
+            &object,
+            &"submitMs".into(),
+            &(layer_geometry_ms + composite_ms).into(),
+        )?;
+        Ok(object.into())
+    }
+
+    pub fn reset_profiling_counters(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.reset_profiling_counters();
         }
     }
 
@@ -1175,6 +1494,45 @@ impl GerberProcessor {
                 "Renderer not initialized. Call init() first.",
             ))
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile_pixels_with_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .render_tile_pixels_with_blend_modes(
+                active_layer_ids,
+                color_data,
+                blend_modes,
+                export_width,
+                export_height,
+                tile_x,
+                tile_y,
+                tile_width,
+                tile_height,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+                alpha,
+            )
     }
 
     /// Get the boundary of the parsed Gerber data for fitToView

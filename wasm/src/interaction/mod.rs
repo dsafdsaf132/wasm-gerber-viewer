@@ -3,7 +3,7 @@ use crate::parser::geometry::{offset_primitive_by, Primitive};
 use crate::parser::{Aperture, Polarity};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::sync::Arc as Rc;
 use wasm_bindgen::prelude::*;
 
 const CIRCLE_SEGMENTS: usize = 48;

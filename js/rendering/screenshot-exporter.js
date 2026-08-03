@@ -247,6 +247,9 @@ export class ScreenshotExporter {
     getParseOptions,
     getRenderOptions,
     getRenderState,
+    getScreenshotRenderLayerPayload,
+    onRendererBorrow,
+    onRendererRestore,
     isWebGlUnavailable,
     drawMeasurements,
     showError,
@@ -272,6 +275,9 @@ export class ScreenshotExporter {
     this.getParseOptions = getParseOptions;
     this.getRenderOptions = getRenderOptions;
     this.getRenderState = getRenderState;
+    this.getScreenshotRenderLayerPayload = getScreenshotRenderLayerPayload;
+    this.onRendererBorrow = onRendererBorrow;
+    this.onRendererRestore = onRendererRestore;
     this.isWebGlUnavailable = isWebGlUnavailable;
     this.drawMeasurements = drawMeasurements;
     this.showError = showError;
@@ -515,7 +521,13 @@ export class ScreenshotExporter {
       exportHeight,
       renderState,
     );
-    context.drawImage(screenshotRenderer.canvas, 0, 0, exportWidth, exportHeight);
+    this.copyRenderedPixels(
+      screenshotRenderer,
+      context,
+      exportWidth,
+      exportHeight,
+      includeBackground ? renderState.backgroundColor : null,
+    );
 
     context.save();
     context.scale(exportScale, exportScale);
@@ -528,6 +540,25 @@ export class ScreenshotExporter {
   }
 
   createRenderer(renderState, includeBackground) {
+    const sharedProcessor = this.getWasmProcessor();
+    const sharedGl = this.getGl();
+    const sharedPayload = this.getScreenshotRenderLayerPayload?.(includeBackground);
+    if (sharedProcessor && sharedGl && sharedPayload) {
+      this.onRendererBorrow?.();
+      return {
+        canvas: this.canvas,
+        gl: sharedGl,
+        processor: sharedProcessor,
+        layerCount: this.getLayers().length,
+        activeLayerIds: sharedPayload.activeLayerIds,
+        colorData: sharedPayload.colorData,
+        blendModes: sharedPayload.blendModes,
+        alpha: sharedPayload.alpha,
+        borrowed: true,
+        originalWidth: this.canvas.width,
+        originalHeight: this.canvas.height,
+      };
+    }
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
     if (!gl) {
@@ -754,6 +785,17 @@ export class ScreenshotExporter {
 
   disposeRenderer(screenshotRenderer) {
     if (!screenshotRenderer) return;
+
+    if (screenshotRenderer.borrowed) {
+      screenshotRenderer.canvas.width = screenshotRenderer.originalWidth;
+      screenshotRenderer.canvas.height = screenshotRenderer.originalHeight;
+      screenshotRenderer.processor.resize();
+      screenshotRenderer.tileCanvas && (screenshotRenderer.tileCanvas.width = 0);
+      screenshotRenderer.tileCanvas && (screenshotRenderer.tileCanvas.height = 0);
+      screenshotRenderer.tileContext = null;
+      this.onRendererRestore?.();
+      return;
+    }
 
     try {
       screenshotRenderer.processor.clear();
@@ -1003,7 +1045,13 @@ export class ScreenshotExporter {
       context.clearRect(0, 0, tileWidth, tileHeight);
     }
 
-    context.drawImage(screenshotRenderer.canvas, 0, 0, tileWidth, tileHeight);
+    this.copyRenderedPixels(
+      screenshotRenderer,
+      context,
+      tileWidth,
+      tileHeight,
+      includeBackground ? renderState.backgroundColor : null,
+    );
     context.save();
     context.scale(exportScale, exportScale);
     context.translate(-tileX / exportScale, -tileY / exportScale);
@@ -1126,6 +1174,29 @@ export class ScreenshotExporter {
     tileHeight,
     renderState,
   ) {
+    if (
+      screenshotRenderer.borrowed &&
+      typeof screenshotRenderer.processor.render_tile_pixels_with_blend_modes === "function"
+    ) {
+      screenshotRenderer.lastPixels =
+        screenshotRenderer.processor.render_tile_pixels_with_blend_modes(
+          screenshotRenderer.activeLayerIds,
+          screenshotRenderer.colorData,
+          screenshotRenderer.blendModes,
+          exportWidth,
+          exportHeight,
+          tileX,
+          tileY,
+          tileWidth,
+          tileHeight,
+          renderState.viewScaleX,
+          renderState.viewScaleY,
+          renderState.offsetX,
+          renderState.offsetY,
+          screenshotRenderer.alpha,
+        );
+      return;
+    }
     const didResize =
       screenshotRenderer.canvas.width !== tileWidth ||
       screenshotRenderer.canvas.height !== tileHeight;
@@ -1172,6 +1243,50 @@ export class ScreenshotExporter {
       );
     }
     screenshotRenderer.gl.finish();
+  }
+
+  copyRenderedPixels(renderer, context, width, height, backgroundColor = null) {
+    const pixels = renderer.lastPixels;
+    if (!(pixels instanceof Uint8Array) || pixels.length !== width * height * 4) {
+      context.drawImage(renderer.canvas, 0, 0, width, height);
+      return;
+    }
+    const imageData = context.createImageData(width, height);
+    const background = backgroundColor ? hexColorToRgb(backgroundColor) : null;
+    for (let sourceY = 0; sourceY < height; sourceY += 1) {
+      const targetY = height - sourceY - 1;
+      for (let x = 0; x < width; x += 1) {
+        const source = (sourceY * width + x) * 4;
+        const target = (targetY * width + x) * 4;
+        const alpha = pixels[source + 3] / 255;
+        if (background) {
+          imageData.data[target] = Math.round(
+            pixels[source] + background[0] * 255 * (1 - alpha),
+          );
+          imageData.data[target + 1] = Math.round(
+            pixels[source + 1] + background[1] * 255 * (1 - alpha),
+          );
+          imageData.data[target + 2] = Math.round(
+            pixels[source + 2] + background[2] * 255 * (1 - alpha),
+          );
+          imageData.data[target + 3] = 255;
+        } else {
+          const unpremultiply = alpha > 0 ? 1 / alpha : 0;
+          imageData.data[target] = Math.min(255, Math.round(pixels[source] * unpremultiply));
+          imageData.data[target + 1] = Math.min(
+            255,
+            Math.round(pixels[source + 1] * unpremultiply),
+          );
+          imageData.data[target + 2] = Math.min(
+            255,
+            Math.round(pixels[source + 2] * unpremultiply),
+          );
+          imageData.data[target + 3] = pixels[source + 3];
+        }
+      }
+    }
+    context.putImageData(imageData, 0, 0);
+    renderer.lastPixels = null;
   }
 
   yieldToBrowser() {

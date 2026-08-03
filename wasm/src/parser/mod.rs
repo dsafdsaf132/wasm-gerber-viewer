@@ -28,6 +28,9 @@ use std::mem::size_of;
 use std::mem::take;
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "threaded")]
+use rayon::prelude::*;
+
 #[derive(Clone, Debug)]
 pub struct PolarityLayer {
     pub(crate) polarity: Polarity,
@@ -79,7 +82,7 @@ impl PrimitiveBufferCounts {
             Primitive::Thermal { .. } => self.thermals += 1,
             Primitive::Line { .. } => self.lines += 1,
             Primitive::TriangleTemplateFlash { template, .. } => {
-                let key = std::rc::Rc::as_ptr(template) as usize;
+                let key = std::sync::Arc::as_ptr(template) as usize;
                 *self
                     .triangle_template_instance_counts
                     .entry(key)
@@ -512,7 +515,7 @@ impl PrimitiveOutputBuffers {
                 self.thermals_rotation.push(rotation);
             }
             Primitive::TriangleTemplateFlash { template, x, y } => {
-                let key = std::rc::Rc::as_ptr(&template) as usize;
+                let key = std::sync::Arc::as_ptr(&template) as usize;
                 let template_idx =
                     if let Some(index) = self.triangle_template_indices.get(&key).copied() {
                         index
@@ -954,13 +957,41 @@ impl GerberParser {
             polarity_layers.len(),
             "interaction path region sublayer map",
         )?;
-        for layer in polarity_layers {
+        #[cfg(feature = "threaded")]
+        let packed_layers: Vec<Result<Vec<GerberData>, String>> = polarity_layers
+            .into_par_iter()
+            .map(|layer| {
+                Self::primitives_to_gerber_data(
+                    layer.primitives,
+                    layer.path_regions,
+                    layer.polarity == Polarity::Negative,
+                )
+                .map_err(|error| {
+                    error
+                        .as_string()
+                        .unwrap_or_else(|| "Unable to pack Gerber primitives".to_string())
+                })
+            })
+            .collect();
+        #[cfg(not(feature = "threaded"))]
+        let packed_layers: Vec<Result<Vec<GerberData>, String>> = polarity_layers
+            .into_iter()
+            .map(|layer| {
+                Self::primitives_to_gerber_data(
+                    layer.primitives,
+                    layer.path_regions,
+                    layer.polarity == Polarity::Negative,
+                )
+                .map_err(|error| {
+                    error
+                        .as_string()
+                        .unwrap_or_else(|| "Unable to pack Gerber primitives".to_string())
+                })
+            })
+            .collect();
+        for packed_layer in packed_layers {
             let render_sublayer_idx = gerber_data_layers.len();
-            let mut gerber_data = Self::primitives_to_gerber_data(
-                layer.primitives,
-                layer.path_regions,
-                layer.polarity == Polarity::Negative,
-            )?;
+            let mut gerber_data = packed_layer.map_err(|error| JsValue::from_str(&error))?;
             sublayer_map.push(render_sublayer_idx);
             gerber_data_layers.append(&mut gerber_data);
         }
