@@ -113,13 +113,17 @@ self.addEventListener("message", async (event) => {
     preserveArcRegions = true,
     arcTessellationQuality = 1,
     interactionsEnabled = false,
+    kind = "gerber",
   } = event.data ?? {};
   let content = event.data?.content;
   let beforeBytes = null;
 
   try {
     const wasmModule = await getWasmModule();
-    if (typeof wasmModule.parse_gerber_layer !== "function") {
+    if (kind === "drill" && typeof wasmModule.parse_source_batch !== "function") {
+      throw new Error("Parse worker API unavailable: parse_source_batch is missing");
+    }
+    if (kind !== "drill" && typeof wasmModule.parse_gerber_layer !== "function") {
       throw new Error("Parse worker API unavailable: parse_gerber_layer is missing");
     }
     beforeBytes = getWorkerWasmMemoryBytes();
@@ -127,6 +131,30 @@ self.addEventListener("message", async (event) => {
     const normalizedQuality = Number(arcTessellationQuality ?? 1);
     const offsetX = Number(offset.x ?? 0);
     const offsetY = Number(offset.y ?? 0);
+
+    if (kind === "drill") {
+      const [drillPayload] = wasmModule.parse_source_batch([
+        {
+          sequence: 0,
+          kind: "drill",
+          content,
+          offset: { x: offsetX, y: offsetY },
+          interactionsEnabled,
+        },
+      ]);
+      const transferables = collectTransferables(drillPayload);
+      self.postMessage(
+        {
+          id,
+          ok: true,
+          kind,
+          drillPayload,
+          workerMemory: { beforeBytes, afterBytes: getWorkerWasmMemoryBytes() },
+        },
+        transferables,
+      );
+      return;
+    }
 
     const supportsInteractionPayload =
       interactionsEnabled &&

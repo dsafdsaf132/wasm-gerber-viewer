@@ -4,7 +4,7 @@ use super::state::Polarity;
 use super::PolarityLayer;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc as Rc;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TriangleTemplateTransformKey {

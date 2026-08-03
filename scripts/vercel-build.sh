@@ -26,7 +26,7 @@ wasm_package_hash() {
   (
     cd "$REPO_ROOT"
     {
-      printf '%s\0' scripts/vercel-build.sh rust-toolchain.toml wasm/Cargo.lock wasm/Cargo.toml
+      printf '%s\0' scripts/vercel-build.sh scripts/build-threaded-wasm.sh rust-toolchain.toml rust-toolchain.threaded.toml wasm/Cargo.lock wasm/Cargo.toml
       find wasm/src -type f -print0 | sort -z
     } | xargs -0 sha256sum
   ) | sha256sum | cut -d ' ' -f1
@@ -34,14 +34,26 @@ wasm_package_hash() {
 
 wasm_hash="$(wasm_package_hash)"
 wasm_pkg_dir="$REPO_ROOT/wasm/pkg"
+threaded_wasm_pkg_dir="$REPO_ROOT/wasm/pkg-threaded"
+build_commit="${VERCEL_GIT_COMMIT_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)}"
+
+write_build_info() {
+  printf 'globalThis.__GERBER_BUILD__ = { commit: "%s" };\n' "$build_commit" > "$REPO_ROOT/js/build-info.js"
+}
 
 if [[
   -f "$wasm_pkg_dir/.source-hash" &&
   -f "$wasm_pkg_dir/wasm_gerber_processor.js" &&
   -f "$wasm_pkg_dir/wasm_gerber_processor_bg.wasm" &&
+  -f "$threaded_wasm_pkg_dir/.source-hash" &&
+  -f "$threaded_wasm_pkg_dir/wasm_gerber_processor.js" &&
+  -f "$threaded_wasm_pkg_dir/wasm_gerber_processor_bg.wasm" &&
+  -n "$(find "$threaded_wasm_pkg_dir" -type f -name '*workerHelpers*.js' -print -quit 2>/dev/null)" &&
   "$(cat "$wasm_pkg_dir/.source-hash")" == "$wasm_hash"
+  && "$(cat "$threaded_wasm_pkg_dir/.source-hash")" == "$wasm_hash"
 ]]; then
-  echo "Reusing cached wasm/pkg for source hash $wasm_hash"
+  write_build_info
+  echo "Reusing cached stable and threaded WASM artifacts for source hash $wasm_hash"
   exit 0
 fi
 
@@ -92,3 +104,6 @@ fi
 cd "$REPO_ROOT/wasm"
 wasm-pack build --target web --out-dir pkg --release
 printf '%s\n' "$wasm_hash" > pkg/.source-hash
+"$REPO_ROOT/scripts/build-threaded-wasm.sh"
+printf '%s\n' "$wasm_hash" > "$threaded_wasm_pkg_dir/.source-hash"
+write_build_info

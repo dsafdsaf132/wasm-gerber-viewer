@@ -29,6 +29,14 @@ import {
   repeatLayerSources,
 } from "../loading/source-loader.js";
 import { ScreenshotExporter } from "../rendering/screenshot-exporter.js";
+import { installBrowserBenchmark } from "../performance/browser-benchmark.js";
+import {
+  detectThreadedCapabilities,
+  normalizeExecutionBackend,
+  RenderBackend,
+  SerialRenderBackend,
+} from "../rendering/render-backend.js";
+import { selectThreadedCapabilityProfile } from "../rendering/capability-profile.js";
 import {
   calculateFitView as calculateViewportFit,
   canvasPointToWorld as canvasPointToWorldCoordinate,
@@ -668,6 +676,7 @@ class GerberParseWorkerPool {
           preserveArcRegions: task.options.preserveArcRegions,
           arcTessellationQuality: task.options.arcTessellationQuality,
           interactionsEnabled: task.options.interactionsEnabled,
+          kind: task.options.kind ?? "gerber",
         });
       } catch (error) {
         this.activeTasks.delete(worker);
@@ -691,10 +700,15 @@ class GerberParseWorkerPool {
     const shouldRecycle = this.shouldRecycleWorker(event.data?.workerMemory);
 
     if (event.data.ok) {
-      task.resolve({
-        renderPayload: event.data.parsedLayer,
-        interactionPayload: event.data.interactionPayload ?? null,
-      });
+      task.resolve(
+        event.data.kind === "drill"
+          ? { kind: "drill", drillPayload: event.data.drillPayload }
+          : {
+              kind: "gerber",
+              renderPayload: event.data.parsedLayer,
+              interactionPayload: event.data.interactionPayload ?? null,
+            },
+      );
     } else {
       const errorMessage = event.data.error || "Failed to parse Gerber layer";
       if (
@@ -797,9 +811,15 @@ function isFatalWasmRuntimeError(error) {
 }
 
 export class GerberViewer {
-  constructor() {
+  constructor({ executionBackend = "auto" } = {}) {
     Object.assign(this, getViewerElements());
     this.gl = null; // WebGL2 context
+    this.executionBackend = normalizeExecutionBackend(executionBackend);
+    this.renderBackend = null;
+    this.renderPayloadCache = null;
+    this.lastSubmittedRenderPayload = null;
+    this.threadedCapabilities = null;
+    this.threadedCapabilityProfile = null;
 
     // WASM module and single processor
     this.wasmModule = null;
@@ -822,6 +842,8 @@ export class GerberViewer {
     this.loadingWorkspaceStatus = "Loading files";
     this.loadingModalFocusReturn = null;
     this.pendingRenderFrame = null;
+    this.isScreenshotRendererBorrowed = false;
+    this.renderRequestedDuringScreenshot = false;
 
     // Layers
     this.layers = [];
@@ -1008,6 +1030,20 @@ export class GerberViewer {
         rulerHoverPoint: this.rulerHoverPoint ? { ...this.rulerHoverPoint } : null,
         measurementUnit: this.measurementUnit,
       }),
+      getScreenshotRenderLayerPayload: (includeBackground) =>
+        this.getScreenshotRenderLayerPayload(includeBackground),
+      onRendererBorrow: () => {
+        this.cancelPendingRenderFrame();
+        this.isScreenshotRendererBorrowed = true;
+      },
+      onRendererRestore: () => {
+        this.isScreenshotRendererBorrowed = false;
+        this.lastSubmittedRenderPayload = null;
+        if (this.renderRequestedDuringScreenshot) {
+          this.renderRequestedDuringScreenshot = false;
+        }
+        this.requestRender();
+      },
       isWebGlUnavailable: () => this.isRendererBusy(),
       drawMeasurements: (context, renderState) =>
         this.drawMeasurementsOnContext(context, renderState),
@@ -1028,6 +1064,10 @@ export class GerberViewer {
     this.wasmExports = await this.wasmModule.default();
     this.wasmModule.init_panic_hook();
 
+    this.threadedCapabilities = detectThreadedCapabilities(this.canvas);
+    this.threadedCapabilityProfile = selectThreadedCapabilityProfile(
+      this.threadedCapabilities,
+    );
     this.createWebGlProcessor();
     this.normalizePersistedParserOptions();
 
@@ -1044,6 +1084,8 @@ export class GerberViewer {
     window.visualViewport?.addEventListener("resize", handleViewportResize);
 
     this.setupEventListeners();
+
+    installBrowserBenchmark(this.createBenchmarkAdapter());
 
     // Initial render
     this.updateEmptyStateHint();
@@ -1521,7 +1563,7 @@ export class GerberViewer {
 
   createWebGlContext() {
     const gl = this.canvas.getContext("webgl2", {
-      preserveDrawingBuffer: true,
+      preserveDrawingBuffer: false,
       stencil: true,
     });
     if (!gl) {
@@ -1535,6 +1577,70 @@ export class GerberViewer {
     this.wasmProcessor = new this.wasmModule.GerberProcessor();
     this.wasmProcessor.init(this.gl);
     this.configureWasmProcessorOptions(this.wasmProcessor);
+    this.renderBackend = new RenderBackend(
+      new SerialRenderBackend(this.wasmProcessor),
+      "serial",
+      {
+        requested: this.executionBackend,
+        capabilities: this.threadedCapabilities,
+        fallbackReason:
+          this.executionBackend !== "serial" && !this.threadedCapabilityProfile
+            ? "no-qualified-capability-profile"
+            : null,
+      },
+    );
+    this.renderPayloadCache = null;
+    this.lastSubmittedRenderPayload = null;
+  }
+
+  createBenchmarkAdapter() {
+    return {
+      getCanvas: () => this.canvas,
+      getGl: () => this.gl,
+      getLayers: () => this.layers,
+      getFixtureName: () => this.layers.map((layer) => layer.name).join(", ") || "current",
+      getBuildCommit: () => globalThis.__GERBER_BUILD__?.commit ?? null,
+      getBackend: () => this.renderBackend?.name ?? "serial",
+      captureState: () => ({
+        camera: { ...this.camera },
+        selectedFeature: this.selectedFeature,
+        renderingMode: this.renderingMode,
+      }),
+      restoreState: (state) => {
+        Object.assign(this.camera, state.camera);
+        this.selectedFeature = state.selectedFeature;
+        this.renderingMode = state.renderingMode;
+        this.clearViewportCssTransform();
+      },
+      applyTraceCamera: (camera) => Object.assign(this.camera, camera),
+      renderExact: () => this.render(),
+      getProfilingCounters: () =>
+        this.wasmProcessor?.profiling_counters?.() ?? {
+          drawCalls: null,
+          stateChanges: null,
+          layerGeometryMs: null,
+          pathStencilMs: null,
+          compositeMs: null,
+          submitMs: null,
+        },
+      getMemoryHighWater: () => ({
+        wasmBytes: Number(this.wasmExports?.memory?.buffer?.byteLength) || null,
+        jsBytes: Number(globalThis.performance?.memory?.usedJSHeapSize) || null,
+        gpuBytes: null,
+      }),
+      loadFixture: async (fixture) => {
+        if (typeof fixture?.load === "function") {
+          await fixture.load(this);
+          return;
+        }
+        const fixtureUrl = fixture?.url ?? fixture;
+        if (typeof fixtureUrl !== "string" && !(fixtureUrl instanceof URL)) {
+          throw new TypeError("Benchmark fixtures must be URLs or provide load(viewer)");
+        }
+        this.clearAllLayers();
+        await this.loadRemoteSource(new URL(fixtureUrl, globalThis.location?.href));
+      },
+    };
   }
 
   createStagedWasmProcessor() {
@@ -3980,10 +4086,6 @@ export class GerberViewer {
       });
     }
     const total = layerSources.length;
-    if (layerSources.some(isDrillSource)) {
-      return this.loadLayerSourcesSerially(layerSources, { title, total });
-    }
-
     const parseWorkerPool = this.createParseWorkerPool(total);
 
     if (!parseWorkerPool) {
@@ -4316,7 +4418,10 @@ export class GerberViewer {
     const parseOptions = this.getParseOptions(parseOptionOverrides);
 
     if (parseWorkerPool) {
-      return parseWorkerPool.parse(content, normalizedOffset, parseOptions);
+      return parseWorkerPool.parse(content, normalizedOffset, {
+        ...parseOptions,
+        kind: parseOptionOverrides.kind ?? "gerber",
+      });
     }
 
     const parsePayloadWithOptions =
@@ -4426,10 +4531,11 @@ export class GerberViewer {
         current: progress.completedLayers,
         total,
       });
-      const { renderPayload, interactionPayload = null } = await this.parseLayerContent(
+      const parsed = await this.parseLayerContent(
         content,
         source.offset,
         parseWorkerPool,
+        { kind: isDrillSource(source) ? "drill" : "gerber" },
       );
       this.updateLoadingModal({
         stage: "Parsing",
@@ -4442,8 +4548,10 @@ export class GerberViewer {
         ok: true,
         index,
         name,
-        parsedLayer: renderPayload,
-        interactionPayload,
+        kind: parsed.kind ?? "gerber",
+        parsedLayer: parsed.renderPayload ?? null,
+        interactionPayload: parsed.interactionPayload ?? null,
+        drillPayload: parsed.drillPayload ?? null,
         sourceContent: content,
         offset: source.offset,
       };
@@ -4588,6 +4696,7 @@ export class GerberViewer {
       });
       parseResult.parsedLayer = null;
       parseResult.interactionPayload = null;
+      parseResult.drillPayload = null;
       parseResult.sourceContent = null;
       return null;
     }
@@ -4601,15 +4710,20 @@ export class GerberViewer {
         total,
       });
 
-      const layerRecord = await this.createParsedLayerRecord(
-        name,
-        parseResult.parsedLayer,
-        {
-          offset: parseResult.offset,
-          sourceContent: parseResult.sourceContent,
-          interactionPayload: parseResult.interactionPayload,
-        },
-      );
+      const layerRecord = parseResult.kind === "drill"
+        ? await this.createParsedDrillLayerRecord(name, parseResult.drillPayload, {
+            offset: parseResult.offset,
+            sourceContent: parseResult.sourceContent,
+          })
+        : await this.createParsedLayerRecord(
+            name,
+            parseResult.parsedLayer,
+            {
+              offset: parseResult.offset,
+              sourceContent: parseResult.sourceContent,
+              interactionPayload: parseResult.interactionPayload,
+            },
+          );
       layerRecord.interactionPayload = parseResult.interactionPayload ?? null;
       const completed = this.markLayerLoadComplete(progress);
       this.updateLoadingModal({
@@ -4632,6 +4746,7 @@ export class GerberViewer {
     } finally {
       parseResult.parsedLayer = null;
       parseResult.interactionPayload = null;
+      parseResult.drillPayload = null;
       parseResult.sourceContent = null;
     }
   }
@@ -5378,6 +5493,49 @@ export class GerberViewer {
     }
   }
 
+  async createParsedDrillLayerRecord(name, drillPayload, options = {}) {
+    if (!drillPayload || typeof this.wasmProcessor?.add_drill_render_payload !== "function") {
+      throw new Error("Worker-produced Drill geometry requires an updated WASM module");
+    }
+    const result = this.wasmProcessor.add_drill_render_payload(
+      drillPayload.outlineLayer,
+      drillPayload.fillLayer,
+      drillPayload.interactionPayload ?? null,
+    );
+    const outlineLayerId = Number(result?.outlineLayerId);
+    const fillLayerId = Number(result?.fillLayerId);
+    if (!Number.isFinite(outlineLayerId) || !Number.isFinite(fillLayerId)) {
+      throw new Error("Failed to upload worker-produced Drill geometry");
+    }
+    const bounds = this.wasmProcessor.get_layer_boundary(outlineLayerId);
+    const drillType = options.drillType ?? getDrillType(name);
+    const outlineStyle = this.getDrillOutlineStyle({ drillType });
+    const rawBounds = {
+      minX: bounds.min_x,
+      maxX: bounds.max_x,
+      minY: bounds.min_y,
+      maxY: bounds.max_y,
+    };
+    const layer = {
+      id: options.id ?? null,
+      kind: DRILL_LAYER_KIND,
+      name,
+      drillType,
+      visible: options.visible ?? true,
+      color: options.color ? [...options.color] : getDefaultDrillColor(name),
+      layerId: outlineLayerId,
+      outlineLayerId,
+      fillLayerId,
+      drillMetadata: normalizeDrillMetadata(drillPayload.metadata),
+      sourceContent: options.sourceContent,
+      offset: normalizeLayerOffset(options.offset),
+      rawBounds,
+      bounds: expandBounds(rawBounds, outlineStyle.worldMm),
+    };
+    this.applyDrillLayerOutlineStyle(layer, this.wasmProcessor);
+    return layer;
+  }
+
   async addParsedLayer(name, parsedLayer, options = {}) {
     if (typeof options.sourceContent !== "string") {
       throw new Error(
@@ -5439,6 +5597,11 @@ export class GerberViewer {
 
   requestRender() {
     this.cancelLazyViewportRender();
+
+    if (this.isScreenshotRendererBorrowed) {
+      this.renderRequestedDuringScreenshot = true;
+      return;
+    }
 
     if (this.pendingRenderFrame !== null) {
       return;
@@ -5556,39 +5719,25 @@ export class GerberViewer {
         this.renderMeasurements();
         return;
       }
-      const { activeLayerIds, colorData, blendModes, alpha } = payload;
-
-      // Render with active layers
-      if (blendModes.some((mode) => mode !== 0)) {
-        if (typeof this.wasmProcessor.render_with_clear_and_blend_modes !== "function") {
-          throw new Error("Stack compositing and drill rendering require an updated WASM module");
-        }
-        this.wasmProcessor.render_with_clear_and_blend_modes(
-          activeLayerIds,
-          colorData,
-          blendModes,
-          this.getViewScaleX(),
-          this.getViewScaleY(),
-          this.camera.offsetX,
-          this.camera.offsetY,
-          alpha,
-          true,
-        );
-      } else {
-        this.wasmProcessor.render(
-          activeLayerIds,
-          colorData,
-          this.getViewScaleX(),
-          this.getViewScaleY(),
-          this.camera.offsetX,
-          this.camera.offsetY,
-          alpha,
-        );
+      const renderStateChanged = payload !== this.lastSubmittedRenderPayload;
+      if (renderStateChanged) {
+        this.renderBackend.setRenderState(payload);
+        this.lastSubmittedRenderPayload = payload;
       }
+      this.renderBackend.renderCamera({
+        zoomX: this.getViewScaleX(),
+        zoomY: this.getViewScaleY(),
+        offsetX: this.camera.offsetX,
+        offsetY: this.camera.offsetY,
+        flipX: this.camera.flipX,
+        flipY: this.camera.flipY,
+      });
       this.syncCompositeRenderErrors();
       this.renderSelectedFeatureHighlight();
       this.zoomReadout.textContent = this.formatZoom();
-      this.boundsReadout.textContent = this.formatCombinedBounds();
+      if (renderStateChanged) {
+        this.boundsReadout.textContent = this.formatCombinedBounds();
+      }
     } catch (error) {
       if (!this.scheduleCompositeFatalRecovery(null, error, "rendering")) {
         const message = getErrorMessage(error);
@@ -6505,7 +6654,6 @@ export class GerberViewer {
     }
     return true;
   }
-
   getRenderLayerPayload() {
     const processor = this.wasmProcessor;
     const rendererChangedOrRecovering = () =>
@@ -6513,6 +6661,35 @@ export class GerberViewer {
       this.pendingFatalWasmRecovery ||
       this.isRecoveringWasmProcessor ||
       this.isWebGlContextLost;
+    if (rendererChangedOrRecovering()) return null;
+
+    const signature = JSON.stringify({
+      stack: this.isStackCompositeMode(),
+      alpha: this.getCompositeAlpha(),
+      light: this.isCanvasLight,
+      layers: this.layers.map((layer) => [
+        layer.id,
+        layer.visible,
+        layer.color,
+        layer.alpha,
+        layer.inverted,
+        layer.layerId,
+        layer.invertedLayerId,
+        layer.outlineLayerId,
+        layer.fillLayerId,
+        layer.kind,
+        layer.outlinePixels,
+        layer.outlineWorldMm,
+        layer.compositeFormula,
+        layer.slotSourceIds,
+      ]),
+    });
+    if (
+      this.renderPayloadCache?.signature === signature &&
+      this.renderPayloadCache?.processor === processor
+    ) {
+      return this.renderPayloadCache.payload;
+    }
     const selectedLayerIds = this.getCompositeDependencyLayerIds();
     const activeLayerIds = [];
     const colorData = [];
@@ -6586,12 +6763,34 @@ export class GerberViewer {
       }
     });
 
-    return {
+    const payload = {
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
       blendModes: new Uint8Array(blendModes),
       alpha: 1,
     };
+    this.renderPayloadCache = { signature, processor, payload };
+    return payload;
+  }
+
+  getScreenshotRenderLayerPayload(includeBackground) {
+    const payload = this.getRenderLayerPayload();
+    const activeLayerIds = new Uint32Array(payload.activeLayerIds);
+    const colorData = new Float32Array(payload.colorData);
+    const blendModes = new Uint8Array(payload.blendModes);
+    if (!includeBackground) {
+      const visibleDrillFills = this.layers.filter(
+        (layer) => isDrillLayer(layer) && layer.visible && Number.isFinite(layer.fillLayerId),
+      ).length;
+      for (let offset = 0; offset < visibleDrillFills; offset += 1) {
+        const index = blendModes.length - 1 - offset;
+        blendModes[index] = 2;
+        colorData[index * 4] = 0;
+        colorData[index * 4 + 1] = 0;
+        colorData[index * 4 + 2] = 0;
+      }
+    }
+    return { activeLayerIds, colorData, blendModes, alpha: payload.alpha };
   }
 
   getCompositeAlpha() {

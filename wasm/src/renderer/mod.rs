@@ -3,6 +3,8 @@ mod camera;
 mod composite;
 mod shader;
 
+use std::cell::Cell;
+
 // Internal use only
 use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
 use camera::Camera;
@@ -119,6 +121,11 @@ pub struct Renderer {
     render_scratch_growth_count: u64,
     selection_composite_id: Option<usize>,
     composite_area_scan: Option<CompositeAreaScanState>,
+    profiling_draw_calls: Cell<u64>,
+    profiling_layer_geometry_ms: f64,
+    profiling_path_stencil_ms: f64,
+    profiling_composite_ms: f64,
+    readback_fbo: Option<(u32, u32, Fbo)>,
 }
 
 struct CompositeAreaScanState {
@@ -1091,9 +1098,41 @@ impl Renderer {
             render_scratch_growth_count: 0,
             selection_composite_id: None,
             composite_area_scan: None,
+            profiling_draw_calls: Cell::new(0),
+            profiling_layer_geometry_ms: 0.0,
+            profiling_path_stencil_ms: 0.0,
+            profiling_composite_ms: 0.0,
+            readback_fbo: None,
         })
     }
 
+    pub fn profiling_counters(&self) -> (u64, f64, f64, f64) {
+        (
+            self.profiling_draw_calls.get(),
+            self.profiling_layer_geometry_ms,
+            self.profiling_path_stencil_ms,
+            self.profiling_composite_ms,
+        )
+    }
+
+    pub fn reset_profiling_counters(&mut self) {
+        self.profiling_draw_calls.set(0);
+        self.profiling_layer_geometry_ms = 0.0;
+        self.profiling_path_stencil_ms = 0.0;
+        self.profiling_composite_ms = 0.0;
+    }
+
+    fn record_draw_call(&self) {
+        self.profiling_draw_calls
+            .set(self.profiling_draw_calls.get().saturating_add(1));
+    }
+
+    /// Update explicit framebuffer dimensions used by headless renderers.
+    pub fn set_framebuffer_size(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
+        Self::validate_framebuffer_size(width, height)?;
+        self.explicit_size = Some((width, height));
+        Ok(())
+    }
     /// Configure a display-space minimum feature size in CSS/device pixels.
     ///
     /// This is applied in the WebGL shaders and only affects rendering. Parsed
@@ -5605,19 +5644,23 @@ impl Renderer {
     }
 
     /// Draw a specific FBO texture to the current framebuffer
+    fn prepare_fbo_texture_draw(&self) -> Result<(), JsValue> {
+        let program = &self.programs.texture;
+        self.bind_fullscreen_quad(program)?;
+        self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        self.gl.uniform1i(program.uniforms.get("u_texture"), 0);
+        Ok(())
+    }
+
     fn draw_fbo_texture(&self, texture: &WebGlTexture, color: &[f32; 4]) -> Result<(), JsValue> {
         let program = &self.programs.texture;
-        self.gl.use_program(Some(&program.program));
-        self.bind_fullscreen_quad(program)?;
-
-        self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
         self.gl
             .bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(texture));
-        self.gl.uniform1i(program.uniforms.get("u_texture"), 0);
         self.gl
             .uniform4fv_with_f32_array(program.uniforms.get("u_color"), color);
 
         self.gl.draw_arrays(TRIANGLES, 0, 6);
+        self.record_draw_call();
 
         Ok(())
     }
@@ -5783,6 +5826,7 @@ impl Renderer {
             .vertex_attrib_pointer_with_i32(position, 2, FLOAT, false, 0, 0);
         self.gl.vertex_attrib_divisor(position, 0);
         self.gl.draw_arrays(TRIANGLES, 0, vertex_count);
+        self.record_draw_call();
         Ok(())
     }
 
@@ -6338,6 +6382,7 @@ impl Renderer {
 
         // Draw
         self.gl.draw_arrays(TRIANGLES, 0, vertex_count);
+        self.record_draw_call();
 
         // Unbind VAO to prevent state leakage
         self.gl.bind_vertex_array(None);
@@ -6487,6 +6532,7 @@ impl Renderer {
 
             self.gl
                 .draw_arrays_instanced(TRIANGLES, 0, vertex_count, instance_count);
+            self.record_draw_call();
             self.gl.bind_vertex_array(None);
         }
 
@@ -6616,6 +6662,7 @@ impl Renderer {
 
         self.gl
             .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
+        self.record_draw_call();
         self.gl.bind_vertex_array(None);
 
         Ok(())
@@ -6778,6 +6825,7 @@ impl Renderer {
         // Draw
         self.gl
             .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
+        self.record_draw_call();
 
         // Unbind VAO to prevent state leakage
         self.gl.bind_vertex_array(None);
@@ -6927,6 +6975,7 @@ impl Renderer {
         // Draw
         self.gl
             .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
+        self.record_draw_call();
 
         // Unbind VAO to prevent state leakage
         self.gl.bind_vertex_array(None);
@@ -7071,6 +7120,7 @@ impl Renderer {
         // Draw
         self.gl
             .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
+        self.record_draw_call();
 
         // Unbind VAO to prevent state leakage
         self.gl.bind_vertex_array(None);
@@ -7085,6 +7135,7 @@ impl Renderer {
         layer_id: usize,
         sublayer_idx: usize,
     ) -> Result<(), JsValue> {
+        let profile_started_at = js_sys::Date::now();
         let region_count = {
             let layer = self.layers[layer_id]
                 .as_mut()
@@ -7176,7 +7227,7 @@ impl Renderer {
                 self.draw_path_solid_range(
                     transform,
                     color,
-                    buffer_cache.path_clear_vao.as_ref(),
+                    buffer_cache.path_cover_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
                 )?;
@@ -7199,6 +7250,7 @@ impl Renderer {
         self.gl.disable(STENCIL_TEST);
         self.gl.color_mask(true, true, true, true);
         self.gl.bind_vertex_array(None);
+        self.profiling_path_stencil_ms += js_sys::Date::now() - profile_started_at;
         result
     }
 
@@ -7388,6 +7440,7 @@ impl Renderer {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
         self.gl.draw_arrays(TRIANGLES, start, count);
+        self.record_draw_call();
         Ok(())
     }
 
@@ -7412,6 +7465,7 @@ impl Renderer {
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
         self.gl.draw_arrays(TRIANGLES, start, count);
+        self.record_draw_call();
         Ok(())
     }
 
@@ -7431,29 +7485,33 @@ impl Renderer {
 
         // Get sublayer count
         let sublayer_count = self.get_layer(layer_id)?.gerber_data.len();
+        self.gl.enable(BLEND);
+        self.gl.blend_equation(FUNC_ADD);
+        let mut previous_polarity_mode: Option<(bool, bool)> = None;
 
         // Render each polarity sublayer with appropriate blending
         for sublayer_idx in 0..sublayer_count {
             let is_negative = self.get_layer(layer_id)?.gerber_data[sublayer_idx].is_negative;
             let mask_in_red = self.get_layer(layer_id)?.mask_in_red;
 
-            // Set polarity blending mode
-            self.gl.enable(BLEND);
-            if mask_in_red && is_negative {
-                // Internal outline masks use R8, so polarity is accumulated in
-                // red rather than alpha. Clear coverage erases destination red.
-                self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
-            } else if mask_in_red {
-                self.gl.blend_func(ONE, ONE);
-            } else if is_negative {
-                // Negative polarity: erase alpha
-                self.gl
-                    .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
-            } else {
-                // Positive polarity: add alpha
-                self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
+            let polarity_mode = (mask_in_red, is_negative);
+            if previous_polarity_mode != Some(polarity_mode) {
+                if mask_in_red && is_negative {
+                    // Internal outline masks use R8, so polarity is accumulated in
+                    // red rather than alpha. Clear coverage erases destination red.
+                    self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
+                } else if mask_in_red {
+                    self.gl.blend_func(ONE, ONE);
+                } else if is_negative {
+                    // Negative polarity: erase alpha
+                    self.gl
+                        .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
+                } else {
+                    // Positive polarity: add alpha
+                    self.gl.blend_func_separate(ZERO, ONE, ONE, ONE);
+                }
+                previous_polarity_mode = Some(polarity_mode);
             }
-            self.gl.blend_equation(FUNC_ADD);
 
             // Render all shapes (empty checks done inside draw methods)
             self.draw_instanced_triangles(transform, &white_color, layer_id, sublayer_idx)?;
@@ -8542,6 +8600,103 @@ impl Renderer {
         )
     }
 
+    /// Render one tile into a reusable offscreen framebuffer and return
+    /// bottom-up RGBA pixels without touching the visible default framebuffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile_pixels_with_blend_modes(
+        &mut self,
+        active_layer_ids: &[u32],
+        color_data: &[f32],
+        blend_modes: &[u8],
+        export_width: u32,
+        export_height: u32,
+        tile_x: u32,
+        tile_y: u32,
+        tile_width: u32,
+        tile_height: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+        alpha: f32,
+    ) -> Result<Vec<u8>, JsValue> {
+        Self::validate_render_inputs(
+            active_layer_ids,
+            color_data,
+            zoom_x,
+            zoom_y,
+            offset_x,
+            offset_y,
+            alpha,
+        )?;
+        Self::validate_blend_modes(active_layer_ids, blend_modes)?;
+        Self::validate_tile_inputs(
+            export_width,
+            export_height,
+            tile_x,
+            tile_y,
+            tile_width,
+            tile_height,
+        )?;
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let transform = Self::tile_transform_matrix(
+            self.camera
+                .get_transform_matrix(export_width, export_height),
+            export_width,
+            export_height,
+            tile_x,
+            tile_y,
+            tile_width,
+            tile_height,
+        );
+        let replace_fbo = self
+            .readback_fbo
+            .as_ref()
+            .is_none_or(|(width, height, _)| *width != tile_width || *height != tile_height);
+        if replace_fbo {
+            if let Some((_, _, old_fbo)) = self.readback_fbo.take() {
+                Self::delete_fbo(&self.gl, old_fbo);
+            }
+            self.readback_fbo = Some((
+                tile_width,
+                tile_height,
+                Self::create_fbo(&self.gl, tile_width, tile_height, false)?,
+            ));
+        }
+        let framebuffer = self
+            .readback_fbo
+            .as_ref()
+            .map(|(_, _, fbo)| fbo.framebuffer.clone())
+            .ok_or_else(|| JsValue::from_str("Readback framebuffer is unavailable"))?;
+        self.render_layer_fbos(active_layer_ids, transform, tile_width, tile_height)?;
+        self.composite_layers_to_target(
+            active_layer_ids,
+            color_data,
+            alpha,
+            true,
+            Some(blend_modes),
+            Some(&framebuffer),
+        )?;
+        let pixel_count = Self::checked_u32_to_usize("tile width", tile_width)?
+            .checked_mul(Self::checked_u32_to_usize("tile height", tile_height)?)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or_else(|| JsValue::from_str("Tile output size exceeds platform limits"))?;
+        let mut pixels = Self::reserved_vec("tile readback pixels", pixel_count)?;
+        pixels.resize(pixel_count, 0);
+        self.gl
+            .read_pixels_with_opt_u8_array(
+                0,
+                0,
+                Self::checked_u32_to_i32("tile width", tile_width)?,
+                Self::checked_u32_to_i32("tile height", tile_height)?,
+                WebGl2RenderingContext::RGBA,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(&mut pixels),
+            )
+            .map_err(|_| JsValue::from_str("Failed to read screenshot tile pixels"))?;
+        Ok(pixels)
+    }
+
     /// Render to an offscreen framebuffer and return bottom-up RGBA pixels.
     #[allow(clippy::too_many_arguments)]
     pub fn render_pixels_with_clear(
@@ -8733,9 +8888,12 @@ impl Renderer {
         let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
 
         // STEP 1: Render active layer geometry to FBOs only when geometry/camera state changed.
+        let geometry_started_at = js_sys::Date::now();
         self.render_layer_fbos(active_layer_ids, transform, width, height)?;
+        self.profiling_layer_geometry_ms += js_sys::Date::now() - geometry_started_at;
 
         // STEP 2: Composite FBOs to canvas
+        let composite_started_at = js_sys::Date::now();
         self.composite_layers(
             active_layer_ids,
             color_data,
@@ -8743,6 +8901,7 @@ impl Renderer {
             clear_canvas,
             blend_modes,
         )?;
+        self.profiling_composite_ms += js_sys::Date::now() - composite_started_at;
 
         Ok(())
     }
@@ -9294,6 +9453,8 @@ impl Renderer {
 
         self.gl.enable(BLEND);
         self.gl.blend_equation(FUNC_ADD);
+        self.prepare_fbo_texture_draw()?;
+        let mut previous_blend_mode = None;
 
         // Render each active layer's FBO to canvas with its color/alpha
         let color_stride = Self::color_data_stride(active_layer_ids, color_data);
@@ -9314,24 +9475,28 @@ impl Renderer {
                     layer_alpha,
                 ];
                 Self::drain_gl_errors(&self.gl);
-                match Self::blend_mode_at(blend_modes, color_index) {
-                    1 => {
-                        self.gl.blend_func_separate(
-                            ONE,
-                            ONE_MINUS_SRC_ALPHA,
-                            ONE,
-                            ONE_MINUS_SRC_ALPHA,
-                        );
+                let blend_mode = Self::blend_mode_at(blend_modes, color_index);
+                if previous_blend_mode != Some(blend_mode) {
+                    match blend_mode {
+                        1 => {
+                            self.gl.blend_func_separate(
+                                ONE,
+                                ONE_MINUS_SRC_ALPHA,
+                                ONE,
+                                ONE_MINUS_SRC_ALPHA,
+                            );
+                        }
+                        2 => {
+                            self.gl.blend_func_separate(
+                                ZERO,
+                                ONE_MINUS_SRC_ALPHA,
+                                ZERO,
+                                ONE_MINUS_SRC_ALPHA,
+                            );
+                        }
+                        _ => self.gl.blend_func(ONE, ONE),
                     }
-                    2 => {
-                        self.gl.blend_func_separate(
-                            ZERO,
-                            ONE_MINUS_SRC_ALPHA,
-                            ZERO,
-                            ONE_MINUS_SRC_ALPHA,
-                        );
-                    }
-                    _ => self.gl.blend_func(ONE, ONE),
+                    previous_blend_mode = Some(blend_mode);
                 }
                 let is_composite = self.composites.get(layer_idx).is_some_and(Option::is_some);
                 let draw_result = if let Some(composite) =
@@ -9604,6 +9769,9 @@ impl Renderer {
         self.composite_area_scan = None;
         self.composite_errors.clear();
         self.explicit_size = next_explicit_size;
+        if let Some((_, _, readback_fbo)) = self.readback_fbo.take() {
+            Self::delete_fbo(&old_gl, readback_fbo);
+        }
         self.gl = gl;
 
         Ok(())
@@ -9612,6 +9780,9 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
+        if let Some((_, _, readback_fbo)) = self.readback_fbo.take() {
+            Self::delete_fbo(&self.gl, readback_fbo);
+        }
         self.clear_all();
         self.delete_highlight_resources();
         self.gl

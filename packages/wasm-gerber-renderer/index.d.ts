@@ -36,6 +36,7 @@ export type CompositeLayerOptions = {
 };
 
 export type RendererOptions = {
+  executionBackend?: "auto" | "serial" | "threaded";
   wasmModule?: unknown;
   wasmModuleUrl?: string | URL;
   wasmInitInput?: unknown;

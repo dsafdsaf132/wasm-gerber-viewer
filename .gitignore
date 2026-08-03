@@ -29,6 +29,7 @@ node_modules/
 wasm_gerber_processor/target/
 wasm/target
 wasm/pkg/
+wasm/pkg-threaded/
 packages/gerber-renderer/wasm/
 packages/gerber-renderer/node_modules/
 packages/gerber-renderer/package-lock.json
