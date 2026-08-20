@@ -145,7 +145,7 @@ wasm-gerber-viewer/
 
 WebGL2를 지원하는 최신 브라우저가 필요합니다.
 
-- Chrome 80+, Firefox 75+, Safari 15+, Edge 80+
+- Chrome 96+, Firefox 114+, Safari 15.4+, Edge 96+
 
 ## 출처
 
