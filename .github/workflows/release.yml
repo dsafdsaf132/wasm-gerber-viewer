@@ -92,6 +92,26 @@ jobs:
           echo "github_package_name=${github_package_name}" >> "$GITHUB_OUTPUT"
           echo "npmjs_exists=${npmjs_exists}" >> "$GITHUB_OUTPUT"
 
+      - name: Validate npmjs publish credentials
+        if: steps.release.outputs.npmjs_exists != 'true'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.npm_token || secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! publisher="$(npm whoami --registry=https://registry.npmjs.org)"; then
+            echo "::error::npm publish token is missing or expired"
+            exit 1
+          fi
+
+          if [[ "${publisher}" != "dsafdsaf132" ]]; then
+            echo "::error::npm publish token belongs to ${publisher}; expected dsafdsaf132"
+            exit 1
+          fi
+
+          echo "Validated npmjs credentials for ${publisher}"
+
       - name: Prepare release version commit
         shell: bash
         run: |
