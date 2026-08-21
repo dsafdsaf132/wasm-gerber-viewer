@@ -37,11 +37,11 @@ jobs:
       - name: Set up Node.js for npmjs
         uses: actions/setup-node@v4
         with:
-          node-version: "22.14.0"
+          node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Set up latest npm
-        run: npm install --global npm@latest
+      - name: Set up npm
+        run: npm install --global npm@12.0.2
 
       - name: Prepare release version
         id: release
@@ -241,7 +241,7 @@ jobs:
       - name: Set up Node.js for GitHub Packages
         uses: actions/setup-node@v4
         with:
-          node-version: "22.14.0"
+          node-version: "24.15.0"
           registry-url: "https://npm.pkg.github.com"
           scope: "@dsafdsaf132"
 
