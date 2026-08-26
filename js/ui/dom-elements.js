@@ -90,6 +90,10 @@ export function getViewerElements(documentRef = document) {
     visibleLayerCount: requireElement(documentRef, "visible-layer-count"),
     zoomReadout: requireElement(documentRef, "zoom-readout"),
     cursorReadout: requireElement(documentRef, "cursor-readout"),
+    compositeSelectionInfo: requireElement(
+      documentRef,
+      "composite-selection-info",
+    ),
     boundsReadout: requireElement(documentRef, "bounds-readout"),
     diagnosticsCount: requireElement(documentRef, "diagnostics-count"),
     renderingModeLazyInput: requireElement(documentRef, "rendering-mode-lazy"),

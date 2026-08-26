@@ -155,8 +155,10 @@ fn closed_outline_regions_preserve_multiple_contours() {
         outline_line([3.0, 7.0], [3.0, 3.0]),
     ];
 
-    let contours = Renderer::closed_outline_regions(&segments);
+    let contours = Renderer::closed_outline_regions(&segments).unwrap();
     assert_eq!(contours.len(), 2);
+    assert!(Renderer::outline_area(&contours[0].points) > 0.0);
+    assert!(Renderer::outline_area(&contours[1].points) < 0.0);
     let boundary = Renderer::outline_regions_boundary(&contours).expect("finite boundary");
     assert!((boundary.min_x() - 0.0).abs() < 0.0001);
     assert!((boundary.max_x() - 10.0).abs() < 0.0001);
@@ -188,7 +190,7 @@ fn closed_outline_regions_accept_arc_only_circle() {
         },
     }];
 
-    let contours = Renderer::closed_outline_regions(&segments);
+    let contours = Renderer::closed_outline_regions(&segments).unwrap();
     assert_eq!(contours.len(), 1);
     assert!(contours[0].has_arc);
     assert!(contours[0].points.len() >= 4);
@@ -197,6 +199,75 @@ fn closed_outline_regions_accept_arc_only_circle() {
     assert!((boundary.max_x() - 7.0).abs() < 0.0001);
     assert!((boundary.min_y() - 3.0).abs() < 0.0001);
     assert!((boundary.max_y() - 7.0).abs() < 0.0001);
+}
+
+#[test]
+fn outline_chain_allocation_failure_is_reported() {
+    assert_eq!(
+        Renderer::try_zeroed_outline_flags(usize::MAX).unwrap_err(),
+        "Not enough memory to chain board outline segments"
+    );
+}
+
+#[test]
+fn composite_bookkeeping_allocation_failures_are_reported_before_mutation() {
+    assert_eq!(
+        try_composite_source_bookkeeping(usize::MAX).unwrap_err(),
+        "Unable to reserve composite source validation state"
+    );
+    let (mut retry_sources, mut retry_order) = try_composite_source_bookkeeping(2).unwrap();
+    assert!(retry_sources.insert(7));
+    assert!(retry_sources.insert(8));
+    retry_order.extend_from_slice(&[
+        ResolvedMaskSource::new(7, MaskSourceKind::Gerber),
+        ResolvedMaskSource::new(8, MaskSourceKind::Gerber),
+    ]);
+    assert_eq!(retry_order[0].layer_id(), 7);
+    assert_eq!(retry_order[1].layer_id(), 8);
+
+    let mut internal_ids = HashSet::from([7usize]);
+    assert_eq!(
+        try_reserve_internal_layer_id_slot(&mut internal_ids, usize::MAX).unwrap_err(),
+        "Unable to reserve internal outline layer state"
+    );
+    assert_eq!(internal_ids, HashSet::from([7usize]));
+    try_reserve_internal_layer_id_slot(&mut internal_ids, 1).unwrap();
+    assert!(internal_ids.insert(8));
+
+    let mut outline_cache = HashMap::new();
+    let existing_key = OutlineMaskCacheKey::Layer { layer_id: 7 };
+    outline_cache.insert(
+        existing_key,
+        OutlineMaskCacheEntry {
+            layer_id: 7,
+            references: 2,
+        },
+    );
+    assert_eq!(
+        try_reserve_outline_cache_slot(&mut outline_cache, usize::MAX).unwrap_err(),
+        "Unable to reserve outline mask cache state"
+    );
+    assert_eq!(outline_cache.len(), 1);
+    assert_eq!(
+        outline_cache[&OutlineMaskCacheKey::Layer { layer_id: 7 }].layer_id,
+        7
+    );
+    assert_eq!(
+        outline_cache[&OutlineMaskCacheKey::Layer { layer_id: 7 }].references,
+        2
+    );
+    try_reserve_outline_cache_slot(&mut outline_cache, 1).unwrap();
+    outline_cache.insert(
+        OutlineMaskCacheKey::Layer { layer_id: 8 },
+        OutlineMaskCacheEntry {
+            layer_id: 8,
+            references: 1,
+        },
+    );
+    assert_eq!(
+        outline_cache[&OutlineMaskCacheKey::Layer { layer_id: 8 }].references,
+        1
+    );
 }
 
 #[test]

@@ -77,11 +77,19 @@ Useful CLI options:
 - `--arc-quality <0|1|2>` controls approximate arc quality.
 - `--invert-layer <selector>` renders a Gerber layer as an inverted/negative layer. Repeat it for multiple layers.
 - `--outline-layer <selector>` chooses the board outline for inverted layers. Use `auto`, `bounds`, a 1-based layer index, exact layer name, or basename.
+- `--composite-config <path>` reads composite definitions and hidden source
+  selectors from JSON.
 - `--flip-x` mirrors the output horizontally.
 - `--flip-y` mirrors the output vertically.
 - `--no-drill` skips NC drill layers.
 - `--no-fit` disables automatic fit-to-view.
 - `--skill` prints package usage notes for AI agents.
+
+CLI Gerber/drill inputs and compressed archive files are capped at 300 MiB;
+composite JSON is capped at 16 MiB. TAR archives are limited to 1,000 headers,
+300 MiB total regular-file data, 300 MiB per entry, a 1,000:1 overall expansion
+ratio, 1 MiB metadata records, and 4 KiB paths. Treat malformed/truncated or
+over-limit archives as fatal input errors; do not retry them.
 
 The CLI renders valid layers and skips invalid inputs such as non-Gerber files in archives. If every layer fails, it exits with an error.
 
@@ -90,6 +98,7 @@ If a single input omits `--output`, generic Gerber extensions such as `.gbr`, `.
 ## Node.js PNG
 
 Use the `/node` entrypoint. A plain string source is Gerber file content, not a file path. Use `fileLayer()`, `{ path }`, or a `file:` URL for filesystem input.
+Filesystem sources are capped at 300 MiB and must be regular files.
 
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";
@@ -181,6 +190,12 @@ or `renderGerberToPngStream()`. This requires `CompressionStream` support,
 closes the stream after `IEND` on success, aborts it on failure, and avoids
 building a PNG `Blob`.
 
+Reusable browser export requires a successfully completed `withFrame()`.
+Export calls before or during a frame, or after a failed frame attempt, reject.
+Do not dispose the renderer while a `withFrame()` callback is active. While an
+export is active, do not start another frame/export or dispose the renderer;
+those calls reject to keep the exported canvas immutable.
+
 ## Reusable Renderer
 
 Use a renderer instance when rendering multiple frames.
@@ -231,7 +246,79 @@ try {
 }
 ```
 
-Prepared layer parse options and offsets are fixed at load time. Load the layer again to change `offsetX`, `offsetY`, `preserveArcRegions`, or `arcTessellationQuality`.
+Do not call `dispose()` while a reusable Node `withFrame()` callback is active.
+Reusable Node exports own the renderer until their promise settles. Do not start
+another frame/export or call `dispose()` while `exportPng()`, `exportPngStream()`,
+or `exportPngFile()` is pending.
+
+Prepared layer parse options and offsets are fixed at load time. Load the original
+source again to change `offsetX`, `offsetY`, `preserveArcRegions`, or
+`arcTessellationQuality`. Passing a prepared object back to `loadLayer()` or
+`loadLayers()` with conflicting parse options rejects, and source-content retention
+cannot be added after parsing.
+
+## Composite Layers
+
+Call `renderCompositeLayer()` only inside `withFrame()`, after adding 2–24 unique
+ordinary Gerber sources with `renderLayer()`. Do not use drill or composite IDs,
+IDs returned by an earlier frame, or one-shot `renderLayers()` declarations as
+composite sources.
+
+Treat composite failures as strict at their asynchronous boundary. In browsers,
+catch `renderCompositeLayer()` for validation/construction failures and the
+enclosing `withFrame()` for GPU allocation/render failures. In Node, logical
+definitions are deferred; catch `exportPng()`, `exportPngStream()`, or
+`exportPngFile()` for both construction and GPU failures.
+
+```js
+await renderer.withFrame({ width: 1600, height: 1000 }, async () => {
+  const paste = await renderer.renderLayer(
+    { source: pasteGerber, name: "top.gtp" },
+    { visible: false },
+  );
+  const notes = await renderer.renderLayer(
+    { source: fabGerber, name: "fab.gbr" },
+    { visible: false },
+  );
+  await renderer.renderCompositeLayer([paste, notes], {
+    preset: "difference",
+    color: "#00a81c",
+    alpha: 0.7,
+  });
+});
+```
+
+Presets are `union`, `intersection`, and `difference`; difference uses the first
+source as its base. Use `visibleAreas` instead of `preset` for exact combinations:
+
+```js
+await renderer.renderCompositeLayer([top, mask, notes], {
+  visibleAreas: ["110", "101", "000"],
+  outlineLayerId: outline,
+});
+```
+
+Pattern bits follow source order, so the leftmost bit is the first source ID.
+`"000"` is valid only inside the resolved Gerber outline or bounds fallback;
+composite inversion uses the same clipping. Hidden ordinary sources remain GPU
+dependencies even though they are excluded from final output. `blend` is
+additive; `stack` is ordered source-over. Composite `visible: false` keeps its
+definition but excludes it from final output.
+
+CLI example:
+
+```bash
+gerber-renderer top.gtp fab.gbr outline.gko \
+  --output composite.png \
+  --composite-config composites.json
+```
+
+The JSON `sources`, `hiddenSources`, and `outline` selectors accept a 1-based
+input index, exact name, or basename. Numeric JSON values are always indices;
+ambiguous string matches reject. `hiddenSources` removes matched inputs from
+final output; hidden Gerbers remain available to composites. Outline precedence is the
+composite JSON value, CLI `--outline-layer`, auto detection, then bounds.
+Composite sources cannot be drills or other composites.
 
 ## Input Rules
 
@@ -255,15 +342,23 @@ Layer options:
 - `name`
 - `color`
 - `alpha` overrides the frame default for that layer; in `stack` mode explicit Gerber alpha overrides the full-opacity default, and drill layers default to full opacity unless set
+- `visible` defaults to true; hidden Gerber layers can still feed a composite
 - `offsetX`
 - `offsetY`
 - `kind` forces `"gerber"` or `"drill"` when a filename is unavailable or ambiguous
 - Node-only `inverted` renders a Gerber layer as an inverted/negative layer
 
-Colors are normalized RGB arrays in browser APIs, e.g. `[1, 0, 0]`. Node APIs also accept CSS-like color strings such as `"#ff3b30"` and `"rgba(255,0,0,0.8)"`.
+Ordinary browser layer colors use normalized RGB arrays, e.g. `[1, 0, 0]`.
+Browser composite colors additionally accept every CSS color supported by the
+canvas, including modern `hsl()` and space-separated `rgb()`. Node APIs accept
+arrays, named CSS colors, hex, and comma-form `rgb()`/`rgba()`. A color-string
+alpha component does not set layer/composite opacity; use the separate `alpha`
+option.
 
 Node prepared layers can be loaded with `preserveArcRegions`,
-`arcTessellationQuality`, and `retainSourceContentForInversion`.
+`arcTessellationQuality`, `retainSourceContentForInversion`, and
+`renderDrills`. With `renderDrills: false`, `loadLayer()` returns `null` for a
+drill and `loadLayers()` omits it.
 Use `retainSourceContentForInversion: true` when a prepared layer must later be
 rendered as inverted or used as the explicit inverted outline source.
 
@@ -279,14 +374,21 @@ Batch APIs skip failed layers by default and continue rendering valid layers:
 - `renderer.renderLayers`
 - `renderer.loadLayers`
 
-Use `onLayerError` to report skipped layers. Use `layerErrorMode: "throw"` when a single bad layer should reject the whole render.
+Use `onLayerError` to report skipped layers. Sync and async callbacks are
+awaited; callback rejection rejects the batch. Use `layerErrorMode: "throw"`
+when a single bad layer should reject the whole render.
 
-`renderer.renderLayer()` and `renderer.loadLayer()` are strict and reject on failure. Use `renderLayers()` or `loadLayers()` for best-effort batch handling.
+`renderer.renderLayer()` and `renderer.loadLayer()` are strict and reject on
+failure. Their documented `null` result only means a drill was intentionally
+skipped with `renderDrills: false`. Use `renderLayers()` or `loadLayers()` for
+best-effort batch handling.
 
 ## Common Options
 
 - `width`, `height`: output size.
-- `background`: `null` for transparent output or a color string/RGBA array.
+- `background`: `null` for transparent output or an RGBA array. Browser export
+  accepts every canvas-supported CSS color; Node accepts named colors, hex, and
+  comma-form `rgb()`/`rgba()`.
 - `fit`: defaults to `true`.
 - `padding`: fit-to-view padding in pixels.
 - `flipX`, `flipY`: mirror the output around the frame center.

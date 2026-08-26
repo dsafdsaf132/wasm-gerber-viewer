@@ -180,6 +180,7 @@
 
           <footer class="canvas-status">
             <span id="cursor-readout">0.000, 0.000</span>
+            <span id="composite-selection-info" role="status" aria-live="polite" hidden></span>
             <span id="bounds-readout">No bounds</span>
           </footer>
         </section>
@@ -637,10 +638,14 @@
         </aside>
       </main>
 
-      <dialog id="screenshot-dialog" class="screenshot-dialog">
+      <dialog
+        id="screenshot-dialog"
+        class="screenshot-dialog"
+        aria-labelledby="screenshot-dialog-title"
+      >
         <form id="screenshot-form" class="screenshot-form">
           <div class="screenshot-dialog-header">
-            <strong>Export PNG</strong>
+            <strong id="screenshot-dialog-title">Export PNG</strong>
             <button
               type="button"
               class="icon-button"
@@ -707,6 +712,7 @@
         aria-labelledby="loading-title"
         aria-describedby="loading-file-name"
         aria-live="polite"
+        tabindex="-1"
         hidden
       >
         <div class="loading-panel">

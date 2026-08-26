@@ -15,6 +15,7 @@ export type GerberNodeLayer =
       name?: string;
       color?: RGBColor | string;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
@@ -25,6 +26,7 @@ export type GerberNodeLayer =
       name?: string;
       color?: RGBColor | string;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
@@ -54,6 +56,17 @@ export type RGBColor = [number, number, number];
 export type RGBAColor = [number, number, number, number];
 export type LayerKind = "gerber" | "drill";
 export type CompositeMode = "blend" | "stack";
+export type CompositePreset = "union" | "intersection" | "difference";
+export type CompositeLayerOptions = {
+  name?: string;
+  color?: RGBColor | string;
+  alpha?: number;
+  visible?: boolean;
+  inverted?: boolean;
+  outlineLayerId?: number;
+  preset?: CompositePreset;
+  visibleAreas?: string[];
+};
 export type PngRenderStrategy = "auto" | "full-frame" | "stream";
 export type InvertedOutlineSelection = "auto" | "bounds" | string | number;
 
@@ -96,7 +109,7 @@ export type NodeFrameOptions = {
   maxRenderTargetBytes?: number;
   framebufferMemorySafetyFactor?: number;
   strategy?: PngRenderStrategy;
-  onLayerError?: (failure: NodeLayerFailure) => void;
+  onLayerError?: (failure: NodeLayerFailure) => void | Promise<void>;
   layerErrorMode?: LayerErrorMode;
 };
 
@@ -112,6 +125,7 @@ export type NodeLayerOptions = {
   name?: string;
   color?: RGBColor | string;
   alpha?: number;
+  visible?: boolean;
   offsetX?: number;
   offsetY?: number;
   inverted?: boolean;
@@ -122,6 +136,7 @@ export type NodeLayerLoadOptions = NodeLayerOptions & {
   preserveArcRegions?: boolean;
   arcTessellationQuality?: 0 | 1 | 2;
   retainSourceContentForInversion?: boolean;
+  renderDrills?: boolean;
 };
 
 export type NodeExportOptions = {
@@ -134,10 +149,14 @@ export type NodeExportOptions = {
 };
 
 export type NodePngWritable = {
+  /**
+   * Native Node Writable streams may return a backpressure boolean. Structural
+   * sinks should return a Promise when a write needs asynchronous backpressure.
+   */
   write(
     chunk: Uint8Array,
     callback?: (error?: Error | null) => void,
-  ): boolean | void | Promise<void>;
+  ): void | boolean | Promise<void>;
 };
 
 export declare function createNodeGerberRenderer(
@@ -185,6 +204,11 @@ export declare class NodeGerberRenderer {
     layerOptions?: NodeLayerOptions,
   ): Promise<number | null>;
 
+  renderCompositeLayer(
+    sourceLayerIds: number[],
+    options?: CompositeLayerOptions,
+  ): Promise<number | null>;
+
   renderLayers(
     layers: GerberNodeLayer | GerberNodeLayer[],
     options?: Pick<NodeFrameOptions, "onLayerError" | "layerErrorMode">,
@@ -192,8 +216,18 @@ export declare class NodeGerberRenderer {
 
   loadLayer(
     layer: GerberNodeLayer,
-    layerOptions?: NodeLayerLoadOptions,
+    layerOptions: NodeLayerLoadOptions & { renderDrills: false },
+  ): Promise<GerberNodePreparedLayer | null>;
+
+  loadLayer(
+    layer: GerberNodeLayer,
+    layerOptions?: NodeLayerLoadOptions & { renderDrills?: true },
   ): Promise<GerberNodePreparedLayer>;
+
+  loadLayer(
+    layer: GerberNodeLayer,
+    layerOptions?: NodeLayerLoadOptions,
+  ): Promise<GerberNodePreparedLayer | null>;
 
   loadLayers(
     layers: GerberNodeLayer | GerberNodeLayer[],

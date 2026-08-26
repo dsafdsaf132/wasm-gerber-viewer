@@ -1,6 +1,7 @@
 import {
   DEFAULT_BACKGROUND,
   COMPOSITE_MODE_STACK,
+  LAYER_KIND_COMPOSITE,
   FrameState,
   PNG_SIGNATURE,
   addDrillLayerToProcessor,
@@ -9,6 +10,7 @@ import {
   boundaryToPlainObject,
   clamp01,
   createBaseFrameOptions,
+  createCompositeVisibleBitset,
   createPngHeader,
   expandBounds,
   getPngChannelCount,
@@ -23,6 +25,7 @@ import {
   normalizeLayerKind,
   normalizeLayer,
   normalizeLayerList,
+  mergeBounds,
   numberOrDefault,
   optionalAlpha,
   resolveDrillRenderColors,
@@ -35,6 +38,8 @@ import {
   setDefaultDrillInnerOutline,
   sourceToText,
   pngChunk,
+  validatePngDimensions,
+  validateCompositeSourceCount,
   writePixelRowsToPngRows,
 } from "./shared.js";
 
@@ -150,7 +155,9 @@ export class GerberRenderer {
     this.gl = null;
     this.frame = null;
     this.lastFrame = null;
+    this.activeExport = false;
     this.disposed = false;
+    this.nextPublicLayerId = 0;
   }
 
   async withFrame(frameOptions = {}, callback) {
@@ -158,20 +165,33 @@ export class GerberRenderer {
     if (this.frame) {
       throw new Error("A render frame is already active.");
     }
+    if (this.activeExport) {
+      throw new Error("Cannot start a render frame while an export is active.");
+    }
     if (typeof callback !== "function") {
       throw new TypeError("withFrame requires a callback.");
     }
 
     const normalizedFrameOptions = normalizeFrameOptions(frameOptions);
+    // Canvas sizing and rendering are not transactional. Invalidate the prior
+    // result before prepareCanvas mutates it, and publish a new result only
+    // after renderFrame completes successfully.
+    this.lastFrame = null;
     this.prepareCanvas(normalizedFrameOptions);
 
     const processor = new this.wasmModule.GerberProcessor();
     try {
-      processor.init(this.getContext());
+      const gl = this.getContext();
+      if (gl.canvas != null || typeof processor.init_with_size !== "function") {
+        processor.init(gl);
+      } else {
+        processor.init_with_size(gl, this.canvas.width, this.canvas.height);
+      }
       applyProcessorOptions(processor, normalizedFrameOptions);
 
       this.frame = new FrameState(normalizedFrameOptions, { processor });
       await callback();
+      this.refreshFrameCompositeFallbackBounds();
       this.renderFrame();
     } finally {
       this.disposeFrameProcessor(processor);
@@ -189,8 +209,9 @@ export class GerberRenderer {
     if (!layerRecord) {
       return null;
     }
+    layerRecord.id = this.reservePublicLayerId();
     this.frame.addLayer(layerRecord);
-    return layerRecord.layerId;
+    return layerRecord.id;
   }
 
   async renderLayers(layers, options = {}) {
@@ -202,58 +223,214 @@ export class GerberRenderer {
     return renderLayersBestEffort(this, normalizeLayerList(layers), options);
   }
 
+  async renderCompositeLayer(sourceLayerIds, options = {}) {
+    this.assertUsable();
+    if (!this.frame) {
+      throw new Error("renderCompositeLayer must be called inside withFrame().");
+    }
+    if (!Array.isArray(sourceLayerIds)) {
+      throw new TypeError("sourceLayerIds must be an ordered array of layer IDs.");
+    }
+    const sourceCount = validateCompositeSourceCount(sourceLayerIds.length);
+    const sourceIds = new Array(sourceCount);
+    for (let index = 0; index < sourceCount; index += 1) {
+      sourceIds[index] = sourceLayerIds[index];
+    }
+    if (new Set(sourceIds).size !== sourceCount) {
+      throw new TypeError("Composite source layer IDs must be unique.");
+    }
+    const sourceLayers = sourceIds.map((sourceLayerId) => {
+      if (!Number.isInteger(sourceLayerId)) {
+        throw new TypeError("Composite source layer IDs must be integers.");
+      }
+      const layer = this.frame.layers.find(
+        (candidate) => getPublicLayerId(candidate) === sourceLayerId,
+      );
+      if (!layer) {
+        throw new Error(`Invalid or stale composite source layer ID: ${sourceLayerId}`);
+      }
+      if (isDrillLayerKind(layer.kind) || layer.kind === LAYER_KIND_COMPOSITE) {
+        throw new TypeError("Composite sources must be ordinary Gerber layers.");
+      }
+      return layer;
+    });
+    const visibleBits = createCompositeVisibleBitset(sourceLayers.length, options);
+    const inverted = options.inverted === true;
+    const outlineLayer = resolveCompositeOutlineLayer(this.frame, options.outlineLayerId);
+    const color =
+      options.color == null
+        ? null
+        : normalizeBrowserCompositeColor(
+            options.color,
+            this.frame.options.colors[0],
+          );
+    const alpha = optionalAlpha(options.alpha);
+    const visible = options.visible !== false;
+    const compositeNumber =
+      this.frame.layers.filter((layer) => layer.kind === LAYER_KIND_COMPOSITE).length + 1;
+    const name = options.name || `Composite ${compositeNumber}`;
+    let layerId;
+    if (outlineLayer) {
+      if (typeof outlineLayer.content !== "string") {
+        throw new Error("Composite outline source content is unavailable.");
+      }
+      layerId = this.frame.processor.add_composite_layer_with_outline_content(
+        new Uint32Array(sourceLayers.map((layer) => layer.layerId)),
+        visibleBits,
+        inverted,
+        outlineLayer.layerId,
+        outlineLayer.content,
+        outlineLayer.offsetX,
+        outlineLayer.offsetY,
+      );
+    } else {
+      const bounds = resolveCompositeFallbackBounds(this.frame, sourceLayers);
+      if (!bounds) {
+        throw new Error("Composite layer needs a board outline or finite bounds.");
+      }
+      layerId = this.frame.processor.add_composite_layer_with_bounds(
+        new Uint32Array(sourceLayers.map((layer) => layer.layerId)),
+        visibleBits,
+        inverted,
+        bounds.minX,
+        bounds.maxX,
+        bounds.minY,
+        bounds.maxY,
+      );
+    }
+    const bounds = boundaryToPlainObject(
+      this.frame.processor.get_layer_boundary(layerId),
+    );
+    const id = this.reservePublicLayerId();
+    this.frame.addLayer({
+      id,
+      kind: LAYER_KIND_COMPOSITE,
+      layerId,
+      name,
+      bounds,
+      color: color ?? this.frame.nextColor(),
+      alpha,
+      visible,
+      sourceLayerIds: sourceIds,
+      visibleBits,
+      inverted,
+      outlineLayerId: outlineLayer ? getPublicLayerId(outlineLayer) : null,
+      fallbackBounds: outlineLayer ? null : bounds,
+    });
+    return id;
+  }
+
+  refreshFrameCompositeFallbackBounds() {
+    const frame = this.frame;
+    if (!frame) return;
+    for (const layer of frame.layers) {
+      if (layer.kind !== LAYER_KIND_COMPOSITE || layer.outlineLayerId != null) {
+        continue;
+      }
+      const sourceLayers = layer.sourceLayerIds.map((sourceLayerId) =>
+        frame.layers.find(
+          (candidate) => getPublicLayerId(candidate) === sourceLayerId,
+        ),
+      );
+      if (sourceLayers.some((sourceLayer) => !sourceLayer)) {
+        throw new Error(`Composite ${layer.name} has an unavailable source layer.`);
+      }
+      const bounds = resolveCompositeFallbackBounds(frame, sourceLayers);
+      if (!bounds) {
+        throw new Error(`Composite ${layer.name} needs finite fallback bounds.`);
+      }
+      if (typeof frame.processor.set_composite_bounds !== "function") {
+        throw new Error("Composite fallback updates require an updated WASM renderer.");
+      }
+      frame.processor.set_composite_bounds(
+        layer.layerId,
+        bounds.minX,
+        bounds.maxX,
+        bounds.minY,
+        bounds.maxY,
+      );
+      layer.fallbackBounds = bounds;
+      layer.bounds = boundaryToPlainObject(
+        frame.processor.get_layer_boundary(layer.layerId),
+      );
+    }
+    frame.bounds = null;
+    for (const layer of frame.layers) {
+      if (layer.visible !== false) {
+        frame.bounds = mergeBounds(frame.bounds, layer.bounds);
+      }
+    }
+  }
+
   async exportPng(exportOptions = {}) {
     this.assertUsable();
-    const type = exportOptions.type || "image/png";
-    const quality = exportOptions.quality;
-    const background =
-      "background" in exportOptions
-        ? exportOptions.background
-        : (this.lastFrame?.background ?? DEFAULT_BACKGROUND);
+    const completedFrame = this.beginExport();
+    try {
+      const type = exportOptions.type || "image/png";
+      const quality = exportOptions.quality;
+      const background =
+        "background" in exportOptions
+          ? exportOptions.background
+          : (completedFrame.background ?? DEFAULT_BACKGROUND);
 
-    if (background == null) {
-      return canvasToBlob(this.canvas, type, quality);
+      if (background == null) {
+        return await canvasToBlob(this.canvas, type, quality);
+      }
+      const cssBackground = normalizeCssColor(background);
+
+      const output = createOutputCanvas(this.canvas.width, this.canvas.height);
+      if (!output) {
+        return await canvasToBlob(this.canvas, type, quality);
+      }
+
+      const context = output.getContext("2d");
+      if (!context) {
+        return await canvasToBlob(this.canvas, type, quality);
+      }
+
+      context.fillStyle = cssBackground;
+      context.fillRect(0, 0, output.width, output.height);
+      context.drawImage(this.canvas, 0, 0);
+      return await canvasToBlob(output, type, quality);
+    } finally {
+      this.activeExport = false;
     }
-
-    const output = createOutputCanvas(this.canvas.width, this.canvas.height);
-    if (!output) {
-      return canvasToBlob(this.canvas, type, quality);
-    }
-
-    const context = output.getContext("2d");
-    if (!context) {
-      return canvasToBlob(this.canvas, type, quality);
-    }
-
-    context.fillStyle = normalizeCssColor(background);
-    context.fillRect(0, 0, output.width, output.height);
-    context.drawImage(this.canvas, 0, 0);
-    return canvasToBlob(output, type, quality);
   }
 
   async exportPngStream(writable, exportOptions = {}) {
     this.assertUsable();
-    const type = exportOptions.type || "image/png";
-    if (type !== "image/png") {
-      throw new TypeError("Streaming export only supports image/png.");
+    const completedFrame = this.beginExport();
+    try {
+      const type = exportOptions.type || "image/png";
+      if (type !== "image/png") {
+        throw new TypeError("Streaming export only supports image/png.");
+      }
+
+      const background =
+        "background" in exportOptions
+          ? exportOptions.background
+          : (completedFrame.background ?? DEFAULT_BACKGROUND);
+
+      await streamCanvasToPng(
+        this.canvas,
+        this.getContext(),
+        writable,
+        background,
+        exportOptions,
+      );
+    } finally {
+      this.activeExport = false;
     }
-
-    const background =
-      "background" in exportOptions
-        ? exportOptions.background
-        : (this.lastFrame?.background ?? DEFAULT_BACKGROUND);
-
-    await streamCanvasToPng(
-      this.canvas,
-      this.getContext(),
-      writable,
-      background,
-      exportOptions,
-    );
   }
 
   dispose() {
     if (this.disposed) return;
+    if (this.frame) {
+      throw new Error("Cannot dispose GerberRenderer while a render frame is active.");
+    }
+    if (this.activeExport) {
+      throw new Error("Cannot dispose GerberRenderer while an export is active.");
+    }
     this.disposed = true;
     this.frame = null;
     this.lastFrame = null;
@@ -319,6 +496,7 @@ export class GerberRenderer {
         color,
         alpha,
         outlineStyle,
+        visible: options.visible !== false,
       };
     }
 
@@ -344,6 +522,10 @@ export class GerberRenderer {
       bounds,
       color,
       alpha,
+      visible: options.visible !== false,
+      content,
+      offsetX,
+      offsetY,
     };
   }
 
@@ -443,6 +625,8 @@ export class GerberRenderer {
       );
     }
 
+    assertNoCompositeRenderErrors(frame.processor, frame.layers);
+
     this.lastFrame = frame.toResult(view);
   }
 
@@ -503,6 +687,56 @@ export class GerberRenderer {
       throw new Error("GerberRenderer has been disposed.");
     }
   }
+
+  assertRenderedFrameAvailable() {
+    if (this.frame) {
+      throw new Error("Cannot export while a render frame is active.");
+    }
+    if (!this.lastFrame) {
+      throw new Error("No successfully completed browser frame is available to export.");
+    }
+  }
+
+  beginExport() {
+    this.assertRenderedFrameAvailable();
+    if (this.activeExport) {
+      throw new Error("A browser export is already active.");
+    }
+    this.activeExport = true;
+    return this.lastFrame;
+  }
+
+  reservePublicLayerId() {
+    while (
+      this.frame?.layers.some(
+        (layer) => getPublicLayerId(layer) === this.nextPublicLayerId,
+      )
+    ) {
+      this.nextPublicLayerId += 1;
+    }
+    if (!Number.isSafeInteger(this.nextPublicLayerId)) {
+      throw new Error("Layer ID space is exhausted.");
+    }
+    const id = this.nextPublicLayerId;
+    this.nextPublicLayerId += 1;
+    return id;
+  }
+}
+
+function assertNoCompositeRenderErrors(processor, layers) {
+  const composites = layers.filter(
+    (layer) => layer.kind === LAYER_KIND_COMPOSITE && layer.visible !== false,
+  );
+  if (composites.length === 0) return;
+  if (typeof processor.get_composite_error !== "function") {
+    throw new Error("Composite error reporting requires an updated WASM renderer.");
+  }
+  for (const layer of composites) {
+    const error = processor.get_composite_error(layer.layerId);
+    if (error) {
+      throw new Error(`Composite ${layer.name} failed: ${error}`);
+    }
+  }
 }
 
 function createRenderEntries(layers, globalAlpha, background, compositeMode) {
@@ -513,7 +747,7 @@ function createRenderEntries(layers, globalAlpha, background, compositeMode) {
     compositeMode === COMPOSITE_MODE_STACK ? 1 : globalAlpha;
 
   for (const layer of layers) {
-    if (!isDrillLayerKind(layer.kind)) {
+    if (layer.visible !== false && !isDrillLayerKind(layer.kind)) {
       entries.push({
         layerId: layer.layerId,
         color: layer.color,
@@ -524,7 +758,11 @@ function createRenderEntries(layers, globalAlpha, background, compositeMode) {
   }
 
   for (const layer of layers) {
-    if (isDrillLayerKind(layer.kind) && hasDrillOutlineStyle(layer.outlineStyle)) {
+    if (
+      layer.visible !== false &&
+      isDrillLayerKind(layer.kind) &&
+      hasDrillOutlineStyle(layer.outlineStyle)
+    ) {
       entries.push({
         layerId: layer.outlineLayerId,
         color: layer.color,
@@ -535,7 +773,7 @@ function createRenderEntries(layers, globalAlpha, background, compositeMode) {
   }
 
   for (const layer of layers) {
-    if (isDrillLayerKind(layer.kind)) {
+    if (layer.visible !== false && isDrillLayerKind(layer.kind)) {
       const alpha = resolveLayerAlpha(layer.alpha, 1);
       entries.push({
         layerId: layer.fillLayerId,
@@ -547,6 +785,41 @@ function createRenderEntries(layers, globalAlpha, background, compositeMode) {
   }
 
   return entries;
+}
+
+function resolveCompositeOutlineLayer(frame, outlineLayerId) {
+  if (outlineLayerId == null) return null;
+  if (!Number.isInteger(outlineLayerId)) {
+    throw new TypeError("outlineLayerId must be an integer Gerber layer ID.");
+  }
+  const layer = frame.layers.find(
+    (candidate) => getPublicLayerId(candidate) === outlineLayerId,
+  );
+  if (!layer || isDrillLayerKind(layer.kind) || layer.kind === LAYER_KIND_COMPOSITE) {
+    throw new TypeError("outlineLayerId must reference an ordinary Gerber layer.");
+  }
+  return layer;
+}
+
+function getPublicLayerId(layer) {
+  return layer?.id ?? layer?.layerId;
+}
+
+function resolveCompositeFallbackBounds(frame, sourceLayers) {
+  let bounds = null;
+  for (const layer of frame.layers) {
+    if (
+      layer.visible !== false &&
+      !isDrillLayerKind(layer.kind) &&
+      layer.kind !== LAYER_KIND_COMPOSITE
+    ) {
+      bounds = mergeBounds(bounds, layer.bounds);
+    }
+  }
+  for (const layer of sourceLayers) {
+    bounds = mergeBounds(bounds, layer.bounds);
+  }
+  return bounds;
 }
 
 async function loadWasmModule(rendererOptions) {
@@ -570,16 +843,26 @@ async function streamCanvasToPng(canvas, gl, writable, background, exportOptions
 
   const width = positiveIntegerOrDefault(canvas.width, 1);
   const height = positiveIntegerOrDefault(canvas.height, 1);
-  const normalizedBackground = parseExportBackground(background);
-  const pngColorType = getPngColorType(normalizedBackground);
-  const pngChannels = getPngChannelCount(pngColorType);
-  const rowStride = getPngRowStride(width, pngChannels);
   const sink = createWebWritablePngSink(writable);
 
   try {
-    await sink.write(PNG_SIGNATURE);
-    await sink.write(pngChunk("IHDR", createPngHeader(width, height, pngColorType)));
+    const normalizedBackground = parseExportBackground(background);
+    const pngColorType = getPngColorType(normalizedBackground);
+    const pngChannels = getPngChannelCount(pngColorType);
+    const rowStride = getPngRowStride(width, pngChannels);
+    validatePngDimensions(width, height);
+    const rowsPerBand = getCanvasStreamBandRows(
+      width,
+      height,
+      rowStride,
+      exportOptions.maxBandBytes,
+    );
     await deflatePngRowsToWebSink(sink, async (writeRow) => {
+      // Compression construction and stream-lock acquisition happen before
+      // these first bytes, so deterministic capability failures cannot leave a
+      // partial PNG in the destination.
+      await sink.write(PNG_SIGNATURE);
+      await sink.write(pngChunk("IHDR", createPngHeader(width, height, pngColorType)));
       await writeCanvasPixelRows(
         writeRow,
         gl,
@@ -588,7 +871,7 @@ async function streamCanvasToPng(canvas, gl, writable, background, exportOptions
         rowStride,
         normalizedBackground,
         pngChannels,
-        exportOptions.maxBandBytes,
+        rowsPerBand,
       );
     });
     await sink.write(pngChunk("IEND", new Uint8Array(0)));
@@ -621,7 +904,38 @@ function parseExportBackground(background) {
     if (!resolved) {
       throw error;
     }
-    return parseColor(resolved, true);
+    try {
+      return parseColor(resolved, true);
+    } catch (_serializationError) {
+      const pixels = resolveCssColorRgbaPixels(background);
+      if (!pixels) throw error;
+      return pixels;
+    }
+  }
+}
+
+function normalizeBrowserCompositeColor(color, fallback) {
+  try {
+    return normalizeColor(color, fallback, { allowString: true });
+  } catch (error) {
+    if (typeof color !== "string") {
+      throw error;
+    }
+    const resolved = resolveCssColor(color);
+    if (!resolved) {
+      throw error;
+    }
+    try {
+      // Composite alpha remains an independent option. CSS alpha is parsed only
+      // to validate the color and is deliberately excluded from the RGB result.
+      return normalizeColor(resolved, fallback, { allowString: true });
+    } catch (_serializationError) {
+      const resolvedPixels = resolveCssColorPixels(color);
+      if (!resolvedPixels) {
+        throw error;
+      }
+      return resolvedPixels;
+    }
   }
 }
 
@@ -637,6 +951,33 @@ function resolveCssColor(color) {
   context.fillStyle = color;
   const second = context.fillStyle;
   return first === "#010203" && second === "#040506" ? null : first;
+}
+
+function resolveCssColorPixels(color) {
+  const data = resolveCssColorRgbaPixels(color);
+  if (!data) return null;
+  return [data[0] / 255, data[1] / 255, data[2] / 255];
+}
+
+function resolveCssColorRgbaPixels(color) {
+  const canvas = createOutputCanvas(1, 1);
+  const context = canvas?.getContext("2d", { willReadFrequently: true });
+  if (
+    !context ||
+    typeof context.clearRect !== "function" ||
+    typeof context.fillRect !== "function" ||
+    typeof context.getImageData !== "function"
+  ) {
+    return null;
+  }
+  context.clearRect(0, 0, 1, 1);
+  context.fillStyle = color;
+  context.fillRect(0, 0, 1, 1);
+  const data = context.getImageData(0, 0, 1, 1)?.data;
+  if (!data || data.length < 4) {
+    return null;
+  }
+  return [data[0], data[1], data[2], data[3]];
 }
 
 function createWebWritablePngSink(writable) {
@@ -662,9 +1003,33 @@ function createWebWritablePngSink(writable) {
 
 async function deflatePngRowsToWebSink(sink, writeRows) {
   const compression = new CompressionStream("deflate");
-  const reader = compression.readable.getReader();
-  const writer = compression.writable.getWriter();
+  let reader = null;
+  let writer = null;
+  try {
+    reader = compression.readable.getReader();
+    writer = compression.writable.getWriter();
+  } catch (error) {
+    try {
+      await reader?.cancel(error);
+    } catch (_cancelError) {
+      // Preserve the capability/setup error.
+    }
+    try {
+      reader?.releaseLock();
+    } catch (_releaseError) {
+      // Preserve the capability/setup error.
+    }
+    throw error;
+  }
   let pumpError = null;
+  let rejectPumpError;
+  const pumpErrorSignal = new Promise((_, reject) => {
+    rejectPumpError = reject;
+  });
+  // The signal is also consumed by Promise.race() below. Keep this handler so
+  // a destination failure between compression writes cannot surface as an
+  // unhandled rejection.
+  pumpErrorSignal.catch(() => {});
   const pump = (async () => {
     for (;;) {
       const { done, value } = await reader.read();
@@ -673,6 +1038,7 @@ async function deflatePngRowsToWebSink(sink, writeRows) {
     }
   })().catch((error) => {
     pumpError = error;
+    rejectPumpError(error);
     throw error;
   });
   pump.catch(() => {});
@@ -680,10 +1046,13 @@ async function deflatePngRowsToWebSink(sink, writeRows) {
   try {
     await writeRows(async (row) => {
       if (pumpError) throw pumpError;
-      await writer.write(row.slice());
+      // The converted PNG band is immutable until this write settles, so the
+      // CompressionStream can consume it directly without a second full-band
+      // allocation outside maxBandBytes accounting.
+      await Promise.race([writer.write(row), pumpErrorSignal]);
       if (pumpError) throw pumpError;
     });
-    await writer.close();
+    await Promise.race([writer.close(), pumpErrorSignal]);
     await pump;
   } catch (error) {
     try {
@@ -724,40 +1093,48 @@ async function writeCanvasPixelRows(
   rowStride,
   background,
   pngChannels,
-  maxBandBytes,
+  rowsPerBand,
 ) {
   const rowBytes = width * 4;
-  const rowsPerBand = getCanvasStreamBandRows(
-    width,
-    height,
-    rowStride,
-    maxBandBytes,
-  );
   const pixels = new Uint8Array(rowBytes * rowsPerBand);
 
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.finish?.();
-  for (let topY = 0; topY < height; topY += rowsPerBand) {
-    const rowCount = Math.min(rowsPerBand, height - topY);
-    const readY = height - topY - rowCount;
-    gl.readPixels(
-      0,
-      readY,
-      width,
-      rowCount,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      pixels,
-    );
-    await writePixelRowsToPngRows(
-      writeRow,
-      pixels.subarray(0, rowBytes * rowCount),
-      width,
-      rowCount,
-      rowStride,
-      background,
-      pngChannels,
-    );
+  const managesPackAlignment =
+    typeof gl.getParameter === "function" &&
+    typeof gl.pixelStorei === "function" &&
+    gl.PACK_ALIGNMENT != null;
+  const previousPackAlignment = managesPackAlignment
+    ? gl.getParameter(gl.PACK_ALIGNMENT)
+    : null;
+  if (managesPackAlignment) gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+  try {
+    for (let topY = 0; topY < height; topY += rowsPerBand) {
+      const rowCount = Math.min(rowsPerBand, height - topY);
+      const readY = height - topY - rowCount;
+      gl.readPixels(
+        0,
+        readY,
+        width,
+        rowCount,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        pixels,
+      );
+      await writePixelRowsToPngRows(
+        writeRow,
+        pixels.subarray(0, rowBytes * rowCount),
+        width,
+        rowCount,
+        rowStride,
+        background,
+        pngChannels,
+      );
+    }
+  } finally {
+    if (managesPackAlignment) {
+      gl.pixelStorei(gl.PACK_ALIGNMENT, previousPackAlignment);
+    }
   }
 }
 
@@ -767,21 +1144,25 @@ function getCanvasStreamBandRows(width, height, rowStride, maxBandBytes) {
     DEFAULT_STREAM_EXPORT_BAND_BYTES,
   );
   const perRowBytes = width * 4 + rowStride;
-  return Math.max(1, Math.min(height, Math.floor(budget / perRowBytes)));
+  const rows = Math.floor(budget / perRowBytes);
+  if (!Number.isFinite(rows) || rows < 1) {
+    throw new Error(
+      `PNG export rows exceed the ${budget}-byte stream band limit at ${width}px wide.`,
+    );
+  }
+  return Math.min(height, rows);
 }
 
 function normalizeCssColor(color) {
   if (typeof color === "string") {
-    return color;
+    const resolved = resolveCssColor(color);
+    if (!resolved) {
+      throw new TypeError(`Unsupported color format: ${color}`);
+    }
+    return resolved;
   }
-  if (Array.isArray(color) && color.length >= 3) {
-    const r = Math.round(clamp01(color[0]) * 255);
-    const g = Math.round(clamp01(color[1]) * 255);
-    const b = Math.round(clamp01(color[2]) * 255);
-    const a = color.length >= 4 ? clamp01(color[3]) : 1;
-    return `rgba(${r}, ${g}, ${b}, ${a})`;
-  }
-  return "transparent";
+  const [r, g, b, a] = parseColor(color, true);
+  return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
 }
 
 function canvasToBlob(canvas, type, quality) {

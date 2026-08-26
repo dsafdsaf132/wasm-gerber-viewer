@@ -723,6 +723,35 @@ M02*",
 }
 
 #[test]
+fn linear_region_with_inner_hole_uses_path_renderer() {
+    let layers = parse_gerber(
+        "\
+%FSLAX24Y24*%
+%MOMM*%
+%LPD*%
+G36*
+X-050000Y-050000D02*
+G01*
+X050000Y-050000D01*
+X050000Y050000D01*
+X-050000Y050000D01*
+X-050000Y-050000D01*
+X-020000Y-020000D02*
+X-020000Y020000D01*
+X020000Y020000D01*
+X020000Y-020000D01*
+X-020000Y-020000D01*
+G37*
+M02*",
+    )
+    .expect("linear region with inner hole should parse");
+
+    assert_eq!(layers.len(), 1);
+    assert!(layers[0].triangles.vertices.is_empty());
+    assert_eq!(layers[0].path_regions.region_count(), 1);
+}
+
+#[test]
 fn path_region_pick_contour_quality_tracks_arc_tessellation_quality() {
     let data = "\
 %FSLAX24Y24*%

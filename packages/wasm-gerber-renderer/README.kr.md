@@ -28,6 +28,7 @@
 - [브라우저 API](#브라우저-api)
 - [Node.js 사용](#nodejs-사용)
 - [Node.js API](#nodejs-api)
+- [Composite Layer](#composite-layer)
 - [API 옵션](#api-옵션)
 - [CLI](#cli)
 - [라이선스](#라이선스)
@@ -128,6 +129,7 @@ type GerberLayer =
       name?: string;
       color?: RGBColor;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       kind?: LayerKind;
@@ -155,6 +157,7 @@ type GerberNodeLayer =
       name?: string;
       color?: RGBColor | string;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
@@ -165,6 +168,7 @@ type GerberNodeLayer =
       name?: string;
       color?: RGBColor | string;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
@@ -174,6 +178,20 @@ type GerberNodeLayer =
 
 Node.js API에서도 일반 `string`은 Gerber 내용으로 취급됩니다. 파일 시스템에서 렌더링할 때는 `{ path: "board.gbr" }`, `fileLayer("board.gbr")`, 또는 `file:` URL을 사용하세요.
 
+```ts
+type CompositePreset = "union" | "intersection" | "difference";
+type CompositeLayerOptions = {
+  name?: string;
+  color?: RGBColor | string;
+  alpha?: number;
+  visible?: boolean;
+  inverted?: boolean;
+  outlineLayerId?: number;
+  preset?: CompositePreset;
+  visibleAreas?: string[];
+};
+```
+
 ## 브라우저 API
 
 - `renderGerberToCanvas(canvas, layers, frameOptions)`: WebGL2를 지원하는 기존 canvas에 한 번에 배치 렌더링합니다. `layers`는 단일 `GerberLayer`, 배열, 또는 `FileList`가 될 수 있습니다. 실패한 layer는 기본적으로 건너뜁니다.
@@ -181,15 +199,20 @@ Node.js API에서도 일반 `string`은 Gerber 내용으로 취급됩니다. 파
 - `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`: PNG chunk를 `WritableStream`에 쓰고 성공 시 닫으며 실패 시 중단합니다. 브라우저의 `CompressionStream` 지원이 필요합니다.
 - `createGerberRenderer(canvas, rendererOptions)`: 여러 frame이나 layer를 렌더링할 수 있는 재사용 렌더러를 만듭니다.
 - `renderer.withFrame(frameOptions, callback)`: frame을 시작하고 canvas/view 옵션을 적용한 뒤 callback이 끝나면 렌더링된 layer를 표시합니다.
-- `renderer.renderLayer(layer, layerOptions)`: 활성 frame에 layer 하나를 추가하고 숫자 layer ID를 반환합니다. 반드시 `withFrame()` 안에서 호출해야 하며, 이 엄격 API는 실패 시 Promise를 reject합니다.
+- `renderer.renderLayer(layer, layerOptions)`: 활성 frame에 layer 하나를 추가하고 숫자 layer ID를 반환합니다. `renderDrills: false`로 drill을 의도적으로 건너뛰면 `null`을 반환합니다. 반드시 `withFrame()` 안에서 호출해야 하며, 이 엄격 API는 실패 시 Promise를 reject합니다.
+- `renderer.renderCompositeLayer(sourceLayerIds, options)`: 현재 frame의 Gerber ID 2–24개를 조합한 composite를 추가합니다. Source를 먼저 추가한 뒤 `withFrame()` 안에서 호출해야 합니다.
 - `renderer.renderLayers(layers, options)`: 여러 layer를 추가하고 `{ renderedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뛰며, 엄격 모드가 필요하면 `layerErrorMode: "throw"`를 사용하세요.
 - `renderer.exportPng(exportOptions)`: 마지막 브라우저 frame을 PNG `Blob`으로 내보냅니다.
 - `renderer.exportPngStream(writable, exportOptions)`: 마지막 브라우저 frame을 `Blob`으로 조립하지 않고 `WritableStream`에 내보내며 성공 시 닫고 실패 시 중단합니다.
 - `renderer.dispose()`: WebGL context를 해제합니다.
 
+브라우저 export는 `withFrame()`이 성공적으로 완료된 뒤에만 가능하며, frame 시작 전·실행 중·실패 후에는 reject됩니다. `withFrame()` callback 실행 중에는 `dispose()`가 reject됩니다. Export 진행 중에는 canvas 변경을 막기 위해 새 frame, 다른 export, `dispose()`도 reject됩니다.
+
 ## Node.js 사용
 
 Node.js 진입점을 사용하기 전에 `node-gles-webgl2`를 설치하세요. Node.js와 CLI 렌더링은 Linux x64/arm64, macOS arm64/x64, Windows x64/arm64에서 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2)를 통해 지원됩니다.
+`fileLayer()`, `{ path }`, `file:` URL로 전달하는 filesystem source는 300 MiB
+이하의 regular file이어야 합니다.
 
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";
@@ -221,15 +244,20 @@ await renderGerberToPngFile(
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG chunk를 Node writable stream에 씁니다.
 - `fileLayer(path, options)`: path 기반 Node layer config를 만듭니다. `options`는 `name`, `color`, `alpha`, `offsetX`, `offsetY`, `inverted`, `kind`를 받습니다.
 - `packageRoot()`: 설치된 패키지 directory 경로를 반환합니다.
-- `renderer.loadLayer(layer, layerOptions)`: Node layer 하나를 한 번 파싱하고 여러 frame에서 재사용할 수 있는 prepared layer를 반환합니다.
+- `renderer.loadLayer(layer, layerOptions)`: Node layer 하나를 한 번 파싱하고 여러 frame에서 재사용할 수 있는 prepared layer를 반환합니다. `renderDrills: false`로 drill을 의도적으로 건너뛸 때만 `null`을 반환합니다.
 - `renderer.loadLayers(layers, options)`: 여러 layer를 파싱하고 `{ layers, loadedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뜁니다.
 - `renderer.withFrame(frameOptions, callback)`: headless render frame을 시작하고 callback이 끝난 뒤 렌더링된 pixel을 저장합니다.
-- `renderer.renderLayer(layer, layerOptions)`: 활성 frame에 layer 하나를 추가하고 숫자 layer ID를 반환합니다. 반드시 `withFrame()` 안에서 호출해야 하며, 이 엄격 API는 실패 시 Promise를 reject합니다.
+- `renderer.renderLayer(layer, layerOptions)`: 활성 frame에 layer 하나를 추가하고 숫자 layer ID를 반환합니다. `renderDrills: false`로 drill을 의도적으로 건너뛰면 `null`을 반환합니다. 반드시 `withFrame()` 안에서 호출해야 하며, 이 엄격 API는 실패 시 Promise를 reject합니다.
+- `renderer.renderCompositeLayer(sourceLayerIds, options)`: 현재 frame의 Gerber ID 2–24개를 조합한 composite를 추가합니다. Source를 먼저 추가한 뒤 `withFrame()` 안에서 호출해야 합니다.
 - `renderer.renderLayers(layers, options)`: 여러 layer를 추가하고 `{ renderedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뛰며, 엄격 모드가 필요하면 `layerErrorMode: "throw"`를 사용하세요.
 - `renderer.exportPng(exportOptions)`: 마지막 Node frame을 메모리상의 PNG 바이트로 내보냅니다.
 - `renderer.exportPngStream(writable, exportOptions)`: 마지막 Node frame을 writable stream으로 내보냅니다.
 - `renderer.exportPngFile(outputPath, exportOptions)`: 마지막 Node frame을 임시 파일로 내보낸 뒤 성공하면 `outputPath`를 교체합니다.
 - `renderer.dispose()`: GLES context를 해제합니다.
+
+`withFrame()` callback 실행 중에는 `dispose()`를 거부합니다. 재사용 Node export가
+진행 중일 때는 GLES context가 중간에 교체되지 않도록 새 frame, 다른 export,
+`dispose()`를 거부합니다.
 
 같은 Gerber 입력을 여러 번 렌더링할 때는 prepared layer를 사용하세요.
 
@@ -257,8 +285,89 @@ try {
 ```
 
 Prepared layer geometry는 load 시점의 `offsetX`, `offsetY`, `preserveArcRegions`, `arcTessellationQuality` 값으로 파싱됩니다. 이 옵션을 바꾸려면 layer를 다시 load해야 합니다. Frame별 색상과 alpha는 `renderLayer(preparedLayer, layerOptions)`에서 재정의할 수 있습니다.
+Prepared 객체를 충돌하는 parse option과 함께 `loadLayer()` 또는 `loadLayers()`에 다시 전달하면 reject됩니다. Source content retention도 parsing 후에는 추가할 수 없으므로 원본 source를 `retainSourceContentForInversion: true`로 다시 load하세요.
 
 Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`, `renderGerberToPngBuffer`, `renderGerberToPngFile`, `renderLayers`)는 load 가능한 모든 유효한 layer를 렌더링합니다. 모든 layer가 실패하면 첫 번째 layer error로 Promise를 reject합니다.
+
+## Composite Layer
+
+`withFrame()` 안에서 일반 Gerber source를 먼저 추가한 뒤 composite를 만드세요.
+Composite는 서로 다른 Gerber layer ID 2–24개를 받습니다. Drill ID, composite
+ID, 중복 ID, stale ID, 이전 frame에서 반환된 ID는 오류입니다.
+
+Composite 오류는 strict하게 전달됩니다. Browser API에서 validation/생성 오류는
+`renderCompositeLayer()`를 reject하고 GPU allocation/render 오류는 바깥
+`withFrame()` Promise를 reject합니다. Node API는 먼저 logical definition을
+기록하므로 생성 및 GPU 오류 모두 `exportPng()`, `exportPngStream()`,
+`exportPngFile()`에서 발생합니다. Node에서는 export Promise를 catch하세요.
+
+```js
+await renderer.withFrame({ width: 1600, height: 1000, compositeMode: "stack" }, async () => {
+  const paste = await renderer.renderLayer(
+    { source: pasteGerber, name: "top.gtp" },
+    { visible: false },
+  );
+  const notes = await renderer.renderLayer(
+    { source: fabGerber, name: "fab.gbr" },
+    { visible: false },
+  );
+  await renderer.renderCompositeLayer([paste, notes], {
+    name: "Paste without notes",
+    preset: "difference",
+    color: "#00a81c",
+    alpha: 0.7,
+  });
+});
+```
+
+`visible: false`인 source는 최종 출력에서는 숨지만 composite dependency로는
+계속 렌더링됩니다. Polarity, aperture block, step-and-repeat, transform, exact
+region, inversion, minimum feature width는 coverage에 반영되고 source color와
+alpha는 무시됩니다.
+`CompositeLayerOptions.visible: false`는 composite 정의를 frame에 유지하되
+해당 composite를 최종 출력에서 제외합니다.
+
+`preset`은 `"union"`, `"intersection"`, `"difference"` 중 하나입니다.
+Difference는 첫 source에서 나머지 source의 union을 뺍니다. 정확한 coverage
+조합을 고르려면 `preset` 대신 `visibleAreas`를 사용하세요.
+
+```js
+await renderer.renderCompositeLayer([top, mask, notes], {
+  visibleAreas: ["110", "101", "000"],
+  outlineLayerId: outline,
+});
+```
+
+가장 왼쪽 bit가 첫 source ID입니다. 중복 pattern은 제거되고 빈 배열은
+거부됩니다. `"000"`은 resolved outline 내부에서만 source가 없는 pixel을
+선택합니다. `outlineLayerId`는 현재 frame의 일반 Gerber여야 하며, 생략하면
+finite frame bounds를 사용합니다. Composite inversion도 같은 영역으로
+clipping됩니다. `blend`는 additive, `stack`은 호출 순서의 source-over입니다.
+One-shot `renderLayers()` 배열에는 composite 선언을 섞을 수 없습니다.
+
+CLI에서는 `--composite-config <path>`로 JSON을 전달합니다.
+
+```json
+{
+  "hiddenSources": ["top.gtp", "fab.gbr"],
+  "composites": [{
+    "name": "Paste without notes",
+    "sources": ["top.gtp", "fab.gbr"],
+    "preset": "difference",
+    "color": "#00a81c",
+    "alpha": 0.7,
+    "outline": "auto"
+  }]
+}
+```
+
+Selector는 1-based input index, exact name, basename을 받습니다. JSON number는
+항상 index이며 string match가 모호하면 임의로 선택하지 않고 오류를 냅니다.
+`hiddenSources`는 일치하는 input을 최종 출력에서 숨기며, hidden Gerber는
+composite dependency로 유지합니다. Outline 우선순위는 composite JSON `outline`, CLI
+`--outline-layer`, auto detection, bounds fallback입니다. Parse에 실패한
+source의 dependent composite만 건너뛰고 다른 정상 layer/composite는 계속
+렌더링합니다. `"bounds"`를 명시하면 auto detection을 건너뜁니다.
 
 ## API 옵션
 
@@ -267,7 +376,7 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `width`: 출력 너비(px). 기본값은 브라우저 canvas width, Node에서는 `1200`입니다.
 - `height`: 출력 높이(px). 기본값은 브라우저 canvas height, Node에서는 `800`입니다.
 - `clear`: 렌더링 전 frame을 지웁니다. 기본값은 `true`이며, Node는 항상 새 buffer에 렌더링합니다.
-- `background`: 출력 배경입니다. 기본값은 투명 출력을 의미하는 `null`입니다. CSS color string 또는 `[r, g, b, a]`를 받습니다.
+- `background`: 출력 배경입니다. 기본값은 투명 출력을 의미하는 `null`입니다. Browser export는 canvas가 지원하는 모든 CSS color를 받고, Node는 named CSS color, hex, comma-form `rgb()`/`rgba()`를 받습니다. 둘 다 `[r, g, b, a]`를 받습니다.
 - `fit`: load된 모든 layer의 경계를 output frame에 맞춥니다. 기본값은 `true`입니다.
 - `padding`: `fit`이 켜져 있을 때 적용되는 pixel padding입니다. 기본값은 `0`입니다.
 - `flipX`: frame center를 기준으로 output을 좌우 반전합니다. 기본값은 `false`입니다.
@@ -286,13 +395,15 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `framebufferMemorySafetyFactor`: Node 전용 full-frame framebuffer memory estimate multiplier입니다. 기본값은 `2`입니다.
 - `strategy`: Node 전용 PNG export strategy입니다. `"auto"`, `"full-frame"`, `"stream"` 중 하나이며 기본값은 `"auto"`입니다.
 - `layerErrorMode`: `"skip"`은 남은 유효한 layer를 계속 렌더링하고, `"throw"`는 첫 실패에서 Promise를 reject합니다. 기본값은 `"skip"`입니다.
-- `onLayerError`: `"skip"` mode에서 건너뛴 layer를 받는 callback입니다. 전달 값은 `{ layer, name, error }`입니다.
+- `onLayerError`: `"skip"` mode에서 건너뛴 layer를 받는 sync/async callback입니다. 전달 값은 `{ layer, name, error }`이며 callback을 await하므로 callback rejection은 batch operation을 reject합니다.
 - `rendererOptions`: 브라우저 one-shot helper 전용입니다. 렌더러 생성 시 그대로 전달됩니다.
 
 `layerOptions`는 layer 하나를 제어합니다.
 
-- `color`: layer 색상입니다. 브라우저는 `[r, g, b]`를 받고, Node는 hex와 `rgb()`/`rgba()` string도 받습니다. 기본값은 자동 색상 순환입니다.
+- `color`: layer 색상입니다. 브라우저 일반 layer option은 `[r, g, b]`를 받고, 브라우저 `CompositeLayerOptions.color`는 modern `hsl()`과 space-separated `rgb()`를 포함해 canvas가 지원하는 모든 CSS color를 받습니다. Node는 배열, named CSS color, hex, comma-form `rgb()`/`rgba()`를 받습니다. Layer/composite color string의 alpha component는 무시되므로 별도 `alpha` option을 사용하세요. 기본값은 자동 색상 순환입니다.
 - `alpha`: layer별 opacity입니다. 설정하면 해당 layer의 frame 기본값을 재정의합니다. `stack` 모드에서는 명시적인 Gerber `alpha`가 불투명 기본값을 재정의합니다. Drill layer는 설정하지 않으면 불투명하게 렌더링됩니다.
+- `visible`: 최종 출력 포함 여부입니다. 기본값은 `true`이며 hidden 일반
+  Gerber layer도 composite dependency로 사용할 수 있습니다.
 - `offsetX`: geometry를 load할 때 적용되는 X offset입니다. 기본값은 `0`입니다.
 - `offsetY`: geometry를 load할 때 적용되는 Y offset입니다. 기본값은 `0`입니다.
 - `inverted`: Node 전용입니다. 이 Gerber layer를 `frameOptions.invertedOutline` 기준의 inverted/negative layer로 렌더링합니다. 기본값은 `false`입니다.
@@ -304,6 +415,7 @@ Batch API(`renderGerberToCanvas`, `renderGerberToPng`, `renderGerberToPngStream`
 - `preserveArcRegions`: prepared layer에서 exact region arc를 유지합니다. 기본값은 `true`입니다.
 - `arcTessellationQuality`: region arc를 approximate할 때 prepared layer의 arc quality를 지정합니다.
 - `retainSourceContentForInversion`: Node 전용입니다. prepared layer를 나중에 inverted layer나 explicit outline source로 사용할 수 있도록 원본 Gerber text를 유지합니다.
+- `renderDrills`: Node load 전용 option입니다. `false`이면 drill input을 건너뛰며, `loadLayer()`는 `null`을 반환하고 `loadLayers()`는 반환하는 `layers`에서 해당 input을 제외합니다.
 
 `exportOptions`는 PNG export를 제어합니다.
 
@@ -348,6 +460,7 @@ gerber-renderer top.gbr bottom.gbr \
   --alpha 0.7 \
   --composite-mode blend \
   --minimum-feature-pixels 1 \
+  --composite-config composites.json \
   --invert-layer mask.gbr \
   --outline-layer board.gko
 ```
@@ -381,12 +494,21 @@ CLI 옵션:
 - `--arc-quality <0|1|2>`: arc 근사 품질입니다. 기본값은 `1`입니다.
 - `--invert-layer <selector>`: Gerber layer를 inverted/negative layer로 렌더링합니다. 여러 layer를 뒤집으려면 반복해서 지정합니다. Selector는 1-based layer index, exact layer name, basename을 지원합니다.
 - `--outline-layer <selector>`: inverted layer에 사용할 board outline입니다. `auto`, `bounds`, 1-based layer index, exact layer name, basename을 사용할 수 있습니다. 기본값은 `auto`입니다.
+- `--composite-config <path>`: composite 정의와 hidden source selector가 담긴
+  JSON 파일입니다.
 - `--flip-x`: output을 좌우 반전합니다.
 - `--flip-y`: output을 상하 반전합니다.
 - `--no-drill`: NC drill layer를 건너뜁니다.
 - `--no-fit`: fit-to-view를 끕니다.
 - `--skill`: AI agent를 위한 [package usage notes](SKILL.md)를 출력합니다.
 - `-h, --help`: CLI 사용법을 출력하고 종료합니다.
+
+CLI Gerber/drill input과 압축 archive 파일은 각각 300 MiB, composite JSON은
+16 MiB로 제한됩니다. TAR archive는 최대 1,000개 header와 총 300 MiB의
+regular-file data를 포함할 수 있으며, entry별 한도는 300 MiB이고 전체
+압축 해제 비율 한도는 1,000:1입니다. TAR metadata는 header별 1 MiB,
+archive path는 4 KiB로 제한되며 malformed 또는 truncated archive는 렌더링
+전에 오류로 처리됩니다.
 
 `--arc-quality`는 `--approx-region-arcs`와 함께 사용할 때 의미가 있습니다. Quality 값은 `0` low, `1` normal, `2` high입니다.
 

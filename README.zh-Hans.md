@@ -33,6 +33,10 @@
 - 支持 NC drill 叠加渲染
 - 支持移动设备触控操作
 - 支持按层控制颜色、透明度和可见性
+- Composite Layer 可将 2–24 个 Gerber 源的 coverage 按 Union、
+  Intersection、Difference 或手动选定的组合进行合成
+- `Select Visible Area`：单击即可同时切换所有具有相同
+  source-coverage pattern 的不连续区域
 - 支持要素拾取和选中区域高亮
 - 支持水平/垂直翻转
 - 标尺测量支持 mm/inch 单位切换
@@ -107,6 +111,9 @@ Node.js 和 CLI 渲染通过
 
 ## 项目结构
 
+Rust/WASM 管线及模块详情请参阅
+[wasm/README.md](wasm/README.md)。
+
 ```text
 wasm-gerber-viewer/
 ├── index.html                         # 应用外壳
@@ -116,9 +123,11 @@ wasm-gerber-viewer/
 │   ├── main.js                        # 浏览器入口
 │   ├── core/                          # GerberViewer 状态和流程编排
 │   ├── loading/                       # 文件、压缩包、URL、repeat 和 worker 加载
-│   ├── layers/                        # 图层列表 UI、过滤、颜色和右键操作
+│   ├── layers/                        # 图层列表 UI、过滤、颜色和 composite bitset
+│   │   └── composite-layers.js        # preset、source slot 和 visible-area bitset
 │   ├── rendering/                     # viewport 计算、测量和截图导出
-│   └── ui/                            # DOM 查询、抽屉、通知、诊断和选项
+│   └── ui/                            # dialog、DOM 查询、通知、诊断和选项
+│       └── composite-layer-dialog.js   # Composite 创建、编辑和重命名 dialog
 ├── vendor/                            # 内置浏览器第三方库
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm 包和 Node CLI
@@ -133,13 +142,29 @@ wasm-gerber-viewer/
 │       ├── parser/                    # Gerber 解析、aperture、命令处理和测试
 │       ├── drill/                     # Excellon/NC drill 解析和测试
 │       ├── interaction/               # picking、compact payload 和高亮数据
-│       ├── renderer/                  # WebGL 渲染器、GPU 资源、shader 和测试
+│       ├── renderer/                  # Gerber/composite mask、GPU 资源、shader 和测试
+│       │   ├── composite.rs           # membership、lookup、outline、cache 和 picking 状态
+│       │   └── shaders/composite_*.frag.glsl
 │       └── util/                      # 格式化和工具函数
 ├── demo/                              # 示例和性能测试 Gerber
 ├── docs/                              # README assets
 ├── scripts/                           # 构建和部署脚本
 └── .github/workflows/                 # CI、部署和 release workflow
 ```
+
+## Composite 验证与性能
+
+运行 `npm run validate:composite` 可执行完整的 Rust、GLSL、release
+WASM、npm/Node、TypeScript、Playwright 和 diff 验证。
+
+24-source 4K acceptance 测量需在已启用 Google Chrome 硬件加速的
+desktop session 中运行 `npm run benchmark:composite:4k:chrome`。报告会记录
+unmasked GPU、viewport、pass 数、timing、FBO format 以及 CPU/GPU
+allocation size；software renderer 或未达到 500 ms selection / 100 ms toggle
+目标时会失败。`COMPOSITE_BENCHMARK_CHANNEL=chromium`、
+`COMPOSITE_BENCHMARK_HEADLESS=1` 和 `COMPOSITE_BENCHMARK_ALLOW_SOFTWARE=1`
+仅用于 non-acceptance smoke run。该模式仍会报告 timing 和 functional cache
+counter，但不会以 GPU identity 或 timing threshold 作为 exit gate。
 
 ## 浏览器要求
 

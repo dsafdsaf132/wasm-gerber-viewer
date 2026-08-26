@@ -42,6 +42,81 @@ D10*
 X0Y0D03*
 M02*`;
 
+test("batch render callbacks await rejection and leave the renderer reusable", async () => {
+  const unhandled = [];
+  const onUnhandledRejection = (error) => {
+    unhandled.push(error);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  try {
+    for (const layerErrorMode of ["skip", "throw"]) {
+      const renderer = new NodeGerberRenderer({}, {});
+      renderer.renderLayer = async () => {
+        throw new Error("forced render layer failure");
+      };
+
+      await assert.rejects(
+        renderer.withFrame({ width: 1, height: 1 }, async () => {
+          await renderer.renderLayers(["bad.gbr"], {
+            layerErrorMode,
+            async onLayerError() {
+              throw new Error(`async render callback failure (${layerErrorMode})`);
+            },
+          });
+        }),
+        new RegExp(`async render callback failure \\(${layerErrorMode}\\)`),
+      );
+      assert.equal(renderer.frame, null);
+
+      await renderer.withFrame({ width: 1, height: 1 }, async () => {});
+      assert.ok((await renderer.exportPng()).length > 8);
+      renderer.dispose();
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
+test("batch load callbacks await rejection and leave the renderer reusable", async () => {
+  const unhandled = [];
+  const onUnhandledRejection = (error) => {
+    unhandled.push(error);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  try {
+    for (const layerErrorMode of ["skip", "throw"]) {
+      const renderer = new NodeGerberRenderer({}, {});
+      renderer.loadLayer = async () => {
+        throw new Error("forced load layer failure");
+      };
+
+      await assert.rejects(
+        renderer.loadLayers(["bad.gbr"], {
+          layerErrorMode,
+          async onLayerError() {
+            throw new Error(`async load callback failure (${layerErrorMode})`);
+          },
+        }),
+        new RegExp(`async load callback failure \\(${layerErrorMode}\\)`),
+      );
+
+      renderer.loadLayer = async () => ({ prepared: true });
+      const recovered = await renderer.loadLayers(["good.gbr"]);
+      assert.equal(recovered.loadedCount, 1);
+      assert.deepEqual(recovered.failures, []);
+      renderer.dispose();
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
 test("viewer layer kind keeps ambiguous .drd Gerbers as Gerber", () => {
   assert.equal(getLayerSourceKind("board.drd", GERBER_CONTENT), "gerber");
   assert.equal(getLayerSourceKind("holes.drd", DRILL_CONTENT), "drill");
@@ -463,12 +538,15 @@ test("renderDrills false skips drill sources before reading", async () => {
   );
   assert.equal(browserRecord, null);
 
-  const nodeRecord = await NodeGerberRenderer.prototype.createPreparedLayer.call(
-    { wasmModule: {} },
-    fileLayer("/missing/holes.drl"),
-    { renderDrills: false },
-  );
-  assert.equal(nodeRecord, null);
+  const node = new NodeGerberRenderer({}, {});
+  try {
+    const nodeRecord = await node.loadLayer(fileLayer("/missing/holes.drl"), {
+      renderDrills: false,
+    });
+    assert.equal(nodeRecord, null);
+  } finally {
+    node.dispose();
+  }
 });
 
 test("node prepared layer rejects late inversion without retained source", async () => {
@@ -479,6 +557,90 @@ test("node prepared layer rejects late inversion without retained source", async
   await assert.rejects(
     renderer.withFrame({}, async () => {
       await renderer.renderLayer(prepared, { inverted: true });
+    }),
+    /Prepared layer cannot be inverted because its source content was not retained/,
+  );
+});
+
+test("node prepared layers reject conflicting reload parse and retention options", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+  const prepared = await renderer.loadLayer(GERBER_CONTENT, {
+    name: "fixed-options.gbr",
+    preserveArcRegions: false,
+    arcTessellationQuality: 0,
+  });
+
+  const matching = await renderer.loadLayer(prepared, {
+    preserveArcRegions: false,
+    arcTessellationQuality: 0,
+    retainSourceContentForInversion: false,
+  });
+  assert.deepEqual(matching.parseOptions, prepared.parseOptions);
+  assert.equal(matching.content, null);
+  await assert.rejects(
+    renderer.loadLayer(prepared, { preserveArcRegions: true }),
+    /preserveArcRegions is fixed/,
+  );
+  await assert.rejects(
+    renderer.loadLayer(prepared, { arcTessellationQuality: 2 }),
+    /arcTessellationQuality is fixed/,
+  );
+  await assert.rejects(
+    renderer.loadLayer(prepared, { retainSourceContentForInversion: true }),
+    /cannot retain source content after parsing/,
+  );
+  await assert.rejects(
+    renderer.loadLayers([prepared], {
+      preserveArcRegions: true,
+      layerErrorMode: "throw",
+    }),
+    /preserveArcRegions is fixed/,
+  );
+
+  const defaultPrepared = await renderer.loadLayer(GERBER_CONTENT, {
+    name: "default-options.gbr",
+  });
+  const batchFailures = [];
+  const batch = await renderer.loadLayers([defaultPrepared, prepared], {
+    preserveArcRegions: true,
+    arcTessellationQuality: 1,
+    onLayerError: (failure) => batchFailures.push(failure),
+  });
+  assert.equal(batch.loadedCount, 1);
+  assert.equal(batch.failures.length, 1);
+  assert.equal(batchFailures.length, 1);
+  assert.match(batch.failures[0].error.message, /preserveArcRegions is fixed/);
+
+  const retained = await renderer.loadLayer(GERBER_CONTENT, {
+    name: "retained-options.gbr",
+    preserveArcRegions: false,
+    arcTessellationQuality: 0,
+    retainSourceContentForInversion: true,
+  });
+  const retainedReload = await renderer.loadLayer(retained, {
+    preserveArcRegions: false,
+    arcTessellationQuality: 0,
+    retainSourceContentForInversion: true,
+  });
+  assert.equal(typeof retainedReload.content, "string");
+  renderer.dispose();
+});
+
+test("node prepared layers retain only region source text for exact composite outlines", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+  const ordinary = await renderer.loadLayer(GERBER_CONTENT, { name: "mask.gbs" });
+  const region = await renderer.loadLayer(
+    `${GERBER_CONTENT.replace("X0Y0D03*", "G036*\nX0Y0D02*\nX1000000Y0D01*\nG037*")}`,
+    { name: "routing-region.gbr" },
+  );
+
+  assert.equal(ordinary.content, null);
+  assert.equal(ordinary.outlineContent, null);
+  assert.equal(region.content, null);
+  assert.equal(typeof region.outlineContent, "string");
+  await assert.rejects(
+    renderer.withFrame({}, async () => {
+      await renderer.renderLayer(region, { inverted: true });
     }),
     /Prepared layer cannot be inverted because its source content was not retained/,
   );

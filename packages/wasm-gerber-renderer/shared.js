@@ -25,8 +25,23 @@ export const DEFAULT_ARC_TESSELLATION_QUALITY = 1;
 export const DEFAULT_COMPOSITE_MODE = "blend";
 export const COMPOSITE_MODE_BLEND = "blend";
 export const COMPOSITE_MODE_STACK = "stack";
+export const COMPOSITE_PRESET_UNION = "union";
+export const COMPOSITE_PRESET_INTERSECTION = "intersection";
+export const COMPOSITE_PRESET_DIFFERENCE = "difference";
+export const MIN_COMPOSITE_SOURCES = 2;
+export const MAX_COMPOSITE_SOURCES = 24;
+export const MAX_SOURCE_FILE_SIZE_BYTES = 300 * 1024 * 1024;
+export const MAX_COMPOSITE_CONFIG_SIZE_BYTES = 16 * 1024 * 1024;
+export const MAX_ARCHIVE_ENTRY_COUNT = 1_000;
+export const MAX_ARCHIVE_TOTAL_SIZE_BYTES = MAX_SOURCE_FILE_SIZE_BYTES;
+export const MAX_ARCHIVE_COMPRESSION_RATIO = 1_000;
+export const MAX_ARCHIVE_METADATA_SIZE_BYTES = 1024 * 1024;
+export const MAX_ARCHIVE_PATH_SIZE_BYTES = 4 * 1024;
+export const MAX_TAR_EXPANDED_SIZE_BYTES =
+  MAX_ARCHIVE_TOTAL_SIZE_BYTES + (MAX_ARCHIVE_ENTRY_COUNT + 2) * 1024;
 export const LAYER_KIND_GERBER = "gerber";
 export const LAYER_KIND_DRILL = "drill";
+export const LAYER_KIND_COMPOSITE = "composite";
 export const INVERTED_OUTLINE_AUTO = "auto";
 export const INVERTED_OUTLINE_BOUNDS = "bounds";
 
@@ -208,7 +223,9 @@ export class FrameState {
 
   addLayer(layer) {
     this.layers.push(layer);
-    this.bounds = mergeBounds(this.bounds, layer.bounds);
+    if (layer.visible !== false) {
+      this.bounds = mergeBounds(this.bounds, layer.bounds);
+    }
   }
 
   nextColor() {
@@ -230,7 +247,7 @@ export class FrameState {
       bounds: this.bounds,
       view,
       layers: this.layers.map((layer) => ({
-        id: layer.layerId,
+        id: layer.id ?? layer.layerId,
         name: layer.name,
         bounds: layer.bounds,
         color: layer.color,
@@ -276,6 +293,73 @@ export function normalizeCompositeMode(value) {
     return mode;
   }
   throw new TypeError("compositeMode must be 'blend' or 'stack'.");
+}
+
+export function validateCompositeSourceCount(sourceCount) {
+  const count = Number(sourceCount);
+  if (
+    !Number.isInteger(count) ||
+    count < MIN_COMPOSITE_SOURCES ||
+    count > MAX_COMPOSITE_SOURCES
+  ) {
+    throw new TypeError("Composite layers require between 2 and 24 Gerber sources.");
+  }
+  return count;
+}
+
+export function createCompositeVisibleBitset(sourceCount, options = {}) {
+  const count = validateCompositeSourceCount(sourceCount);
+  if (options == null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Composite layer options must be an object.");
+  }
+  const hasPreset = options.preset != null;
+  const hasVisibleAreas = options.visibleAreas != null;
+  if (hasPreset && hasVisibleAreas) {
+    throw new TypeError("preset and visibleAreas cannot be used together.");
+  }
+
+  const byteLength = Math.ceil(2 ** count / 8);
+  const bits = new Uint8Array(byteLength);
+  if (hasVisibleAreas) {
+    if (!Array.isArray(options.visibleAreas)) {
+      throw new TypeError("visibleAreas must be an array of binary strings.");
+    }
+    if (options.visibleAreas.length === 0) {
+      throw new TypeError("visibleAreas cannot be empty.");
+    }
+    for (const pattern of new Set(options.visibleAreas)) {
+      if (typeof pattern !== "string" || pattern.length !== count) {
+        throw new TypeError(
+          `Each visibleAreas pattern must contain exactly ${count} bits.`,
+        );
+      }
+      if (!/^[01]+$/.test(pattern)) {
+        throw new TypeError("visibleAreas patterns may contain only '0' and '1'.");
+      }
+      let code = 0;
+      for (let slot = 0; slot < count; slot += 1) {
+        if (pattern[slot] === "1") {
+          code += 2 ** slot;
+        }
+      }
+      bits[Math.floor(code / 8)] |= 1 << (code % 8);
+    }
+    return bits;
+  }
+
+  const preset = options.preset ?? COMPOSITE_PRESET_UNION;
+  if (preset === COMPOSITE_PRESET_UNION) {
+    bits.fill(0xff);
+    bits[0] &= 0xfe;
+  } else if (preset === COMPOSITE_PRESET_INTERSECTION) {
+    const code = 2 ** count - 1;
+    bits[Math.floor(code / 8)] |= 1 << (code % 8);
+  } else if (preset === COMPOSITE_PRESET_DIFFERENCE) {
+    bits[0] |= 1 << 1;
+  } else {
+    throw new TypeError("preset must be 'union', 'intersection', or 'difference'.");
+  }
+  return bits;
 }
 
 export function normalizeInvertedOutline(value) {
@@ -411,7 +495,7 @@ export async function renderLayersBestEffort(renderer, layers, options = {}) {
       };
       failures.push(failure);
       if (typeof options.onLayerError === "function") {
-        options.onLayerError(failure);
+        await options.onLayerError(failure);
       }
       if (layerErrorMode === "throw") {
         throw error;
@@ -450,7 +534,7 @@ export async function loadLayersBestEffort(renderer, layers, options = {}) {
       };
       failures.push(failure);
       if (typeof onLayerError === "function") {
-        onLayerError(failure);
+        await onLayerError(failure);
       }
       if (layerErrorMode === "throw") {
         throw error;
@@ -682,7 +766,7 @@ export async function sourceToText(source, options = {}) {
   }
   if (ArrayBuffer.isView(source)) {
     return new TextDecoder().decode(
-      source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength),
+      new Uint8Array(source.buffer, source.byteOffset, source.byteLength),
     );
   }
 
@@ -921,8 +1005,33 @@ export function toByte(value) {
 export const PNG_SIGNATURE = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+export const MAX_PNG_DIMENSION = 0x7fffffff;
+
+export function validatePngDimensions(width, height) {
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width < 1 ||
+    height < 1 ||
+    width > MAX_PNG_DIMENSION ||
+    height > MAX_PNG_DIMENSION
+  ) {
+    throw new RangeError(
+      `PNG dimensions must be safe integers from 1 to ${MAX_PNG_DIMENSION}.`,
+    );
+  }
+  const rgbaRowBytes = width * 4;
+  const rgbaPixelBytes = rgbaRowBytes * height;
+  if (
+    !Number.isSafeInteger(rgbaRowBytes) ||
+    !Number.isSafeInteger(rgbaPixelBytes)
+  ) {
+    throw new RangeError("PNG RGBA size exceeds JavaScript safe-integer limits.");
+  }
+}
 
 export function createPngHeader(width, height, colorType) {
+  validatePngDimensions(width, height);
   const header = new Uint8Array(13);
   writeUint32(header, 0, width);
   writeUint32(header, 4, height);

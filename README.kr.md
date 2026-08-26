@@ -33,6 +33,10 @@ PCB 시각화를 위한 WASM/WebGL2 기반 Gerber 파일 뷰어입니다.
 - NC drill 오버레이 렌더링 지원
 - 모바일 기기 터치 조작 지원
 - 레이어별 색상, 투명도, 표시 여부 제어
+- 2–24개의 Gerber source coverage를 Union, Intersection, Difference 또는
+  직접 선택한 조합으로 합성하는 Composite Layer
+- `Select Visible Area`: 같은 source-coverage pattern을 가진 떨어진 영역을
+  한 번의 클릭으로 함께 전환
 - 도형 선택과 선택 영역 강조 표시 지원
 - 좌우/상하 반전 제어
 - mm/inch 단위 전환이 가능한 자 측정
@@ -107,6 +111,9 @@ Node.js와 CLI 렌더링은
 
 ## 프로젝트 구조
 
+Rust/WASM pipeline과 module 세부 내용은
+[wasm/README.md](wasm/README.md)를 참고하세요.
+
 ```text
 wasm-gerber-viewer/
 ├── index.html                         # 애플리케이션 셸
@@ -116,9 +123,11 @@ wasm-gerber-viewer/
 │   ├── main.js                        # 브라우저 진입점
 │   ├── core/                          # GerberViewer 상태와 실행 흐름
 │   ├── loading/                       # 파일, 압축, URL, repeat, worker 로딩
-│   ├── layers/                        # 레이어 목록 UI, 필터, 색상, 컨텍스트 동작
+│   ├── layers/                        # 레이어 목록 UI, 필터, 색상, composite bitset
+│   │   └── composite-layers.js        # preset, source slot, visible-area bitset
 │   ├── rendering/                     # viewport 계산, 측정, 스크린샷 내보내기
-│   └── ui/                            # DOM 조회, 드로어, 알림, 진단, 옵션
+│   └── ui/                            # dialog, DOM 조회, 알림, 진단, 옵션
+│       └── composite-layer-dialog.js   # Composite 생성, 편집, 이름 변경 dialog
 ├── vendor/                            # vendored 브라우저 라이브러리
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm 패키지와 Node CLI
@@ -133,13 +142,30 @@ wasm-gerber-viewer/
 │       ├── parser/                    # Gerber 파서, aperture, 명령 처리, 테스트
 │       ├── drill/                     # Excellon/NC drill 파서와 테스트
 │       ├── interaction/               # picking, compact payload, highlight 데이터
-│       ├── renderer/                  # WebGL 렌더러, GPU 리소스, 셰이더, 테스트
+│       ├── renderer/                  # Gerber/composite mask, GPU 리소스, shader, 테스트
+│       │   ├── composite.rs           # membership, lookup, outline, cache, picking 상태
+│       │   └── shaders/composite_*.frag.glsl
 │       └── util/                      # 포맷팅과 유틸리티
 ├── demo/                              # 샘플과 성능 테스트 Gerber
 ├── docs/                              # README assets
 ├── scripts/                           # 빌드와 배포 스크립트
 └── .github/workflows/                 # CI, 배포, release 워크플로
 ```
+
+## Composite 검증과 성능
+
+전체 Rust, GLSL, release WASM, npm/Node, TypeScript, Playwright, diff 검증은
+`npm run validate:composite`로 실행합니다.
+
+24-source 4K acceptance 측정은 Google Chrome hardware acceleration이
+활성화된 desktop session에서 `npm run benchmark:composite:4k:chrome`으로
+실행합니다. Report에는 unmasked GPU, viewport, pass 수, timing, FBO
+format, CPU/GPU allocation size가 포함되며 software renderer와 500 ms
+selection / 100 ms toggle 목표 미달은 실패로 처리됩니다.
+`COMPOSITE_BENCHMARK_CHANNEL=chromium`, `COMPOSITE_BENCHMARK_HEADLESS=1`,
+`COMPOSITE_BENCHMARK_ALLOW_SOFTWARE=1`은 non-acceptance smoke run에서만
+사용하세요. 이 모드도 timing과 functional cache counter를 출력하지만 GPU
+identity와 timing threshold는 exit gate로 사용하지 않습니다.
 
 ## 브라우저 요구 사항
 

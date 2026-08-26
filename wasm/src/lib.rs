@@ -13,7 +13,7 @@ use crate::interaction::InteractionLayer;
 use crate::parser::{parse_gerber_payload_with_options, GerberParser, ParsedGerberLayer};
 use crate::renderer::Renderer;
 use crate::util::format_bytes;
-use js_sys::{Object, Reflect};
+use js_sys::{Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 use web_sys::WebGl2RenderingContext;
 
@@ -213,6 +213,7 @@ pub struct GerberProcessor {
     minimum_feature_pixels: f32,
     drill_outline_pixels: f32,
     drill_outline_layer_ids: Vec<u32>,
+    drill_layer_ids: Vec<u32>,
     interaction_enabled: bool,
     interaction_layers: Vec<Option<InteractionLayer>>,
 }
@@ -226,6 +227,7 @@ impl Default for GerberProcessor {
             minimum_feature_pixels: 0.0,
             drill_outline_pixels: 0.0,
             drill_outline_layer_ids: Vec::new(),
+            drill_layer_ids: Vec::new(),
             interaction_enabled: false,
             interaction_layers: Vec::new(),
         }
@@ -280,6 +282,12 @@ impl GerberProcessor {
                 "File does not contain valid drill data (no holes found)",
             ));
         }
+        self.drill_outline_layer_ids
+            .try_reserve(1)
+            .map_err(|_| JsValue::from_str("Unable to reserve drill outline layer bookkeeping"))?;
+        self.drill_layer_ids
+            .try_reserve(2)
+            .map_err(|_| JsValue::from_str("Unable to reserve drill layer bookkeeping"))?;
 
         let (outline_layer_id, fill_layer_id) = {
             let Some(renderer) = &mut self.renderer else {
@@ -301,6 +309,8 @@ impl GerberProcessor {
         };
 
         self.drill_outline_layer_ids.push(outline_layer_id as u32);
+        self.drill_layer_ids.push(outline_layer_id as u32);
+        self.drill_layer_ids.push(fill_layer_id as u32);
         self.set_interaction_layer(outline_layer_id, interaction_layer);
         self.set_interaction_layer(fill_layer_id, None);
 
@@ -544,8 +554,7 @@ impl GerberProcessor {
         height: u32,
     ) -> Result<String, JsValue> {
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_framebuffer_size(width, height)?;
-            renderer.restore_context(gl)?;
+            renderer.restore_context_with_size(gl, width, height)?;
         } else {
             let mut renderer = Renderer::new_headless(gl, width, height)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
@@ -634,20 +643,52 @@ impl GerberProcessor {
         outline_offset_x: f32,
         outline_offset_y: f32,
     ) -> Result<u32, JsValue> {
+        let preserve_arc_regions = self.preserve_arc_regions;
+        let arc_tessellation_quality = self.arc_tessellation_quality;
+        self.add_inverted_layer_with_outline_options(
+            target_content,
+            outline_content,
+            target_offset_x,
+            target_offset_y,
+            preserve_arc_regions,
+            arc_tessellation_quality,
+            outline_offset_x,
+            outline_offset_y,
+            preserve_arc_regions,
+            arc_tessellation_quality,
+        )
+    }
+
+    /// Add an inverted display layer while preserving the parse settings of
+    /// independently prepared target and outline sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_inverted_layer_with_outline_options(
+        &mut self,
+        target_content: String,
+        outline_content: String,
+        target_offset_x: f32,
+        target_offset_y: f32,
+        target_preserve_arc_regions: bool,
+        target_arc_tessellation_quality: u32,
+        outline_offset_x: f32,
+        outline_offset_y: f32,
+        outline_preserve_arc_regions: bool,
+        outline_arc_tessellation_quality: u32,
+    ) -> Result<u32, JsValue> {
         let target_layers = parse_layer_data(
             &target_content,
             target_offset_x,
             target_offset_y,
-            self.preserve_arc_regions,
-            self.arc_tessellation_quality,
+            target_preserve_arc_regions,
+            target_arc_tessellation_quality,
             false,
         )?;
         let outline_layers = parse_layer_data(
             &outline_content,
             outline_offset_x,
             outline_offset_y,
-            self.preserve_arc_regions,
-            self.arc_tessellation_quality,
+            outline_preserve_arc_regions,
+            outline_arc_tessellation_quality,
             true,
         )?;
 
@@ -672,12 +713,40 @@ impl GerberProcessor {
         min_y: f32,
         max_y: f32,
     ) -> Result<u32, JsValue> {
+        let preserve_arc_regions = self.preserve_arc_regions;
+        let arc_tessellation_quality = self.arc_tessellation_quality;
+        self.add_inverted_layer_with_bounds_options(
+            target_content,
+            target_offset_x,
+            target_offset_y,
+            preserve_arc_regions,
+            arc_tessellation_quality,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_inverted_layer_with_bounds_options(
+        &mut self,
+        target_content: String,
+        target_offset_x: f32,
+        target_offset_y: f32,
+        target_preserve_arc_regions: bool,
+        target_arc_tessellation_quality: u32,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<u32, JsValue> {
         let target_layers = parse_layer_data(
             &target_content,
             target_offset_x,
             target_offset_y,
-            self.preserve_arc_regions,
-            self.arc_tessellation_quality,
+            target_preserve_arc_regions,
+            target_arc_tessellation_quality,
             false,
         )?;
 
@@ -739,6 +808,409 @@ impl GerberProcessor {
                 "Renderer not initialized. Call init() first.",
             ))
         }
+    }
+
+    fn validate_composite_source_ids(&self, source_layer_ids: &[u32]) -> Result<(), JsValue> {
+        if source_layer_ids
+            .iter()
+            .any(|source_id| self.drill_layer_ids.contains(source_id))
+        {
+            return Err(JsValue::from_str(
+                "Drill layers cannot be used as composite sources",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn add_composite_layer_with_bounds(
+        &mut self,
+        source_layer_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<u32, JsValue> {
+        self.validate_composite_source_ids(source_layer_ids)?;
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?;
+        Ok(renderer.add_composite_layer_from_bounds(
+            source_layer_ids,
+            visible_bits,
+            inverted,
+            Boundary::new(min_x, max_x, min_y, max_y),
+        )? as u32)
+    }
+
+    pub fn add_composite_preset_with_bounds(
+        &mut self,
+        source_layer_ids: &[u32],
+        preset: String,
+        inverted: bool,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<u32, JsValue> {
+        self.validate_composite_source_ids(source_layer_ids)?;
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?;
+        Ok(renderer.add_composite_preset_from_bounds(
+            source_layer_ids,
+            &preset,
+            inverted,
+            Boundary::new(min_x, max_x, min_y, max_y),
+        )? as u32)
+    }
+
+    pub fn add_composite_layer_with_outline(
+        &mut self,
+        source_layer_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        outline_layer_id: u32,
+    ) -> Result<u32, JsValue> {
+        self.validate_composite_source_ids(source_layer_ids)?;
+        if self.drill_layer_ids.contains(&outline_layer_id) {
+            return Err(JsValue::from_str(
+                "Composite outlineLayerId must reference a Gerber layer",
+            ));
+        }
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?;
+        Ok(renderer.add_composite_layer_from_outline(
+            source_layer_ids,
+            visible_bits,
+            inverted,
+            outline_layer_id as usize,
+        )? as u32)
+    }
+
+    pub fn add_composite_layer_with_outline_content(
+        &mut self,
+        source_layer_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        outline_layer_id: u32,
+        outline_content: String,
+        outline_offset_x: f32,
+        outline_offset_y: f32,
+    ) -> Result<u32, JsValue> {
+        let preserve_arc_regions = self.preserve_arc_regions;
+        let arc_tessellation_quality = self.arc_tessellation_quality;
+        self.add_composite_layer_with_outline_content_options(
+            source_layer_ids,
+            visible_bits,
+            inverted,
+            outline_layer_id,
+            outline_content,
+            outline_offset_x,
+            outline_offset_y,
+            preserve_arc_regions,
+            arc_tessellation_quality,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_composite_layer_with_outline_content_options(
+        &mut self,
+        source_layer_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        outline_layer_id: u32,
+        outline_content: String,
+        outline_offset_x: f32,
+        outline_offset_y: f32,
+        outline_preserve_arc_regions: bool,
+        outline_arc_tessellation_quality: u32,
+    ) -> Result<u32, JsValue> {
+        self.validate_composite_source_ids(source_layer_ids)?;
+        if self.drill_layer_ids.contains(&outline_layer_id) {
+            return Err(JsValue::from_str(
+                "Composite outlineLayerId must reference a Gerber layer",
+            ));
+        }
+        let outline_layers = parse_layer_data(
+            &outline_content,
+            outline_offset_x,
+            outline_offset_y,
+            outline_preserve_arc_regions,
+            outline_arc_tessellation_quality,
+            true,
+        )?;
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?;
+        Ok(renderer.add_composite_layer_from_outline_data(
+            source_layer_ids,
+            visible_bits,
+            inverted,
+            outline_layer_id as usize,
+            &outline_content,
+            outline_offset_x,
+            outline_offset_y,
+            outline_preserve_arc_regions,
+            outline_arc_tessellation_quality,
+            &outline_layers,
+        )? as u32)
+    }
+
+    pub fn add_composite_preset_with_outline(
+        &mut self,
+        source_layer_ids: &[u32],
+        preset: String,
+        inverted: bool,
+        outline_layer_id: u32,
+    ) -> Result<u32, JsValue> {
+        self.validate_composite_source_ids(source_layer_ids)?;
+        if self.drill_layer_ids.contains(&outline_layer_id) {
+            return Err(JsValue::from_str(
+                "Composite outlineLayerId must reference a Gerber layer",
+            ));
+        }
+        let renderer = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?;
+        Ok(renderer.add_composite_preset_from_outline(
+            source_layer_ids,
+            &preset,
+            inverted,
+            outline_layer_id as usize,
+        )? as u32)
+    }
+
+    pub fn update_composite_sources(
+        &mut self,
+        composite_id: u32,
+        source_layer_ids: &[u32],
+        visible_bits: &[u8],
+    ) -> Result<(), JsValue> {
+        self.validate_composite_source_ids(source_layer_ids)?;
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .update_composite_sources(composite_id as usize, source_layer_ids, visible_bits)
+    }
+
+    pub fn set_composite_visible_bits(
+        &mut self,
+        composite_id: u32,
+        visible_bits: &[u8],
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .set_composite_visible_bits(composite_id as usize, visible_bits)
+    }
+
+    pub fn set_composite_visible_byte(
+        &mut self,
+        composite_id: u32,
+        byte_index: usize,
+        value: u8,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .set_composite_visible_byte(composite_id as usize, byte_index, value)
+    }
+
+    pub fn set_composite_inverted(
+        &mut self,
+        composite_id: u32,
+        inverted: bool,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .set_composite_inverted(composite_id as usize, inverted)
+    }
+
+    pub fn set_composite_bounds(
+        &mut self,
+        composite_id: u32,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .set_composite_bounds(
+                composite_id as usize,
+                Boundary::new(min_x, max_x, min_y, max_y),
+            )
+    }
+
+    pub fn release_composite_cache(&mut self, composite_id: u32) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .release_composite_cache(composite_id as usize)
+    }
+
+    pub fn get_composite_error(&self, composite_id: u32) -> Result<Option<String>, JsValue> {
+        self.renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .get_composite_error(composite_id as usize)
+    }
+
+    pub fn get_composite_diagnostics(&self, composite_id: u32) -> Result<JsValue, JsValue> {
+        let diagnostics = self
+            .renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .get_composite_diagnostics(composite_id as usize)?;
+        let object = Object::new();
+        for (name, value) in [
+            ("viewportWidth", diagnostics.viewport_width as f64),
+            ("viewportHeight", diagnostics.viewport_height as f64),
+            ("sourceCount", diagnostics.source_count as f64),
+            ("encodePassCount", diagnostics.encode_pass_count as f64),
+            ("cpuBitsetBytes", diagnostics.cpu_bitset_bytes as f64),
+            ("gpuLookupBytes", diagnostics.gpu_lookup_bytes as f64),
+            ("outputMaskBytes", diagnostics.output_mask_bytes as f64),
+            (
+                "sharedMembershipBytes",
+                diagnostics.shared_membership_bytes as f64,
+            ),
+            (
+                "sharedOutlineBytes",
+                diagnostics.shared_outline_bytes as f64,
+            ),
+            (
+                "membershipEncodeCount",
+                diagnostics.membership_encode_count as f64,
+            ),
+            (
+                "membershipEncodePassCount",
+                diagnostics.membership_encode_pass_count as f64,
+            ),
+            (
+                "renderScratchGrowthCount",
+                diagnostics.render_scratch_growth_count as f64,
+            ),
+            ("lookupRenderCount", diagnostics.lookup_render_count as f64),
+        ] {
+            Reflect::set(&object, &JsValue::from_str(name), &JsValue::from_f64(value))?;
+        }
+        Reflect::set(
+            &object,
+            &JsValue::from_str("outputFormat"),
+            &JsValue::from_str(diagnostics.output_format),
+        )?;
+        Ok(object.into())
+    }
+
+    pub fn render_composite_selection(
+        &mut self,
+        composite_id: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<String, JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .render_composite_selection(
+                composite_id as usize,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+            )?;
+        Ok("render_selection_done".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_composite_area(
+        &mut self,
+        composite_id: u32,
+        x: i32,
+        y: i32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<i32, JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .pick_composite_area(
+                composite_id as usize,
+                x,
+                y,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+            )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_composite_area_highlight(
+        &mut self,
+        composite_id: u32,
+        selected_code: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<String, JsValue> {
+        let rendered = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .render_composite_area_highlight(
+                composite_id as usize,
+                selected_code,
+                zoom_x,
+                zoom_y,
+                offset_x,
+                offset_y,
+            )?;
+        Ok(if rendered {
+            "highlight_done"
+        } else {
+            "highlight_skipped"
+        }
+        .to_string())
+    }
+
+    pub fn pick_composite_code(&self, composite_id: u32, x: i32, y: i32) -> Result<i32, JsValue> {
+        self.renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .pick_composite_code(composite_id as usize, x, y)
+    }
+
+    pub fn get_composite_area_codes(&self, composite_id: u32) -> Result<Uint32Array, JsValue> {
+        let codes = self
+            .renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .get_composite_area_codes(composite_id as usize)?;
+        Ok(Uint32Array::from(codes.as_slice()))
+    }
+
+    pub fn end_composite_selection(&mut self) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .end_composite_selection();
+        Ok(())
     }
 
     pub fn add_interaction_payload(
@@ -807,6 +1279,8 @@ impl GerberProcessor {
             renderer.remove_layer(layer_id as usize)?;
             self.drill_outline_layer_ids
                 .retain(|&outline_layer_id| outline_layer_id != layer_id);
+            self.drill_layer_ids
+                .retain(|&drill_layer_id| drill_layer_id != layer_id);
             self.remove_interaction_layer(layer_id as usize);
             Ok("remove_done".to_string())
         } else {
@@ -824,6 +1298,7 @@ impl GerberProcessor {
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_all();
             self.drill_outline_layer_ids.clear();
+            self.drill_layer_ids.clear();
             self.interaction_layers.clear();
             Ok("clear_done".to_string())
         } else {
@@ -1025,7 +1500,11 @@ impl GerberProcessor {
         }
     }
 
-    /// Render into an offscreen framebuffer and return bottom-up RGBA pixels.
+    /// Render into a fresh offscreen framebuffer and return bottom-up RGBA pixels.
+    ///
+    /// The target is always initialized to transparent black. `clear_canvas`
+    /// remains in the ABI for compatibility but cannot preserve contents
+    /// across calls because each call owns a new framebuffer.
     #[allow(clippy::too_many_arguments)]
     pub fn render_pixels_with_clear(
         &mut self,

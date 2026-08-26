@@ -432,6 +432,55 @@ button {
   backdrop-filter: blur(10px);
 }
 
+.composite-selection-bar {
+  position: absolute;
+  top: 12px;
+  right: calc(var(--canvas-reserved-width) + 12px);
+  z-index: 7;
+  max-width: calc(100% - var(--canvas-reserved-width) - 24px);
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(13, 17, 23, 0.92);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+}
+
+.composite-selection-presets {
+  display: flex;
+  gap: 6px;
+}
+
+.composite-selection-presets .chip-button {
+  flex: 0 0 auto;
+}
+
+.composite-selection-divider {
+  width: 1px;
+  align-self: stretch;
+  flex: 0 0 1px;
+  margin: 4px 1px;
+  background: var(--line);
+}
+
+.canvas-status > span {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+#composite-selection-info {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--muted);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#composite-selection-info[hidden] {
+  display: none;
+}
+
 .canvas-light .metric-pill,
 .canvas-light .canvas-status {
   border-color: rgba(148, 163, 184, 0.62);
@@ -814,6 +863,99 @@ button {
   background: var(--surface-2);
 }
 
+.layer-create-composite {
+  display: flex;
+  padding: 8px 10px 4px;
+}
+
+.layer-list.is-locked {
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+.panel-section.composite-area-selection-active .layer-panel-controls,
+.panel-section.composite-area-selection-active .outline-source-control {
+  display: none;
+}
+
+.composite-area-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.composite-area-heading span,
+.composite-area-empty {
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.composite-area-empty {
+  padding: 12px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.composite-area-item {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.composite-area-item label {
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.composite-area-item:hover {
+  background: var(--surface-3);
+}
+
+.composite-area-item input {
+  flex: 0 0 auto;
+}
+
+.composite-area-swatch {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 3px;
+}
+
+.composite-area-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composite-area-more .chip-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.layer-create-composite .chip-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.composite-layer-item {
+  border-left: 2px solid var(--accent);
+}
+
+.layer-item-error {
+  border-color: var(--danger);
+}
+
 .layer-group-heading {
   padding: 8px 2px 2px;
   color: var(--muted);
@@ -1067,6 +1209,10 @@ button {
   cursor: pointer;
 }
 
+.layer-context-menu-item[hidden] {
+  display: none;
+}
+
 .layer-context-menu-item svg {
   width: 16px;
   height: 16px;
@@ -1106,6 +1252,137 @@ button {
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-2);
+}
+
+.composite-layer-dialog {
+  width: min(760px, calc(100vw - 28px));
+  max-height: min(760px, calc(100vh - 28px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  overflow: auto;
+}
+
+.composite-layer-dialog::backdrop {
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.composite-layer-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.composite-dialog-header,
+.composite-dialog-actions,
+.composite-source-heading,
+.composite-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composite-dialog-header,
+.composite-source-heading {
+  justify-content: space-between;
+}
+
+.composite-dialog-actions {
+  justify-content: flex-end;
+}
+
+.composite-field,
+.composite-source-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.composite-field > span,
+.composite-source-heading span,
+.composite-difference-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.composite-field input,
+.composite-search {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.composite-source-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  min-height: 240px;
+}
+
+.composite-source-list,
+.composite-selected-list {
+  min-height: 0;
+  max-height: 310px;
+  overflow: auto;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.composite-source-choice,
+.composite-selected-list li {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 5px;
+}
+
+.composite-source-choice:hover,
+.composite-selected-list li:hover {
+  background: var(--surface-3);
+}
+
+.composite-selected-list li {
+  justify-content: space-between;
+}
+
+.composite-source-choice > span,
+.composite-selected-list li > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composite-order-controls {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.icon-button.compact {
+  width: 26px;
+  height: 26px;
+}
+
+.composite-preset-row .active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+@media (max-width: 620px) {
+  .composite-source-columns {
+    grid-template-columns: 1fr;
+  }
 }
 
 .screenshot-dialog {
@@ -1361,6 +1638,16 @@ button {
 @keyframes loading-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-panel {
+    transition: none;
+  }
+
+  .loading-header svg {
+    animation: none;
   }
 }
 
@@ -1764,12 +2051,25 @@ button {
     height: 24px;
   }
 
-  #drawer-toggle {
+  #workspace-status {
     display: none;
   }
 
-  #workspace-status {
-    display: none;
+  .composite-selection-bar {
+    top: 8px;
+    right: 12px;
+    max-width: calc(100% - 24px);
+    padding: 4px;
+  }
+
+  .composite-selection-presets {
+    gap: 4px;
+  }
+
+  .composite-selection-presets .chip-button {
+    flex: 0 1 auto;
+    padding: 0 6px;
+    font-size: 12px;
   }
 
   .tool-button {

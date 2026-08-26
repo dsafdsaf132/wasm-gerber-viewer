@@ -33,6 +33,10 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 - NC drill overlay rendering support
 - Touch support for mobile devices
 - Multi-layer rendering with per-layer color and visibility control
+- Composite Layers that combine coverage from 2–24 Gerber sources with Union,
+  Intersection, Difference, or manually selected coverage combinations
+- `Select Visible Area`: one click toggles every disconnected area with the same
+  source-coverage pattern
 - Feature picking with selected-area highlighting
 - Horizontal/vertical flip controls
 - Ruler measurements with mm/inch unit switching
@@ -120,9 +124,11 @@ wasm-gerber-viewer/
 │   ├── main.js                        # Browser entry point
 │   ├── core/                          # GerberViewer state and orchestration
 │   ├── loading/                       # File, archive, URL, repeat, and worker loading
-│   ├── layers/                        # Layer list UI, filters, colors, and context actions
+│   ├── layers/                        # Layer list UI, filters, colors, and composite bitsets
+│   │   └── composite-layers.js        # Presets, source slots, and visible-area bitsets
 │   ├── rendering/                     # Viewport math, measurements, and screenshot export
-│   └── ui/                            # DOM lookup, drawer, notifications, diagnostics, options
+│   └── ui/                            # Dialogs, DOM lookup, notifications, diagnostics, options
+│       └── composite-layer-dialog.js   # Composite create, edit, and rename dialog
 ├── vendor/                            # Vendored browser libraries
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm package and Node CLI
@@ -137,13 +143,31 @@ wasm-gerber-viewer/
 │       ├── parser/                    # Gerber parser, apertures, commands, and tests
 │       ├── drill/                     # Excellon/NC drill parser and tests
 │       ├── interaction/               # Picking, compact payloads, and highlight data
-│       ├── renderer/                  # WebGL renderer, GPU resources, shaders, and tests
+│       ├── renderer/                  # Gerber/composite masks, GPU resources, shaders, tests
+│       │   ├── composite.rs           # Membership, lookup, outline, cache, and picking state
+│       │   └── shaders/composite_*.frag.glsl
 │       └── util/                      # Formatting and utility helpers
 ├── demo/                              # Sample and performance Gerbers
 ├── docs/                              # README assets
 ├── scripts/                           # Build and deployment scripts
 └── .github/workflows/                 # CI, deploy, and release workflows
 ```
+
+## Composite Validation and Performance
+
+Run the complete Rust, GLSL, release WASM, npm/Node, TypeScript, Playwright,
+and diff validation suite with `npm run validate:composite`.
+
+For the 24-source 4K acceptance measurement, run
+`npm run benchmark:composite:4k:chrome` from a desktop session with Google
+Chrome hardware acceleration enabled. The report records the unmasked GPU,
+viewport, pass count, timings, FBO format, and CPU/GPU allocation sizes; it
+rejects software renderers and missed 500 ms selection / 100 ms toggle targets.
+`COMPOSITE_BENCHMARK_CHANNEL=chromium`,
+`COMPOSITE_BENCHMARK_HEADLESS=1`, and
+`COMPOSITE_BENCHMARK_ALLOW_SOFTWARE=1` are available only for a
+non-acceptance smoke run: timings and functional cache counters are still
+reported, but GPU identity and timing thresholds are not exit gates.
 
 ## Browser Requirements
 

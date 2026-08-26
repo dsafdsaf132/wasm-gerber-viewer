@@ -3096,7 +3096,13 @@ pub fn parse_graphic_command(
                     // G37: End region fill mode
                     state.region_mode = false;
 
-                    if preserve_arc_regions && region_contours_have_arcs(region_contours) {
+                    // Multiple contours form one Gerber region. Rendering each contour as an
+                    // independent triangle mesh fills clockwise inner contours instead of
+                    // treating them as holes. Keep the complete contour group in the exact
+                    // path renderer whenever it contains arcs or more than one contour.
+                    if preserve_arc_regions
+                        && (region_contours_have_arcs(region_contours) || region_contours.len() > 1)
+                    {
                         flush_primitives_to_layer(
                             primitives,
                             path_regions,
