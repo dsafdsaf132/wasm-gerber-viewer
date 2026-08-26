@@ -117,8 +117,8 @@ export class CompositeLayerDialog {
           <button type="button" class="chip-button" data-composite-preset="union">Union</button>
           <button type="button" class="chip-button" data-composite-preset="intersection">Intersection</button>
           <button type="button" class="chip-button" data-composite-preset="difference">Difference</button>
-          <button type="button" class="chip-button" data-composite-custom>Custom</button>
         </div>
+        <button type="button" class="chip-button" data-composite-custom aria-label="Apply changes and select visible areas">Custom</button>
         <small class="composite-difference-note">Difference uses the first selected source as the base.</small>
       </div>
       <div class="composite-dialog-actions">
@@ -237,6 +237,18 @@ export class CompositeLayerDialog {
 
   renderSources() {
     if (!this.selectedSourceIds) return;
+    const activeElement = document.activeElement;
+    const focusedSourceControl =
+      activeElement instanceof HTMLElement &&
+      (this.availableList.contains(activeElement) ||
+        this.selectedList.contains(activeElement))
+        ? {
+            sourceId: activeElement.dataset.compositeSourceId ?? null,
+            control: activeElement.dataset.compositeSourceControl ?? null,
+          }
+        : null;
+    const availableScrollTop = this.availableList.scrollTop;
+    const selectedScrollTop = this.selectedList.scrollTop;
     const sources = this.getGerberLayers();
     const sourceById = new Map(sources.map((source) => [source.id, source]));
     const nameCounts = new Map();
@@ -263,6 +275,8 @@ export class CompositeLayerDialog {
       label.className = "composite-source-choice";
       const input = document.createElement("input");
       input.type = "checkbox";
+      input.dataset.compositeSourceId = source.id;
+      input.dataset.compositeSourceControl = "choice";
       input.checked = this.selectedSourceIds.includes(source.id);
       input.disabled =
         (!input.checked && this.selectedSourceIds.length >= MAX_COMPOSITE_SOURCES) ||
@@ -307,8 +321,22 @@ export class CompositeLayerDialog {
       const controls = document.createElement("span");
       controls.className = "composite-order-controls";
       controls.append(
-        this.createMoveButton("chevron-up", `Move ${sourceLabel} up`, index, index - 1),
-        this.createMoveButton("chevron-down", `Move ${sourceLabel} down`, index, index + 1),
+        this.createMoveButton(
+          "chevron-up",
+          `Move ${sourceLabel} up`,
+          sourceId,
+          "move-up",
+          index,
+          index - 1,
+        ),
+        this.createMoveButton(
+          "chevron-down",
+          `Move ${sourceLabel} down`,
+          sourceId,
+          "move-down",
+          index,
+          index + 1,
+        ),
       );
       item.append(name, controls);
       this.selectedList.appendChild(item);
@@ -317,13 +345,32 @@ export class CompositeLayerDialog {
     this.syncPresetButtons();
     this.syncSubmitState();
     this.refreshIcons();
+    this.availableList.scrollTop = availableScrollTop;
+    this.selectedList.scrollTop = selectedScrollTop;
+    if (focusedSourceControl?.sourceId && focusedSourceControl.control) {
+      const sourceControls = [
+        ...this.availableList.querySelectorAll("[data-composite-source-id]"),
+        ...this.selectedList.querySelectorAll("[data-composite-source-id]"),
+      ].filter(
+        (element) =>
+          element.dataset.compositeSourceId === focusedSourceControl.sourceId,
+      );
+      const replacement = sourceControls.find(
+        (element) =>
+          element.dataset.compositeSourceControl === focusedSourceControl.control &&
+          !element.disabled,
+      ) ?? sourceControls.find((element) => !element.disabled);
+      replacement?.focus({ preventScroll: true });
+    }
   }
 
-  createMoveButton(iconName, label, from, to) {
+  createMoveButton(iconName, label, sourceId, control, from, to) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "icon-button compact";
     button.setAttribute("aria-label", label);
+    button.dataset.compositeSourceId = sourceId;
+    button.dataset.compositeSourceControl = control;
     button.disabled = to < 0 || to >= this.selectedSourceIds.length;
     const icon = document.createElement("i");
     icon.setAttribute("data-lucide", iconName);

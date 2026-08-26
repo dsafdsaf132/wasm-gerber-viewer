@@ -550,3 +550,11 @@ M02*",
     assert!((fill_layers[0].boundary.min_y() + 1.0).abs() < 0.0001);
     assert!((fill_layers[0].boundary.max_y() - 1.0).abs() < 0.0001);
 }
+
+#[test]
+fn tile_inputs_reject_coordinates_beyond_exact_f32_integer_range() {
+    const MAX_EXACT: u32 = 1 << 24;
+    assert!(Renderer::validate_tile_inputs(MAX_EXACT, 1, MAX_EXACT - 1, 0, 1, 1).is_ok());
+    assert!(Renderer::validate_tile_inputs(MAX_EXACT + 1, 1, 0, 0, 1, 1).is_err());
+    assert!(Renderer::validate_tile_inputs(1, MAX_EXACT + 1, 0, 0, 1, 1).is_err());
+}

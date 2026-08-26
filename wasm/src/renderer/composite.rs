@@ -314,6 +314,7 @@ pub(crate) struct CompositeDiagnostics {
     pub(crate) output_mask_bytes: usize,
     pub(crate) shared_membership_bytes: usize,
     pub(crate) shared_outline_bytes: usize,
+    pub(crate) outline_format: &'static str,
     pub(crate) output_format: &'static str,
     pub(crate) membership_encode_count: u64,
     pub(crate) membership_encode_pass_count: u64,

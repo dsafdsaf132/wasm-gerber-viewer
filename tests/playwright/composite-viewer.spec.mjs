@@ -545,6 +545,31 @@ test("Custom creates or edits a composite and immediately opens visible-area sel
   await expect(page.locator(".composite-selection-bar")).toBeHidden();
 });
 
+test("Coverage Areas disambiguates duplicate source display names", async ({ page }) => {
+  await page.goto("/");
+  const labels = await page.evaluate(async () => {
+    const { GerberViewer } = await import("/js/main.js");
+    const context = {
+      compositeSelection: {
+        layer: {
+          sourceIds: ["layer-a", "layer-b"],
+          slotSourceIds: ["layer-a", "layer-b"],
+        },
+      },
+      layers: [
+        { id: "layer-a", name: "Copper", sourceName: "first.gtl" },
+        { id: "layer-b", name: "Copper", sourceName: "second.gbl" },
+      ],
+    };
+    return [1, 2].map((code) =>
+      GerberViewer.prototype.getCompositeAreaLabel.call(context, code));
+  });
+  expect(labels).toEqual([
+    "Copper — first.gtl (layer-a)",
+    "Copper — second.gbl (layer-b)",
+  ]);
+});
+
 test("visible-area preset toolbar applies Union, Intersection, Difference, and None drafts", async ({ page }) => {
   await loadTwoSources(page);
   const row = await createComposite(page, "Preset toolbar coverage");
@@ -4927,6 +4952,22 @@ test("normal mode selects only visible composite areas and accepts active code z
   await expect.poll(() => page.evaluate(() =>
     window.__normalCompositeAreaHighlights.includes(0))).toBe(true);
   expect((await page.evaluate(() => window.__normalCompositeAreaPicks)).at(-1)).toBe(0);
+
+  const islandsLayer = page.locator(
+    ".gerber-layer-item:not(.composite-layer-item)",
+  ).filter({ has: page.getByText("islands.gtl", { exact: true }) });
+  await islandsLayer.locator(".layer-checkbox").check();
+  const islandPoint = {
+    x: box.width * leftIslandRatio,
+    y: box.height * 0.5,
+  };
+  await canvas.click({ position: islandPoint });
+  await expect(page.locator("#bounds-readout")).toContainText(
+    "Normal area coverage | Composite area",
+  );
+  await canvas.click({ position: islandPoint });
+  await expect(page.locator("#bounds-readout")).toContainText("islands.gtl");
+  await expect(page.locator("#bounds-readout")).not.toContainText("Composite area");
 });
 
 test("selection mouse pan, touch pan, and pinch never toggle before the next tap", async ({ page }) => {

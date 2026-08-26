@@ -242,7 +242,7 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，并以 `Uint8Array` 返回 PNG 字节数据。
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，把 PNG 字节数据写入临时文件，成功后替换 `outputPath`。父目录必须已存在。
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，把 PNG 数据块写入 Node 可写流。
-- `fileLayer(path, options)`：创建基于路径的 Node 图层配置。`options` 接受 `name`、`color`、`alpha`、`offsetX`、`offsetY`、`inverted`、`kind`。
+- `fileLayer(path, options)`：创建基于路径的 Node 图层配置。`options` 接受 `name`、`color`、`alpha`、`visible`、`offsetX`、`offsetY`、`inverted`、`kind`。
 - `packageRoot()`：返回已安装包的目录路径。
 - `renderer.loadLayer(layer, layerOptions)`：解析一个 Node 图层，并返回可跨帧复用的预加载图层。仅当使用 `renderDrills: false` 主动跳过钻孔输入时返回 `null`。
 - `renderer.loadLayers(layers, options)`：解析多个图层，并返回 `{ layers, loadedCount, failures }`。失败的图层默认会被跳过。

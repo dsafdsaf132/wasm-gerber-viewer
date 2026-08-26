@@ -524,7 +524,9 @@ function createLayerItem({
 function createGroupHeader(title) {
   const item = document.createElement("li");
   item.className = "layer-group-heading";
-  item.textContent = title;
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  item.appendChild(heading);
   return item;
 }
 

@@ -260,7 +260,7 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that returns PNG bytes as a `Uint8Array`.
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that streams PNG bytes to a temporary file, then replaces `outputPath` after success. Parent directories must already exist.
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG chunks to a Node writable stream.
-- `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `offsetX`, `offsetY`, `inverted`, and `kind`.
+- `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `visible`, `offsetX`, `offsetY`, `inverted`, and `kind`.
 - `packageRoot()`: returns the installed package directory path.
 - `renderer.loadLayer(layer, layerOptions)`: parses a Node layer once and returns a prepared layer that can be reused across frames. It returns `null` only when a drill is intentionally skipped with `renderDrills: false`.
 - `renderer.loadLayers(layers, options)`: parses multiple layers and returns `{ layers, loadedCount, failures }`. Failed layers are skipped by default.

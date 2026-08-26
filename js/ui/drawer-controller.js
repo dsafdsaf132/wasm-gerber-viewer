@@ -36,6 +36,7 @@ export class DrawerController {
     this.collapsedHeight = 122;
     this.snapThreshold = 50;
     this.bottomCollapseThreshold = 200;
+    this.locked = false;
   }
 
   bindEvents() {
@@ -62,8 +63,19 @@ export class DrawerController {
     this.toggleButton.addEventListener("click", (event) => {
       event.stopPropagation();
       event.preventDefault();
+      if (this.locked) return;
       this.toggle();
     });
+  }
+
+  setLocked(locked) {
+    const nextLocked = Boolean(locked);
+    if (this.locked === nextLocked) return;
+    this.locked = nextLocked;
+    this.toggleButton.disabled = nextLocked;
+    this.resizeHandle.classList.toggle("is-disabled", nextLocked);
+    this.resizeHandle.setAttribute("aria-disabled", String(nextLocked));
+    if (nextLocked && this.isResizing) this.stopResize();
   }
 
   initialize() {
@@ -267,6 +279,7 @@ export class DrawerController {
   }
 
   startResize(event) {
+    if (this.locked) return;
     event.preventDefault();
     this.isResizing = true;
     this.resizeViewState = this.captureViewState?.() ?? null;
@@ -369,6 +382,7 @@ export class DrawerController {
   }
 
   toggle(forceOpen = null) {
+    if (this.locked) return;
     const viewState = this.captureViewState?.() ?? null;
     const isCollapsed = this.drawer.classList.contains("collapsed");
     const shouldOpen = forceOpen === null ? isCollapsed : forceOpen;

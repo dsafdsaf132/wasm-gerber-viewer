@@ -242,7 +242,7 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG 바이트를 `Uint8Array`로 반환합니다.
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG 바이트를 임시 파일에 스트리밍한 뒤 성공하면 `outputPath`를 교체합니다. 상위 directory는 미리 존재해야 합니다.
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG chunk를 Node writable stream에 씁니다.
-- `fileLayer(path, options)`: path 기반 Node layer config를 만듭니다. `options`는 `name`, `color`, `alpha`, `offsetX`, `offsetY`, `inverted`, `kind`를 받습니다.
+- `fileLayer(path, options)`: path 기반 Node layer config를 만듭니다. `options`는 `name`, `color`, `alpha`, `visible`, `offsetX`, `offsetY`, `inverted`, `kind`를 받습니다.
 - `packageRoot()`: 설치된 패키지 directory 경로를 반환합니다.
 - `renderer.loadLayer(layer, layerOptions)`: Node layer 하나를 한 번 파싱하고 여러 frame에서 재사용할 수 있는 prepared layer를 반환합니다. `renderDrills: false`로 drill을 의도적으로 건너뛸 때만 `null`을 반환합니다.
 - `renderer.loadLayers(layers, options)`: 여러 layer를 파싱하고 `{ layers, loadedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뜁니다.

@@ -42,6 +42,13 @@ PCB 시각화를 위한 WASM/WebGL2 기반 Gerber 파일 뷰어입니다.
 - mm/inch 단위 전환이 가능한 자 측정
 - 자 오버레이를 포함한 해상도별 스크린샷 내보내기
 
+Viewer에서 사용자 지정 composite를 만들려면 `Custom`을 선택합니다. 새
+composite는 모든 조합이 꺼진 area 선택 모드로 진입합니다. Union,
+Intersection, Difference, None을 적용한 뒤 canvas 또는 Coverage Areas 목록에서
+영역을 전환할 수 있습니다. `Done`이나 Enter는 draft를 저장하고 Esc는
+취소합니다. Coverage가 0인 영역은 확정된 board outline 또는 bounds fallback
+안에서만 선택할 수 있으며, 일반 모드에서는 현재 활성화된 영역만 선택됩니다.
+
 ## 빠른 시작
 
 <details>

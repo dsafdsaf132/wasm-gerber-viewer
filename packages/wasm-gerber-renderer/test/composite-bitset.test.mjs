@@ -349,6 +349,27 @@ test("public explicit visibleAreas validation rejects unsafe empty and malformed
     }),
     /cannot be used together/,
   );
+  assert.throws(
+    () => createCompositeVisibleBitset(3, { preset: null }),
+    /preset must be/,
+  );
+  assert.throws(
+    () => createCompositeVisibleBitset(3, { visibleAreas: null }),
+    /visibleAreas must be an array/,
+  );
+});
+
+test("public composite display options reject values outside their declared types", () => {
+  for (const options of [
+    { name: 42 },
+    { visible: "false" },
+    { inverted: "true" },
+  ]) {
+    assert.throws(
+      () => createCompositeVisibleBitset(2, options),
+      /must be a (string|boolean)/,
+    );
+  }
 });
 
 test("public composite APIs reject oversized source lists before reading elements", async () => {
@@ -488,7 +509,7 @@ test("Node path sources reject files that shrink after the initial stat", async 
   }
 });
 
-test("Browser and Node reject composite colors before mutating renderer state", async () => {
+test("Browser and Node reject invalid composite options before mutating renderer state", async () => {
   let browserProcessor = null;
   class CompositeSpyProcessor {
     constructor() {
@@ -520,6 +541,15 @@ test("Browser and Node reject composite colors before mutating renderer state", 
   await browser.withFrame({ width: 4, height: 4 }, async () => {
     browser.frame.addLayer(makeBrowserRecord(0, "a.gbr"));
     browser.frame.addLayer(makeBrowserRecord(1, "b.gbr"));
+    for (const options of [
+      { preset: null },
+      { visibleAreas: null },
+      { name: 42 },
+      { visible: "false" },
+      { inverted: "true" },
+    ]) {
+      await assert.rejects(browser.renderCompositeLayer([0, 1], options));
+    }
     await assert.rejects(
       browser.renderCompositeLayer([0, 1], { color: "not-a-color" }),
       /Unsupported color format/,
@@ -542,6 +572,15 @@ test("Browser and Node reject composite colors before mutating renderer state", 
   await node.withFrame({}, async () => {
     node.frame.addLayer(makeNodeRecord(0, "a.gbr"));
     node.frame.addLayer(makeNodeRecord(1, "b.gbr"));
+    for (const options of [
+      { preset: null },
+      { visibleAreas: null },
+      { name: 42 },
+      { visible: "false" },
+      { inverted: "true" },
+    ]) {
+      await assert.rejects(node.renderCompositeLayer([0, 1], options));
+    }
     await assert.rejects(
       node.renderCompositeLayer([0, 1], { color: "not-a-color" }),
       /Unsupported color format/,
@@ -870,8 +909,8 @@ test("Node callback failures invalidate the prior frame and leave the instance r
 
 test("Node PNG export rejects invalid dimensions before sink writes", async () => {
   for (const [width, height, message] of [
-    [0x80000000, 1, /PNG dimensions must be safe integers/],
-    [100_000_000, 100_000_000, /PNG RGBA size exceeds/],
+    [0x01000001, 1, /PNG dimensions must be safe integers/],
+    [100_000_000, 100_000_000, /PNG dimensions must be safe integers/],
   ]) {
     const renderer = new NodeGerberRenderer({}, {});
     await renderer.withFrame({ width, height }, async () => {});

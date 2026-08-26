@@ -40,9 +40,14 @@ void main() {
         float((hashed >> 16u) & 255u)
     ) / 255.0;
     if (!selected) {
-        // Preserve the exact bijective pseudo-color in RGB while making an
-        // inactive area recede clearly against the canvas background.
-        fragColor = vec4(base, 0.12);
+        // Keep OFF areas unmistakably dark without collapsing the 24-bit
+        // pseudo-color space through low-alpha quantization. One 2x2 cell in
+        // each 4x4 tile retains the exact bijective base; the other cells use
+        // only a faint trace of it. Opaque output also obeys the canvas's
+        // premultiplied-alpha contract.
+        ivec2 inactive_cell = pixel & 3;
+        bool color_sample = inactive_cell.x >= 2 && inactive_cell.y >= 2;
+        fragColor = vec4(color_sample ? base : base * 0.04, 1.0);
         return;
     }
 

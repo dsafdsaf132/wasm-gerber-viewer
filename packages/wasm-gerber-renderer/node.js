@@ -1680,6 +1680,7 @@ function renderStreamBand(state, width, height, tileY, plan, bandRowBytes) {
       if (
         state.renderContext.excludedCompositePublicIds.size > failureCountBefore
       ) {
+        rebuildPlanRenderContext(state.renderContext, plan);
         retryBand = true;
         break;
       }
@@ -1939,7 +1940,38 @@ function renderPlanPixels(renderContext, plan) {
     if (renderContext.excludedCompositePublicIds.size === failureCountBefore) {
       return pixels;
     }
+    rebuildPlanRenderContext(renderContext, plan);
   }
+}
+
+function applyPlanRenderEntries(renderContext, renderEntries) {
+  renderContext.activeLayerIds = new Uint32Array(
+    renderEntries.map((entry) => entry.layerId),
+  );
+  renderContext.blendModes = new Uint8Array(
+    renderEntries.map((entry) => entry.blendMode),
+  );
+  const colorData = new Float32Array(renderEntries.length * 4);
+  for (const [index, entry] of renderEntries.entries()) {
+    const offset = index * 4;
+    colorData[offset] = entry.color[0];
+    colorData[offset + 1] = entry.color[1];
+    colorData[offset + 2] = entry.color[2];
+    colorData[offset + 3] = entry.alpha;
+  }
+  renderContext.colorData = colorData;
+  renderContext.compositeEntries = renderEntries.filter(
+    (entry) => entry.isComposite,
+  );
+}
+
+function rebuildPlanRenderContext(renderContext, plan) {
+  renderContext.processor.clear();
+  applyProcessorOptions(renderContext.processor, plan);
+  applyPlanRenderEntries(
+    renderContext,
+    createPlanRenderEntries(renderContext.processor, plan, renderContext),
+  );
 }
 
 function handlePlanCompositeRenderErrors(renderContext) {
@@ -2017,6 +2049,8 @@ function addPlanLayerToProcessor(processor, layer) {
 }
 
 function createPlanRenderEntries(processor, plan, compositeErrorState) {
+  const exclusionCountBefore =
+    compositeErrorState.excludedCompositePublicIds.size;
   const gerberEntries = [];
   const compositeEntries = [];
   const drillOutlineEntries = [];
@@ -2248,6 +2282,17 @@ function createPlanRenderEntries(processor, plan, compositeErrorState) {
       }
       reportPlanCompositeFailure(compositeErrorState, failure);
     }
+  }
+
+  if (
+    compositeErrorState.excludedCompositePublicIds.size > exclusionCountBefore
+  ) {
+    // Ordinary inverted dependencies and bounds were resolved before the
+    // failed composite was known. Rebuild from the survivor set so a skipped
+    // definition cannot affect another composite's mask or manual-view pixels.
+    processor.clear();
+    applyProcessorOptions(processor, plan);
+    return createPlanRenderEntries(processor, plan, compositeErrorState);
   }
 
   const gerberEntryByPublicId = new Map(

@@ -668,6 +668,11 @@ button {
   background: rgba(94, 234, 212, 0.22);
 }
 
+.resize-handle.is-disabled {
+  pointer-events: none;
+  cursor: default;
+}
+
 .panel-tabs {
   display: flex;
   gap: 6px;
@@ -962,6 +967,13 @@ button {
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+
+.layer-group-heading h3 {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
 }
 
 .drill-layer-item .layer-label span {

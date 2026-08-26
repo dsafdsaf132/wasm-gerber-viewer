@@ -62,6 +62,14 @@ const LEGACY_PROCESSOR_ARITIES = {
   resize_to: 2,
 };
 
+const COMPOSITE_SCAN_PROCESSOR_ARITIES = {
+  get_composite_area_codes_band: 3,
+  begin_composite_area_scan: 1,
+  scan_composite_area_band: 3,
+  finish_composite_area_scan: 1,
+  cancel_composite_area_scan: 1,
+};
+
 test(
   "release WASM preserves every pre-composite public symbol and JavaScript arity",
   { skip: !canInspectWasm && "release WASM is required" },
@@ -75,6 +83,19 @@ test(
     assert.equal(wasm.Boundary.prototype.free.length, 0);
     assert.equal(wasm.GerberProcessor.length, 0);
     for (const [name, arity] of Object.entries(LEGACY_PROCESSOR_ARITIES)) {
+      const method = wasm.GerberProcessor.prototype[name];
+      assert.equal(typeof method, "function", `missing GerberProcessor.${name}`);
+      assert.equal(method.length, arity, `GerberProcessor.${name} JavaScript arity`);
+    }
+  },
+);
+
+test(
+  "release WASM exposes the composite scan lifecycle with stable arities",
+  { skip: !canInspectWasm && "release WASM is required" },
+  async () => {
+    const wasm = await import(wasmModuleUrl.href);
+    for (const [name, arity] of Object.entries(COMPOSITE_SCAN_PROCESSOR_ARITIES)) {
       const method = wasm.GerberProcessor.prototype[name];
       assert.equal(typeof method, "function", `missing GerberProcessor.${name}`);
       assert.equal(method.length, arity, `GerberProcessor.${name} JavaScript arity`);

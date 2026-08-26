@@ -118,6 +118,18 @@ pub struct Renderer {
     active_composite_scratch: HashSet<usize>,
     render_scratch_growth_count: u64,
     selection_composite_id: Option<usize>,
+    composite_area_scan: Option<CompositeAreaScanState>,
+}
+
+struct CompositeAreaScanState {
+    composite_id: usize,
+    transform: [f32; 9],
+    width: u32,
+    height: u32,
+    next_row: u32,
+    present: Vec<u8>,
+    membership_pixels: Vec<u8>,
+    outline_pixels: Vec<u8>,
 }
 
 struct OutlineMaskCacheEntry {
@@ -164,12 +176,12 @@ struct GlCapabilityGuard {
 
 struct PixelStoreUnpackAlignmentGuard {
     gl: WebGl2RenderingContext,
-    alignment: i32,
+    states: [(u32, i32); 6],
 }
 
 struct PixelStorePackAlignmentGuard {
     gl: WebGl2RenderingContext,
-    alignment: i32,
+    states: [(u32, i32); 4],
 }
 
 struct GlObjectBindingStateGuard {
@@ -651,45 +663,87 @@ impl Drop for RasterWriteStateGuard {
 
 impl PixelStoreUnpackAlignmentGuard {
     fn set_one(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
-        let alignment = gl
-            .get_parameter(WebGl2RenderingContext::UNPACK_ALIGNMENT)?
-            .as_f64()
-            .map(|value| value as i32)
-            .ok_or_else(|| JsValue::from_str("WebGL UNPACK_ALIGNMENT is unavailable"))?;
-        gl.pixel_storei(WebGl2RenderingContext::UNPACK_ALIGNMENT, 1);
+        let parameters = [
+            WebGl2RenderingContext::UNPACK_ALIGNMENT,
+            WebGl2RenderingContext::UNPACK_ROW_LENGTH,
+            WebGl2RenderingContext::UNPACK_IMAGE_HEIGHT,
+            WebGl2RenderingContext::UNPACK_SKIP_PIXELS,
+            WebGl2RenderingContext::UNPACK_SKIP_ROWS,
+            WebGl2RenderingContext::UNPACK_SKIP_IMAGES,
+        ];
+        let mut states = [(0u32, 0i32); 6];
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            let value = gl
+                .get_parameter(parameter)?
+                .as_f64()
+                .map(|value| value as i32)
+                .ok_or_else(|| JsValue::from_str("WebGL UNPACK state is unavailable"))?;
+            states[index] = (parameter, value);
+        }
+        for &(parameter, _) in &states {
+            gl.pixel_storei(
+                parameter,
+                if parameter == WebGl2RenderingContext::UNPACK_ALIGNMENT {
+                    1
+                } else {
+                    0
+                },
+            );
+        }
         Ok(Self {
             gl: gl.clone(),
-            alignment,
+            states,
         })
     }
 }
 
 impl Drop for PixelStoreUnpackAlignmentGuard {
     fn drop(&mut self) {
-        self.gl
-            .pixel_storei(WebGl2RenderingContext::UNPACK_ALIGNMENT, self.alignment);
+        for &(parameter, value) in &self.states {
+            self.gl.pixel_storei(parameter, value);
+        }
     }
 }
 
 impl PixelStorePackAlignmentGuard {
     fn set_one(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
-        let alignment = gl
-            .get_parameter(WebGl2RenderingContext::PACK_ALIGNMENT)?
-            .as_f64()
-            .map(|value| value as i32)
-            .ok_or_else(|| JsValue::from_str("WebGL PACK_ALIGNMENT is unavailable"))?;
-        gl.pixel_storei(WebGl2RenderingContext::PACK_ALIGNMENT, 1);
+        let parameters = [
+            WebGl2RenderingContext::PACK_ALIGNMENT,
+            WebGl2RenderingContext::PACK_ROW_LENGTH,
+            WebGl2RenderingContext::PACK_SKIP_PIXELS,
+            WebGl2RenderingContext::PACK_SKIP_ROWS,
+        ];
+        let mut states = [(0u32, 0i32); 4];
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            let value = gl
+                .get_parameter(parameter)?
+                .as_f64()
+                .map(|value| value as i32)
+                .ok_or_else(|| JsValue::from_str("WebGL PACK state is unavailable"))?;
+            states[index] = (parameter, value);
+        }
+        for &(parameter, _) in &states {
+            gl.pixel_storei(
+                parameter,
+                if parameter == WebGl2RenderingContext::PACK_ALIGNMENT {
+                    1
+                } else {
+                    0
+                },
+            );
+        }
         Ok(Self {
             gl: gl.clone(),
-            alignment,
+            states,
         })
     }
 }
 
 impl Drop for PixelStorePackAlignmentGuard {
     fn drop(&mut self) {
-        self.gl
-            .pixel_storei(WebGl2RenderingContext::PACK_ALIGNMENT, self.alignment);
+        for &(parameter, value) in &self.states {
+            self.gl.pixel_storei(parameter, value);
+        }
     }
 }
 
@@ -826,7 +880,7 @@ impl FboBuildGuard {
         }
     }
 
-    fn commit(mut self) -> Fbo {
+    fn commit(mut self, color_bytes_per_pixel: usize, color_format: &'static str) -> Fbo {
         Fbo {
             framebuffer: self
                 .framebuffer
@@ -837,6 +891,8 @@ impl FboBuildGuard {
                 .take()
                 .expect("completed FBO must have a texture"),
             stencil: self.stencil.take(),
+            color_bytes_per_pixel,
+            color_format,
         }
     }
 }
@@ -1034,6 +1090,7 @@ impl Renderer {
             active_composite_scratch: HashSet::new(),
             render_scratch_growth_count: 0,
             selection_composite_id: None,
+            composite_area_scan: None,
         })
     }
 
@@ -1149,7 +1206,7 @@ impl Renderer {
             .iter()
             .any(|data| data.path_regions.has_geometry());
         let fbo = if mask_in_red {
-            Self::create_r8_mask_fbo(&self.gl, width, height, needs_stencil)?
+            Self::create_red_mask_fbo(&self.gl, width, height, needs_stencil)?
         } else {
             Self::create_fbo(&self.gl, width, height, needs_stencil)?
         };
@@ -1688,6 +1745,13 @@ impl Renderer {
         {
             self.membership_scratch_owner = None;
         }
+        if self
+            .composite_area_scan
+            .as_ref()
+            .is_some_and(|scan| scan.composite_id == composite_id)
+        {
+            self.composite_area_scan = None;
+        }
     }
 
     fn invalidate_composites_for_source_change(&mut self, source_id: usize) {
@@ -1715,6 +1779,7 @@ impl Renderer {
         }
         if scratch_owner_is_stale {
             self.membership_scratch_owner = None;
+            self.composite_area_scan = None;
         }
     }
 
@@ -1810,13 +1875,7 @@ impl Renderer {
         composite.membership_dirty = true;
         composite.source_generations.clear();
         composite.transform = None;
-        if self
-            .membership_scratch_owner
-            .as_ref()
-            .is_some_and(|(owner_id, _)| *owner_id == composite_id)
-        {
-            self.membership_scratch_owner = None;
-        }
+        self.invalidate_composite_selection_freshness(composite_id);
         self.composite_errors.remove(&composite_id);
         Ok(())
     }
@@ -1840,13 +1899,7 @@ impl Renderer {
         if self.selection_composite_id == Some(composite_id) {
             self.selection_composite_id = None;
         }
-        if self
-            .membership_scratch_owner
-            .as_ref()
-            .is_some_and(|(owner_id, _)| *owner_id == composite_id)
-        {
-            self.membership_scratch_owner = None;
-        }
+        self.invalidate_composite_selection_freshness(composite_id);
         self.composite_errors.remove(&composite_id);
         Ok(())
     }
@@ -1890,6 +1943,10 @@ impl Renderer {
         } else {
             0
         };
+        let outline_fbo = &self.get_layer(composite.outline_mask_id)?.fbo;
+        let shared_outline_bytes = pixel_count
+            .checked_mul(outline_fbo.color_bytes_per_pixel)
+            .ok_or_else(|| JsValue::from_str("Composite outline byte count overflow"))?;
 
         Ok(CompositeDiagnostics {
             viewport_width,
@@ -1906,7 +1963,8 @@ impl Renderer {
             } else {
                 0
             },
-            shared_outline_bytes: pixel_count,
+            shared_outline_bytes,
+            outline_format: outline_fbo.color_format,
             output_format: if composite.output_fbo.is_none() {
                 "unallocated"
             } else if composite.output_is_r8 {
@@ -4499,6 +4557,13 @@ impl Renderer {
             self.selection_composite_id = None;
         }
         if self
+            .composite_area_scan
+            .as_ref()
+            .is_some_and(|scan| scan.composite_id == layer_id)
+        {
+            self.composite_area_scan = None;
+        }
+        if self
             .membership_scratch_owner
             .as_ref()
             .is_some_and(|(owner_id, _)| *owner_id == layer_id)
@@ -4546,6 +4611,7 @@ impl Renderer {
         self.outline_mask_cache.clear();
         self.composite_errors.clear();
         self.selection_composite_id = None;
+        self.composite_area_scan = None;
         self.layer_count = 0;
     }
 
@@ -4581,6 +4647,7 @@ impl Renderer {
             composite.transform = None;
         }
         self.membership_scratch_owner = None;
+        self.composite_area_scan = None;
     }
 
     fn delete_layer_gpu_resources(gl: &WebGl2RenderingContext, layer: LayerMetadata) {
@@ -4881,14 +4948,29 @@ impl Renderer {
         .map_err(FboBuildError::into_js_value)
     }
 
-    fn create_r8_mask_fbo(
+    fn create_red_mask_fbo(
         gl: &WebGl2RenderingContext,
         width: u32,
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
-        Self::create_r8_mask_fbo_build(gl, width, height, with_stencil)
-            .map_err(FboBuildError::into_js_value)
+        match Self::create_r8_mask_fbo_build(gl, width, height, with_stencil) {
+            Ok(fbo) => Ok(fbo),
+            Err(FboBuildError::UnsupportedFormat(_)) => {
+                Self::drain_gl_errors(gl);
+                Self::create_fbo_with_format(
+                    gl,
+                    width,
+                    height,
+                    with_stencil,
+                    WebGl2RenderingContext::RGBA8 as i32,
+                    WebGl2RenderingContext::RGBA,
+                    WebGl2RenderingContext::NEAREST,
+                )
+                .map_err(FboBuildError::into_js_value)
+            }
+            Err(FboBuildError::Fatal(error)) => Err(error),
+        }
     }
 
     fn create_r8_mask_fbo_build(
@@ -5061,7 +5143,10 @@ impl Renderer {
         gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
-        Ok(pending.commit())
+        Ok(pending.commit(
+            if is_r8 { 1 } else { 4 },
+            if is_r8 { "R8" } else { "RGBA8" },
+        ))
     }
 
     fn create_composite_lookup_texture(
@@ -6084,7 +6169,8 @@ impl Renderer {
             self.gl.color_mask(true, true, true, true);
             self.gl.enable(BLEND);
             self.gl.blend_equation(FUNC_ADD);
-            self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+            self.gl
+                .blend_func_separate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA);
             self.gl.stencil_func(EQUAL, 0x01, 0x01);
             self.gl.stencil_mask(0x00);
             self.gl.stencil_op(KEEP, KEEP, KEEP);
@@ -7719,6 +7805,7 @@ impl Renderer {
 
     pub fn end_composite_selection(&mut self) {
         self.selection_composite_id = None;
+        self.composite_area_scan = None;
     }
 
     fn ensure_composite_selection_inactive(&self) -> Result<(), JsValue> {
@@ -7773,38 +7860,22 @@ impl Renderer {
             WebGl2RenderingContext::READ_FRAMEBUFFER,
             Some(&output.framebuffer),
         );
-        let active = if composite.output_is_r8 {
-            let mut pixel = [0u8; 1];
-            let read = self.gl.read_pixels_with_opt_u8_array(
-                x,
-                y,
-                1,
-                1,
-                WebGl2RenderingContext::RED,
-                WebGl2RenderingContext::UNSIGNED_BYTE,
-                Some(&mut pixel),
-            );
-            let gl_result = Self::check_gl_stage(&self.gl, "Composite output pick readback");
-            read?;
-            gl_result?;
-            pixel[0] >= 128
-        } else {
-            let mut pixel = [0u8; 4];
-            let read = self.gl.read_pixels_with_opt_u8_array(
-                x,
-                y,
-                1,
-                1,
-                WebGl2RenderingContext::RGBA,
-                WebGl2RenderingContext::UNSIGNED_BYTE,
-                Some(&mut pixel),
-            );
-            let gl_result = Self::check_gl_stage(&self.gl, "Composite output pick readback");
-            read?;
-            gl_result?;
-            pixel[0] >= 128
-        };
-        Ok(active)
+        // RGBA/UNSIGNED_BYTE is the portable normalized-framebuffer readback
+        // pair in WebGL2, including when the attachment itself is R8.
+        let mut pixel = [0u8; 4];
+        let read = self.gl.read_pixels_with_opt_u8_array(
+            x,
+            y,
+            1,
+            1,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixel),
+        );
+        let gl_result = Self::check_gl_stage(&self.gl, "Composite output pick readback");
+        read?;
+        gl_result?;
+        Ok(pixel[0] >= 128)
     }
 
     fn read_composite_membership_code(&self, x: i32, y: i32) -> Result<i32, JsValue> {
@@ -7935,7 +8006,8 @@ impl Renderer {
         self.gl.color_mask(true, true, true, true);
         self.gl.enable(BLEND);
         self.gl.blend_equation(FUNC_ADD);
-        self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+        self.gl
+            .blend_func_separate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA);
 
         let program = &self.programs.composite_highlight;
         self.gl.use_program(Some(&program.program));
@@ -7964,6 +8036,7 @@ impl Renderer {
 
     pub fn pick_composite_code(&self, composite_id: usize, x: i32, y: i32) -> Result<i32, JsValue> {
         let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
         if self.selection_composite_id != Some(composite_id) {
             return Err(JsValue::from_str(
                 "Composite selection preview is not active",
@@ -8018,7 +8091,7 @@ impl Renderer {
         }
 
         let outline = self.get_layer(composite.outline_mask_id)?;
-        let mut outline_pixel = [0u8; 1];
+        let mut outline_pixel = [0u8; 4];
         Self::drain_gl_errors(&self.gl);
         self.gl.bind_framebuffer(
             WebGl2RenderingContext::READ_FRAMEBUFFER,
@@ -8029,7 +8102,7 @@ impl Renderer {
             y,
             1,
             1,
-            WebGl2RenderingContext::RED,
+            WebGl2RenderingContext::RGBA,
             WebGl2RenderingContext::UNSIGNED_BYTE,
             Some(&mut outline_pixel),
         );
@@ -8040,8 +8113,163 @@ impl Renderer {
     }
 
     pub fn get_composite_area_codes(&self, composite_id: usize) -> Result<Vec<u32>, JsValue> {
+        let (_, height) = self.get_canvas_size()?;
+        self.get_composite_area_codes_range(composite_id, 0, height)
+    }
+
+    pub fn get_composite_area_codes_band(
+        &self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<Vec<u32>, JsValue> {
+        self.get_composite_area_codes_range(composite_id, start_y, row_count)
+    }
+
+    fn get_composite_area_codes_range(
+        &self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<Vec<u32>, JsValue> {
+        let mut scan = self.create_composite_area_scan_state(composite_id)?;
+        self.accumulate_composite_area_presence_range(
+            composite_id,
+            start_y,
+            row_count,
+            &mut scan.present,
+            &mut scan.membership_pixels,
+            &mut scan.outline_pixels,
+        )?;
+        Self::composite_area_codes_from_presence(&scan.present)
+    }
+
+    pub fn begin_composite_area_scan(&mut self, composite_id: usize) -> Result<(), JsValue> {
+        self.composite_area_scan = None;
+        self.composite_area_scan = Some(self.create_composite_area_scan_state(composite_id)?);
+        Ok(())
+    }
+
+    pub fn scan_composite_area_band(
+        &mut self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<(), JsValue> {
+        let mut scan = self
+            .composite_area_scan
+            .take()
+            .ok_or_else(|| JsValue::from_str("Composite area scan is not active"))?;
+        let result = (|| {
+            if scan.composite_id != composite_id {
+                return Err(JsValue::from_str(
+                    "Composite area scan belongs to another layer",
+                ));
+            }
+            let (transform, width, height, _) =
+                self.composite_area_scan_descriptor(composite_id)?;
+            if scan.transform != transform || scan.width != width || scan.height != height {
+                return Err(JsValue::from_str(
+                    "Composite area scan preview changed; restart the scan",
+                ));
+            }
+            if start_y != scan.next_row {
+                return Err(JsValue::from_str(
+                    "Composite area scan bands must be contiguous and ordered",
+                ));
+            }
+            self.accumulate_composite_area_presence_range(
+                composite_id,
+                start_y,
+                row_count,
+                &mut scan.present,
+                &mut scan.membership_pixels,
+                &mut scan.outline_pixels,
+            )?;
+            scan.next_row = start_y.saturating_add(row_count).min(height);
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.composite_area_scan = Some(scan);
+        }
+        result
+    }
+
+    pub fn finish_composite_area_scan(&mut self, composite_id: usize) -> Result<Vec<u32>, JsValue> {
+        let scan = self
+            .composite_area_scan
+            .take()
+            .ok_or_else(|| JsValue::from_str("Composite area scan is not active"))?;
+        if scan.composite_id != composite_id {
+            return Err(JsValue::from_str(
+                "Composite area scan belongs to another layer",
+            ));
+        }
+        let (transform, width, height, _) = self.composite_area_scan_descriptor(composite_id)?;
+        if scan.transform != transform || scan.width != width || scan.height != height {
+            return Err(JsValue::from_str(
+                "Composite area scan preview changed; restart the scan",
+            ));
+        }
+        if scan.next_row != height {
+            return Err(JsValue::from_str("Composite area scan is incomplete"));
+        }
+        Self::composite_area_codes_from_presence(&scan.present)
+    }
+
+    pub fn cancel_composite_area_scan(&mut self, composite_id: usize) {
+        if self
+            .composite_area_scan
+            .as_ref()
+            .is_some_and(|scan| scan.composite_id == composite_id)
+        {
+            self.composite_area_scan = None;
+        }
+    }
+
+    fn create_composite_area_scan_state(
+        &self,
+        composite_id: usize,
+    ) -> Result<CompositeAreaScanState, JsValue> {
+        let (transform, width, height, presence_len) =
+            self.composite_area_scan_descriptor(composite_id)?;
+        let band_rows = height.min(128);
+        let pixel_bytes = usize::try_from(
+            width
+                .checked_mul(band_rows)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| JsValue::from_str("Composite area scan byte size overflow"))?,
+        )
+        .map_err(|_| JsValue::from_str("Composite area scan byte size is too large"))?;
+        Ok(CompositeAreaScanState {
+            composite_id,
+            transform,
+            width,
+            height,
+            next_row: 0,
+            present: Self::try_zeroed_composite_scan_buffer(presence_len, "presence bits")?,
+            membership_pixels: Self::try_zeroed_composite_scan_buffer(
+                pixel_bytes,
+                "membership pixels",
+            )?,
+            outline_pixels: Self::try_zeroed_composite_scan_buffer(pixel_bytes, "outline pixels")?,
+        })
+    }
+
+    fn try_zeroed_composite_scan_buffer(len: usize, label: &str) -> Result<Vec<u8>, JsValue> {
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(len).map_err(|_| {
+            JsValue::from_str(&format!("Unable to allocate composite area scan {label}"))
+        })?;
+        buffer.resize(len, 0);
+        Ok(buffer)
+    }
+
+    fn composite_area_scan_descriptor(
+        &self,
+        composite_id: usize,
+    ) -> Result<([f32; 9], u32, u32, usize), JsValue> {
         let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
-        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
         if self.selection_composite_id != Some(composite_id) {
             return Err(JsValue::from_str(
                 "Composite selection preview is not active",
@@ -8064,7 +8292,33 @@ impl Renderer {
                 "Composite selection membership is stale; render the preview again",
             ));
         }
+        let transform = composite
+            .transform
+            .ok_or_else(|| JsValue::from_str("Composite selection transform is unavailable"))?;
+        let (width, height) = self.get_canvas_size()?;
+        Ok((transform, width, height, composite.visible_bits.len()))
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn accumulate_composite_area_presence_range(
+        &self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+        present: &mut [u8],
+        membership: &mut [u8],
+        outline: &mut [u8],
+    ) -> Result<(), JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
+        let (_, width, height, presence_len) = self.composite_area_scan_descriptor(composite_id)?;
+        if present.len() != presence_len {
+            return Err(JsValue::from_str(
+                "Composite area scan presence buffer has the wrong size",
+            ));
+        }
+
+        let composite = self.composites[composite_id].as_ref().unwrap();
         let scratch_framebuffer = self
             .membership_scratch
             .as_ref()
@@ -8076,40 +8330,30 @@ impl Renderer {
             .fbo
             .framebuffer
             .clone();
-        let mut present = Vec::new();
-        present
-            .try_reserve_exact(composite.visible_bits.len())
-            .map_err(|_| JsValue::from_str("Unable to allocate composite area presence bits"))?;
-        present.resize(composite.visible_bits.len(), 0u8);
-
-        let (width, height) = self.get_canvas_size()?;
-        let band_height = height.min(128);
-        let band_pixels = width
-            .checked_mul(band_height)
-            .ok_or_else(|| JsValue::from_str("Composite area scan dimensions overflow"))?;
-        let membership_capacity = usize::try_from(
-            band_pixels
-                .checked_mul(4)
+        if row_count == 0 || start_y >= height {
+            return Err(JsValue::from_str(
+                "Composite area scan range is outside the canvas",
+            ));
+        }
+        let end_y = start_y.saturating_add(row_count).min(height);
+        let band_height = (end_y - start_y).min(128);
+        let required_capacity = usize::try_from(
+            width
+                .checked_mul(band_height)
+                .and_then(|pixels| pixels.checked_mul(4))
                 .ok_or_else(|| JsValue::from_str("Composite area scan byte size overflow"))?,
         )
         .map_err(|_| JsValue::from_str("Composite area scan byte size is too large"))?;
-        let outline_capacity = usize::try_from(band_pixels)
-            .map_err(|_| JsValue::from_str("Composite outline scan byte size is too large"))?;
-        let mut membership = Vec::new();
-        membership
-            .try_reserve_exact(membership_capacity)
-            .map_err(|_| JsValue::from_str("Unable to allocate composite area scan buffer"))?;
-        membership.resize(membership_capacity, 0u8);
-        let mut outline = Vec::new();
-        outline
-            .try_reserve_exact(outline_capacity)
-            .map_err(|_| JsValue::from_str("Unable to allocate composite outline scan buffer"))?;
-        outline.resize(outline_capacity, 0u8);
+        if membership.len() < required_capacity || outline.len() < required_capacity {
+            return Err(JsValue::from_str(
+                "Composite area scan pixel buffer is too small",
+            ));
+        }
 
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
-        let mut band_y = 0u32;
-        while band_y < height {
-            let rows = (height - band_y).min(band_height);
+        let mut band_y = start_y;
+        while band_y < end_y {
+            let rows = (end_y - band_y).min(band_height);
             let pixels = usize::try_from(width.checked_mul(rows).ok_or_else(|| {
                 JsValue::from_str("Composite area scan band dimensions overflow")
             })?)
@@ -8143,21 +8387,23 @@ impl Renderer {
                 band_y_i32,
                 width_i32,
                 rows_i32,
-                WebGl2RenderingContext::RED,
+                WebGl2RenderingContext::RGBA,
                 WebGl2RenderingContext::UNSIGNED_BYTE,
-                Some(&mut outline[..pixels]),
+                Some(&mut outline[..membership_len]),
             );
             let outline_result =
                 Self::check_gl_stage(&self.gl, "Composite area list outline readback");
             outline_read?;
             outline_result?;
 
-            for (pixel_index, &outline_value) in outline.iter().take(pixels).enumerate() {
+            for (pixel_index, outline_pixel) in
+                outline[..membership_len].chunks_exact(4).enumerate()
+            {
                 let membership_index = pixel_index * 4;
                 let code = membership[membership_index] as u32
                     | ((membership[membership_index + 1] as u32) << 8)
                     | ((membership[membership_index + 2] as u32) << 16);
-                if code != 0 || outline_value >= 128 {
+                if code != 0 || outline_pixel[0] >= 128 {
                     let code_index = code as usize;
                     present[code_index >> 3] |= 1 << (code_index & 7);
                 }
@@ -8165,6 +8411,10 @@ impl Renderer {
             band_y += rows;
         }
 
+        Ok(())
+    }
+
+    fn composite_area_codes_from_presence(present: &[u8]) -> Result<Vec<u32>, JsValue> {
         let area_count = present.iter().map(|byte| byte.count_ones() as usize).sum();
         let mut codes = Vec::new();
         codes
@@ -8946,20 +9196,24 @@ impl Renderer {
         tile_y: u32,
         tile_width: u32,
         tile_height: u32,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), &'static str> {
+        const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
         if export_width == 0 || export_height == 0 || tile_width == 0 || tile_height == 0 {
-            return Err(JsValue::from_str("Tile dimensions must be non-zero"));
+            return Err("Tile dimensions must be non-zero");
+        }
+        if export_width > MAX_EXACT_F32_INTEGER || export_height > MAX_EXACT_F32_INTEGER {
+            return Err("Tile export dimensions exceed exact WebGL coordinate precision");
         }
 
         let tile_right = tile_x
             .checked_add(tile_width)
-            .ok_or_else(|| JsValue::from_str("Tile width overflows export bounds"))?;
+            .ok_or("Tile width overflows export bounds")?;
         let tile_bottom = tile_y
             .checked_add(tile_height)
-            .ok_or_else(|| JsValue::from_str("Tile height overflows export bounds"))?;
+            .ok_or("Tile height overflows export bounds")?;
 
         if tile_right > export_width || tile_bottom > export_height {
-            return Err(JsValue::from_str("Tile is outside export bounds"));
+            return Err("Tile is outside export bounds");
         }
 
         Ok(())
@@ -9186,7 +9440,7 @@ impl Renderer {
         for layer in &self.layers {
             let fbo = match layer {
                 Some(layer) => Some(if layer.mask_in_red {
-                    Self::create_r8_mask_fbo(&self.gl, width, height, layer.has_path_regions)?
+                    Self::create_red_mask_fbo(&self.gl, width, height, layer.has_path_regions)?
                 } else {
                     Self::create_fbo(&self.gl, width, height, layer.has_path_regions)?
                 }),
@@ -9219,6 +9473,7 @@ impl Renderer {
             Self::delete_fbo(&self.gl, scratch);
         }
         self.membership_scratch_owner = None;
+        self.composite_area_scan = None;
         self.composite_errors.clear();
 
         Ok(())
@@ -9286,7 +9541,7 @@ impl Renderer {
             if layer.is_some() {
                 let layer = layer.as_ref().unwrap();
                 pending.fbos.push(Some(if layer.mask_in_red {
-                    Self::create_r8_mask_fbo(&gl, width, height, layer.has_path_regions)?
+                    Self::create_red_mask_fbo(&gl, width, height, layer.has_path_regions)?
                 } else {
                     Self::create_fbo(&gl, width, height, layer.has_path_regions)?
                 }));
@@ -9346,6 +9601,7 @@ impl Renderer {
         }
         self.membership_scratch_owner = None;
         self.selection_composite_id = None;
+        self.composite_area_scan = None;
         self.composite_errors.clear();
         self.explicit_size = next_explicit_size;
         self.gl = gl;

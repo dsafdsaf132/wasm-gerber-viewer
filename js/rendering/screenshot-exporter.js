@@ -53,6 +53,13 @@ function isFatalWasmRuntimeError(error) {
   );
 }
 
+class ScreenshotExportCancelledError extends Error {
+  constructor() {
+    super("Screenshot export was cancelled.");
+    this.name = "ScreenshotExportCancelledError";
+  }
+}
+
 function isBoardOutlineLayer(layer) {
   if (!layer || isDrillLayer(layer) || isCompositeLayer(layer)) return false;
   return isBoardOutlineName(layer.name);
@@ -313,6 +320,7 @@ export class ScreenshotExporter {
     this.onCompositeError = onCompositeError;
 
     this.isExporting = false;
+    this.exportCancellation = null;
     this.rendererUnavailable = false;
     this.pngCrcTable = null;
   }
@@ -341,7 +349,7 @@ export class ScreenshotExporter {
     this.form.classList.toggle("is-exporting", isBusy);
     this.backgroundToggle.disabled = isBusy || this.rendererUnavailable;
     this.scaleSelect.disabled = isBusy || this.rendererUnavailable;
-    this.cancelButton.disabled = isBusy;
+    this.cancelButton.disabled = false;
     this.dismissButton.disabled = isBusy;
     this.exportButton.disabled = isBusy || this.rendererUnavailable;
     this.exportButton.textContent = isBusy ? "Exporting" : "Export";
@@ -350,6 +358,20 @@ export class ScreenshotExporter {
       this.setProgress(0, "Rendering");
     } else {
       this.setProgress(0, "Exporting");
+    }
+  }
+
+  cancelExport() {
+    if (!this.isExporting || !this.exportCancellation) return false;
+    this.exportCancellation.cancelled = true;
+    this.cancelButton.disabled = true;
+    this.setProgress(this.progressBar.value / 100, "Cancelling");
+    return true;
+  }
+
+  throwIfExportCancelled() {
+    if (this.exportCancellation?.cancelled) {
+      throw new ScreenshotExportCancelledError();
     }
   }
 
@@ -417,8 +439,11 @@ export class ScreenshotExporter {
     return scale >= 2;
   }
 
-  shouldStream(scale) {
-    return scale >= 2 && this.supportsStreaming();
+  shouldStream(_scale) {
+    // Native canvas.toBlob() cannot be aborted once encoding starts. Prefer
+    // the banded encoder whenever available so the visible Cancel action can
+    // release both CPU and WebGL resources between bounded work units.
+    return this.supportsStreaming();
   }
 
   supportsStreaming() {
@@ -480,12 +505,14 @@ export class ScreenshotExporter {
     }
 
     this.isExporting = true;
+    this.exportCancellation = { cancelled: false };
     this.screenshotButton.disabled = true;
     this.setExportBusy(true);
     let screenshotRenderer = null;
 
     try {
       screenshotRenderer = this.createRenderer(renderState, includeBackground);
+      this.throwIfExportCancelled();
       let blob = null;
 
       if (shouldStream) {
@@ -514,9 +541,13 @@ export class ScreenshotExporter {
         );
       }
 
+      this.throwIfExportCancelled();
       this.downloadBlob(blob);
       return true;
     } catch (error) {
+      if (error instanceof ScreenshotExportCancelledError) {
+        return false;
+      }
       const message = getErrorMessage(error);
       console.error("[Export] Failed to export screenshot:", error);
       this.showError(`Failed to export screenshot: ${message}`);
@@ -524,6 +555,7 @@ export class ScreenshotExporter {
     } finally {
       this.disposeRenderer(screenshotRenderer);
       this.isExporting = false;
+      this.exportCancellation = null;
       this.screenshotButton.disabled = this.rendererUnavailable;
       this.setExportBusy(false);
       this.updateResolutionPreview();
@@ -599,6 +631,11 @@ export class ScreenshotExporter {
         processor,
         renderState,
         includeBackground,
+        {
+          initialized: false,
+          excludedCompositeClientIds: new Set(),
+          reportedCompositeErrors: new Set(),
+        },
       );
     } catch (error) {
       this.disposeRenderer({ canvas, gl, processor });
@@ -606,8 +643,19 @@ export class ScreenshotExporter {
     }
   }
 
-  initializeRenderer(canvas, gl, processor, renderState, includeBackground) {
-    processor.init(gl);
+  initializeRenderer(
+    canvas,
+    gl,
+    processor,
+    renderState,
+    includeBackground,
+    buildState,
+  ) {
+    if (!buildState.initialized) {
+      processor.init(gl);
+      buildState.initialized = true;
+    }
+    const exclusionCountBefore = buildState.excludedCompositeClientIds.size;
     const parseOptions = this.getParseOptions?.() ?? {};
     if (typeof processor.set_interactions_enabled === "function") {
       processor.set_interactions_enabled(false);
@@ -652,10 +700,15 @@ export class ScreenshotExporter {
       ? hexColorToRgb(renderState.backgroundColor)
       : [0, 0, 0];
     const drillFillBlendMode = includeBackground ? 1 : 2;
-    const defaultLayerAlpha = clampAlpha(renderState.globalAlpha);
+    const defaultLayerAlpha = isStackCompositeMode
+      ? 1
+      : clampAlpha(renderState.globalAlpha);
     const layers = this.getLayers();
     const visibleCompositeLayers = layers.filter(
-      (layer) => isCompositeLayer(layer) && layer.visible,
+      (layer) =>
+        isCompositeLayer(layer) &&
+        layer.visible &&
+        !buildState.excludedCompositeClientIds.has(layer.id),
     );
     const compositeSourceLayerIds = new Set(
       visibleCompositeLayers.flatMap((layer) => layer.slotSourceIds),
@@ -851,7 +904,11 @@ export class ScreenshotExporter {
     }
 
     for (const layer of layers) {
-      if (!isCompositeLayer(layer) || !layer.visible) continue;
+      if (
+        !isCompositeLayer(layer) ||
+        !layer.visible ||
+        buildState.excludedCompositeClientIds.has(layer.id)
+      ) continue;
       try {
       const sourceIds = layer.slotSourceIds.map((sourceId) => {
         const dependencyError = hiddenDependencyBuildErrors.get(sourceId);
@@ -946,7 +1003,11 @@ export class ScreenshotExporter {
       // Count the renderer-shared membership scratch conservatively per
       // composite so tile sizing cannot under-estimate the first composite.
       wasmLayerCount += 3;
-      compositeEntries.push({ layerId: Number(compositeId), name: layer.name });
+      compositeEntries.push({
+        layerId: Number(compositeId),
+        clientId: layer.id,
+        name: layer.name,
+      });
       gerberRenderLayers.push({
         clientId: layer.id,
         layerId: Number(compositeId),
@@ -955,8 +1016,28 @@ export class ScreenshotExporter {
       });
       } catch (error) {
         if (isFatalWasmRuntimeError(error)) throw error;
-        this.reportCompositeError(layer.name, getErrorMessage(error));
+        const message = getErrorMessage(error);
+        buildState.excludedCompositeClientIds.add(layer.id);
+        const key = `${layer.id}:${message}`;
+        if (!buildState.reportedCompositeErrors.has(key)) {
+          buildState.reportedCompositeErrors.add(key);
+          this.reportCompositeError(layer.name, message);
+        }
       }
+    }
+
+    if (
+      buildState.excludedCompositeClientIds.size > exclusionCountBefore
+    ) {
+      processor.clear();
+      return this.initializeRenderer(
+        canvas,
+        gl,
+        processor,
+        renderState,
+        includeBackground,
+        buildState,
+      );
     }
 
     gerberRenderLayers.sort(
@@ -1012,7 +1093,10 @@ export class ScreenshotExporter {
       colorData: new Float32Array(colorData),
       blendModes: new Uint8Array(blendModes),
       compositeEntries,
-      reportedCompositeErrors: new Set(),
+      reportedCompositeErrors: buildState.reportedCompositeErrors,
+      buildState,
+      renderState,
+      includeBackground,
       alpha: 1,
     };
   }
@@ -1069,13 +1153,18 @@ export class ScreenshotExporter {
     const totalTiles =
       Math.ceil(exportWidth / tileSize.width) *
       Math.ceil(exportHeight / tileSize.height);
+    const preflightProgressShare =
+      screenshotRenderer.compositeEntries.length > 0 ? 0.5 : 0;
     await this.preflightStreamingTiles(
       screenshotRenderer,
       exportWidth,
       exportHeight,
       tileSize,
       renderState,
+      preflightProgressShare,
     );
+    this.throwIfExportCancelled();
+    this.setProgress(preflightProgressShare, "Rendering");
     const expectedCompositeFailureCount =
       screenshotRenderer.reportedCompositeErrors.size;
     const rowStride = this.getPngRowStride(exportWidth);
@@ -1098,6 +1187,7 @@ export class ScreenshotExporter {
 
     try {
       for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
+        this.throwIfExportCancelled();
         const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
         const bandBuffer = this.createBandBuffer(
           exportWidth,
@@ -1106,8 +1196,12 @@ export class ScreenshotExporter {
         );
 
         for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
+          this.throwIfExportCancelled();
           const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
-          this.setProgress(tileCount / totalTiles);
+          this.setProgress(
+            preflightProgressShare +
+              (tileCount / totalTiles) * (1 - preflightProgressShare),
+          );
           const tileData = this.renderTileToImageData(
             screenshotRenderer,
             exportWidth,
@@ -1117,6 +1211,8 @@ export class ScreenshotExporter {
             tileY,
             tileWidth,
             tileHeight,
+            tileSize.width,
+            tileSize.height,
             includeBackground,
             renderState,
             false,
@@ -1138,14 +1234,19 @@ export class ScreenshotExporter {
           }
 
           tileCount += 1;
-          this.setProgress(tileCount / totalTiles);
+          this.setProgress(
+            preflightProgressShare +
+              (tileCount / totalTiles) * (1 - preflightProgressShare),
+          );
         }
 
         for (let row = 0; row < tileHeight; row += 1) {
           const rowStart = row * rowStride;
           await writer.write(bandBuffer.subarray(rowStart, rowStart + rowStride));
+          this.throwIfExportCancelled();
         }
         await this.yieldToBrowser();
+        this.throwIfExportCancelled();
       }
 
       this.setProgress(1);
@@ -1181,26 +1282,42 @@ export class ScreenshotExporter {
     exportHeight,
     tileSize,
     renderState,
+    progressShare = 0,
   ) {
     if (screenshotRenderer.compositeEntries.length === 0) return;
 
+    const totalTiles =
+      Math.ceil(exportWidth / tileSize.width) *
+      Math.ceil(exportHeight / tileSize.height);
+    let checkedTiles = 0;
+    this.setProgress(0, "Checking composites");
+
     for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
+      this.throwIfExportCancelled();
       const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
       for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
+        this.throwIfExportCancelled();
         const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
         this.renderSingleTile(
           screenshotRenderer,
           exportWidth,
           exportHeight,
-          tileX,
-          tileY,
-          tileWidth,
-          tileHeight,
+          tileWidth === tileSize.width
+            ? tileX
+            : Math.max(0, exportWidth - tileSize.width),
+          tileHeight === tileSize.height
+            ? tileY
+            : Math.max(0, exportHeight - tileSize.height),
+          tileSize.width,
+          tileSize.height,
           renderState,
           true,
         );
+        checkedTiles += 1;
+        this.setProgress((checkedTiles / totalTiles) * progressShare);
       }
       await this.yieldToBrowser();
+      this.throwIfExportCancelled();
     }
   }
 
@@ -1297,18 +1414,26 @@ export class ScreenshotExporter {
     tileY,
     tileWidth,
     tileHeight,
+    renderTargetWidth,
+    renderTargetHeight,
     includeBackground,
     renderState,
     allowCompositeDiscovery = true,
   ) {
+    const renderTileX = tileWidth === renderTargetWidth
+      ? tileX
+      : Math.max(0, exportWidth - renderTargetWidth);
+    const renderTileY = tileHeight === renderTargetHeight
+      ? tileY
+      : Math.max(0, exportHeight - renderTargetHeight);
     this.renderSingleTile(
       screenshotRenderer,
       exportWidth,
       exportHeight,
-      tileX,
-      tileY,
-      tileWidth,
-      tileHeight,
+      renderTileX,
+      renderTileY,
+      renderTargetWidth,
+      renderTargetHeight,
       renderState,
       allowCompositeDiscovery,
     );
@@ -1322,7 +1447,17 @@ export class ScreenshotExporter {
       context.clearRect(0, 0, tileWidth, tileHeight);
     }
 
-    context.drawImage(screenshotRenderer.canvas, 0, 0, tileWidth, tileHeight);
+    context.drawImage(
+      screenshotRenderer.canvas,
+      tileX - renderTileX,
+      tileY - renderTileY,
+      tileWidth,
+      tileHeight,
+      0,
+      0,
+      tileWidth,
+      tileHeight,
+    );
     context.save();
     context.scale(exportScale, exportScale);
     context.translate(-tileX / exportScale, -tileY / exportScale);
@@ -1514,34 +1649,27 @@ export class ScreenshotExporter {
       const error = processor.get_composite_error(entry.layerId);
       if (!error) continue;
       failedLayerIds.add(entry.layerId);
-      const key = `${entry.layerId}:${error}`;
+      screenshotRenderer.buildState.excludedCompositeClientIds.add(
+        entry.clientId,
+      );
+      const key = `${entry.clientId}:${error}`;
       if (screenshotRenderer.reportedCompositeErrors.has(key)) continue;
       screenshotRenderer.reportedCompositeErrors.add(key);
       this.reportCompositeError(entry.name, error);
     }
     if (failedLayerIds.size === 0) return 0;
-
-    const activeLayerIds = [];
-    const colorData = [];
-    const blendModes = [];
-    for (let index = 0; index < screenshotRenderer.activeLayerIds.length; index += 1) {
-      if (failedLayerIds.has(screenshotRenderer.activeLayerIds[index])) continue;
-      activeLayerIds.push(screenshotRenderer.activeLayerIds[index]);
-      blendModes.push(screenshotRenderer.blendModes[index]);
-      const colorOffset = index * 4;
-      colorData.push(
-        screenshotRenderer.colorData[colorOffset],
-        screenshotRenderer.colorData[colorOffset + 1],
-        screenshotRenderer.colorData[colorOffset + 2],
-        screenshotRenderer.colorData[colorOffset + 3],
-      );
-    }
-    screenshotRenderer.activeLayerIds = new Uint32Array(activeLayerIds);
-    screenshotRenderer.colorData = new Float32Array(colorData);
-    screenshotRenderer.blendModes = new Uint8Array(blendModes);
-    screenshotRenderer.compositeEntries = screenshotRenderer.compositeEntries.filter(
-      (entry) => !failedLayerIds.has(entry.layerId),
+    const { canvas, gl, renderState, includeBackground, buildState } =
+      screenshotRenderer;
+    processor.clear();
+    const rebuilt = this.initializeRenderer(
+      canvas,
+      gl,
+      processor,
+      renderState,
+      includeBackground,
+      buildState,
     );
+    Object.assign(screenshotRenderer, rebuilt);
     return failedLayerIds.size;
   }
 

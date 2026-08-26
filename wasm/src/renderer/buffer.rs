@@ -7,6 +7,8 @@ pub struct Fbo {
     pub framebuffer: WebGlFramebuffer,
     pub texture: WebGlTexture,
     pub stencil: Option<WebGlRenderbuffer>,
+    pub color_bytes_per_pixel: usize,
+    pub color_format: &'static str,
 }
 
 /// Buffer cache for one repeated triangle mesh template.

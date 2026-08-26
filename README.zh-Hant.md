@@ -42,6 +42,12 @@
 - 尺規測量支援 mm/inch 單位切換
 - 可依解析度匯出截圖，並可包含尺規覆蓋層
 
+在 Viewer 中選擇 `Custom` 可建立自訂 composite；新 composite 會以所有
+組合均關閉的狀態進入區域選擇模式。可先使用 Union、Intersection、
+Difference 或 None，再在畫布或 Coverage Areas 清單中切換區域。`Done` 或
+Enter 提交草稿，Esc 取消草稿。零 coverage 區域只能在已解析的電路板外形或
+bounds fallback 內選擇；一般模式下只能選擇目前啟用的區域。
+
 ## 快速開始
 
 <details>

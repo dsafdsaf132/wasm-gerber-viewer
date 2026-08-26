@@ -42,6 +42,12 @@
 - 标尺测量支持 mm/inch 单位切换
 - 可按分辨率导出截图，并可包含标尺覆盖层
 
+在 Viewer 中选择 `Custom` 可创建自定义 composite；新 composite 会以所有
+组合均关闭的状态进入区域选择模式。可先使用 Union、Intersection、
+Difference 或 None，再在画布或 Coverage Areas 列表中切换区域。`Done` 或
+Enter 提交草稿，Esc 取消草稿。零 coverage 区域只能在已解析的电路板外形或
+bounds fallback 内选择；普通模式下只能选择当前启用的区域。
+
 ## 快速开始
 
 <details>

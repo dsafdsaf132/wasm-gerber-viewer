@@ -42,6 +42,13 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 - Ruler measurements with mm/inch unit switching
 - Screenshot export with resolution options, including ruler overlays
 
+To build a custom composite in the Viewer, choose `Custom`; new composites enter
+area selection with no combinations enabled. Use the Union, Intersection,
+Difference, or None controls, then click coverage areas in the canvas or the
+Coverage Areas list. `Done` or Enter commits the draft, while Esc cancels it.
+The zero-coverage area is selectable only inside the resolved board outline or
+bounds fallback, and normal-mode picking only changes currently active areas.
+
 ## Quick Start
 
 <details>

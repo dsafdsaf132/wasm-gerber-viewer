@@ -144,7 +144,7 @@ function compositeBitsetsEqual(left, right) {
 
 function mergeCompositeAreaCodes(current, discovered) {
   if (!(current instanceof Uint32Array) || current.length === 0) {
-    return discovered.slice();
+    return discovered;
   }
   if (!(discovered instanceof Uint32Array) || discovered.length === 0) {
     return current;
@@ -176,6 +176,7 @@ function mergeCompositeAreaCodes(current, discovered) {
     }
     if (unchanged) return current;
   }
+  if (outputIndex === merged.length) return merged;
   return merged.slice(0, outputIndex);
 }
 
@@ -1651,32 +1652,87 @@ export class GerberViewer {
     allowProcessorResize = false,
     preserveViewState = null,
     commitDrawerLayout = false,
+    skipProcessorResize = false,
+    targetSize = null,
   } = {}) {
     this.flushLazyViewportRender();
     this.drawerController.syncLayout({ commitLayout: commitDrawerLayout });
 
-    const rect = this.canvas.getBoundingClientRect();
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
-    this.canvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
-    this.restoreCanvasViewState(preserveViewState);
+    const nextSize = targetSize ?? this.getCanvasBackingSize();
+    const previousSize = {
+      width: this.canvas.width,
+      height: this.canvas.height,
+    };
+    const sizeChanged =
+      previousSize.width !== nextSize.width ||
+      previousSize.height !== nextSize.height;
 
     const canResizeProcessor =
+      !skipProcessorResize &&
+      sizeChanged &&
       this.wasmProcessor &&
       !this.isWebGlContextLost &&
       (!this.isRestoringWebGlContext || allowProcessorResize);
     if (canResizeProcessor) {
+      let canvasChangedForLegacyResize = false;
       try {
-        this.wasmProcessor.resize();
-        this.interactionProcessor?.resize?.();
+        if (typeof this.wasmProcessor.resize_to === "function") {
+          // Allocate the replacement FBO set before changing the drawing
+          // buffer. Rust commits resize_to atomically, so an allocation error
+          // leaves both the canvas and renderer on their previous dimensions.
+          this.wasmProcessor.resize_to(nextSize.width, nextSize.height);
+        } else {
+          this.canvas.width = nextSize.width;
+          this.canvas.height = nextSize.height;
+          canvasChangedForLegacyResize = true;
+          this.wasmProcessor.resize();
+        }
       } catch (error) {
+        if (canvasChangedForLegacyResize) {
+          this.canvas.width = previousSize.width;
+          this.canvas.height = previousSize.height;
+        }
         const message = getErrorMessage(error);
         console.error("[Render] Failed to resize renderer:", error);
         this.addDiagnostic("error", "Resize failed", message);
+        this.restoreCanvasViewState(preserveViewState);
+        this.requestRender();
+        return false;
       }
     }
 
+    if (sizeChanged) {
+      this.canvas.width = nextSize.width;
+      this.canvas.height = nextSize.height;
+    }
+    if (canResizeProcessor && this.interactionProcessor) {
+      try {
+        if (typeof this.interactionProcessor.resize_to === "function") {
+          this.interactionProcessor.resize_to(nextSize.width, nextSize.height);
+        } else {
+          this.interactionProcessor.resize?.();
+        }
+      } catch (error) {
+        this.disableFeaturePickingForCurrentDocument(
+          "Feature picking failed",
+          `Picking data could not be resized: ${getErrorMessage(error)}`,
+          { abandon: isFatalWasmRuntimeError(error) },
+        );
+      }
+    }
+
+    this.restoreCanvasViewState(preserveViewState);
     this.requestRender();
+    return true;
+  }
+
+  getCanvasBackingSize() {
+    const rect = this.canvas.getBoundingClientRect();
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    return {
+      width: Math.max(1, Math.round(rect.width * pixelRatio)),
+      height: Math.max(1, Math.round(rect.height * pixelRatio)),
+    };
   }
 
   setupEventListeners() {
@@ -1746,7 +1802,10 @@ export class GerberViewer {
       this.updateScreenshotResolutionPreview();
     });
     this.screenshotCancelBtn.addEventListener("click", () => {
-      if (this.isExportingScreenshot) return;
+      if (this.isExportingScreenshot) {
+        this.screenshotExporter.cancelExport();
+        return;
+      }
       this.closeScreenshotDialog();
     });
     this.screenshotDismissBtn.addEventListener("click", () => {
@@ -1761,6 +1820,7 @@ export class GerberViewer {
     this.screenshotDialog.addEventListener("cancel", (e) => {
       if (this.isExportingScreenshot) {
         e.preventDefault();
+        this.screenshotExporter.cancelExport();
       }
     });
     this.screenshotDialog.addEventListener("keydown", (event) => {
@@ -2000,6 +2060,7 @@ export class GerberViewer {
     this.resizeCanvas();
     this.panelTabs.forEach((button) => {
       button.addEventListener("click", () => {
+        if (this.compositeSelection) return;
         this.setActivePanel(button.dataset.panelTab);
       });
     });
@@ -2063,6 +2124,7 @@ export class GerberViewer {
       // definition from that state.
       this.finishCompositeSelection(false, { skipRenderer: true });
     }
+    this.clearSelectedFeature({ refresh: false });
     this.isWebGlContextLost = true;
     this.gl = null;
     this.addDiagnostic(
@@ -2140,10 +2202,38 @@ export class GerberViewer {
           );
         }
         if (!ownsRestore()) return;
-        this.wasmProcessor.restore_context(this.gl);
+        this.drawerController.syncLayout();
+        const restoreCanvasSize = this.getCanvasBackingSize();
+        const restoredAtTargetSize =
+          typeof this.wasmProcessor.restore_context_with_size === "function";
+        if (restoredAtTargetSize) {
+          this.wasmProcessor.restore_context_with_size(
+            this.gl,
+            restoreCanvasSize.width,
+            restoreCanvasSize.height,
+          );
+        } else {
+          this.wasmProcessor.restore_context(this.gl);
+        }
+        if (!ownsRestore()) return;
+        this.synchronizeCompositeBitsetsAfterCachedRestore(
+          layerSnapshot,
+          this.wasmProcessor,
+        );
         if (!ownsRestore()) return;
         try {
-          this.interactionProcessor?.restore_context?.(this.gl);
+          if (
+            restoredAtTargetSize &&
+            typeof this.interactionProcessor?.restore_context_with_size === "function"
+          ) {
+            this.interactionProcessor.restore_context_with_size(
+              this.gl,
+              restoreCanvasSize.width,
+              restoreCanvasSize.height,
+            );
+          } else {
+            this.interactionProcessor?.restore_context?.(this.gl);
+          }
         } catch (interactionRestoreError) {
           this.disableFeaturePickingForCurrentDocument(
             "Feature picking failed",
@@ -2152,7 +2242,12 @@ export class GerberViewer {
           );
         }
         if (!ownsRestore()) return;
-        this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
+        this.resizeCanvas({
+          allowProcessorResize: true,
+          preserveViewState: viewState,
+          skipProcessorResize: restoredAtTargetSize,
+          targetSize: restoreCanvasSize,
+        });
         if (!ownsRestore()) return;
         // Cached-context restore keeps pending renderer IDs valid. Leave those
         // records in the loader so it can commit them and build interactions.
@@ -2243,6 +2338,31 @@ export class GerberViewer {
       }
     }
     return ownsRestore() && processor === this.wasmProcessor;
+  }
+
+  synchronizeCompositeBitsetsAfterCachedRestore(
+    layerSnapshot,
+    processor = this.wasmProcessor,
+  ) {
+    const composites = layerSnapshot.filter(
+      (layer) => isCompositeLayer(layer) && hasRendererLayerId(layer.layerId),
+    );
+    if (composites.length === 0) return;
+    if (typeof processor?.set_composite_visible_bits !== "function") {
+      throw new Error(
+        "Composite context recovery requires an updated WASM module.",
+      );
+    }
+    for (const layer of composites) {
+      // Selection edits live in Rust so toggles can update one LUT byte. A
+      // context loss cancels that draft without making another GPU call, so
+      // restore the authoritative JS snapshot before the cached renderer is
+      // allowed to draw again.
+      processor.set_composite_visible_bits(
+        layer.layerId,
+        layer.visibleBitset,
+      );
+    }
   }
 
   refreshIcons() {
@@ -3200,6 +3320,14 @@ export class GerberViewer {
     }
 
     const rendererBusy = this.isRendererBusy();
+    const compositeSelectionLocked = Boolean(this.compositeSelection);
+    if (compositeSelectionLocked && this.activePanel !== "layers") {
+      this.setActivePanel("layers");
+    }
+    for (const button of this.panelTabs) {
+      button.disabled = compositeSelectionLocked;
+    }
+    this.drawerController.setLocked(compositeSelectionLocked);
     if (rendererBusy && (this.draggedLayerId || this.layerTouchDrag)) {
       this.cancelLayerReorderGesture();
     }
@@ -3451,6 +3579,7 @@ export class GerberViewer {
 
   setActivePanel(panelName) {
     if (!panelName) return;
+    if (this.compositeSelection && panelName !== "layers") return;
     this.activePanel = panelName;
 
     this.panelTabs.forEach((button) => {
@@ -6982,9 +7111,13 @@ export class GerberViewer {
 
     const tolerance = this.getFeatureHitToleranceWorld(clientX, clientY, inputType);
     const shouldCycle = this.shouldCycleFeatureSelection(clientX, clientY, inputType);
-    const selectedIsComposite = isCompositeAreaSelection(this.selectedFeature);
-    const hit = shouldCycle && !selectedIsComposite
-      ? this.pickFeatureAcrossProcessors(point, tolerance, true)
+    const hit = shouldCycle
+      ? this.pickFeatureAcrossAllSources(
+          point,
+          tolerance,
+          clientX,
+          clientY,
+        )
       : (
           this.pickFeatureWithProcessor(
             this.wasmProcessor,
@@ -7013,7 +7146,11 @@ export class GerberViewer {
     this.requestRender();
   }
 
-  pickCompositeAreaAtCanvasPoint(clientX, clientY) {
+  pickCompositeAreaAtCanvasPoint(
+    clientX,
+    clientY,
+    { afterClientLayerId = null } = {},
+  ) {
     const pixel = this.getCompositeCanvasPixel(clientX, clientY);
     if (
       !pixel ||
@@ -7022,8 +7159,13 @@ export class GerberViewer {
       return null;
     }
 
+    let reachedAfterLayer = afterClientLayerId === null;
     for (const layer of this.layers) {
       if (!isCompositeLayer(layer) || !layer.visible || layer.error) continue;
+      if (!reachedAfterLayer) {
+        if (layer.id === afterClientLayerId) reachedAfterLayer = true;
+        continue;
+      }
       try {
         const layerId = this.ensureCompositeRendererLayer(layer);
         if (!hasRendererLayerId(layerId)) continue;
@@ -7066,61 +7208,75 @@ export class GerberViewer {
     return null;
   }
 
-  pickFeatureAcrossProcessors(point, tolerance, shouldCycle) {
-    const selectedIsDrill = isDrillLayer(this.selectedFeature?.layer);
-    if (shouldCycle && this.selectedFeature) {
-      const primaryHit = selectedIsDrill
-        ? this.pickFeatureWithProcessor(
-            this.wasmProcessor,
-            this.getVisibleDrillInteractionLayerIds(),
-            point,
-            tolerance,
-            true,
-          )
-        : this.pickFeatureWithProcessor(
-            this.getFeaturePickingProcessorForGerber(),
-            this.getVisibleGerberInteractionLayerIds(),
-            point,
-            tolerance,
-            true,
-          );
-      if (primaryHit && !this.isSelectedFeatureHit(primaryHit)) {
-        return primaryHit;
-      }
-
-      const alternateHit = selectedIsDrill
-        ? this.pickFeatureWithProcessor(
-            this.getFeaturePickingProcessorForGerber(),
-            this.getVisibleGerberInteractionLayerIds(),
-            point,
-            tolerance,
-            false,
-          )
-        : this.pickFeatureWithProcessor(
-            this.wasmProcessor,
-            this.getVisibleDrillInteractionLayerIds(),
-            point,
-            tolerance,
-            false,
-          );
-      return alternateHit ?? primaryHit;
-    }
-
-    return (
+  pickFeatureAcrossAllSources(point, tolerance, clientX, clientY) {
+    const drillIds = this.getVisibleDrillInteractionLayerIds();
+    const gerberProcessor = this.getFeaturePickingProcessorForGerber();
+    const gerberIds = this.getVisibleGerberInteractionLayerIds();
+    const drillFirst = () =>
       this.pickFeatureWithProcessor(
         this.wasmProcessor,
-        this.getVisibleDrillInteractionLayerIds(),
+        drillIds,
         point,
         tolerance,
         false,
-      ) ??
+      );
+    const gerberFirst = () =>
       this.pickFeatureWithProcessor(
-        this.getFeaturePickingProcessorForGerber(),
-        this.getVisibleGerberInteractionLayerIds(),
+        gerberProcessor,
+        gerberIds,
         point,
         tolerance,
         false,
-      )
+      );
+    const compositeFirst = () =>
+      this.pickCompositeAreaAtCanvasPoint(clientX, clientY);
+    const ordinaryNextWithoutWrap = (processor, layerIds, first) => {
+      const next = this.pickFeatureWithProcessor(
+        processor,
+        layerIds,
+        point,
+        tolerance,
+        true,
+      );
+      return next && !this.isSameFeatureHit(next, first) ? next : null;
+    };
+
+    if (isCompositeAreaSelection(this.selectedFeature)) {
+      return (
+        this.pickCompositeAreaAtCanvasPoint(clientX, clientY, {
+          afterClientLayerId: this.selectedFeature.layer.id,
+        }) ??
+        gerberFirst() ??
+        drillFirst() ??
+        compositeFirst()
+      );
+    }
+
+    if (isDrillLayer(this.selectedFeature?.layer)) {
+      const first = drillFirst();
+      return (
+        ordinaryNextWithoutWrap(this.wasmProcessor, drillIds, first) ??
+        compositeFirst() ??
+        gerberFirst() ??
+        first
+      );
+    }
+
+    const first = gerberFirst();
+    return (
+      ordinaryNextWithoutWrap(gerberProcessor, gerberIds, first) ??
+      drillFirst() ??
+      compositeFirst() ??
+      first
+    );
+  }
+
+  isSameFeatureHit(left, right) {
+    return (
+      left !== null &&
+      right !== null &&
+      Number(left?.layerId) === Number(right?.layerId) &&
+      Number(left?.featureId) === Number(right?.featureId)
     );
   }
 
@@ -8011,6 +8167,11 @@ export class GerberViewer {
       areaCodesScanned: false,
       areaScanError: null,
       areaScanTimer: null,
+      areaScanKey: null,
+      areaScanNextRow: 0,
+      areaScanCodes: new Uint32Array(0),
+      areaScanInProgress: false,
+      areaScanSessionStarted: false,
       areaRenderLimit: 200,
       rulerWasActive,
       returnFocusLayerId: layer.id,
@@ -8158,7 +8319,7 @@ export class GerberViewer {
     const selection = this.compositeSelection;
     if (!selection) return;
     if (selection.hoverFrame !== null) cancelAnimationFrame(selection.hoverFrame);
-    if (selection.areaScanTimer !== null) clearTimeout(selection.areaScanTimer);
+    this.cancelCompositeAreaScan(selection);
     let rebuildRendererLayer = false;
     let fatalCleanupError = null;
     try {
@@ -8329,7 +8490,12 @@ export class GerberViewer {
         !selection.areaCodesScanned ||
         selection.previewStateKey !== nextPreviewStateKey;
       selection.previewStateKey = nextPreviewStateKey;
-      if (shouldScanAreas) this.scheduleCompositeAreaScan(selection);
+      if (
+        shouldScanAreas &&
+        selection.areaScanKey !== nextPreviewStateKey
+      ) {
+        this.scheduleCompositeAreaScan(selection);
+      }
       return true;
     } catch (error) {
       this.handleCompositeSelectionPreviewFailure(selection, error);
@@ -8361,45 +8527,109 @@ export class GerberViewer {
 
   scheduleCompositeAreaScan(selection) {
     if (!selection || this.compositeSelection !== selection) return;
-    if (selection.areaScanTimer !== null) {
-      clearTimeout(selection.areaScanTimer);
-      selection.areaScanTimer = null;
-    }
-    if (!selection.areaCodesScanned) {
-      this.scanCompositeSelectionAreas(selection);
-      return;
-    }
+    this.cancelCompositeAreaScan(selection);
+    selection.areaScanKey = selection.previewStateKey;
+    selection.areaScanNextRow = 0;
+    selection.areaScanCodes = new Uint32Array(0);
+    selection.areaScanInProgress = true;
+    selection.areaScanError = null;
+    if (!selection.areaCodesScanned) this.renderCompositeAreaList();
     selection.areaScanTimer = setTimeout(() => {
       selection.areaScanTimer = null;
       this.scanCompositeSelectionAreas(selection);
-    }, 140);
+    }, selection.areaCodesScanned ? 140 : 0);
   }
 
   scanCompositeSelectionAreas(selection) {
     if (!selection || this.compositeSelection !== selection) return false;
     if (
-      typeof this.wasmProcessor?.get_composite_area_codes !== "function" ||
+      selection.areaScanKey !== selection.previewStateKey ||
       selection.previewStateKey !==
         this.getCompositeSelectionPreviewStateKey(selection.layer)
     ) {
+      this.cancelCompositeAreaScan(selection, { refresh: true });
       return false;
     }
     try {
-      const firstScan = !selection.areaCodesScanned;
-      const discovered = this.wasmProcessor.get_composite_area_codes(
-        selection.layer.layerId,
-      );
-      if (!(discovered instanceof Uint32Array)) {
+      const scanHeight = this.canvas.height;
+      if (scanHeight <= 0) {
+        selection.areaCodesScanned = true;
+        selection.areaScanInProgress = false;
+        selection.areaScanError = null;
+        this.renderCompositeAreaList();
+        return true;
+      }
+      const supportsBands =
+        typeof this.wasmProcessor?.get_composite_area_codes_band === "function";
+      const supportsScanSession =
+        typeof this.wasmProcessor?.begin_composite_area_scan === "function" &&
+        typeof this.wasmProcessor?.scan_composite_area_band === "function" &&
+        typeof this.wasmProcessor?.finish_composite_area_scan === "function";
+      if (
+        !supportsScanSession &&
+        !supportsBands &&
+        typeof this.wasmProcessor?.get_composite_area_codes !== "function"
+      ) {
+        throw new TypeError("Composite area scan API is unavailable");
+      }
+      const bandRows = Math.min(128, scanHeight - selection.areaScanNextRow);
+      if (supportsScanSession && !selection.areaScanSessionStarted) {
+        this.wasmProcessor.begin_composite_area_scan(selection.layer.layerId);
+        selection.areaScanSessionStarted = true;
+      }
+      const discovered = supportsScanSession
+        ? (this.wasmProcessor.scan_composite_area_band(
+            selection.layer.layerId,
+            selection.areaScanNextRow,
+            bandRows,
+          ), null)
+        : supportsBands
+          ? this.wasmProcessor.get_composite_area_codes_band(
+            selection.layer.layerId,
+            selection.areaScanNextRow,
+            bandRows,
+          )
+          : this.wasmProcessor.get_composite_area_codes(
+              selection.layer.layerId,
+            );
+      if (discovered !== null && !(discovered instanceof Uint32Array)) {
         throw new TypeError("Composite area scan did not return a Uint32Array");
       }
-      const merged = mergeCompositeAreaCodes(selection.areaCodes, discovered);
-      const changed = merged !== selection.areaCodes;
-      selection.areaCodes = merged;
-      selection.areaCodesScanned = true;
-      selection.areaScanError = null;
-      if (firstScan || changed) {
-        this.renderCompositeAreaList();
+      if (discovered !== null) {
+        selection.areaScanCodes = mergeCompositeAreaCodes(
+          selection.areaScanCodes,
+          discovered,
+        );
       }
+      selection.areaScanNextRow = supportsScanSession || supportsBands
+        ? selection.areaScanNextRow + bandRows
+        : scanHeight;
+      if (selection.areaScanNextRow < scanHeight) {
+        selection.areaScanTimer = setTimeout(() => {
+          selection.areaScanTimer = null;
+          this.scanCompositeSelectionAreas(selection);
+        }, 0);
+        return true;
+      }
+
+      const completedCodes = supportsScanSession
+        ? this.wasmProcessor.finish_composite_area_scan(
+            selection.layer.layerId,
+          )
+        : selection.areaScanCodes;
+      selection.areaScanSessionStarted = false;
+      if (!(completedCodes instanceof Uint32Array)) {
+        throw new TypeError("Composite area scan did not return a Uint32Array");
+      }
+      // The list describes the current preview viewport. Replace it
+      // atomically so pan/zoom does not retain stale rows (or grow a
+      // session-long union of every viewport the user has visited).
+      selection.areaCodes = completedCodes;
+      selection.areaScanCodes = new Uint32Array(0);
+      selection.areaCodesScanned = true;
+      selection.areaScanInProgress = false;
+      selection.areaScanError = null;
+      this.renderCompositeAreaList();
       return true;
     } catch (error) {
       if (
@@ -8412,6 +8642,9 @@ export class GerberViewer {
         return false;
       }
       selection.areaCodesScanned = true;
+      selection.areaScanInProgress = false;
+      this.cancelCompositeAreaScanSession(selection);
+      selection.areaScanCodes = new Uint32Array(0);
       selection.areaScanError = getErrorMessage(error);
       this.addDiagnostic(
         "warning",
@@ -8420,6 +8653,35 @@ export class GerberViewer {
       );
       this.renderCompositeAreaList();
       return false;
+    }
+  }
+
+  cancelCompositeAreaScan(selection, { refresh = false } = {}) {
+    if (!selection) return;
+    if (selection.areaScanTimer !== null) {
+      clearTimeout(selection.areaScanTimer);
+    }
+    selection.areaScanTimer = null;
+    this.cancelCompositeAreaScanSession(selection);
+    selection.areaScanKey = null;
+    selection.areaScanNextRow = 0;
+    selection.areaScanCodes = new Uint32Array(0);
+    selection.areaScanInProgress = false;
+    if (refresh && this.compositeSelection === selection) {
+      this.renderCompositeAreaList();
+    }
+  }
+
+  cancelCompositeAreaScanSession(selection) {
+    if (!selection?.areaScanSessionStarted) return;
+    selection.areaScanSessionStarted = false;
+    try {
+      this.wasmProcessor?.cancel_composite_area_scan?.(
+        selection.layer.layerId,
+      );
+    } catch (_error) {
+      // Context loss or renderer recovery drops the scan state with the
+      // processor. The JS accumulator is cleared by the caller either way.
     }
   }
 
@@ -8458,10 +8720,28 @@ export class GerberViewer {
     const selection = this.compositeSelection;
     if (!selection || code < 0) return "Outside outline";
     const slots = getCompositeSourceSlots(selection.layer);
-    const names = selection.layer.sourceIds
-      .filter((_sourceId, index) => (code & 2 ** slots[index]) !== 0)
-      .map((sourceId) => this.layers.find((layer) => layer.id === sourceId)?.name)
-      .filter(Boolean);
+    const sources = selection.layer.sourceIds
+      .map((sourceId, index) => ({
+        source: this.layers.find((layer) => layer.id === sourceId),
+        index,
+      }))
+      .filter(({ source }) => Boolean(source));
+    const nameCounts = new Map();
+    for (const { source } of sources) {
+      const key = source.name.trim().toLowerCase();
+      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+    }
+    const names = sources
+      .filter(({ index }) => (code & 2 ** slots[index]) !== 0)
+      .map(({ source }) => {
+        const key = source.name.trim().toLowerCase();
+        if ((nameCounts.get(key) ?? 0) <= 1) return source.name;
+        const provenance = String(source.sourceName ?? "")
+          .split(/[\\/]/)
+          .filter(Boolean)
+          .at(-1);
+        return `${source.name} — ${provenance || "source"} (${source.id})`;
+      });
     return names.length
       ? names.join(", ")
       : "No source layers";
@@ -8470,17 +8750,33 @@ export class GerberViewer {
   renderCompositeAreaList() {
     const selection = this.compositeSelection;
     if (!selection) return;
+    const focusedAreaCode = document.activeElement instanceof HTMLInputElement
+      ? document.activeElement.dataset.compositeAreaCode ?? null
+      : null;
+    const focusedShowMore = document.activeElement instanceof HTMLButtonElement &&
+      document.activeElement.dataset.compositeAreaMore === "true";
+    if (focusedAreaCode !== null) {
+      const focusedIndex = selection.areaCodes.indexOf(Number(focusedAreaCode));
+      if (focusedIndex >= 0) {
+        selection.areaRenderLimit = Math.max(
+          selection.areaRenderLimit,
+          focusedIndex + 1,
+        );
+      }
+    }
     clearLayerListView(this.layerList);
     this.layerList.classList.remove("is-locked");
 
     const heading = document.createElement("li");
     heading.className = "layer-group-heading composite-area-heading";
-    const title = document.createElement("strong");
+    const title = document.createElement("h3");
     title.textContent = "Coverage Areas";
     const count = document.createElement("span");
-    count.textContent = selection.areaCodesScanned
-      ? `${selection.areaCodes.length}`
-      : "Scanning…";
+    count.textContent = !selection.areaCodesScanned || selection.areaScanInProgress
+      ? selection.areaCodes.length > 0
+        ? `${selection.areaCodes.length} · Scanning…`
+        : "Scanning…"
+      : `${selection.areaCodes.length}`;
     heading.append(title, count);
     this.layerList.appendChild(heading);
 
@@ -8492,10 +8788,11 @@ export class GerberViewer {
       this.layerList.appendChild(errorItem);
       return;
     }
-    if (!selection.areaCodesScanned) {
+    if (!selection.areaCodesScanned ||
+        (selection.areaScanInProgress && selection.areaCodes.length === 0)) {
       const scanning = document.createElement("li");
       scanning.className = "composite-area-empty";
-      scanning.textContent = "Scanning visible coverage areas…";
+      scanning.textContent = "Scanning coverage combinations in the current view…";
       this.layerList.appendChild(scanning);
       return;
     }
@@ -8545,6 +8842,7 @@ export class GerberViewer {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "chip-button";
+      more.dataset.compositeAreaMore = "true";
       more.textContent = `Show more (${displayedCount} / ${selection.areaCodes.length})`;
       more.addEventListener("click", () => {
         selection.areaRenderLimit += 200;
@@ -8552,6 +8850,36 @@ export class GerberViewer {
       });
       moreItem.appendChild(more);
       this.layerList.appendChild(moreItem);
+    }
+
+    if (focusedAreaCode !== null) {
+      const sameArea = this.layerList.querySelector(
+        `[data-composite-area-code="${focusedAreaCode}"]`,
+      );
+      const fallbackArea = this.layerList.querySelector(
+        "[data-composite-area-code]",
+      );
+      if (sameArea instanceof HTMLInputElement) {
+        sameArea.focus({ preventScroll: true });
+      } else if (fallbackArea instanceof HTMLInputElement) {
+        fallbackArea.focus({ preventScroll: true });
+      } else {
+        this.compositeSelectionBar
+          ?.querySelector("[data-composite-selection-done]")
+          ?.focus({ preventScroll: true });
+      }
+    } else if (focusedShowMore) {
+      const nextShowMore = this.layerList.querySelector(
+        '[data-composite-area-more="true"]',
+      );
+      if (nextShowMore instanceof HTMLButtonElement) {
+        nextShowMore.focus({ preventScroll: true });
+      } else {
+        const checkboxes = this.layerList.querySelectorAll(
+          "[data-composite-area-code]",
+        );
+        checkboxes.item(checkboxes.length - 1)?.focus({ preventScroll: true });
+      }
     }
   }
 

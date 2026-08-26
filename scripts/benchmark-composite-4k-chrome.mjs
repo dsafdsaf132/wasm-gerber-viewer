@@ -103,6 +103,7 @@ M02*`;
         selectionMs,
         toggleMs,
         outputFormat: diagnostics.outputFormat,
+        outlineFormat: diagnostics.outlineFormat,
         cpuBitsetBytes: diagnostics.cpuBitsetBytes,
         gpuLookupBytes: diagnostics.gpuLookupBytes,
         outputMaskBytes: diagnostics.outputMaskBytes,
@@ -124,7 +125,10 @@ M02*`;
           lookupRenderCount: diagnostics.lookupRenderCount,
           renderScratchGrowthCount: diagnostics.renderScratchGrowthCount,
         },
-        r8Fallback: diagnostics.outputFormat !== "R8",
+        r8Fallback:
+          diagnostics.outputFormat !== "R8" || diagnostics.outlineFormat !== "R8",
+        outputR8Fallback: diagnostics.outputFormat !== "R8",
+        outlineR8Fallback: diagnostics.outlineFormat !== "R8",
         webglVersion: gl.getParameter(gl.VERSION),
         gpuVendor: debugInfo
           ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL)

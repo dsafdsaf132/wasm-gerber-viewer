@@ -235,6 +235,12 @@ impl Default for GerberProcessor {
 }
 
 impl GerberProcessor {
+    fn reset_renderer_generation_state(&mut self) {
+        self.drill_outline_layer_ids.clear();
+        self.drill_layer_ids.clear();
+        self.interaction_layers.clear();
+    }
+
     fn add_parsed_layers(&mut self, gerber_data_layers: Vec<GerberData>) -> Result<u32, JsValue> {
         let non_empty_layers: Vec<_> = gerber_data_layers
             .into_iter()
@@ -433,6 +439,7 @@ impl GerberProcessor {
         let mut renderer = Renderer::new(gl)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         self.renderer = Some(renderer);
+        self.reset_renderer_generation_state();
         Ok("init_done".to_string())
     }
 
@@ -448,6 +455,7 @@ impl GerberProcessor {
         let mut renderer = Renderer::new_headless(gl, width, height)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         self.renderer = Some(renderer);
+        self.reset_renderer_generation_state();
         Ok("init_done".to_string())
     }
 
@@ -1107,6 +1115,11 @@ impl GerberProcessor {
         }
         Reflect::set(
             &object,
+            &JsValue::from_str("outlineFormat"),
+            &JsValue::from_str(diagnostics.outline_format),
+        )?;
+        Reflect::set(
+            &object,
             &JsValue::from_str("outputFormat"),
             &JsValue::from_str(diagnostics.output_format),
         )?;
@@ -1203,6 +1216,59 @@ impl GerberProcessor {
             .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
             .get_composite_area_codes(composite_id as usize)?;
         Ok(Uint32Array::from(codes.as_slice()))
+    }
+
+    pub fn get_composite_area_codes_band(
+        &self,
+        composite_id: u32,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<Uint32Array, JsValue> {
+        let codes = self
+            .renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .get_composite_area_codes_band(composite_id as usize, start_y, row_count)?;
+        Ok(Uint32Array::from(codes.as_slice()))
+    }
+
+    pub fn begin_composite_area_scan(&mut self, composite_id: u32) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .begin_composite_area_scan(composite_id as usize)
+    }
+
+    pub fn scan_composite_area_band(
+        &mut self,
+        composite_id: u32,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .scan_composite_area_band(composite_id as usize, start_y, row_count)
+    }
+
+    pub fn finish_composite_area_scan(
+        &mut self,
+        composite_id: u32,
+    ) -> Result<Uint32Array, JsValue> {
+        let codes = self
+            .renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .finish_composite_area_scan(composite_id as usize)?;
+        Ok(Uint32Array::from(codes.as_slice()))
+    }
+
+    pub fn cancel_composite_area_scan(&mut self, composite_id: u32) -> Result<(), JsValue> {
+        self.renderer
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .cancel_composite_area_scan(composite_id as usize);
+        Ok(())
     }
 
     pub fn end_composite_selection(&mut self) -> Result<(), JsValue> {

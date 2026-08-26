@@ -901,6 +901,43 @@ test(
 );
 
 test(
+  "best-effort survivors rebuild without failed composite dependencies in manual views",
+  { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
+  async () => {
+    for (const strategy of ["full-frame", "stream"]) {
+      const baselineRenderer = await createNodeGerberRenderer();
+      let baseline;
+      try {
+        await addExcludedDependencyFrame(baselineRenderer, false, strategy);
+        baseline = decodeRgbaPng(await baselineRenderer.exportPng());
+      } finally {
+        baselineRenderer.dispose();
+      }
+
+      for (const failureKind of ["construction", "lazy"]) {
+        const wasmModule = failureKind === "construction"
+          ? await createForcedCompositeConstructionFailureModule()
+          : await createOneCompositeFailureModule();
+        const renderer = await createNodeGerberRenderer({
+          wasmModule,
+          __continueOnCompositeError: true,
+        });
+        try {
+          await addExcludedDependencyFrame(renderer, true, strategy);
+          assert.deepEqual(
+            decodeRgbaPng(await renderer.exportPng()),
+            baseline,
+            `${strategy} ${failureKind} failure must rebuild survivor masks`,
+          );
+        } finally {
+          renderer.dispose();
+        }
+      }
+    }
+  },
+);
+
+test(
   "Node strict composite export rejects without damaging the next healthy frame",
   { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
   async () => {
@@ -1003,6 +1040,7 @@ test(
       assert.equal(diagnostics.outputMaskBytes, 256 * 256);
       assert.equal(diagnostics.sharedMembershipBytes, 256 * 256 * 4);
       assert.equal(diagnostics.sharedOutlineBytes, 256 * 256);
+      assert.equal(diagnostics.outlineFormat, "R8");
 
       for (let slot = 0; slot < 24; slot += 1) {
         const worldX = -11.5 + slot;
@@ -1047,14 +1085,69 @@ test(
       );
       assert.deepEqual(
         [...hiddenPreview],
-        [0, 0, 0, 31],
-        "inactive coverage keeps its hashed base RGB at the dim preview alpha",
+        [0, 0, 0, 255],
+        "inactive coverage uses the opaque dark stipple without violating premultiplication",
       );
       assert.equal(
         processor.get_composite_diagnostics(compositeId).gpuLookupBytes,
         visibleBits.length,
         "a stale GL error must not release the valid lookup texture",
       );
+    } finally {
+      try {
+        processor.clear();
+      } finally {
+        processor.free();
+        gl.destroy();
+      }
+    }
+  },
+);
+
+test(
+  "processor reinitialization clears drill and interaction layer generations",
+  { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
+  async () => {
+    const wasm = await import(wasmModuleUrl.href);
+    wasm.initSync({ module: readFileSync(wasmBinaryUrl) });
+    const { createWebGLRenderingContext } = require("node-gles-webgl2");
+    const gl = createWebGLRenderingContext({
+      width: 64,
+      height: 64,
+      majorVersion: 3,
+      minorVersion: 0,
+      webGLCompatibility: true,
+    });
+    const processor = new wasm.GerberProcessor();
+    try {
+      processor.set_interactions_enabled(true);
+      processor.init_with_size(gl, 64, 64);
+      processor.add_drill_layer([
+        "M48",
+        "METRIC,TZ",
+        "T01C1.0",
+        "%",
+        "T01",
+        "X000000Y000000",
+        "M30",
+      ].join("\n"));
+      assert.equal(processor.has_interaction_layer(0), true);
+
+      processor.init_with_size(gl, 64, 64);
+      assert.equal(processor.has_interaction_layer(0), false);
+      const first = processor.add_layer(flashGerber(0));
+      const second = processor.add_layer(flashGerber(4));
+      assert.deepEqual([first, second], [0, 1]);
+      assert.doesNotThrow(() =>
+        processor.add_composite_preset_with_bounds(
+          new Uint32Array([first, second]),
+          "union",
+          false,
+          -5,
+          9,
+          -5,
+          5,
+        ));
     } finally {
       try {
         processor.clear();
@@ -1206,6 +1299,13 @@ test(
         gl.readPixels(pixelX(worldX), 64, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
         return pixel;
       };
+      const readInactiveColorSample = (worldX) => {
+        const pixel = new Uint8Array(4);
+        const centerX = pixelX(worldX);
+        const sampleX = centerX + ((2 - (centerX & 3) + 4) & 3);
+        gl.readPixels(sampleX, 66, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+        return pixel;
+      };
       const expectedHashRgb = (coverageCode) => {
         const mask = 0xffffff;
         let value = (coverageCode + 1) & mask;
@@ -1221,14 +1321,32 @@ test(
       assert.equal(processor.pick_composite_code(compositeId, pixelX(-2), 64), codes[0]);
       assert.equal(processor.pick_composite_code(compositeId, pixelX(2), 64), codes[1]);
       const hidden = [readPreview(-2), readPreview(2)];
-      assert.deepEqual([...hidden[0].subarray(0, 3)], expectedHashRgb(codes[0]));
-      assert.deepEqual([...hidden[1].subarray(0, 3)], expectedHashRgb(codes[1]));
+      const hiddenColorSamples = [
+        readInactiveColorSample(-2),
+        readInactiveColorSample(2),
+      ];
+      assert.deepEqual(
+        [...hiddenColorSamples[0]],
+        [...expectedHashRgb(codes[0]), 255],
+      );
+      assert.deepEqual(
+        [...hiddenColorSamples[1]],
+        [...expectedHashRgb(codes[1]), 255],
+      );
       assert.notDeepEqual(
-        [...hidden[0]],
-        [...hidden[1]],
+        [...hiddenColorSamples[0]],
+        [...hiddenColorSamples[1]],
         "distinct coverage codes must never collapse after hidden-state dimming",
       );
-      assert.deepEqual(hidden.map((pixel) => pixel[3]), [31, 31]);
+      assert.deepEqual(hidden.map((pixel) => pixel[3]), [255, 255]);
+      for (let index = 0; index < hidden.length; index += 1) {
+        const dimSum = hidden[index][0] + hidden[index][1] + hidden[index][2];
+        const baseSum = expectedHashRgb(codes[index]).reduce(
+          (sum, channel) => sum + channel,
+          0,
+        );
+        assert.ok(dimSum < baseSum * 0.1, "inactive stipple cells stay dark");
+      }
 
       for (const code of codes) {
         processor.set_composite_visible_byte(
@@ -1344,12 +1462,93 @@ test(
       );
 
       processor.render_composite_selection(compositeId, zoom, zoom, 0, 0);
+      processor.begin_composite_area_scan(compositeId);
+      processor.release_composite_cache(compositeId);
+      assert.throws(
+        () => processor.finish_composite_area_scan(compositeId),
+        /scan is not active/,
+        "cache release drops transient area-scan CPU buffers",
+      );
+      processor.render_composite_selection(compositeId, zoom, zoom, 0, 0);
+      processor.begin_composite_area_scan(compositeId);
+      processor.resize_to(128, 128);
+      assert.throws(
+        () => processor.finish_composite_area_scan(compositeId),
+        /scan is not active/,
+        "resize drops scan buffers tied to the previous FBO generation",
+      );
+      processor.render_composite_selection(compositeId, zoom, zoom, 0, 0);
       assert.deepEqual(
         [...processor.get_composite_area_codes(compositeId)],
         [0, 1, 2],
         "area enumeration returns active and inactive coverage plus outlined code zero",
       );
+      const bandCodes = new Set([
+        ...processor.get_composite_area_codes_band(compositeId, 0, 64),
+        ...processor.get_composite_area_codes_band(compositeId, 64, 64),
+      ]);
+      assert.deepEqual(
+        [...bandCodes].sort((left, right) => left - right),
+        [0, 1, 2],
+        "incremental area bands preserve the complete coverage set",
+      );
+      processor.begin_composite_area_scan(compositeId);
+      processor.scan_composite_area_band(compositeId, 0, 64);
+      processor.scan_composite_area_band(compositeId, 64, 64);
+      assert.deepEqual(
+        [...processor.finish_composite_area_scan(compositeId)],
+        [0, 1, 2],
+        "one scan session accumulates every band and enumerates codes once",
+      );
+      processor.begin_composite_area_scan(compositeId);
+      assert.throws(
+        () => processor.scan_composite_area_band(compositeId, 64, 64),
+        /contiguous and ordered/,
+      );
+      processor.begin_composite_area_scan(compositeId);
+      processor.scan_composite_area_band(compositeId, 0, 64);
+      assert.throws(
+        () => processor.finish_composite_area_scan(compositeId),
+        /scan is incomplete/,
+      );
+      processor.begin_composite_area_scan(compositeId);
+      processor.cancel_composite_area_scan(compositeId);
+      assert.throws(
+        () => processor.finish_composite_area_scan(compositeId),
+        /scan is not active/,
+      );
+      processor.begin_composite_area_scan(compositeId);
+      processor.update_composite_sources(
+        compositeId,
+        new Uint32Array([disconnected, inactiveCenter]),
+        visibleBits,
+      );
+      assert.throws(
+        () => processor.finish_composite_area_scan(compositeId),
+        /scan is not active/,
+        "source changes invalidate an in-flight scan instead of mixing coverage revisions",
+      );
       processor.end_composite_selection();
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      assert.equal(
+        processor.render_composite_area_highlight(
+          compositeId,
+          1,
+          zoom,
+          zoom,
+          0,
+          0,
+        ),
+        "highlight_done",
+      );
+      assert.deepEqual(
+        readCanvasPixel(gl, 48, 64),
+        [219, 219, 219, 219],
+        "straight-alpha highlight blending must leave a premultiplied transparent canvas",
+      );
 
       renderComposite(compositeId);
       assert.equal(pick(compositeId, -2), 1);
@@ -1697,6 +1896,57 @@ test(
 );
 
 test(
+  "internal outline masks fall back to RGBA8 when the first R8 allocation is unsupported",
+  { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
+  async () => {
+    await withCompositeProcessor(async ({
+      processor,
+      dummyId,
+      forceNextR8Failure,
+      wasR8FailureForced,
+      rgbaAllocationsAfterR8Failure,
+    }) => {
+      const sourceId = processor.add_layer(flashGerber(0));
+      forceNextR8Failure();
+      const compositeId = processor.add_composite_layer_with_bounds(
+        new Uint32Array([sourceId, dummyId]),
+        new Uint8Array([0b00001110]),
+        false,
+        -5,
+        5,
+        -5,
+        5,
+      );
+      assert.equal(wasR8FailureForced(), true);
+      assert.ok(
+        rgbaAllocationsAfterR8Failure() >= 1,
+        "the internal outline must retry with a red-channel RGBA8 mask",
+      );
+      let diagnostics = processor.get_composite_diagnostics(compositeId);
+      assert.equal(diagnostics.outlineFormat, "RGBA8");
+      assert.equal(diagnostics.sharedOutlineBytes, 256 * 256 * 4);
+      processor.render_composite_selection(compositeId, 0.05, 0.05, 0, 0);
+      assert.equal(processor.pick_composite_code(compositeId, 128, 128), 1);
+
+      processor.end_composite_selection();
+      processor.resize_to(192, 128);
+      diagnostics = processor.get_composite_diagnostics(compositeId);
+      assert.equal(diagnostics.outlineFormat, "R8");
+      assert.equal(diagnostics.sharedOutlineBytes, 192 * 128);
+
+      forceNextR8Failure();
+      processor.resize_to(160, 96);
+      diagnostics = processor.get_composite_diagnostics(compositeId);
+      assert.equal(wasR8FailureForced(), true);
+      assert.equal(diagnostics.outlineFormat, "RGBA8");
+      assert.equal(diagnostics.sharedOutlineBytes, 160 * 96 * 4);
+      processor.render_composite_selection(compositeId, 0.05, 0.05, 0, 0);
+      assert.equal(processor.pick_composite_code(compositeId, 80, 48), 1);
+    }, { r8FailureMode: "unsupported" });
+  },
+);
+
+test(
   "composite output uses RGBA8 only when the R8 format is unsupported",
   { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
   async () => {
@@ -1723,6 +1973,7 @@ test(
       assert.equal(wasR8FailureForced(), true);
       const diagnostics = processor.get_composite_diagnostics(compositeId);
       assert.equal(diagnostics.outputFormat, "RGBA8");
+      assert.equal(diagnostics.outlineFormat, "R8");
       assert.equal(diagnostics.gpuLookupBytes, 1);
       assert.equal(processor.pick_composite_code(compositeId, 128, 128), 1);
       assert.ok(
@@ -1950,7 +2201,7 @@ test(
 );
 
 test(
-  "composite lookup uploads restore caller pixel-store alignment on success and failure",
+  "composite uploads and readbacks normalize and restore caller pixel-store layout",
   { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
   async () => {
     await withCompositeProcessor(async ({
@@ -1960,19 +2211,50 @@ test(
       forceNextLutUploadFailure,
     }) => {
       const sourceId = processor.add_layer(flashGerber(0));
-      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 8);
+      const unpackState = [
+        [gl.UNPACK_ALIGNMENT, 8],
+        [gl.UNPACK_ROW_LENGTH, 7],
+        [gl.UNPACK_IMAGE_HEIGHT, 5],
+        [gl.UNPACK_SKIP_PIXELS, 1],
+        [gl.UNPACK_SKIP_ROWS, 1],
+        [gl.UNPACK_SKIP_IMAGES, 1],
+      ];
+      const packState = [
+        [gl.PACK_ALIGNMENT, 8],
+        [gl.PACK_ROW_LENGTH, 7],
+        [gl.PACK_SKIP_PIXELS, 1],
+        [gl.PACK_SKIP_ROWS, 1],
+      ];
+      const setPixelStoreState = (states) => {
+        for (const [parameter, value] of states) gl.pixelStorei(parameter, value);
+      };
+      const assertPixelStoreState = (states) => {
+        for (const [parameter, value] of states) {
+          assert.equal(gl.getParameter(parameter), value);
+        }
+      };
+
+      setPixelStoreState(unpackState);
       const compositeId = createSelectionComposite(processor, sourceId, dummyId);
-      assert.equal(gl.getParameter(gl.UNPACK_ALIGNMENT), 8);
+      assertPixelStoreState(unpackState);
 
       processor.set_composite_visible_byte(compositeId, 0, 0b00000110);
-      assert.equal(gl.getParameter(gl.UNPACK_ALIGNMENT), 8);
+      assertPixelStoreState(unpackState);
 
       forceNextLutUploadFailure();
       assert.throws(
         () => processor.set_composite_visible_byte(compositeId, 0, 0b00001110),
         /WebGL error 0x505/,
       );
-      assert.equal(gl.getParameter(gl.UNPACK_ALIGNMENT), 8);
+      assertPixelStoreState(unpackState);
+
+      setPixelStoreState(packState);
+      assert.equal(processor.pick_composite_code(compositeId, 128, 128), 1);
+      assert.ok(
+        processor.get_composite_area_codes_band(compositeId, 0, 64).length > 0,
+      );
+      assertPixelStoreState(packState);
+      assertPixelStoreState(unpackState);
     }, { monitorLutUpload: true });
   },
 );
@@ -4723,6 +5005,35 @@ async function createForcedCompositeConstructionFailureModule() {
   };
 }
 
+async function createOneCompositeFailureModule() {
+  const wasm = await import(wasmModuleUrl.href);
+  wasm.initSync({ module: readFileSync(wasmBinaryUrl) });
+  class OneCompositeFailureProcessor {
+    constructor() {
+      const processor = new wasm.GerberProcessor();
+      let failureAvailable = true;
+      return new Proxy(processor, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target);
+          if (property === "get_composite_error") {
+            return () => {
+              if (!failureAvailable) return "";
+              failureAvailable = false;
+              return "forced one-composite allocation failure";
+            };
+          }
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
+  }
+  return {
+    ...wasm,
+    default: undefined,
+    GerberProcessor: OneCompositeFailureProcessor,
+  };
+}
+
 async function createForcedCompositeRetryModule(retryMode) {
   const wasm = await import(wasmModuleUrl.href);
   wasm.initSync({ module: readFileSync(wasmBinaryUrl) });
@@ -4954,12 +5265,16 @@ async function addForcedFailureFrame(renderer, strategy) {
   );
 }
 
-async function addExcludedDependencyFrame(renderer, includeFailedComposite) {
+async function addExcludedDependencyFrame(
+  renderer,
+  includeFailedComposite,
+  strategy = "auto",
+) {
   await renderer.withFrame(
     {
       width: 96,
       height: 64,
-      strategy: "auto",
+      strategy,
       background: null,
       fit: false,
       invertedOutline: "bounds",
@@ -5737,7 +6052,8 @@ async function withCompositeProcessor(
                 forcedGetError = 0x0505;
                 return result;
               }
-              if (forceNextR8 && !forcedR8 && args[2] === target.R8) {
+              if (forceNextR8 && args[2] === target.R8) {
+                forceNextR8 = false;
                 forcedR8 = true;
                 const result = value.apply(target, args);
                 forcedGetError = r8FailureMode === "unsupported"

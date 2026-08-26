@@ -312,8 +312,23 @@ export function createCompositeVisibleBitset(sourceCount, options = {}) {
   if (options == null || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("Composite layer options must be an object.");
   }
-  const hasPreset = options.preset != null;
-  const hasVisibleAreas = options.visibleAreas != null;
+  if (options.name !== undefined && typeof options.name !== "string") {
+    throw new TypeError("name must be a string.");
+  }
+  if (options.visible !== undefined && typeof options.visible !== "boolean") {
+    throw new TypeError("visible must be a boolean.");
+  }
+  if (options.inverted !== undefined && typeof options.inverted !== "boolean") {
+    throw new TypeError("inverted must be a boolean.");
+  }
+  if (options.preset === null) {
+    throw new TypeError("preset must be 'union', 'intersection', or 'difference'.");
+  }
+  if (options.visibleAreas === null) {
+    throw new TypeError("visibleAreas must be an array of binary strings.");
+  }
+  const hasPreset = options.preset !== undefined;
+  const hasVisibleAreas = options.visibleAreas !== undefined;
   if (hasPreset && hasVisibleAreas) {
     throw new TypeError("preset and visibleAreas cannot be used together.");
   }
@@ -1005,7 +1020,10 @@ export function toByte(value) {
 export const PNG_SIGNATURE = new Uint8Array([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
-export const MAX_PNG_DIMENSION = 0x7fffffff;
+// Tile transforms are uploaded to WebGL as f32. Every integer through 2^24
+// is exactly representable; larger virtual-canvas coordinates can duplicate
+// or skip edge pixels before any memory budget is reached.
+export const MAX_PNG_DIMENSION = 0x01000000;
 
 export function validatePngDimensions(width, height) {
   if (

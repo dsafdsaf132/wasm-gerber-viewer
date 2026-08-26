@@ -494,8 +494,12 @@ function normalizeCompositeConfig(config, layers, cliOutlineSelection) {
     throw new Error("Composite config root must be a JSON object.");
   }
   assertCompositeConfigFields(config, COMPOSITE_CONFIG_ROOT_FIELDS, "Composite config");
-  const hiddenSources = config.hiddenSources ?? [];
-  const composites = config.composites ?? [];
+  const hiddenSources = Object.hasOwn(config, "hiddenSources")
+    ? config.hiddenSources
+    : [];
+  const composites = Object.hasOwn(config, "composites")
+    ? config.composites
+    : [];
   if (!Array.isArray(hiddenSources)) {
     throw new Error("Composite config hiddenSources must be an array.");
   }
@@ -520,6 +524,18 @@ function normalizeCompositeConfig(config, layers, cliOutlineSelection) {
     );
     if (!Array.isArray(definition.sources)) {
       throw new Error(`${label}.sources must be an array.`);
+    }
+    if (
+      Object.hasOwn(definition, "visibleAreas") &&
+      !Array.isArray(definition.visibleAreas)
+    ) {
+      throw new Error(`${label}.visibleAreas must be an array of binary strings.`);
+    }
+    if (
+      Object.hasOwn(definition, "preset") &&
+      typeof definition.preset !== "string"
+    ) {
+      throw new Error(`${label}.preset must be a string.`);
     }
     validateCompositeSourceCount(definition.sources.length);
     const sourceLayers = definition.sources.map((selector) => {
@@ -564,10 +580,12 @@ function normalizeCompositeConfig(config, layers, cliOutlineSelection) {
     );
     const options = {
       ...(definition.name == null ? {} : { name: definition.name }),
-      ...(definition.preset == null ? {} : { preset: definition.preset }),
-      ...(definition.visibleAreas == null
-        ? {}
-        : { visibleAreas: definition.visibleAreas }),
+      ...(Object.hasOwn(definition, "preset")
+        ? { preset: definition.preset }
+        : {}),
+      ...(Object.hasOwn(definition, "visibleAreas")
+        ? { visibleAreas: definition.visibleAreas }
+        : {}),
       ...(definition.color == null ? {} : { color: definition.color }),
       ...(definition.alpha == null ? {} : { alpha: definition.alpha }),
       ...(definition.inverted == null
@@ -607,7 +625,7 @@ function resolveCompositeConfigOutline(
 ) {
   if (configuredOutline != null) {
     validateCompositeSelector(configuredOutline, `${label}.outline`);
-    const normalized = String(configuredOutline).toLowerCase();
+    const normalized = String(configuredOutline).trim().toLowerCase();
     if (normalized === "bounds") {
       return { layer: null, required: false, allowBoundsFallback: false };
     }

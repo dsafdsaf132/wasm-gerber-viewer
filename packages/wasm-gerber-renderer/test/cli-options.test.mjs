@@ -306,6 +306,34 @@ test("CLI validates duplicate sources and unsafe empty visible areas", async () 
       );
     },
   );
+
+  for (const [config, expected] of [
+    [{ hiddenSources: null }, /hiddenSources must be an array/],
+    [{ composites: null }, /composites must be an array/],
+    [
+      { composites: [{ sources: [1, 2], visibleAreas: null }] },
+      /visibleAreas must be an array of binary strings/,
+    ],
+    [
+      { composites: [{ sources: [1, 2], preset: null }] },
+      /preset must be a string/,
+    ],
+  ]) {
+    await withCompositeConfig(JSON.stringify(config), async (configPath) => {
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          cliPath,
+          "first.gbr",
+          "second.gbr",
+          "--output",
+          `${configPath}.png`,
+          "--composite-config",
+          configPath,
+        ]),
+        expected,
+      );
+    });
+  }
 });
 
 test("CLI rejects unknown and renderer-internal composite config fields", async () => {

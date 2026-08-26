@@ -504,8 +504,9 @@ larger fallback.
 Membership code zero is meaningful only inside the resolved board fill mask.
 An explicit Gerber outline is converted with the existing robust contour/region
 path, including nested holes and exact arcs. Otherwise a finite bounds rectangle
-is used. Internal outline fills are nearest-filtered R8 masks and are shared by
-composites with the same outline cache key. Parsed-outline keys contain the
+is used. Internal outline fills are nearest-filtered red-channel masks, using
+R8 when supported and RGBA8 otherwise, and are shared by composites with the
+same outline cache key. Parsed-outline keys contain the
 stable layer token, a fixed-size SHA-256 content revision and length, exact
 offset bit patterns, and the full arc parse signature; they do not retain or
 duplicate the Gerber source string. Composite inversion happens after lookup
@@ -521,24 +522,33 @@ failure is recorded per composite, whose final draw is skipped without aborting
 ordinary layers or other healthy composites.
 
 Selection preview reuses the same membership scratch and hashes each 24-bit code
-to a deterministic bijective RGB pseudo-color. Selected and hidden states keep
-that exact RGB base and use alpha 1.0 or 0.25 respectively, avoiding color-code
-collisions while the canvas compositor makes hidden areas dimmer. Pixel readback
-reads one membership texel; code zero additionally checks the outline mask.
+to a deterministic bijective RGB pseudo-color. Active areas add the normal
+2-by-2 black/white selection checker over that base. Inactive areas use an
+opaque 4-by-4 stipple: one 2-by-2 cell retains the exact bijective base while
+the rest carries only a faint trace. This stays dark, preserves code identity,
+and satisfies the premultiplied-alpha canvas contract. Pixel readback reads one
+membership texel; code zero additionally checks the outline mask. The Viewer enumerates coverage codes
+in 128-row tasks so a 4K framebuffer scan does not monopolize the main thread.
 Screenshot, full-frame Node output, and tiled/stream output rebuild the same
 source dependencies and bitset for their target transform.
 
 ### 10. Highlight Rendering
 
 Selected-feature highlight is an extra pass after normal layer composition.
+Ordinary Gerber/drill features and Composite coverage areas use separate
+geometry-identity and membership-code paths.
 
 Flow:
 
 1. Normal layer rendering finishes.
-2. JS calls `render_interaction_highlight(layer_id, feature_id, camera...)`.
-3. Rust retrieves the stored `InteractionFeature`.
-4. Highlight shaders render the selected area, using stencil/blend state as
-   needed.
+2. For a Gerber/drill feature, JS calls
+   `render_interaction_highlight(layer_id, feature_id, camera...)`; Rust
+   retrieves the stored `InteractionFeature` and renders its geometry.
+3. For a Composite area, JS calls
+   `render_composite_area_highlight(composite_id, coverage_code, camera...)`;
+   Rust rebuilds/reuses the membership mask and highlights every pixel with the
+   same active coverage code, clipping code zero and inversion to the outline.
+4. Both paths restore caller WebGL state after their stencil/blend pass.
 
 The visible app render includes highlight after normal layer composition.
 Screenshot export intentionally omits selected-feature highlight and only draws

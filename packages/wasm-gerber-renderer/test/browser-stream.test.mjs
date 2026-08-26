@@ -351,8 +351,8 @@ test("browser PNG streaming does not copy the converted full band", async () => 
 
 test("browser PNG streaming rejects invalid dimensions before writes", async () => {
   for (const [width, height, message] of [
-    [0x80000000, 1, /PNG dimensions must be safe integers/],
-    [100_000_000, 100_000_000, /PNG RGBA size exceeds/],
+    [0x01000001, 1, /PNG dimensions must be safe integers/],
+    [100_000_000, 100_000_000, /PNG dimensions must be safe integers/],
   ]) {
     const renderer = makeRenderer(makeGl());
     renderer.canvas.width = width;
