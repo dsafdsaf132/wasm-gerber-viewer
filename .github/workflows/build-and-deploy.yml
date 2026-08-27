@@ -35,6 +35,11 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Install headless display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -74,7 +79,7 @@ jobs:
           find js -type f -name '*.js' -print0 | sort -z | xargs -0 -n1 node --check
 
       - name: Check renderer package and viewer helpers
-        run: npm run check --prefix packages/wasm-gerber-renderer
+        run: xvfb-run -a npm run check --prefix packages/wasm-gerber-renderer
 
       - name: Install Rust toolchain for tests
         run: |
