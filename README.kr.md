@@ -161,8 +161,10 @@ wasm-gerber-viewer/
 
 ## Composite 검증과 성능
 
-전체 Rust, GLSL, release WASM, npm/Node, TypeScript, Playwright, diff 검증은
-`npm run validate:composite`로 실행합니다.
+Rust, GLSL, release WASM, npm/Node, TypeScript, diff 검증은
+`npm run validate:composite`로 실행합니다. Playwright는 별도 opt-in
+검증이며 browser interaction 검증이 명시적으로 필요할 때만
+`npm run test:playwright`를 따로 실행합니다.
 
 24-source 4K acceptance 측정은 Google Chrome hardware acceleration이
 활성화된 desktop session에서 `npm run benchmark:composite:4k:chrome`으로

@@ -162,8 +162,10 @@ wasm-gerber-viewer/
 
 ## Composite Validation and Performance
 
-Run the complete Rust, GLSL, release WASM, npm/Node, TypeScript, Playwright,
-and diff validation suite with `npm run validate:composite`.
+Run the Rust, GLSL, release WASM, npm/Node, TypeScript, and diff validation
+suite with `npm run validate:composite`. Playwright remains a separate opt-in
+check; run `npm run test:playwright` only when browser interaction validation is
+explicitly requested.
 
 For the 24-source 4K acceptance measurement, run
 `npm run benchmark:composite:4k:chrome` from a desktop session with Google

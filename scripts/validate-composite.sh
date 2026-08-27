@@ -22,4 +22,5 @@ node --test tests/webgl-renderer-classification.test.mjs
 
 npm --prefix packages/wasm-gerber-renderer run check
 
+# Browser interaction coverage remains opt-in via npm run test:playwright.
 git diff --check

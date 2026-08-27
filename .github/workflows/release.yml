@@ -39,9 +39,19 @@ jobs:
         with:
           node-version: "24.15.0"
           registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Set up npm
         run: npm install --global npm@12.0.2
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Install headless display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
 
       - name: Prepare release version
         id: release
@@ -137,7 +147,7 @@ jobs:
         run: npm run build:wasm --prefix "$PACKAGE_DIR"
 
       - name: Check package JavaScript
-        run: npm run check --prefix "$PACKAGE_DIR"
+        run: xvfb-run -a npm run check --prefix "$PACKAGE_DIR"
 
       - name: Verify npm package contents
         working-directory: ${{ env.PACKAGE_DIR }}
@@ -230,7 +240,7 @@ jobs:
       - name: Publish to npmjs
         if: steps.release.outputs.npmjs_exists != 'true'
         working-directory: ${{ env.PACKAGE_DIR }}
-        run: npm publish --access public
+        run: xvfb-run -a npm publish --access public
 
       - name: Skip npmjs publish
         if: steps.release.outputs.npmjs_exists == 'true'
@@ -262,7 +272,7 @@ jobs:
         run: |
           npm pkg set name="@dsafdsaf132/wasm-gerber-renderer"
           npm pkg set publishConfig.registry="https://npm.pkg.github.com"
-          npm publish
+          xvfb-run -a npm publish
 
       - name: Skip GitHub Packages publish
         if: steps.github-package.outputs.exists == 'true'
