@@ -7,6 +7,11 @@ const readmeNames = [
   "README.zh-Hans.md",
   "README.zh-Hant.md",
 ];
+const rendererPackageRoot = new URL(
+  "packages/wasm-gerber-renderer/",
+  repositoryRoot,
+);
+const rendererReadmeNames = [...readmeNames];
 const requiredCompositeConcepts = [
   "2–24",
   "Union",
@@ -24,6 +29,30 @@ const requiredCompositeConcepts = [
   "500 ms",
   "100 ms",
 ];
+const requiredRendererConcepts = [
+  "renderCompositeLayer",
+  "CompositeLayerOptions",
+  "visibleAreas",
+  "outlineLayerId",
+  "--composite-config",
+  "hiddenSources",
+  "2–24",
+  '"union"',
+  '"intersection"',
+  '"difference"',
+  '"000"',
+  "blend",
+  "stack",
+];
+const requiredSkillConcepts = [
+  "renderCompositeLayer",
+  "--composite-config",
+  "visibleAreas",
+  "leftmost",
+  "hiddenSources",
+  "Outline precedence",
+  "drill or composite",
+];
 
 const failures = [];
 for (const readmeName of readmeNames) {
@@ -39,10 +68,53 @@ for (const readmeName of readmeNames) {
   }
 }
 
+for (const readmeName of rendererReadmeNames) {
+  const contents = await readFile(
+    new URL(readmeName, rendererPackageRoot),
+    "utf8",
+  );
+  const missing = requiredRendererConcepts.filter(
+    (concept) => !contents.includes(concept),
+  );
+  if (missing.length > 0) {
+    failures.push(
+      `packages/wasm-gerber-renderer/${readmeName}: missing ${missing.join(", ")}`,
+    );
+  }
+}
+
+const skillContents = await readFile(
+  new URL("SKILL.md", rendererPackageRoot),
+  "utf8",
+);
+const missingSkillConcepts = requiredSkillConcepts.filter(
+  (concept) => !skillContents.includes(concept),
+);
+if (missingSkillConcepts.length > 0) {
+  failures.push(
+    `packages/wasm-gerber-renderer/SKILL.md: missing ${missingSkillConcepts.join(", ")}`,
+  );
+}
+
+const packageJson = JSON.parse(
+  await readFile(new URL("package.json", rendererPackageRoot), "utf8"),
+);
+const publishedFiles = new Set(packageJson.files ?? []);
+const missingPublishedReadmes = rendererReadmeNames.filter(
+  (readmeName) => !publishedFiles.has(readmeName),
+);
+if (missingPublishedReadmes.length > 0) {
+  failures.push(
+    `packages/wasm-gerber-renderer/package.json: unpublished ${missingPublishedReadmes.join(", ")}`,
+  );
+}
+
 if (failures.length > 0) {
   console.error("Composite README parity check failed:");
   for (const failure of failures) console.error(`- ${failure}`);
   process.exitCode = 1;
 } else {
-  console.log(`Composite README parity check passed (${readmeNames.length} files).`);
+  console.log(
+    `Composite README parity check passed (${readmeNames.length} root and ${rendererReadmeNames.length} renderer files).`,
+  );
 }

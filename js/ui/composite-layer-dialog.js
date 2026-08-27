@@ -1,9 +1,11 @@
 import {
   COMPOSITE_LAYER_KIND,
+  COMPOSITE_PRESETS,
   createCompositeLayerPresetBitset,
+  createCompositePresetBitset,
+  getCompositeBitsetByteLength,
   MAX_COMPOSITE_SOURCES,
   MIN_COMPOSITE_SOURCES,
-  reconcileCompositeSources,
 } from "../layers/composite-layers.js";
 
 export class CompositeLayerDialog {
@@ -14,15 +16,26 @@ export class CompositeLayerDialog {
     document.body.appendChild(this.dialog);
   }
 
-  openCreate(defaultName) {
+  openCreate(defaultName, state = null) {
+    const sourceIds = state?.sourceIds ?? [];
+    const visibleBitset = state?.visibleBitset ?? null;
     return this.open({
       title: "Create Composite Layer",
       submitLabel: "Create",
-      name: defaultName,
-      defaultName,
-      sourceIds: [],
-      initialPreset: "union",
+      name: state?.name ?? defaultName,
+      defaultName: state?.defaultName ?? defaultName,
+      sourceIds,
+      initialPreset: state?.presetCommand ?? "union",
       isEdit: false,
+      requiresAreaMode: state?.requiresAreaMode ?? false,
+      draftLayer: visibleBitset
+        ? {
+            kind: COMPOSITE_LAYER_KIND,
+            sourceIds,
+            slotSourceIds: state.slotSourceIds ?? sourceIds,
+            visibleBitset,
+          }
+        : null,
     });
   }
 
@@ -34,6 +47,7 @@ export class CompositeLayerDialog {
       sourceIds: layer.sourceIds,
       initialPreset: null,
       isEdit: true,
+      requiresAreaMode: false,
       draftLayer: {
         kind: COMPOSITE_LAYER_KIND,
         sourceIds: layer.sourceIds,
@@ -43,24 +57,12 @@ export class CompositeLayerDialog {
     });
   }
 
-  openRename(name) {
-    return this.open({
-      title: "Rename Layer",
-      submitLabel: "Rename",
-      name,
-      sourceIds: null,
-      initialPreset: null,
-      isEdit: false,
-      renameOnly: true,
-    });
-  }
-
   open(options) {
     if (this.pendingResolve) {
       this.finish(null);
     }
     this.options = options;
-    this.selectedSourceIds = options.sourceIds ? [...options.sourceIds] : null;
+    this.selectedSourceIds = [...options.sourceIds];
     this.draftLayer = options.draftLayer
       ? {
           ...options.draftLayer,
@@ -70,11 +72,11 @@ export class CompositeLayerDialog {
         }
       : null;
     this.presetCommand = options.initialPreset;
+    this.requiresAreaMode = Boolean(options.requiresAreaMode);
     this.bitsetDirty = false;
     this.title.textContent = options.title;
     this.submit.textContent = options.submitLabel;
     this.nameInput.value = options.name ?? "";
-    this.sourceEditor.hidden = Boolean(options.renameOnly);
     this.searchInput.value = "";
     this.renderSources();
     this.syncSubmitState();
@@ -103,7 +105,7 @@ export class CompositeLayerDialog {
         <span>Name</span>
         <input data-composite-name type="text" maxlength="160" autocomplete="off" />
       </label>
-      <div data-composite-source-editor class="composite-source-editor">
+      <div class="composite-source-editor">
         <div class="composite-source-heading">
           <strong>Gerber Sources</strong>
           <span data-composite-count role="status" aria-live="polite">0 / ${MAX_COMPOSITE_SOURCES}</span>
@@ -117,8 +119,8 @@ export class CompositeLayerDialog {
           <button type="button" class="chip-button" data-composite-preset="union">Union</button>
           <button type="button" class="chip-button" data-composite-preset="intersection">Intersection</button>
           <button type="button" class="chip-button" data-composite-preset="difference">Difference</button>
+          <button type="button" class="chip-button" data-composite-custom aria-label="Apply changes and select visible areas">Custom</button>
         </div>
-        <button type="button" class="chip-button" data-composite-custom aria-label="Apply changes and select visible areas">Custom</button>
         <small class="composite-difference-note">Difference uses the first selected source as the base.</small>
       </div>
       <div class="composite-dialog-actions">
@@ -129,7 +131,6 @@ export class CompositeLayerDialog {
     this.form = form;
     this.title = form.querySelector("[data-composite-title]");
     this.nameInput = form.querySelector("[data-composite-name]");
-    this.sourceEditor = form.querySelector("[data-composite-source-editor]");
     this.searchInput = form.querySelector("[data-composite-search]");
     this.availableList = form.querySelector("[data-composite-available]");
     this.selectedList = form.querySelector("[data-composite-selected]");
@@ -151,23 +152,44 @@ export class CompositeLayerDialog {
             this.presetCommand,
           );
           this.bitsetDirty = true;
+        } else if (this.requiresAreaMode) {
+          this.draftLayer = this.createPresetDraft(this.presetCommand);
+          this.bitsetDirty = true;
         }
+        this.requiresAreaMode = false;
         this.syncPresetButtons();
+        this.syncSubmitState();
       });
     }
     this.custom.addEventListener("click", () => {
       if (this.custom.disabled) return;
-      if (!this.options.isEdit) this.presetCommand = "none";
-      this.finish(this.buildResult({ enterSelection: true }));
+      const createDialogState = this.options.isEdit
+        ? null
+        : this.buildCreateDialogState();
+      const selectionBitset =
+        this.draftLayer &&
+        (this.options.isEdit || this.presetCommand === "custom")
+          ? this.draftLayer.visibleBitset
+          : new Uint8Array(
+              getCompositeBitsetByteLength(this.selectedSourceIds.length),
+            );
+      const result = this.buildResult({ enterSelection: true });
+      this.finish({
+        ...result,
+        ...(!result.visibleBitset
+          ? {
+              slotSourceIds: [...this.selectedSourceIds],
+              visibleBitset: selectionBitset,
+              bitsetDirty: true,
+            }
+          : {}),
+        selectionBitset,
+        createDialogState,
+      });
     });
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (this.submit.disabled) return;
-      const name = this.nameInput.value.trim();
-      if (this.options.renameOnly) {
-        this.finish(name);
-        return;
-      }
       this.finish(this.buildResult());
     });
     dialog.addEventListener("cancel", (event) => {
@@ -217,6 +239,23 @@ export class CompositeLayerDialog {
     };
   }
 
+  buildCreateDialogState() {
+    const name = this.nameInput.value.trim();
+    return {
+      name: name || this.options.defaultName,
+      defaultName: this.options.defaultName,
+      sourceIds: [...this.selectedSourceIds],
+      presetCommand: this.presetCommand,
+      requiresAreaMode: this.requiresAreaMode,
+      ...(this.draftLayer
+        ? {
+            slotSourceIds: [...this.draftLayer.slotSourceIds],
+            visibleBitset: this.draftLayer.visibleBitset,
+          }
+        : {}),
+    };
+  }
+
   finish(result) {
     if (this.dialog.open) this.dialog.close();
     const resolve = this.pendingResolve;
@@ -224,7 +263,7 @@ export class CompositeLayerDialog {
     // Source choice listeners close over their layer records (including the
     // original Gerber source text), while edit drafts can own two-megabyte
     // bitsets. The dialog lives for the entire Viewer session, so detach those
-    // rows and references as soon as a create/edit/rename operation finishes.
+    // rows and references as soon as a create/edit operation finishes.
     this.availableList.replaceChildren();
     this.selectedList.replaceChildren();
     this.options = null;
@@ -232,6 +271,7 @@ export class CompositeLayerDialog {
     this.draftLayer = null;
     this.presetCommand = null;
     this.bitsetDirty = false;
+    this.requiresAreaMode = false;
     resolve?.(result);
   }
 
@@ -279,27 +319,12 @@ export class CompositeLayerDialog {
       input.dataset.compositeSourceControl = "choice";
       input.checked = this.selectedSourceIds.includes(source.id);
       input.disabled =
-        (!input.checked && this.selectedSourceIds.length >= MAX_COMPOSITE_SOURCES) ||
-        (this.options.isEdit &&
-          input.checked &&
-          this.selectedSourceIds.length <= MIN_COMPOSITE_SOURCES);
+        !input.checked && this.selectedSourceIds.length >= MAX_COMPOSITE_SOURCES;
       input.addEventListener("change", () => {
         const nextSourceIds = input.checked
           ? [...this.selectedSourceIds, source.id]
           : this.selectedSourceIds.filter((id) => id !== source.id);
-        if (this.draftLayer) {
-          const reconciled = reconcileCompositeSources(
-            this.draftLayer,
-            nextSourceIds,
-            { takeBitsetOwnership: true },
-          );
-          Object.assign(this.draftLayer, reconciled);
-          this.selectedSourceIds = [...this.draftLayer.sourceIds];
-          this.presetCommand = null;
-          this.bitsetDirty = true;
-        } else {
-          this.selectedSourceIds = nextSourceIds;
-        }
+        this.updateSourceComposition(nextSourceIds);
         this.renderSources();
       });
       const text = document.createElement("span");
@@ -382,7 +407,7 @@ export class CompositeLayerDialog {
       ];
       if (this.draftLayer) {
         this.draftLayer.sourceIds = [...this.selectedSourceIds];
-        this.presetCommand = null;
+        if (this.presetCommand !== "custom") this.presetCommand = null;
       }
       this.renderSources();
     });
@@ -395,18 +420,60 @@ export class CompositeLayerDialog {
       button.classList.toggle("active", active);
       button.setAttribute("aria-pressed", active ? "true" : "false");
     }
+    const customActive =
+      this.presetCommand === "custom" && !this.requiresAreaMode;
+    this.custom.classList.toggle("active", customActive);
+    this.custom.setAttribute("aria-pressed", customActive ? "true" : "false");
   }
 
   syncSubmitState() {
     const validName =
-      (!this.options?.isEdit && !this.options?.renameOnly) ||
+      !this.options?.isEdit ||
       this.nameInput.value.trim().length > 0;
     const validSources =
-      this.options?.renameOnly ||
-      (this.selectedSourceIds?.length >= MIN_COMPOSITE_SOURCES &&
-        this.selectedSourceIds.length <= MAX_COMPOSITE_SOURCES);
-    const disabled = !validName || !validSources;
-    this.submit.disabled = disabled;
-    this.custom.disabled = disabled;
+      this.selectedSourceIds?.length >= MIN_COMPOSITE_SOURCES &&
+      this.selectedSourceIds.length <= MAX_COMPOSITE_SOURCES;
+    this.submit.disabled =
+      !validName || !validSources || this.requiresAreaMode;
+    this.custom.disabled = !validName || !validSources;
+  }
+
+  createPresetDraft(preset) {
+    if (
+      !COMPOSITE_PRESETS.has(preset) ||
+      this.selectedSourceIds.length < MIN_COMPOSITE_SOURCES ||
+      this.selectedSourceIds.length > MAX_COMPOSITE_SOURCES
+    ) {
+      return null;
+    }
+    return {
+      kind: COMPOSITE_LAYER_KIND,
+      sourceIds: [...this.selectedSourceIds],
+      slotSourceIds: [...this.selectedSourceIds],
+      visibleBitset: createCompositePresetBitset(
+        this.selectedSourceIds.length,
+        preset,
+      ),
+    };
+  }
+
+  updateSourceComposition(nextSourceIds) {
+    const customState =
+      this.draftLayer && !COMPOSITE_PRESETS.has(this.presetCommand);
+    this.selectedSourceIds = [...new Set(nextSourceIds)];
+    if (customState) {
+      this.draftLayer = null;
+      this.presetCommand = null;
+      this.requiresAreaMode = true;
+      this.bitsetDirty = true;
+      return;
+    }
+    if (
+      COMPOSITE_PRESETS.has(this.presetCommand) &&
+      (this.draftLayer || this.bitsetDirty)
+    ) {
+      this.draftLayer = this.createPresetDraft(this.presetCommand);
+      this.bitsetDirty = true;
+    }
   }
 }

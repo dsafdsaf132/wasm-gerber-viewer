@@ -1086,7 +1086,7 @@ test(
       assert.deepEqual(
         [...hiddenPreview],
         [0, 0, 0, 255],
-        "inactive coverage uses the opaque dark stipple without violating premultiplication",
+        "inactive coverage keeps its uniform base pseudo-color",
       );
       assert.equal(
         processor.get_composite_diagnostics(compositeId).gpuLookupBytes,
@@ -1258,7 +1258,7 @@ test(
 );
 
 test(
-  "selection preview dims inactive pseudo-colors and highlights active areas like normal selection",
+  "selection preview keeps inactive pseudo-colors uniform and highlights only active areas",
   { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
   async () => {
     const wasm = await import(wasmModuleUrl.href);
@@ -1299,13 +1299,6 @@ test(
         gl.readPixels(pixelX(worldX), 64, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
         return pixel;
       };
-      const readInactiveColorSample = (worldX) => {
-        const pixel = new Uint8Array(4);
-        const centerX = pixelX(worldX);
-        const sampleX = centerX + ((2 - (centerX & 3) + 4) & 3);
-        gl.readPixels(sampleX, 66, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-        return pixel;
-      };
       const expectedHashRgb = (coverageCode) => {
         const mask = 0xffffff;
         let value = (coverageCode + 1) & mask;
@@ -1321,32 +1314,14 @@ test(
       assert.equal(processor.pick_composite_code(compositeId, pixelX(-2), 64), codes[0]);
       assert.equal(processor.pick_composite_code(compositeId, pixelX(2), 64), codes[1]);
       const hidden = [readPreview(-2), readPreview(2)];
-      const hiddenColorSamples = [
-        readInactiveColorSample(-2),
-        readInactiveColorSample(2),
-      ];
-      assert.deepEqual(
-        [...hiddenColorSamples[0]],
-        [...expectedHashRgb(codes[0]), 255],
-      );
-      assert.deepEqual(
-        [...hiddenColorSamples[1]],
-        [...expectedHashRgb(codes[1]), 255],
-      );
+      assert.deepEqual([...hidden[0]], [...expectedHashRgb(codes[0]), 255]);
+      assert.deepEqual([...hidden[1]], [...expectedHashRgb(codes[1]), 255]);
       assert.notDeepEqual(
-        [...hiddenColorSamples[0]],
-        [...hiddenColorSamples[1]],
-        "distinct coverage codes must never collapse after hidden-state dimming",
+        [...hidden[0]],
+        [...hidden[1]],
+        "distinct inactive coverage codes retain distinct base pseudo-colors",
       );
       assert.deepEqual(hidden.map((pixel) => pixel[3]), [255, 255]);
-      for (let index = 0; index < hidden.length; index += 1) {
-        const dimSum = hidden[index][0] + hidden[index][1] + hidden[index][2];
-        const baseSum = expectedHashRgb(codes[index]).reduce(
-          (sum, channel) => sum + channel,
-          0,
-        );
-        assert.ok(dimSum < baseSum * 0.1, "inactive stipple cells stay dark");
-      }
 
       for (const code of codes) {
         processor.set_composite_visible_byte(

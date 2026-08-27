@@ -235,7 +235,7 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("creates, renames, applies presets, and edits a composite", async ({ page }) => {
+test("creates, names through edit, and applies presets to a composite", async ({ page }) => {
   await loadTwoSources(page);
   const row = await createComposite(page);
 
@@ -245,18 +245,15 @@ test("creates, renames, applies presets, and edits a composite", async ({ page }
   await menu.locator('[data-layer-menu-action="composite-intersection"]').click();
 
   await row.click({ button: "right" });
-  await menu.locator('[data-layer-menu-action="rename-layer"]').click();
-  const renameDialog = page.locator(".composite-layer-dialog");
-  await renameDialog.locator("[data-composite-name]").fill("Renamed coverage");
-  await renameDialog.locator("[data-composite-submit]").click();
-  await expect(row.locator(".layer-label strong")).toHaveText("Renamed coverage");
-
-  await row.locator(".layer-menu-btn").click();
+  await expect(menu.locator('[data-layer-menu-action="rename-layer"]')).toBeHidden();
   await menu.locator('[data-layer-menu-action="edit-composite"]').click();
-  await expect(page.locator(".composite-layer-dialog [data-composite-count]")).toHaveText("2 / 24");
-  await page.locator('.composite-layer-dialog [data-composite-preset="union"]').click();
-  await page.locator(".composite-layer-dialog [data-composite-submit]").click();
-  await expect(page.locator(".composite-layer-dialog")).toBeHidden();
+  const dialog = page.locator(".composite-layer-dialog");
+  await dialog.locator("[data-composite-name]").fill("Renamed coverage");
+  await expect(dialog.locator("[data-composite-count]")).toHaveText("2 / 24");
+  await dialog.locator('[data-composite-preset="union"]').click();
+  await dialog.locator("[data-composite-submit]").click();
+  await expect(dialog).toBeHidden();
+  await expect(row.locator(".layer-label strong")).toHaveText("Renamed coverage");
 });
 
 test("ordinary Gerber and drill workflows remain compatible without composites", async ({ page }) => {
@@ -310,9 +307,9 @@ test("ordinary Gerber and drill workflows remain compatible without composites",
     await expect(menu.locator(`[data-layer-menu-action="${action}"]`)).toBeHidden();
   }
   await menu.locator('[data-layer-menu-action="rename-layer"]').click();
-  const renameDialog = page.locator(".composite-layer-dialog");
-  await renameDialog.locator("[data-composite-name]").fill("Legacy plated drill");
-  await renameDialog.locator("[data-composite-submit]").click();
+  const renameDialog = page.locator(".rename-layer-dialog");
+  await renameDialog.locator("[data-rename-name]").fill("Legacy plated drill");
+  await renameDialog.locator("[data-rename-submit]").click();
   await expect(page.locator(".drill-layer-item .layer-label strong")).toHaveText(
     "Legacy plated drill",
   );
@@ -386,10 +383,10 @@ test("composite dialogs disambiguate duplicate source names and expose accessibl
     });
     await row.locator(".layer-menu-btn").click();
     await page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]').click();
-    const dialog = page.locator(".composite-layer-dialog");
+    const dialog = page.locator(".rename-layer-dialog");
     await expect(dialog).toHaveAccessibleName("Rename Layer");
-    await dialog.locator("[data-composite-name]").fill(nextName);
-    await dialog.locator("[data-composite-submit]").click();
+    await dialog.locator("[data-rename-name]").fill(nextName);
+    await dialog.locator("[data-rename-submit]").click();
   };
 
   await renameSource("left.gtl", "Shared copper");
@@ -410,6 +407,11 @@ test("composite dialogs disambiguate duplicate source names and expose accessibl
     "aria-pressed",
     "false",
   );
+  const presetButtons = dialog.locator(
+    "[data-composite-preset], [data-composite-custom]",
+  );
+  expect(new Set(await presetButtons.evaluateAll((buttons) =>
+    buttons.map((button) => button.offsetTop))).size).toBe(1);
 
   const choices = dialog.locator(".composite-source-choice");
   await expect(choices).toHaveCount(2);
@@ -455,13 +457,14 @@ test("composite dialogs disambiguate duplicate source names and expose accessibl
   await dialog.locator("[data-composite-dismiss]").click();
 
   await composite.locator(".layer-menu-btn").click();
-  await page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]').click();
-  await expect(dialog).toHaveAccessibleName("Rename Layer");
-  await dialog.locator("[data-composite-dismiss]").click();
+  await expect(
+    page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]'),
+  ).toBeHidden();
+  await page.keyboard.press("Escape");
 });
 
-test("Custom creates or edits a composite and immediately opens visible-area selection", async ({ page }) => {
-  await loadTwoSources(page);
+test("Custom returns its draft to Create and edits existing composite areas", async ({ page }) => {
+  await loadThreeSources(page);
   await page.locator(".layer-create-composite button").click();
   const dialog = page.locator(".composite-layer-dialog");
   const custom = dialog.locator("[data-composite-custom]");
@@ -499,9 +502,10 @@ test("Custom creates or edits a composite and immediately opens visible-area sel
     "Intersection",
     "Difference",
     "None",
+    "Cancel",
     "Done",
   ]);
-  const [noneBox, dividerBox, doneBox] = await Promise.all([
+  const [noneBox, dividerBox, cancelBox, doneBox] = await Promise.all([
     page.locator(".composite-selection-presets").getByRole(
       "button",
       { name: "None", exact: true },
@@ -509,11 +513,17 @@ test("Custom creates or edits a composite and immediately opens visible-area sel
     page.locator(".composite-selection-divider").boundingBox(),
     page.locator(".composite-selection-presets").getByRole(
       "button",
+      { name: "Cancel", exact: true },
+    ).boundingBox(),
+    page.locator(".composite-selection-presets").getByRole(
+      "button",
       { name: "Done", exact: true },
     ).boundingBox(),
   ]);
   expect(dividerBox.x).toBeGreaterThan(noneBox.x + noneBox.width);
+  expect(cancelBox.x).toBeGreaterThan(dividerBox.x + dividerBox.width);
   expect(doneBox.x).toBeGreaterThan(dividerBox.x + dividerBox.width);
+  expect(doneBox.x).toBeGreaterThan(cancelBox.x + cancelBox.width);
   expect(doneBox.x).toBeGreaterThan(noneBox.x);
   expect(doneBox.y).toBe(noneBox.y);
   await expect(page.locator(".canvas-status")).toHaveJSProperty(
@@ -530,7 +540,73 @@ test("Custom creates or edits a composite and immediately opens visible-area sel
     "text-overflow",
     "ellipsis",
   );
-  await page.keyboard.press("Escape");
+  await page
+    .locator(".composite-selection-presets")
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("[data-composite-name]")).toHaveValue("Custom coverage");
+  await expect(dialog.locator("[data-composite-count]")).toHaveText("2 / 24");
+  await expect(dialog.locator('[data-composite-preset="union"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(custom).toHaveAttribute("aria-pressed", "false");
+  await expect(page.locator(".composite-layer-item")).toHaveCount(0);
+
+  await custom.click();
+  await expect(dialog).toBeHidden();
+  await page
+    .locator(".composite-selection-presets")
+    .getByRole("button", { name: "Union", exact: true })
+    .click();
+  await page
+    .locator(".composite-selection-presets")
+    .getByRole("button", { name: "Done", exact: true })
+    .click();
+  await expect(dialog).toBeVisible();
+  await expect(custom).toHaveAttribute("aria-pressed", "true");
+  await expect(custom).toHaveClass(/active/);
+  await expect(page.locator(".composite-layer-item")).toHaveCount(0);
+
+  const sourceChoice = (name) => dialog
+    .locator(".composite-source-choice", { hasText: name })
+    .locator("input");
+  await sourceChoice("right.gbl").uncheck();
+  await expect(dialog.locator("[data-composite-selected] li")).toHaveCount(1);
+  await expect(dialog.locator("[data-composite-selected]")).toContainText("left.gtl");
+  await expect(dialog.locator("[data-composite-selected]")).not.toContainText(
+    "right.gbl",
+  );
+  await expect(custom).toHaveAttribute("aria-pressed", "false");
+  await expect(custom).toBeDisabled();
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+
+  await sourceChoice("board-outline.gko").check();
+  await expect(dialog.locator("[data-composite-selected] li")).toHaveCount(2);
+  await expect(dialog.locator("[data-composite-selected]")).toContainText("left.gtl");
+  await expect(dialog.locator("[data-composite-selected]")).toContainText(
+    "board-outline.gko",
+  );
+  await expect(dialog.locator("[data-composite-selected]")).not.toContainText(
+    "right.gbl",
+  );
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+  await expect(custom).toBeEnabled();
+
+  await custom.click();
+  await page
+    .locator(".composite-selection-presets")
+    .getByRole("button", { name: "Union", exact: true })
+    .click();
+  await page
+    .locator(".composite-selection-presets")
+    .getByRole("button", { name: "Done", exact: true })
+    .click();
+  await expect(dialog).toBeVisible();
+  await expect(custom).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.locator("[data-composite-submit]")).toBeEnabled();
+  await dialog.locator("[data-composite-submit]").click();
 
   const row = page.locator(".composite-layer-item").filter({
     has: page.getByText("Custom coverage", { exact: true }),
@@ -538,11 +614,27 @@ test("Custom creates or edits a composite and immediately opens visible-area sel
   await row.locator(".layer-menu-btn").click();
   await page.locator('[data-layer-menu-action="edit-composite"]').click();
   await expect(dialog).toBeVisible();
+  await dialog.locator("[data-composite-name]").fill("Discarded custom edit");
+  await sourceChoice("board-outline.gko").uncheck();
+  await expect(dialog.locator("[data-composite-selected] li")).toHaveCount(1);
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+  await sourceChoice("right.gbl").check();
+  await expect(dialog.locator("[data-composite-selected] li")).toHaveCount(2);
+  await expect(dialog.locator("[data-composite-selected]")).not.toContainText(
+    "board-outline.gko",
+  );
+  await expect(dialog.locator("[data-composite-selected]")).toContainText("right.gbl");
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+  await expect(dialog.locator("[data-composite-custom]")).toBeEnabled();
   await dialog.locator("[data-composite-custom]").click();
   await expect(dialog).toBeHidden();
   await expect(page.locator(".composite-selection-bar")).toBeVisible();
-  await page.locator(".composite-selection-bar button", { hasText: "Done" }).click();
+  await page
+    .locator(".composite-selection-bar")
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
   await expect(page.locator(".composite-selection-bar")).toBeHidden();
+  await expect(row.locator(".layer-label strong")).toHaveText("Custom coverage");
 });
 
 test("Coverage Areas disambiguates duplicate source display names", async ({ page }) => {
@@ -762,6 +854,9 @@ test("24-source drafts copy once and clean edits retain bitset ownership", async
       const removePromise = dialog.openEdit(layer);
       assert(largeSlices - before === 1, "remove edit must create one large draft");
       dialog.form.querySelector(".composite-source-choice input:checked").click();
+      assert(dialog.submit.disabled, "source removal did not require a new area mode");
+      assert(dialog.draftLayer === null, "source removal retained an incompatible bitset");
+      dialog.form.querySelector('[data-composite-preset="union"]').click();
       dialog.form.querySelector("[data-composite-submit]").click();
       const removeResult = await removePromise;
       assertDialogReleased("source removal Apply");
@@ -779,6 +874,9 @@ test("24-source drafts copy once and clean edits retain bitset ownership", async
       dialog.form
         .querySelector(`.composite-source-choice input:not(:checked)`)
         .click();
+      assert(dialog.submit.disabled, "source addition did not require a new area mode");
+      assert(dialog.draftLayer === null, "source addition retained an incompatible bitset");
+      dialog.form.querySelector('[data-composite-preset="union"]').click();
       dialog.form.querySelector("[data-composite-submit]").click();
       const addResult = await addPromise;
       assertDialogReleased("source addition Apply");
@@ -1128,8 +1226,9 @@ test("Viewer operation sequence preserves model, renderer, camera, and recovery 
     .filter({ has: page.getByText("islands.gtl", { exact: true }) });
   await islands.locator(".layer-menu-btn").click();
   await page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]').click();
-  await dialog.locator("[data-composite-name]").fill("Renamed islands");
-  await dialog.locator("[data-composite-submit]").click();
+  const renameDialog = page.locator(".rename-layer-dialog");
+  await renameDialog.locator("[data-rename-name]").fill("Renamed islands");
+  await renameDialog.locator("[data-rename-submit]").click();
   await page.waitForTimeout(75);
   expect(await page.evaluate(() => window.__viewerSequenceCounters)).toEqual({
     add: 0,
@@ -1339,9 +1438,9 @@ test("outline identity changes invalidate both composite and inverted caches wit
       .filter({ has: page.getByText(currentName, { exact: true }) });
     await row.locator(".layer-menu-btn").click();
     await page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]').click();
-    const dialog = page.locator(".composite-layer-dialog");
-    await dialog.locator("[data-composite-name]").fill(nextName);
-    await dialog.locator("[data-composite-submit]").click();
+    const dialog = page.locator(".rename-layer-dialog");
+    await dialog.locator("[data-rename-name]").fill(nextName);
+    await dialog.locator("[data-rename-submit]").click();
     await page.waitForTimeout(75);
   };
 
@@ -1586,9 +1685,9 @@ test("mobile localized source dialogs stay contained and honor reduced motion", 
   for (let index = 0; index < 2; index += 1) {
     await sourceRows.nth(index).locator(".layer-menu-btn").click();
     await page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]').click();
-    const renameDialog = page.locator(".composite-layer-dialog");
-    await renameDialog.locator("[data-composite-name]").fill(longName);
-    await renameDialog.locator("[data-composite-submit]").click();
+    const renameDialog = page.locator(".rename-layer-dialog");
+    await renameDialog.locator("[data-rename-name]").fill(longName);
+    await renameDialog.locator("[data-rename-submit]").click();
   }
 
   await page.locator(".layer-create-composite button").click();
@@ -1602,6 +1701,14 @@ test("mobile localized source dialogs stay contained and honor reduced motion", 
   expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(320);
   expect(dialogBox.y + dialogBox.height).toBeLessThanOrEqual(480);
   await expect(dialog).toHaveCSS("overflow-y", "auto");
+  const mobilePresetRows = await dialog
+    .locator("[data-composite-preset], [data-composite-custom]")
+    .evaluateAll((buttons) => buttons.map((button) => button.offsetTop));
+  const buttonsPerRow = new Map();
+  for (const top of mobilePresetRows) {
+    buttonsPerRow.set(top, (buttonsPerRow.get(top) ?? 0) + 1);
+  }
+  expect([...buttonsPerRow.values()]).toEqual([2, 2]);
 
   const labels = dialog.locator(".composite-source-choice > span");
   await expect(labels).toHaveCount(2);
@@ -2850,11 +2957,15 @@ test("renderer recovery cancels dialogs before layer records become stale", asyn
   );
   await expect(row.locator(".layer-menu-btn")).toBeFocused();
 
-  await row.locator(".layer-menu-btn").click();
+  let sourceRow = page.locator(".gerber-layer-item:not(.composite-layer-item)").filter({
+    has: page.getByText("left.gtl", { exact: true }),
+  });
+  await sourceRow.locator(".layer-menu-btn").click();
   await page
     .locator('.layer-context-menu [data-layer-menu-action="rename-layer"]')
     .click();
-  await dialog.locator("[data-composite-name]").fill("Stale rename must not apply");
+  const renameDialog = page.locator(".rename-layer-dialog");
+  await renameDialog.locator("[data-rename-name]").fill("Stale rename must not apply");
   await installGatedFatalProcessorMethod(
     page,
     "render",
@@ -2862,13 +2973,13 @@ test("renderer recovery cancels dialogs before layer records become stale", asyn
   );
   await page.evaluate(() => window.dispatchEvent(new Event("resize")));
   await waitForInjectedFatalRecovery(page);
-  await expect(dialog).toBeHidden();
+  await expect(renameDialog).toBeHidden();
   await releaseInjectedFatalRecovery(page);
-  row = page.locator(".composite-layer-item");
-  await expect(row.locator(".layer-label strong")).toHaveText(
-    "Dialog recovery coverage",
-  );
-  await expect(row.locator(".layer-menu-btn")).toBeFocused();
+  sourceRow = page.locator(".gerber-layer-item:not(.composite-layer-item)").filter({
+    has: page.getByText("left.gtl", { exact: true }),
+  });
+  await expect(sourceRow.locator(".layer-label strong")).toHaveText("left.gtl");
+  await expect(sourceRow.locator(".layer-menu-btn")).toBeFocused();
 
   await loadTwoSources(page);
   await page.locator(".layer-create-composite button").click();
@@ -4823,8 +4934,9 @@ test("selection maps CSS pixels, clips code zero, throttles hover, and toggles d
   });
   await islands.locator(".layer-menu-btn").click();
   await page.locator('[data-layer-menu-action="rename-layer"]').click();
-  await dialog.locator("[data-composite-name]").fill("Renamed islands");
-  await dialog.locator("[data-composite-submit]").click();
+  const renameDialog = page.locator(".rename-layer-dialog");
+  await renameDialog.locator("[data-rename-name]").fill("Renamed islands");
+  await renameDialog.locator("[data-rename-submit]").click();
   composite = page.locator(".composite-layer-item").filter({ hasText: "Selection map coverage" });
   await composite.locator(".layer-menu-btn").click();
   await page.locator('[data-layer-menu-action="edit-composite"]').click();
@@ -5211,9 +5323,9 @@ test("source limits and context lifecycle commands keep stable composite depende
   });
   await left.locator(".layer-menu-btn").click();
   await page.locator('[data-layer-menu-action="rename-layer"]').click();
-  const dialog = page.locator(".composite-layer-dialog");
-  await dialog.locator("[data-composite-name]").fill("renamed-top.gtl");
-  await dialog.locator("[data-composite-submit]").click();
+  const renameDialog = page.locator(".rename-layer-dialog");
+  await renameDialog.locator("[data-rename-name]").fill("renamed-top.gtl");
+  await renameDialog.locator("[data-rename-submit]").click();
   await expect(composite).not.toHaveClass(/layer-item-error/);
 
   await composite.locator(".layer-menu-btn").click();

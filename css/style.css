@@ -953,10 +953,6 @@ button {
   justify-content: center;
 }
 
-.composite-layer-item {
-  border-left: 2px solid var(--accent);
-}
-
 .layer-item-error {
   border-color: var(--danger);
 }
@@ -1307,6 +1303,11 @@ button {
   justify-content: flex-end;
 }
 
+.composite-dialog-actions > button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
 .composite-field,
 .composite-source-editor {
   display: grid;
@@ -1389,6 +1390,71 @@ button {
 .composite-preset-row .active {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+.composite-preset-row {
+  flex-wrap: wrap;
+}
+
+.composite-preset-row > button {
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+.rename-layer-dialog {
+  width: min(420px, calc(100vw - 28px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+}
+
+.rename-layer-dialog::backdrop {
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.rename-layer-form {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.rename-layer-header,
+.rename-layer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rename-layer-header {
+  justify-content: space-between;
+}
+
+.rename-layer-actions > button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.rename-layer-field {
+  display: grid;
+  gap: 8px;
+}
+
+.rename-layer-field > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rename-layer-field input {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface-2);
 }
 
 @media (max-width: 620px) {
@@ -2307,5 +2373,16 @@ button {
     right: 8px;
     width: auto;
     max-height: min(38vh, 260px);
+  }
+}
+
+@media (max-width: 360px) {
+  .composite-selection-presets {
+    gap: 3px;
+  }
+
+  .composite-selection-presets .chip-button {
+    padding: 0 4px;
+    font-size: 11px;
   }
 }

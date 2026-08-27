@@ -33,6 +33,9 @@
     "node.d.ts",
     "shared.js",
     "README.md",
+    "README.kr.md",
+    "README.zh-Hans.md",
+    "README.zh-Hant.md",
     "SKILL.md",
     "LICENSE",
     "wasm/**/*"

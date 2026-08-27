@@ -523,11 +523,10 @@ ordinary layers or other healthy composites.
 
 Selection preview reuses the same membership scratch and hashes each 24-bit code
 to a deterministic bijective RGB pseudo-color. Active areas add the normal
-2-by-2 black/white selection checker over that base. Inactive areas use an
-opaque 4-by-4 stipple: one 2-by-2 cell retains the exact bijective base while
-the rest carries only a faint trace. This stays dark, preserves code identity,
-and satisfies the premultiplied-alpha canvas contract. Pixel readback reads one
-membership texel; code zero additionally checks the outline mask. The Viewer enumerates coverage codes
+2-by-2 black/white selection checker over that base. Inactive areas keep the
+uniform base pseudo-color with no dimming or stipple, so only selected areas are
+visually emphasized. Pixel readback reads one membership texel; code zero
+additionally checks the outline mask. The Viewer enumerates coverage codes
 in 128-row tasks so a 4K framebuffer scan does not monopolize the main thread.
 Screenshot, full-frame Node output, and tiled/stream output rebuild the same
 source dependencies and bitset for their target transform.

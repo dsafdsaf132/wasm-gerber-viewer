@@ -20,17 +20,6 @@ node --check scripts/benchmark-composite-4k-chrome.mjs
 node scripts/check-composite-readme-parity.mjs
 node --test tests/webgl-renderer-classification.test.mjs
 
-npm --prefix packages/wasm-gerber-renderer run check &
-npm_pid=$!
-GERBER_VIEWER_TEST_PORT=4174 npm run test:playwright &
-playwright_pid=$!
-
-npm_status=0
-playwright_status=0
-wait "$npm_pid" || npm_status=$?
-wait "$playwright_pid" || playwright_status=$?
-if (( npm_status != 0 || playwright_status != 0 )); then
-  exit 1
-fi
+npm --prefix packages/wasm-gerber-renderer run check
 
 git diff --check

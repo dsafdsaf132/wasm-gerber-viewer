@@ -360,7 +360,7 @@ Node prepared layers can be loaded with `preserveArcRegions`,
 `renderDrills`. With `renderDrills: false`, `loadLayer()` returns `null` for a
 drill and `loadLayers()` omits it.
 Use `retainSourceContentForInversion: true` when a prepared layer must later be
-rendered as inverted or used as the explicit inverted outline source.
+rendered as inverted or used as an explicit inverted/composite outline source.
 
 ## Error Handling
 

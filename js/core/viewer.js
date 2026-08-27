@@ -42,6 +42,7 @@ import {
 } from "../rendering/viewport.js";
 import { ViewerOptionsStore } from "../ui/viewer-options.js";
 import { CompositeLayerDialog } from "../ui/composite-layer-dialog.js";
+import { RenameLayerDialog } from "../ui/rename-layer-dialog.js";
 import {
   COMPOSITE_LAYER_KIND,
   createCompositeLayerPresetBitset,
@@ -964,6 +965,9 @@ export class GerberViewer {
       getGerberLayers: () => this.layers.filter(isGerberLayer),
       refreshIcons: () => this.refreshIcons(),
     });
+    this.renameLayerDialog = new RenameLayerDialog({
+      refreshIcons: () => this.refreshIcons(),
+    });
     this.screenshotExporter = new ScreenshotExporter({
       canvas: this.canvas,
       screenshotButton: this.screenshotBtn,
@@ -1161,6 +1165,10 @@ export class GerberViewer {
 
   syncLayerContextMenuState(layer) {
     this.setLayerContextMenuItemDisabled("delete-layer", !layer);
+    const isComposite = isCompositeLayer(layer);
+    const renameButton = this.layerContextMenuButtons.get("rename-layer");
+    if (renameButton) renameButton.hidden = isComposite;
+    this.setLayerContextMenuItemDisabled("rename-layer", !layer || isComposite);
     const canInvert = this.canInvertLayer(layer);
     this.setLayerContextMenuItemDisabled("invert-layer", !canInvert);
     const invertButton = this.layerContextMenuButtons.get("invert-layer");
@@ -1171,7 +1179,6 @@ export class GerberViewer {
           : "";
     }
     this.setLayerContextMenuItemChecked("invert-layer", Boolean(layer?.inverted));
-    const isComposite = isCompositeLayer(layer);
     for (const action of [
       "edit-composite",
       "composite-union",
@@ -1462,7 +1469,7 @@ export class GerberViewer {
         }
         break;
       case "rename-layer":
-        if (layer) {
+        if (layer && !isCompositeLayer(layer)) {
           restoreFocus = false;
           void this.renameLayer(layer).finally(() => this.focusLayerActionButton(layerId));
         }
@@ -2118,6 +2125,7 @@ export class GerberViewer {
     // from the current renderer generation. Recovery replaces those records,
     // so cancel any pending dialog before its result can be committed stale.
     this.compositeLayerDialog.finish(null);
+    this.renameLayerDialog.finish(null);
     if (this.compositeSelection) {
       // GPU calls are no longer valid at this point. The JS layer still owns
       // the original bitset, and restore/rebuild will recreate the renderer
@@ -2162,6 +2170,7 @@ export class GerberViewer {
     this.webGlRestorePromise = restorePromise;
 
     this.compositeLayerDialog.finish(null);
+    this.renameLayerDialog.finish(null);
 
     const interruptedWasmRecovery = this.activeWasmRecoveryState;
     const recoveredPendingLayerIds = this.collectPendingLayerRecoveryIds();
@@ -3476,6 +3485,7 @@ export class GerberViewer {
     if (isNewLoadingSession) {
       this.loadingModalFocusReturn = this.captureViewerFocusRestore();
       this.compositeLayerDialog.finish(null);
+      this.renameLayerDialog.finish(null);
       this.closeLayerContextMenu();
       if (!this.isExportingScreenshot) this.closeScreenshotDialog();
     }
@@ -5013,6 +5023,7 @@ export class GerberViewer {
     }
     this.invalidateRendererInteractionState();
     this.compositeLayerDialog.finish(null);
+    this.renameLayerDialog.finish(null);
     if (this.compositeSelection) {
       // A trapped processor cannot safely accept the rollback upload. The
       // authoritative layer bitset is still the pre-selection value because
@@ -7983,17 +7994,22 @@ export class GerberViewer {
     this.updateUiState();
   }
 
-  async createCompositeLayer() {
-    if (this.isRendererBusy()) return;
-    const defaultName = `Composite ${this.nextCompositeNumber}`;
-    const result = await this.compositeLayerDialog.openCreate(defaultName);
-    if (!result || this.isRendererBusy()) {
-      this.focusCreateCompositeButton();
-      return;
-    }
-    const sourceIds = result.sourceIds;
-    const layer = {
-      id: null,
+  createCompositeLayerRecord(result, { visibleBitset = null, temporary = false } = {}) {
+    const sourceIds = [...result.sourceIds];
+    const slotSourceIds = result.slotSourceIds
+      ? [...result.slotSourceIds]
+      : [...sourceIds];
+    const resolvedBitset =
+      visibleBitset ??
+      result.visibleBitset ??
+      (result.presetCommand === "none"
+        ? new Uint8Array(getCompositeBitsetByteLength(slotSourceIds.length))
+        : createCompositePresetBitset(
+            slotSourceIds.length,
+            result.presetCommand ?? "union",
+          ));
+    return {
+      id: temporary ? "composite-create-draft" : null,
       layerId: null,
       kind: COMPOSITE_LAYER_KIND,
       name: result.name,
@@ -8001,19 +8017,46 @@ export class GerberViewer {
       color: null,
       alpha: null,
       inverted: false,
-      sourceIds: [...sourceIds],
-      slotSourceIds: [...sourceIds],
-      visibleBitset: result.presetCommand === "none"
-        ? new Uint8Array(getCompositeBitsetByteLength(sourceIds.length))
-        : createCompositePresetBitset(
-            sourceIds.length,
-            result.presetCommand ?? "union",
-          ),
+      sourceIds,
+      slotSourceIds,
+      visibleBitset: resolvedBitset,
       rendererDefinitionKey: null,
       bounds: null,
       renderBounds: null,
       error: null,
     };
+  }
+
+  async createCompositeLayer(dialogState = null) {
+    if (this.isRendererBusy()) return;
+    const defaultName =
+      dialogState?.defaultName ?? `Composite ${this.nextCompositeNumber}`;
+    const result = await this.compositeLayerDialog.openCreate(
+      defaultName,
+      dialogState,
+    );
+    if (!result || this.isRendererBusy()) {
+      this.focusCreateCompositeButton();
+      return;
+    }
+
+    if (result.enterSelection) {
+      const draftLayer = this.createCompositeLayerRecord(result, {
+        visibleBitset: result.selectionBitset,
+        temporary: true,
+      });
+      if (
+        this.startCompositeSelection(draftLayer, {
+          createDialogState: result.createDialogState,
+        })
+      ) {
+        return;
+      }
+      this.removeCompositeRendererLayer(draftLayer);
+      return this.createCompositeLayer(result.createDialogState);
+    }
+
+    const layer = this.createCompositeLayerRecord(result);
     this.prepareLayerMetadata(layer);
     this.layers.unshift(layer);
     this.nextCompositeNumber += 1;
@@ -8021,13 +8064,24 @@ export class GerberViewer {
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
-    if (!result.enterSelection || !this.startCompositeSelection(layer)) {
-      this.focusLayerActionButton(layer.id);
-    }
+    this.focusLayerActionButton(layer.id);
   }
 
   async editCompositeLayer(layer) {
     if (!isCompositeLayer(layer) || this.isRendererBusy()) return;
+    const previousState = {
+      name: layer.name,
+      sourceIds: [...layer.sourceIds],
+      slotSourceIds: [...layer.slotSourceIds],
+      visibleBitset: layer.visibleBitset,
+      bounds: layer.bounds ? { ...layer.bounds } : null,
+      renderBounds: layer.renderBounds ? { ...layer.renderBounds } : null,
+      error: layer.error,
+      reportedError: layer.reportedError,
+      renderError: layer.renderError,
+      outlineFallbackForKey: layer.outlineFallbackForKey,
+      outlineFallbackWarningKey: layer.outlineFallbackWarningKey,
+    };
     const result = await this.compositeLayerDialog.openEdit(layer);
     if (!result || this.isRendererBusy() || !this.layers.includes(layer)) return;
     try {
@@ -8075,7 +8129,12 @@ export class GerberViewer {
       this.requestRender();
       this.updateUiState();
       if (result.enterSelection) {
-        this.startCompositeSelection(layer);
+        if (!this.startCompositeSelection(layer, { cancelLayerState: previousState })) {
+          this.restoreCompositeLayerState(layer, previousState);
+          this.renderLayerList();
+          this.requestRender();
+          this.updateUiState();
+        }
       }
     } catch (error) {
       if (!this.scheduleCompositeFatalRecovery(layer, error, `composite ${layer.name}`)) {
@@ -8087,8 +8146,8 @@ export class GerberViewer {
   }
 
   async renameLayer(layer) {
-    if (!layer || this.isRendererBusy()) return;
-    const name = await this.compositeLayerDialog.openRename(layer.name);
+    if (!layer || isCompositeLayer(layer) || this.isRendererBusy()) return;
+    const name = await this.renameLayerDialog.open(layer.name);
     if (!name || this.isRendererBusy() || !this.layers.includes(layer)) return;
     const previousAutoOutlineId = isGerberLayer(layer)
       ? this.findAutomaticBoardOutlineLayer()?.id ?? null
@@ -8134,7 +8193,10 @@ export class GerberViewer {
     this.updateUiState();
   }
 
-  startCompositeSelection(layer) {
+  startCompositeSelection(
+    layer,
+    { createDialogState = null, cancelLayerState = null } = {},
+  ) {
     if (!isCompositeLayer(layer) || this.isRendererBusy()) return false;
     const layerId = this.ensureCompositeRendererLayer(layer);
     if (!hasRendererLayerId(layerId)) {
@@ -8175,6 +8237,8 @@ export class GerberViewer {
       areaRenderLimit: 200,
       rulerWasActive,
       returnFocusLayerId: layer.id,
+      createDialogState,
+      cancelLayerState,
     };
     this.createCompositeSelectionBar();
     this.cancelLazyViewportRender();
@@ -8219,6 +8283,13 @@ export class GerberViewer {
     divider.className = "composite-selection-divider";
     divider.setAttribute("aria-hidden", "true");
     presets.appendChild(divider);
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "chip-button composite-selection-cancel";
+    cancel.dataset.compositeSelectionCancel = "true";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => this.finishCompositeSelection(false));
+    presets.appendChild(cancel);
     const done = document.createElement("button");
     done.type = "button";
     done.className = "chip-button tool-button primary composite-selection-done";
@@ -8326,6 +8397,7 @@ export class GerberViewer {
       if (commit) {
         selection.layer.visibleBitset = selection.draft;
       } else if (
+        !selection.createDialogState &&
         !skipRenderer &&
         hasRendererLayerId(selection.layer.layerId) &&
         (selection.bulkBitsetChanged || selection.changedByteIndices.size > 0)
@@ -8391,6 +8463,25 @@ export class GerberViewer {
     ) {
       this.releaseHiddenCompositeRendererCache(selection.layer);
     }
+    let resumeCreateState = null;
+    if (selection.createDialogState) {
+      resumeCreateState = commit
+        ? {
+            ...selection.createDialogState,
+            name: selection.layer.name,
+            sourceIds: [...selection.layer.sourceIds],
+            slotSourceIds: [...selection.layer.slotSourceIds],
+            visibleBitset: selection.draft,
+            presetCommand: "custom",
+            requiresAreaMode: false,
+          }
+        : selection.createDialogState;
+      if (!skipRenderer) this.removeCompositeRendererLayer(selection.layer);
+    } else if (!commit && selection.cancelLayerState) {
+      this.restoreCompositeLayerState(selection.layer, selection.cancelLayerState, {
+        skipRenderer,
+      });
+    }
     this.compositeSelectionBar?.remove();
     this.compositeSelectionBar = null;
     if (this.compositeSelectionInfo) {
@@ -8403,7 +8494,36 @@ export class GerberViewer {
     this.renderLayerList();
     this.updateUiState();
     this.requestRender();
-    this.focusLayerActionButton(selection.returnFocusLayerId);
+    if (resumeCreateState && !skipRenderer) {
+      void this.createCompositeLayer(resumeCreateState);
+    } else {
+      this.focusLayerActionButton(selection.returnFocusLayerId);
+    }
+  }
+
+  restoreCompositeLayerState(layer, state, { skipRenderer = false } = {}) {
+    if (!isCompositeLayer(layer) || !state) return false;
+    const rendererRemoved = skipRenderer
+      ? true
+      : this.removeCompositeRendererLayer(layer);
+    layer.name = state.name;
+    layer.sourceIds = [...state.sourceIds];
+    layer.slotSourceIds = [...state.slotSourceIds];
+    layer.visibleBitset = state.visibleBitset;
+    layer.bounds = state.bounds ? { ...state.bounds } : null;
+    layer.renderBounds = state.renderBounds ? { ...state.renderBounds } : null;
+    layer.error = state.error ?? null;
+    layer.reportedError = state.reportedError ?? null;
+    layer.renderError = state.renderError ?? null;
+    layer.outlineFallbackForKey = state.outlineFallbackForKey ?? null;
+    layer.outlineFallbackWarningKey = state.outlineFallbackWarningKey ?? null;
+    layer.layerId = null;
+    layer.rendererDefinitionKey = null;
+    this.clearSelectedCompositeAreaForLayer?.(layer);
+    if (!skipRenderer && rendererRemoved && layer.visible) {
+      this.ensureCompositeRendererLayer(layer);
+    }
+    return rendererRemoved;
   }
 
   getCompositeCanvasPixel(clientX, clientY) {

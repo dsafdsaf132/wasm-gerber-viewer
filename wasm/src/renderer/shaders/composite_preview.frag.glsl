@@ -39,29 +39,17 @@ void main() {
         float((hashed >> 8u) & 255u),
         float((hashed >> 16u) & 255u)
     ) / 255.0;
-    if (!selected) {
-        // Keep OFF areas unmistakably dark without collapsing the 24-bit
-        // pseudo-color space through low-alpha quantization. One 2x2 cell in
-        // each 4x4 tile retains the exact bijective base; the other cells use
-        // only a faint trace of it. Opaque output also obeys the canvas's
-        // premultiplied-alpha contract.
-        ivec2 inactive_cell = pixel & 3;
-        bool color_sample = inactive_cell.x >= 2 && inactive_cell.y >= 2;
-        fragColor = vec4(color_sample ? base : base * 0.04, 1.0);
-        return;
-    }
-
-    // Match the normal feature-selection highlight: its 2x2 checker cells
-    // alternate white and black over the existing area color. Keeping the
-    // uncovered pixels at the base pseudo-color also leaves every coverage
-    // combination identifiable while making the ON state unmistakable.
-    ivec2 local = pixel & 3;
-    if (local.x < 2 && local.y < 2) {
-        ivec2 tile = pixel >> 2;
-        bool light_cell = ((tile.x ^ tile.y) & 1) == 0;
-        vec3 highlight = light_cell ? vec3(1.0) : vec3(0.0);
-        float highlight_alpha = light_cell ? 0.86 : 0.72;
-        base = mix(base, highlight, highlight_alpha);
+    if (selected) {
+        // OFF areas keep their uniform pseudo-color. Only ON areas receive
+        // the normal feature-selection checker highlight.
+        ivec2 local = pixel & 3;
+        if (local.x < 2 && local.y < 2) {
+            ivec2 tile = pixel >> 2;
+            bool light_cell = ((tile.x ^ tile.y) & 1) == 0;
+            vec3 highlight = light_cell ? vec3(1.0) : vec3(0.0);
+            float highlight_alpha = light_cell ? 0.86 : 0.72;
+            base = mix(base, highlight, highlight_alpha);
+        }
     }
     fragColor = vec4(base, 1.0);
 }
