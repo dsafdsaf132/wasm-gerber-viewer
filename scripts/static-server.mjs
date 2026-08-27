@@ -1,6 +1,6 @@
 import { createReadStream, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 
 const root = resolve(process.cwd());
 const port = Number(process.env.GERBER_VIEWER_TEST_PORT ?? 4173);
@@ -20,7 +20,10 @@ function resolveRequestPath(requestUrl) {
   const pathname = decodeURIComponent(new URL(requestUrl, "http://localhost").pathname);
   const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
   const candidate = resolve(join(root, normalize(relativePath)));
-  return candidate === root || candidate.startsWith(`${root}/`) ? candidate : null;
+  const relativeCandidate = relative(root, candidate);
+  const escapesRoot =
+    isAbsolute(relativeCandidate) || relativeCandidate === ".." || relativeCandidate.startsWith(`..${sep}`);
+  return escapesRoot ? null : candidate;
 }
 
 const server = createServer((request, response) => {

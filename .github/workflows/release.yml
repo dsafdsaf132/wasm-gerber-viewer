@@ -45,9 +45,6 @@ jobs:
       - name: Set up npm
         run: npm install --global npm@12.0.2
 
-      - name: Install JavaScript dependencies
-        run: npm ci
-
       - name: Install headless display dependencies
         run: |
           sudo apt-get update
@@ -130,6 +127,9 @@ jobs:
           else
             echo "${PACKAGE_JSON} is already at ${{ steps.release.outputs.version }}"
           fi
+
+      - name: Install JavaScript dependencies
+        run: npm ci
 
       - name: Set up Rust toolchain
         run: |
