@@ -13,21 +13,14 @@ const rendererPackageRoot = new URL(
 );
 const rendererReadmeNames = [...readmeNames];
 const requiredCompositeConcepts = [
-  "2–24",
   "Union",
   "Intersection",
   "Difference",
-  "Select Visible Area",
-  "source-coverage pattern",
   "composite-layers.js",
   "composite-layer-dialog.js",
   "composite.rs",
   "shaders/composite_*.frag.glsl",
   "[wasm/README.md](wasm/README.md)",
-  "npm run validate:composite",
-  "npm run benchmark:composite:4k:chrome",
-  "500 ms",
-  "100 ms",
 ];
 const requiredRendererConcepts = [
   "renderCompositeLayer",

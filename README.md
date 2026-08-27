@@ -33,21 +33,12 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 - NC drill overlay rendering support
 - Touch support for mobile devices
 - Multi-layer rendering with per-layer color and visibility control
-- Composite Layers that combine coverage from 2–24 Gerber sources with Union,
-  Intersection, Difference, or manually selected coverage combinations
-- `Select Visible Area`: one click toggles every disconnected area with the same
-  source-coverage pattern
+- Composite Layers with Union, Intersection, Difference, and custom coverage
+  combinations
 - Feature picking with selected-area highlighting
 - Horizontal/vertical flip controls
 - Ruler measurements with mm/inch unit switching
 - Screenshot export with resolution options, including ruler overlays
-
-To build a custom composite in the Viewer, choose `Custom`; new composites enter
-area selection with no combinations enabled. Use the Union, Intersection,
-Difference, or None controls, then click coverage areas in the canvas or the
-Coverage Areas list. `Done` or Enter commits the draft, while Esc cancels it.
-The zero-coverage area is selectable only inside the resolved board outline or
-bounds fallback, and normal-mode picking only changes currently active areas.
 
 ## Quick Start
 
@@ -159,24 +150,6 @@ wasm-gerber-viewer/
 ├── scripts/                           # Build and deployment scripts
 └── .github/workflows/                 # CI, deploy, and release workflows
 ```
-
-## Composite Validation and Performance
-
-Run the Rust, GLSL, release WASM, npm/Node, TypeScript, and diff validation
-suite with `npm run validate:composite`. Playwright remains a separate opt-in
-check; run `npm run test:playwright` only when browser interaction validation is
-explicitly requested.
-
-For the 24-source 4K acceptance measurement, run
-`npm run benchmark:composite:4k:chrome` from a desktop session with Google
-Chrome hardware acceleration enabled. The report records the unmasked GPU,
-viewport, pass count, timings, FBO format, and CPU/GPU allocation sizes; it
-rejects software renderers and missed 500 ms selection / 100 ms toggle targets.
-`COMPOSITE_BENCHMARK_CHANNEL=chromium`,
-`COMPOSITE_BENCHMARK_HEADLESS=1`, and
-`COMPOSITE_BENCHMARK_ALLOW_SOFTWARE=1` are available only for a
-non-acceptance smoke run: timings and functional cache counters are still
-reported, but GPU identity and timing thresholds are not exit gates.
 
 ## Browser Requirements
 

@@ -33,20 +33,12 @@
 - 支持 NC drill 叠加渲染
 - 支持移动设备触控操作
 - 支持按层控制颜色、透明度和可见性
-- Composite Layer 可将 2–24 个 Gerber 源的 coverage 按 Union、
-  Intersection、Difference 或手动选定的组合进行合成
-- `Select Visible Area`：单击即可同时切换所有具有相同
-  source-coverage pattern 的不连续区域
+- Composite Layer 支持 Union、Intersection、Difference 和自定义 coverage
+  组合
 - 支持要素拾取和选中区域高亮
 - 支持水平/垂直翻转
 - 标尺测量支持 mm/inch 单位切换
 - 可按分辨率导出截图，并可包含标尺覆盖层
-
-在 Viewer 中选择 `Custom` 可创建自定义 composite；新 composite 会以所有
-组合均关闭的状态进入区域选择模式。可先使用 Union、Intersection、
-Difference 或 None，再在画布或 Coverage Areas 列表中切换区域。`Done` 或
-Enter 提交草稿，Esc 取消草稿。零 coverage 区域只能在已解析的电路板外形或
-bounds fallback 内选择；普通模式下只能选择当前启用的区域。
 
 ## 快速开始
 
@@ -157,21 +149,6 @@ wasm-gerber-viewer/
 ├── scripts/                           # 构建和部署脚本
 └── .github/workflows/                 # CI、部署和 release workflow
 ```
-
-## Composite 验证与性能
-
-运行 `npm run validate:composite` 可执行 Rust、GLSL、release WASM、
-npm/Node、TypeScript 和 diff 验证。Playwright 保持为单独的 opt-in 检查；
-仅在明确需要 browser interaction 验证时运行 `npm run test:playwright`。
-
-24-source 4K acceptance 测量需在已启用 Google Chrome 硬件加速的
-desktop session 中运行 `npm run benchmark:composite:4k:chrome`。报告会记录
-unmasked GPU、viewport、pass 数、timing、FBO format 以及 CPU/GPU
-allocation size；software renderer 或未达到 500 ms selection / 100 ms toggle
-目标时会失败。`COMPOSITE_BENCHMARK_CHANNEL=chromium`、
-`COMPOSITE_BENCHMARK_HEADLESS=1` 和 `COMPOSITE_BENCHMARK_ALLOW_SOFTWARE=1`
-仅用于 non-acceptance smoke run。该模式仍会报告 timing 和 functional cache
-counter，但不会以 GPU identity 或 timing threshold 作为 exit gate。
 
 ## 浏览器要求
 
