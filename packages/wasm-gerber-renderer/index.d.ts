@@ -12,6 +12,7 @@ export type GerberLayer =
       name?: string;
       color?: RGBColor;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       kind?: LayerKind;
@@ -21,6 +22,18 @@ export type RGBColor = [number, number, number];
 export type RGBAColor = [number, number, number, number];
 export type LayerKind = "gerber" | "drill";
 export type CompositeMode = "blend" | "stack";
+export type CompositePreset = "union" | "intersection" | "difference";
+
+export type CompositeLayerOptions = {
+  name?: string;
+  color?: RGBColor | string;
+  alpha?: number;
+  visible?: boolean;
+  inverted?: boolean;
+  outlineLayerId?: number;
+  preset?: CompositePreset;
+  visibleAreas?: string[];
+};
 
 export type RendererOptions = {
   wasmModule?: unknown;
@@ -52,7 +65,7 @@ export type FrameOptions = {
   globalAlpha?: number;
   compositeMode?: CompositeMode;
   rendererOptions?: RendererOptions;
-  onLayerError?: (failure: LayerFailure) => void;
+  onLayerError?: (failure: LayerFailure) => void | Promise<void>;
   layerErrorMode?: LayerErrorMode;
 };
 
@@ -67,6 +80,7 @@ export type LayerFailure = {
 export type LayerOptions = {
   color?: RGBColor;
   alpha?: number;
+  visible?: boolean;
   offsetX?: number;
   offsetY?: number;
   kind?: LayerKind;
@@ -122,6 +136,11 @@ export declare class GerberRenderer {
   ): Promise<void>;
 
   renderLayer(layer: GerberLayer, layerOptions?: LayerOptions): Promise<number | null>;
+
+  renderCompositeLayer(
+    sourceLayerIds: number[],
+    options?: CompositeLayerOptions,
+  ): Promise<number | null>;
 
   renderLayers(
     layers: GerberLayer | GerberLayer[] | FileList,

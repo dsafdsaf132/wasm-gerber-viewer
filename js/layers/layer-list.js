@@ -53,12 +53,31 @@ function updateColorButton(button, rgb, alpha = 1) {
   button.style.setProperty("--layer-alpha", String(clampAlpha(alpha)));
 }
 
-function updateColorButtonAlphaOverride(button, hasOverride) {
+function updateColorButtonAlphaOverride(button, layer, hasOverride) {
   button.classList.toggle("has-alpha-override", Boolean(hasOverride));
+  if (layer.kind === "drill") return;
+  button.title = hasOverride
+    ? "Layer color; custom alpha"
+    : "Layer color; uses Global Alpha";
+  button.setAttribute("aria-label", getColorPickerButtonLabel({
+    ...layer,
+    alpha: hasOverride ? layer.alpha ?? 0 : null,
+  }));
 }
 
 function getColorPickerButtonLabel(layer) {
-  return `${layer.name} color`;
+  const alphaMode =
+    layer.kind !== "drill" && layer.alpha !== null && layer.alpha !== undefined
+      ? ", custom alpha"
+      : layer.kind !== "drill"
+        ? ", global alpha"
+        : "";
+  const errorState = layer.error ? ", rendering error" : "";
+  return `${layer.name} color${alphaMode}${errorState}`;
+}
+
+function getLayerActionButtonLabel(layer) {
+  return `${layer.name} actions${layer.error ? ", rendering error" : ""}`;
 }
 
 function getPickrRoot(pickr) {
@@ -116,6 +135,11 @@ function destroyContainerPickrs(container) {
     }
   }
   container._layerPickrs = [];
+}
+
+export function clearLayerList(container) {
+  destroyContainerPickrs(container);
+  container.replaceChildren();
 }
 
 function attachNativeColorFallback({
@@ -220,6 +244,12 @@ function createPickrInstance({
       },
     },
   });
+  let focusFrame = null;
+  const cancelPendingFocus = () => {
+    if (focusFrame === null) return;
+    cancelAnimationFrame(focusFrame);
+    focusFrame = null;
+  };
   configurePickrAccessibility({ button, layer, pickr });
 
   if (!lockOpacity) {
@@ -237,9 +267,14 @@ function createPickrInstance({
     syncAlphaOverrideControl(state);
     pickr.setColor(rgbToRgbaString(layer.color, getEffectiveAlpha()), true);
     button.setAttribute("aria-expanded", "true");
-    requestAnimationFrame(() => focusPickrDialog(pickr));
+    cancelPendingFocus();
+    focusFrame = requestAnimationFrame(() => {
+      focusFrame = null;
+      focusPickrDialog(pickr);
+    });
   });
   pickr.on("hide", () => {
+    cancelPendingFocus();
     button.setAttribute("aria-expanded", "false");
   });
   pickr.on("change", (color) => {
@@ -264,6 +299,7 @@ function createPickrInstance({
     updateColorButton(button, rgb, lockOpacity ? 1 : alpha ?? getGlobalAlpha());
     updateColorButtonAlphaOverride(
       button,
+      layer,
       alpha !== null && alpha !== undefined,
     );
     onColorChange(layer.id, rgb, alpha);
@@ -271,7 +307,10 @@ function createPickrInstance({
   });
 
   return {
-    destroyAndRemove: () => pickr.destroyAndRemove(),
+    destroyAndRemove: () => {
+      cancelPendingFocus();
+      pickr.destroyAndRemove();
+    },
     syncGlobalAlpha() {
       if (lockOpacity || layer.alpha !== null && layer.alpha !== undefined) return;
 
@@ -364,6 +403,7 @@ function createEmptyLayerItem(onOpenFiles) {
 function createLayerItem({
   layer,
   index,
+  locked,
   formatBounds,
   onDragStart,
   onDragEnd,
@@ -376,12 +416,21 @@ function createLayerItem({
 }) {
   const item = document.createElement("li");
   item.className = "layer-item gerber-layer-item";
+  if (layer.kind === "composite") {
+    item.classList.add("composite-layer-item");
+  }
+  if (layer.error) {
+    item.classList.add("layer-item-error");
+    item.title = layer.error;
+    item.setAttribute("aria-invalid", "true");
+  }
   if (layer.inverted) {
     item.classList.add("layer-item-inverted");
   }
   item.dataset.layerId = layer.id;
   item.dataset.layerIndex = String(index);
-  item.draggable = true;
+  item.dataset.layerGroup = layer.kind === "composite" ? "composite" : "gerber";
+  item.draggable = !locked;
   item.addEventListener("dragstart", (event) => onDragStart(event, layer.id));
   item.addEventListener("dragend", onDragEnd);
   item.addEventListener("contextmenu", (event) => {
@@ -392,10 +441,15 @@ function createLayerItem({
   colorPicker.type = "button";
   colorPicker.className = "layer-color-picker";
   colorPicker.setAttribute("aria-label", getColorPickerButtonLabel(layer));
-  colorPicker.title = "Layer color";
+  colorPicker.title =
+    layer.alpha !== null && layer.alpha !== undefined
+      ? "Layer color; custom alpha"
+      : "Layer color; uses Global Alpha";
+  colorPicker.disabled = locked;
   updateColorButton(colorPicker, layer.color, layer.alpha ?? getGlobalAlpha());
   updateColorButtonAlphaOverride(
     colorPicker,
+    layer,
     layer.alpha !== null && layer.alpha !== undefined,
   );
   for (const eventName of ["click", "mousedown", "pointerdown", "touchstart"]) {
@@ -410,9 +464,10 @@ function createLayerItem({
   checkbox.type = "checkbox";
   checkbox.className = "layer-checkbox";
   checkbox.checked = layer.visible;
+  checkbox.disabled = locked;
   checkbox.setAttribute(
     "aria-label",
-    `${layer.name} visibility${layer.inverted ? " (inverted)" : ""}`,
+    `${layer.name} visibility${layer.inverted ? " (inverted)" : ""}${layer.error ? ", rendering error" : ""}`,
   );
   checkbox.addEventListener("change", () => {
     onVisibilityChange(layer, checkbox.checked);
@@ -423,9 +478,15 @@ function createLayerItem({
   const layerName = document.createElement("strong");
   const layerMeta = document.createElement("span");
   layerName.textContent = layer.name;
-  layerMeta.textContent = formatBounds(layer);
+  layerMeta.textContent = layer.kind === "composite"
+    ? `${layer.sourceIds.length} sources · ${formatBounds(layer)}`
+    : formatBounds(layer);
+  if (layer.error) {
+    layerMeta.textContent = `Error · ${layerMeta.textContent}`;
+  }
   label.append(layerName, layerMeta);
   label.addEventListener("click", () => {
+    if (locked) return;
     checkbox.checked = !checkbox.checked;
     onToggleVisibility(layer);
   });
@@ -433,8 +494,17 @@ function createLayerItem({
   const menuBtn = document.createElement("button");
   menuBtn.type = "button";
   menuBtn.className = "icon-button layer-menu-btn";
-  menuBtn.setAttribute("aria-label", "Layer actions");
-  menuBtn.title = "Layer actions";
+  menuBtn.setAttribute("aria-label", getLayerActionButtonLabel(layer));
+  menuBtn.setAttribute("aria-haspopup", "menu");
+  menuBtn.setAttribute("aria-controls", "layer-context-menu");
+  menuBtn.setAttribute("aria-expanded", "false");
+  menuBtn.title = layer.kind === "composite"
+    ? "Layer actions; touch and hold to reorder"
+    : "Layer actions";
+  menuBtn.disabled = locked;
+  if (layer.kind === "composite") {
+    menuBtn.dataset.layerTouchReorder = "true";
+  }
   const menuIcon = document.createElement("i");
   menuIcon.setAttribute("data-lucide", "more-vertical");
   menuBtn.appendChild(menuIcon);
@@ -454,12 +524,35 @@ function createLayerItem({
 function createGroupHeader(title) {
   const item = document.createElement("li");
   item.className = "layer-group-heading";
-  item.textContent = title;
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  item.appendChild(heading);
+  return item;
+}
+
+function createCompositeAction(onCreateComposite, disabled) {
+  const item = document.createElement("li");
+  item.className = "layer-create-composite";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "chip-button";
+  button.disabled = disabled;
+  button.title = disabled
+    ? "Load at least two Gerber layers"
+    : "Create Composite Layer";
+  const icon = document.createElement("i");
+  icon.setAttribute("data-lucide", "combine");
+  const text = document.createElement("span");
+  text.textContent = "Create Composite Layer";
+  button.append(icon, text);
+  button.addEventListener("click", onCreateComposite);
+  item.appendChild(button);
   return item;
 }
 
 function createDrillItem({
   layer,
+  locked,
   formatBounds,
   onColorChange,
   onVisibilityChange,
@@ -469,6 +562,11 @@ function createDrillItem({
   const item = document.createElement("li");
   item.className = "layer-item drill-layer-item";
   item.dataset.layerId = layer.id;
+  if (layer.error) {
+    item.classList.add("layer-item-error");
+    item.title = layer.error;
+    item.setAttribute("aria-invalid", "true");
+  }
   item.addEventListener("contextmenu", (event) => {
     openLayerContextMenu(event, layer, onContextMenu);
   });
@@ -478,6 +576,7 @@ function createDrillItem({
   colorPicker.className = "layer-color-picker";
   colorPicker.setAttribute("aria-label", getColorPickerButtonLabel(layer));
   colorPicker.title = "Layer color";
+  colorPicker.disabled = locked;
   updateColorButton(colorPicker, layer.color, 1);
   for (const eventName of ["click", "mousedown", "pointerdown", "touchstart"]) {
     colorPicker.addEventListener(eventName, stopLayerControlEvent);
@@ -491,7 +590,11 @@ function createDrillItem({
   checkbox.type = "checkbox";
   checkbox.className = "layer-checkbox";
   checkbox.checked = layer.visible;
-  checkbox.setAttribute("aria-label", `${layer.name} visibility`);
+  checkbox.disabled = locked;
+  checkbox.setAttribute(
+    "aria-label",
+    `${layer.name} visibility${layer.error ? ", rendering error" : ""}`,
+  );
   checkbox.addEventListener("change", () => {
     onVisibilityChange(layer, checkbox.checked);
   });
@@ -502,8 +605,12 @@ function createDrillItem({
   const layerMeta = document.createElement("span");
   layerName.textContent = layer.name;
   layerMeta.textContent = formatBounds(layer);
+  if (layer.error) {
+    layerMeta.textContent = `Error · ${layerMeta.textContent}`;
+  }
   label.append(layerName, layerMeta);
   label.addEventListener("click", () => {
+    if (locked) return;
     checkbox.checked = !checkbox.checked;
     onToggleVisibility(layer);
   });
@@ -511,8 +618,12 @@ function createDrillItem({
   const menuBtn = document.createElement("button");
   menuBtn.type = "button";
   menuBtn.className = "icon-button layer-menu-btn";
-  menuBtn.setAttribute("aria-label", "Layer actions");
+  menuBtn.setAttribute("aria-label", getLayerActionButtonLabel(layer));
+  menuBtn.setAttribute("aria-haspopup", "menu");
+  menuBtn.setAttribute("aria-controls", "layer-context-menu");
+  menuBtn.setAttribute("aria-expanded", "false");
   menuBtn.title = "Layer actions";
+  menuBtn.disabled = locked;
   const menuIcon = document.createElement("i");
   menuIcon.setAttribute("data-lucide", "more-vertical");
   menuBtn.appendChild(menuIcon);
@@ -538,6 +649,7 @@ function openLayerContextMenu(event, layer, onContextMenu) {
     layerId: layer.id,
     clientX: event.clientX,
     clientY: event.clientY,
+    trigger: null,
   });
 }
 
@@ -551,12 +663,14 @@ function openLayerMenuFromButton(event, layer, onContextMenu) {
     layerId: layer.id,
     clientX: rect.right,
     clientY: rect.bottom + 4,
+    trigger: event.currentTarget,
   });
 }
 
 export function renderLayerList({
   container,
   layers,
+  locked = false,
   formatBounds,
   onDragStart,
   onDragEnd,
@@ -565,11 +679,11 @@ export function renderLayerList({
   onVisibilityChange,
   onToggleVisibility,
   onContextMenu,
+  onCreateComposite,
   onOpenFiles,
   getGlobalAlpha,
 }) {
-  destroyContainerPickrs(container);
-  container.replaceChildren();
+  clearLayerList(container);
   const pickrTargets = [];
 
   if (layers.length === 0) {
@@ -577,16 +691,46 @@ export function renderLayerList({
     return;
   }
 
-  const gerberLayers = layers.filter((layer) => layer.kind !== "drill");
+  const sourceGerberLayers = layers.filter(
+    (layer) => layer.kind !== "drill" && layer.kind !== "composite",
+  );
+  const compositeLayers = layers.filter((layer) => layer.kind === "composite");
   const drillLayers = layers.filter((layer) => layer.kind === "drill");
 
-  if (gerberLayers.length > 0) {
-    container.appendChild(createGroupHeader("Gerber Layers"));
-  }
-  for (const [index, layer] of gerberLayers.entries()) {
+  container.appendChild(createGroupHeader("Composite Layers"));
+  for (const [index, layer] of compositeLayers.entries()) {
     const target = createLayerItem({
       layer,
       index,
+      locked,
+      formatBounds,
+      onDragStart,
+      onDragEnd,
+      onColorChange,
+      onAlphaOverrideChange,
+      onVisibilityChange,
+      onToggleVisibility,
+      onContextMenu,
+      getGlobalAlpha,
+    });
+    container.appendChild(target.item);
+    pickrTargets.push(target);
+  }
+  container.appendChild(
+    createCompositeAction(
+      onCreateComposite,
+      locked || sourceGerberLayers.length < 2,
+    ),
+  );
+
+  if (sourceGerberLayers.length > 0) {
+    container.appendChild(createGroupHeader("Gerber Layers"));
+  }
+  for (const [index, layer] of sourceGerberLayers.entries()) {
+    const target = createLayerItem({
+      layer,
+      index,
+      locked,
       formatBounds,
       onDragStart,
       onDragEnd,
@@ -607,6 +751,7 @@ export function renderLayerList({
   for (const layer of drillLayers) {
     const target = createDrillItem({
       layer,
+      locked,
       formatBounds,
       onColorChange,
       onVisibilityChange,

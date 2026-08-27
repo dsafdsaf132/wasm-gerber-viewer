@@ -40,10 +40,29 @@ function isDrillLayer(layer) {
   return layer?.kind === "drill";
 }
 
-function isBoardOutlineLayer(layer) {
-  if (!layer || isDrillLayer(layer)) return false;
+function isCompositeLayer(layer) {
+  return layer?.kind === "composite";
+}
 
-  return [layer.name, layer.sourceName, layer.fileName].some(isBoardOutlineName);
+function isFatalWasmRuntimeError(error) {
+  const message = getErrorMessage(error);
+  return (
+    (typeof WebAssembly !== "undefined" &&
+      error instanceof WebAssembly.RuntimeError) ||
+    message.includes("recursive use of an object detected")
+  );
+}
+
+class ScreenshotExportCancelledError extends Error {
+  constructor() {
+    super("Screenshot export was cancelled.");
+    this.name = "ScreenshotExportCancelledError";
+  }
+}
+
+function isBoardOutlineLayer(layer) {
+  if (!layer || isDrillLayer(layer) || isCompositeLayer(layer)) return false;
+  return isBoardOutlineName(layer.name);
 }
 
 function isBoardOutlineName(name) {
@@ -100,7 +119,10 @@ function expandBounds(bounds, amount) {
   };
 }
 
-function getVisibleGerberBounds(layers, { excludeLayer = null } = {}) {
+function getVisibleGerberBounds(
+  layers,
+  { excludeLayer = null, includeLayerIds = null } = {},
+) {
   let minX = Infinity;
   let maxX = -Infinity;
   let minY = Infinity;
@@ -109,9 +131,11 @@ function getVisibleGerberBounds(layers, { excludeLayer = null } = {}) {
 
   for (const layer of layers) {
     const bounds = layer.bounds;
+    const includedDependency = includeLayerIds?.has(layer.id) ?? false;
     if (
       isDrillLayer(layer) ||
-      !layer.visible ||
+      isCompositeLayer(layer) ||
+      (!layer.visible && !includedDependency) ||
       layer === excludeLayer ||
       !bounds
     ) {
@@ -146,6 +170,7 @@ function resolveInvertedFillSource(
   layer,
   boardOutlineSelection,
   boundsMarginMm,
+  includeLayerIds = null,
 ) {
   const selection = String(boardOutlineSelection ?? "auto");
   const selectedOutlineLayer =
@@ -169,15 +194,31 @@ function resolveInvertedFillSource(
       type: "outline",
       outlineLayer,
       outlineOffset: normalizeLayerOffset(outlineLayer.offset),
-      bounds: outlineLayer.renderBounds ?? outlineLayer.bounds ?? null,
+      // The outline is rebuilt from its ordinary Gerber source content, so its
+      // dependency bounds must describe that raw geometry even when the same
+      // layer is displayed inverted.
+      bounds: outlineLayer.bounds ?? null,
     };
   }
 
-  return resolveInvertedBoundsFillSource(layers, layer, boundsMarginMm);
+  return resolveInvertedBoundsFillSource(
+    layers,
+    layer,
+    boundsMarginMm,
+    includeLayerIds,
+  );
 }
 
-function resolveInvertedBoundsFillSource(layers, layer, boundsMarginMm = 0) {
-  const bounds = expandBounds(getVisibleGerberBounds(layers), boundsMarginMm);
+function resolveInvertedBoundsFillSource(
+  layers,
+  layer,
+  boundsMarginMm = 0,
+  includeLayerIds = null,
+) {
+  const bounds = expandBounds(
+    getVisibleGerberBounds(layers, { includeLayerIds }),
+    boundsMarginMm,
+  );
   return bounds ? { type: "bounds", bounds } : null;
 }
 
@@ -250,6 +291,7 @@ export class ScreenshotExporter {
     isWebGlUnavailable,
     drawMeasurements,
     showError,
+    onCompositeError,
   }) {
     this.canvas = canvas;
     this.screenshotButton = screenshotButton;
@@ -275,8 +317,11 @@ export class ScreenshotExporter {
     this.isWebGlUnavailable = isWebGlUnavailable;
     this.drawMeasurements = drawMeasurements;
     this.showError = showError;
+    this.onCompositeError = onCompositeError;
 
     this.isExporting = false;
+    this.exportCancellation = null;
+    this.rendererUnavailable = false;
     this.pngCrcTable = null;
   }
 
@@ -294,6 +339,7 @@ export class ScreenshotExporter {
   }
 
   closeDialog() {
+    if (this.isExporting) return;
     if (this.dialog.open) {
       this.dialog.close();
     }
@@ -301,11 +347,11 @@ export class ScreenshotExporter {
 
   setExportBusy(isBusy) {
     this.form.classList.toggle("is-exporting", isBusy);
-    this.backgroundToggle.disabled = isBusy;
-    this.scaleSelect.disabled = isBusy;
-    this.cancelButton.disabled = isBusy;
+    this.backgroundToggle.disabled = isBusy || this.rendererUnavailable;
+    this.scaleSelect.disabled = isBusy || this.rendererUnavailable;
+    this.cancelButton.disabled = false;
     this.dismissButton.disabled = isBusy;
-    this.exportButton.disabled = isBusy;
+    this.exportButton.disabled = isBusy || this.rendererUnavailable;
     this.exportButton.textContent = isBusy ? "Exporting" : "Export";
 
     if (isBusy) {
@@ -313,6 +359,29 @@ export class ScreenshotExporter {
     } else {
       this.setProgress(0, "Exporting");
     }
+  }
+
+  cancelExport() {
+    if (!this.isExporting || !this.exportCancellation) return false;
+    this.exportCancellation.cancelled = true;
+    this.cancelButton.disabled = true;
+    this.setProgress(this.progressBar.value / 100, "Cancelling");
+    return true;
+  }
+
+  throwIfExportCancelled() {
+    if (this.exportCancellation?.cancelled) {
+      throw new ScreenshotExportCancelledError();
+    }
+  }
+
+  setRendererUnavailable(isUnavailable) {
+    this.rendererUnavailable = Boolean(isUnavailable);
+    this.screenshotButton.disabled = this.isExporting || this.rendererUnavailable;
+    if (this.isExporting) return;
+    this.backgroundToggle.disabled = this.rendererUnavailable;
+    this.scaleSelect.disabled = this.rendererUnavailable;
+    this.updateResolutionPreview();
   }
 
   setProgress(progress, label = null) {
@@ -362,15 +431,19 @@ export class ScreenshotExporter {
     this.resolution.textContent = limitMessage
       ? `Estimated ${width} x ${height} px · ${limitMessage}`
       : `Estimated ${width} x ${height} px`;
-    this.exportButton.disabled = this.isExporting || Boolean(limitMessage);
+    this.exportButton.disabled =
+      this.isExporting || this.rendererUnavailable || Boolean(limitMessage);
   }
 
   shouldTile(scale) {
     return scale >= 2;
   }
 
-  shouldStream(scale) {
-    return scale >= 2 && this.supportsStreaming();
+  shouldStream(_scale) {
+    // Native canvas.toBlob() cannot be aborted once encoding starts. Prefer
+    // the banded encoder whenever available so the visible Cancel action can
+    // release both CPU and WebGL resources between bounded work units.
+    return this.supportsStreaming();
   }
 
   supportsStreaming() {
@@ -393,7 +466,11 @@ export class ScreenshotExporter {
   async export({ includeBackground = false, scale = 1 } = {}) {
     if (this.isExporting) return false;
 
-    if (!this.getWasmProcessor() || this.isWebGlUnavailable()) {
+    if (
+      this.rendererUnavailable ||
+      !this.getWasmProcessor() ||
+      this.isWebGlUnavailable()
+    ) {
       this.showError("Cannot export screenshot while WebGL is unavailable.");
       return false;
     }
@@ -408,7 +485,6 @@ export class ScreenshotExporter {
     const exportWidth = Math.max(1, Math.round(rect.width * exportScale));
     const exportHeight = Math.max(1, Math.round(rect.height * exportScale));
     const maxDimension = this.getMaxDimension();
-    const isTiled = this.shouldTile(exportScale);
     const shouldStream = this.shouldStream(exportScale);
     const renderState = this.getRenderState(rect);
     const limitMessage = this.getExportLimitMessage(
@@ -429,12 +505,14 @@ export class ScreenshotExporter {
     }
 
     this.isExporting = true;
+    this.exportCancellation = { cancelled: false };
     this.screenshotButton.disabled = true;
-    this.setExportBusy(isTiled);
+    this.setExportBusy(true);
     let screenshotRenderer = null;
 
     try {
       screenshotRenderer = this.createRenderer(renderState, includeBackground);
+      this.throwIfExportCancelled();
       let blob = null;
 
       if (shouldStream) {
@@ -463,9 +541,13 @@ export class ScreenshotExporter {
         );
       }
 
+      this.throwIfExportCancelled();
       this.downloadBlob(blob);
       return true;
     } catch (error) {
+      if (error instanceof ScreenshotExportCancelledError) {
+        return false;
+      }
       const message = getErrorMessage(error);
       console.error("[Export] Failed to export screenshot:", error);
       this.showError(`Failed to export screenshot: ${message}`);
@@ -473,7 +555,8 @@ export class ScreenshotExporter {
     } finally {
       this.disposeRenderer(screenshotRenderer);
       this.isExporting = false;
-      this.screenshotButton.disabled = false;
+      this.exportCancellation = null;
+      this.screenshotButton.disabled = this.rendererUnavailable;
       this.setExportBusy(false);
       this.updateResolutionPreview();
     }
@@ -528,19 +611,51 @@ export class ScreenshotExporter {
   }
 
   createRenderer(renderState, includeBackground) {
+    const wasmModule = this.getWasmModule();
+    if (!wasmModule) {
+      throw new Error("WASM module is unavailable for screenshot export.");
+    }
+
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
     if (!gl) {
       throw new Error("WebGL2 is unavailable for screenshot export.");
     }
 
-    const wasmModule = this.getWasmModule();
-    if (!wasmModule) {
-      throw new Error("WASM module is unavailable for screenshot export.");
+    let processor = null;
+    try {
+      processor = new wasmModule.GerberProcessor();
+      return this.initializeRenderer(
+        canvas,
+        gl,
+        processor,
+        renderState,
+        includeBackground,
+        {
+          initialized: false,
+          excludedCompositeClientIds: new Set(),
+          reportedCompositeErrors: new Set(),
+        },
+      );
+    } catch (error) {
+      this.disposeRenderer({ canvas, gl, processor });
+      throw error;
     }
+  }
 
-    const processor = new wasmModule.GerberProcessor();
-    processor.init(gl);
+  initializeRenderer(
+    canvas,
+    gl,
+    processor,
+    renderState,
+    includeBackground,
+    buildState,
+  ) {
+    if (!buildState.initialized) {
+      processor.init(gl);
+      buildState.initialized = true;
+    }
+    const exclusionCountBefore = buildState.excludedCompositeClientIds.size;
     const parseOptions = this.getParseOptions?.() ?? {};
     if (typeof processor.set_interactions_enabled === "function") {
       processor.set_interactions_enabled(false);
@@ -574,15 +689,53 @@ export class ScreenshotExporter {
     const colorData = [];
     const blendModes = [];
     const gerberRenderLayers = [];
+    const rendererIdByClientId = new Map();
+    const outlineRendererIdByClientId = new Map();
+    const effectiveBoundsByClientId = new Map();
+    const hiddenDependencyBuildErrors = new Map();
     const drillLayers = [];
+    const compositeEntries = [];
     let wasmLayerCount = 0;
     const drillFillColor = includeBackground
       ? hexColorToRgb(renderState.backgroundColor)
       : [0, 0, 0];
     const drillFillBlendMode = includeBackground ? 1 : 2;
-    const defaultLayerAlpha = clampAlpha(renderState.globalAlpha);
+    const defaultLayerAlpha = isStackCompositeMode
+      ? 1
+      : clampAlpha(renderState.globalAlpha);
     const layers = this.getLayers();
+    const visibleCompositeLayers = layers.filter(
+      (layer) =>
+        isCompositeLayer(layer) &&
+        layer.visible &&
+        !buildState.excludedCompositeClientIds.has(layer.id),
+    );
+    const compositeSourceLayerIds = new Set(
+      visibleCompositeLayers.flatMap((layer) => layer.slotSourceIds),
+    );
     const boardOutlineSelection = this.getBoardOutlineSelection?.() ?? "auto";
+    const selectedCompositeOutline =
+      boardOutlineSelection !== "auto" && boardOutlineSelection !== "bounds"
+        ? layers.find(
+            (candidate) =>
+              candidate.id === boardOutlineSelection &&
+              !isDrillLayer(candidate) &&
+              !isCompositeLayer(candidate),
+          )
+        : null;
+    const compositeOutline = selectedCompositeOutline ??
+      (boardOutlineSelection === "auto"
+        ? layers.find(
+            (candidate) =>
+              !isCompositeLayer(candidate) &&
+              typeof candidate.sourceContent === "string" &&
+              isBoardOutlineLayer(candidate),
+          )
+        : null);
+    const requiredGerberLayerIds = new Set(compositeSourceLayerIds);
+    if (visibleCompositeLayers.length > 0 && compositeOutline) {
+      requiredGerberLayerIds.add(compositeOutline.id);
+    }
     const rawBoardOutlineBoundsMarginMm = Number(
       renderOptions.boardOutlineBoundsMarginMm,
     );
@@ -592,9 +745,18 @@ export class ScreenshotExporter {
       ? Math.max(0, rawBoardOutlineBoundsMarginMm)
       : 10;
     for (const layer of layers) {
-      if (typeof layer.sourceContent !== "string") {
-        throw new Error("Reload files before using high-resolution screenshot export.");
+      if (isCompositeLayer(layer)) {
+        continue;
       }
+      if (!layer.visible && !requiredGerberLayerIds.has(layer.id)) {
+        continue;
+      }
+      const isolateHiddenDependencyFailure =
+        !layer.visible && requiredGerberLayerIds.has(layer.id);
+      try {
+        if (typeof layer.sourceContent !== "string") {
+          throw new Error("Reload files before using high-resolution screenshot export.");
+        }
 
       if (isDrillLayer(layer)) {
         if (typeof processor.add_drill_layer !== "function") {
@@ -638,36 +800,53 @@ export class ScreenshotExporter {
         continue;
       }
 
-      if (!layer.visible) {
-        continue;
-      }
-
       const offset = normalizeLayerOffset(layer.offset);
-      if (layer.inverted) {
+      if (layer.inverted && (layer.visible || compositeSourceLayerIds.has(layer.id))) {
+        if (compositeOutline?.id === layer.id) {
+          if (
+            hasLayerOffset(offset) &&
+            typeof processor.add_layer_with_offset !== "function"
+          ) {
+            throw new Error("Layer offset requires an updated WASM module.");
+          }
+          const rawOutlineLayerId = hasLayerOffset(offset)
+            ? processor.add_layer_with_offset(layer.sourceContent, offset.x, offset.y)
+            : processor.add_layer(layer.sourceContent);
+          wasmLayerCount += 1;
+          outlineRendererIdByClientId.set(layer.id, Number(rawOutlineLayerId));
+        }
         const fillSource = resolveInvertedFillSource(
           layers,
           layer,
           boardOutlineSelection,
           boardOutlineBoundsMarginMm,
+          compositeSourceLayerIds,
         );
         if (!fillSource) {
           throw new Error("Inverted screenshot export needs a board outline or visible layer bounds.");
         }
         let layerId;
+        let effectiveFillSource = fillSource;
         try {
           layerId = addInvertedLayerToProcessor(processor, layer, fillSource, offset);
         } catch (error) {
-          if (fillSource.type !== "outline" || String(boardOutlineSelection ?? "auto") !== "auto") {
+          if (
+            isFatalWasmRuntimeError(error) ||
+            fillSource.type !== "outline" ||
+            String(boardOutlineSelection ?? "auto") !== "auto"
+          ) {
             throw error;
           }
           const fallbackSource = resolveInvertedBoundsFillSource(
             layers,
             layer,
             boardOutlineBoundsMarginMm,
+            compositeSourceLayerIds,
           );
           if (!fallbackSource) {
             throw error;
           }
+          effectiveFillSource = fallbackSource;
           layerId = addInvertedLayerToProcessor(
             processor,
             layer,
@@ -676,11 +855,19 @@ export class ScreenshotExporter {
           );
         }
         wasmLayerCount += 1;
-        gerberRenderLayers.push({
-          layerId,
-          color: layer.color,
-          alpha: resolveLayerAlpha(layer, defaultLayerAlpha),
-        });
+        rendererIdByClientId.set(layer.id, Number(layerId));
+        effectiveBoundsByClientId.set(
+          layer.id,
+          effectiveFillSource.bounds ?? layer.renderBounds ?? layer.bounds,
+        );
+        if (layer.visible) {
+          gerberRenderLayers.push({
+            clientId: layer.id,
+            layerId,
+            color: layer.color,
+            alpha: resolveLayerAlpha(layer, defaultLayerAlpha),
+          });
+        }
         continue;
       }
 
@@ -694,13 +881,170 @@ export class ScreenshotExporter {
         ? processor.add_layer_with_offset(layer.sourceContent, offset.x, offset.y)
         : processor.add_layer(layer.sourceContent);
       wasmLayerCount += 1;
+      rendererIdByClientId.set(layer.id, Number(layerId));
+      outlineRendererIdByClientId.set(layer.id, Number(layerId));
+      effectiveBoundsByClientId.set(
+        layer.id,
+        layer.renderBounds ?? layer.bounds,
+      );
+      if (layer.visible) {
+        gerberRenderLayers.push({
+          clientId: layer.id,
+          layerId,
+          color: layer.color,
+          alpha: resolveLayerAlpha(layer, defaultLayerAlpha),
+        });
+      }
+      } catch (error) {
+        if (!isolateHiddenDependencyFailure || isFatalWasmRuntimeError(error)) {
+          throw error;
+        }
+        hiddenDependencyBuildErrors.set(layer.id, getErrorMessage(error));
+      }
+    }
+
+    for (const layer of layers) {
+      if (
+        !isCompositeLayer(layer) ||
+        !layer.visible ||
+        buildState.excludedCompositeClientIds.has(layer.id)
+      ) continue;
+      try {
+      const sourceIds = layer.slotSourceIds.map((sourceId) => {
+        const dependencyError = hiddenDependencyBuildErrors.get(sourceId);
+        if (dependencyError) {
+          const sourceName = layers.find(
+            (candidate) => candidate.id === sourceId,
+          )?.name ?? sourceId;
+          throw new Error(
+            `Composite source failed to rebuild: ${sourceName}: ${dependencyError}`,
+          );
+        }
+        const rendererId = rendererIdByClientId.get(sourceId);
+        if (!Number.isFinite(rendererId)) {
+          throw new Error(`Composite source is unavailable: ${sourceId}`);
+        }
+        return rendererId;
+      });
+      const outline = compositeOutline;
+      const fallbackLayerIds = new Set([
+        ...layers
+          .filter(
+            (candidate) =>
+              !isDrillLayer(candidate) &&
+              !isCompositeLayer(candidate) &&
+              candidate.visible,
+          )
+          .map((candidate) => candidate.id),
+        ...layer.slotSourceIds,
+      ]);
+      const fallbackLayers = [...fallbackLayerIds]
+        .map((clientId) => ({
+          id: clientId,
+          kind: "gerber",
+          visible: true,
+          bounds: effectiveBoundsByClientId.get(clientId),
+        }))
+        .filter((candidate) => candidate.bounds);
+      const fallbackBounds = expandBounds(
+        getVisibleGerberBounds(fallbackLayers),
+        boardOutlineBoundsMarginMm,
+      );
+      let compositeId;
+      if (outline) {
+        const outlineRendererId = outlineRendererIdByClientId.get(outline.id);
+        if (!Number.isFinite(outlineRendererId)) {
+          throw new Error(`Composite outline is unavailable: ${outline.id}`);
+        }
+        const offset = normalizeLayerOffset(outline.offset);
+        try {
+          compositeId = processor.add_composite_layer_with_outline_content(
+            new Uint32Array(sourceIds),
+            layer.visibleBitset,
+            Boolean(layer.inverted),
+            outlineRendererId,
+            outline.sourceContent,
+            offset.x,
+            offset.y,
+          );
+        } catch (outlineError) {
+          if (
+            isFatalWasmRuntimeError(outlineError) ||
+            boardOutlineSelection !== "auto" ||
+            !fallbackBounds
+          ) {
+            throw outlineError;
+          }
+          compositeId = processor.add_composite_layer_with_bounds(
+            new Uint32Array(sourceIds),
+            layer.visibleBitset,
+            Boolean(layer.inverted),
+            fallbackBounds.minX,
+            fallbackBounds.maxX,
+            fallbackBounds.minY,
+            fallbackBounds.maxY,
+          );
+        }
+      } else {
+        if (!fallbackBounds) {
+          throw new Error("Composite screenshot bounds are unavailable.");
+        }
+        compositeId = processor.add_composite_layer_with_bounds(
+          new Uint32Array(sourceIds),
+          layer.visibleBitset,
+          Boolean(layer.inverted),
+          fallbackBounds.minX,
+          fallbackBounds.maxX,
+          fallbackBounds.minY,
+          fallbackBounds.maxY,
+        );
+      }
+      // A visible composite owns an output mask and an internal outline mask.
+      // Count the renderer-shared membership scratch conservatively per
+      // composite so tile sizing cannot under-estimate the first composite.
+      wasmLayerCount += 3;
+      compositeEntries.push({
+        layerId: Number(compositeId),
+        clientId: layer.id,
+        name: layer.name,
+      });
       gerberRenderLayers.push({
-        layerId,
+        clientId: layer.id,
+        layerId: Number(compositeId),
         color: layer.color,
         alpha: resolveLayerAlpha(layer, defaultLayerAlpha),
       });
+      } catch (error) {
+        if (isFatalWasmRuntimeError(error)) throw error;
+        const message = getErrorMessage(error);
+        buildState.excludedCompositeClientIds.add(layer.id);
+        const key = `${layer.id}:${message}`;
+        if (!buildState.reportedCompositeErrors.has(key)) {
+          buildState.reportedCompositeErrors.add(key);
+          this.reportCompositeError(layer.name, message);
+        }
+      }
     }
 
+    if (
+      buildState.excludedCompositeClientIds.size > exclusionCountBefore
+    ) {
+      processor.clear();
+      return this.initializeRenderer(
+        canvas,
+        gl,
+        processor,
+        renderState,
+        includeBackground,
+        buildState,
+      );
+    }
+
+    gerberRenderLayers.sort(
+      (a, b) =>
+        layers.findIndex((layer) => layer.id === a.clientId) -
+        layers.findIndex((layer) => layer.id === b.clientId),
+    );
     const orderedGerberRenderLayers = isStackCompositeMode
       ? [...gerberRenderLayers].reverse()
       : gerberRenderLayers;
@@ -748,6 +1092,11 @@ export class ScreenshotExporter {
       activeLayerIds: new Uint32Array(activeLayerIds),
       colorData: new Float32Array(colorData),
       blendModes: new Uint8Array(blendModes),
+      compositeEntries,
+      reportedCompositeErrors: buildState.reportedCompositeErrors,
+      buildState,
+      renderState,
+      includeBackground,
       alpha: 1,
     };
   }
@@ -756,9 +1105,14 @@ export class ScreenshotExporter {
     if (!screenshotRenderer) return;
 
     try {
-      screenshotRenderer.processor.clear();
+      screenshotRenderer.processor?.clear();
     } catch (error) {
       console.warn("[Export] Failed to dispose screenshot renderer:", error);
+    }
+    try {
+      screenshotRenderer.processor?.free?.();
+    } catch (error) {
+      console.warn("[Export] Failed to free screenshot processor:", error);
     }
 
     screenshotRenderer.canvas.width = 0;
@@ -799,6 +1153,20 @@ export class ScreenshotExporter {
     const totalTiles =
       Math.ceil(exportWidth / tileSize.width) *
       Math.ceil(exportHeight / tileSize.height);
+    const preflightProgressShare =
+      screenshotRenderer.compositeEntries.length > 0 ? 0.5 : 0;
+    await this.preflightStreamingTiles(
+      screenshotRenderer,
+      exportWidth,
+      exportHeight,
+      tileSize,
+      renderState,
+      preflightProgressShare,
+    );
+    this.throwIfExportCancelled();
+    this.setProgress(preflightProgressShare, "Rendering");
+    const expectedCompositeFailureCount =
+      screenshotRenderer.reportedCompositeErrors.size;
     const rowStride = this.getPngRowStride(exportWidth);
     const pngParts = [
       this.createPngSignature(),
@@ -819,6 +1187,7 @@ export class ScreenshotExporter {
 
     try {
       for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
+        this.throwIfExportCancelled();
         const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
         const bandBuffer = this.createBandBuffer(
           exportWidth,
@@ -827,8 +1196,12 @@ export class ScreenshotExporter {
         );
 
         for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
+          this.throwIfExportCancelled();
           const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
-          this.setProgress(tileCount / totalTiles);
+          this.setProgress(
+            preflightProgressShare +
+              (tileCount / totalTiles) * (1 - preflightProgressShare),
+          );
           const tileData = this.renderTileToImageData(
             screenshotRenderer,
             exportWidth,
@@ -838,9 +1211,20 @@ export class ScreenshotExporter {
             tileY,
             tileWidth,
             tileHeight,
+            tileSize.width,
+            tileSize.height,
             includeBackground,
             renderState,
+            false,
           );
+          if (
+            screenshotRenderer.reportedCompositeErrors.size !==
+            expectedCompositeFailureCount
+          ) {
+            throw new Error(
+              "A composite failed after screenshot preflight; no mixed PNG was produced.",
+            );
+          }
 
           for (let row = 0; row < tileHeight; row += 1) {
             const sourceStart = row * tileWidth * 4;
@@ -850,14 +1234,19 @@ export class ScreenshotExporter {
           }
 
           tileCount += 1;
-          this.setProgress(tileCount / totalTiles);
+          this.setProgress(
+            preflightProgressShare +
+              (tileCount / totalTiles) * (1 - preflightProgressShare),
+          );
         }
 
         for (let row = 0; row < tileHeight; row += 1) {
           const rowStart = row * rowStride;
           await writer.write(bandBuffer.subarray(rowStart, rowStart + rowStride));
+          this.throwIfExportCancelled();
         }
         await this.yieldToBrowser();
+        this.throwIfExportCancelled();
       }
 
       this.setProgress(1);
@@ -885,6 +1274,51 @@ export class ScreenshotExporter {
 
     pngParts.push(this.createPngChunk("IEND", new Uint8Array()));
     return new Blob(pngParts, { type: "image/png" });
+  }
+
+  async preflightStreamingTiles(
+    screenshotRenderer,
+    exportWidth,
+    exportHeight,
+    tileSize,
+    renderState,
+    progressShare = 0,
+  ) {
+    if (screenshotRenderer.compositeEntries.length === 0) return;
+
+    const totalTiles =
+      Math.ceil(exportWidth / tileSize.width) *
+      Math.ceil(exportHeight / tileSize.height);
+    let checkedTiles = 0;
+    this.setProgress(0, "Checking composites");
+
+    for (let tileY = 0; tileY < exportHeight; tileY += tileSize.height) {
+      this.throwIfExportCancelled();
+      const tileHeight = Math.min(tileSize.height, exportHeight - tileY);
+      for (let tileX = 0; tileX < exportWidth; tileX += tileSize.width) {
+        this.throwIfExportCancelled();
+        const tileWidth = Math.min(tileSize.width, exportWidth - tileX);
+        this.renderSingleTile(
+          screenshotRenderer,
+          exportWidth,
+          exportHeight,
+          tileWidth === tileSize.width
+            ? tileX
+            : Math.max(0, exportWidth - tileSize.width),
+          tileHeight === tileSize.height
+            ? tileY
+            : Math.max(0, exportHeight - tileSize.height),
+          tileSize.width,
+          tileSize.height,
+          renderState,
+          true,
+        );
+        checkedTiles += 1;
+        this.setProgress((checkedTiles / totalTiles) * progressShare);
+      }
+      await this.yieldToBrowser();
+      this.throwIfExportCancelled();
+    }
   }
 
   validateStreamMemory(exportWidth, exportHeight, tileSize) {
@@ -980,18 +1414,28 @@ export class ScreenshotExporter {
     tileY,
     tileWidth,
     tileHeight,
+    renderTargetWidth,
+    renderTargetHeight,
     includeBackground,
     renderState,
+    allowCompositeDiscovery = true,
   ) {
+    const renderTileX = tileWidth === renderTargetWidth
+      ? tileX
+      : Math.max(0, exportWidth - renderTargetWidth);
+    const renderTileY = tileHeight === renderTargetHeight
+      ? tileY
+      : Math.max(0, exportHeight - renderTargetHeight);
     this.renderSingleTile(
       screenshotRenderer,
       exportWidth,
       exportHeight,
-      tileX,
-      tileY,
-      tileWidth,
-      tileHeight,
+      renderTileX,
+      renderTileY,
+      renderTargetWidth,
+      renderTargetHeight,
       renderState,
+      allowCompositeDiscovery,
     );
 
     const context = this.getTileContext(screenshotRenderer, tileWidth, tileHeight);
@@ -1003,7 +1447,17 @@ export class ScreenshotExporter {
       context.clearRect(0, 0, tileWidth, tileHeight);
     }
 
-    context.drawImage(screenshotRenderer.canvas, 0, 0, tileWidth, tileHeight);
+    context.drawImage(
+      screenshotRenderer.canvas,
+      tileX - renderTileX,
+      tileY - renderTileY,
+      tileWidth,
+      tileHeight,
+      0,
+      0,
+      tileWidth,
+      tileHeight,
+    );
     context.save();
     context.scale(exportScale, exportScale);
     context.translate(-tileX / exportScale, -tileY / exportScale);
@@ -1125,6 +1579,7 @@ export class ScreenshotExporter {
     tileWidth,
     tileHeight,
     renderState,
+    allowCompositeDiscovery = true,
   ) {
     const didResize =
       screenshotRenderer.canvas.width !== tileWidth ||
@@ -1134,44 +1589,97 @@ export class ScreenshotExporter {
       screenshotRenderer.canvas.height = tileHeight;
       screenshotRenderer.processor.resize();
     }
-    if (screenshotRenderer.blendModes.some((mode) => mode !== 0)) {
-      if (typeof screenshotRenderer.processor.render_tile_with_blend_modes !== "function") {
-        throw new Error("Stack compositing and drill screenshot rendering require an updated WASM module.");
+    for (;;) {
+      if (screenshotRenderer.blendModes.some((mode) => mode !== 0)) {
+        if (typeof screenshotRenderer.processor.render_tile_with_blend_modes !== "function") {
+          throw new Error("Stack compositing and drill screenshot rendering require an updated WASM module.");
+        }
+        screenshotRenderer.processor.render_tile_with_blend_modes(
+          screenshotRenderer.activeLayerIds,
+          screenshotRenderer.colorData,
+          screenshotRenderer.blendModes,
+          exportWidth,
+          exportHeight,
+          tileX,
+          tileY,
+          tileWidth,
+          tileHeight,
+          renderState.viewScaleX,
+          renderState.viewScaleY,
+          renderState.offsetX,
+          renderState.offsetY,
+          screenshotRenderer.alpha,
+        );
+      } else {
+        screenshotRenderer.processor.render_tile(
+          screenshotRenderer.activeLayerIds,
+          screenshotRenderer.colorData,
+          exportWidth,
+          exportHeight,
+          tileX,
+          tileY,
+          tileWidth,
+          tileHeight,
+          renderState.viewScaleX,
+          renderState.viewScaleY,
+          renderState.offsetX,
+          renderState.offsetY,
+          screenshotRenderer.alpha,
+        );
       }
-      screenshotRenderer.processor.render_tile_with_blend_modes(
-        screenshotRenderer.activeLayerIds,
-        screenshotRenderer.colorData,
-        screenshotRenderer.blendModes,
-        exportWidth,
-        exportHeight,
-        tileX,
-        tileY,
-        tileWidth,
-        tileHeight,
-        renderState.viewScaleX,
-        renderState.viewScaleY,
-        renderState.offsetX,
-        renderState.offsetY,
-        screenshotRenderer.alpha,
-      );
-    } else {
-      screenshotRenderer.processor.render_tile(
-        screenshotRenderer.activeLayerIds,
-        screenshotRenderer.colorData,
-        exportWidth,
-        exportHeight,
-        tileX,
-        tileY,
-        tileWidth,
-        tileHeight,
-        renderState.viewScaleX,
-        renderState.viewScaleY,
-        renderState.offsetX,
-        renderState.offsetY,
-        screenshotRenderer.alpha,
-      );
+      const removedCount = this.handleCompositeRenderErrors(screenshotRenderer);
+      if (removedCount === 0) break;
+      if (!allowCompositeDiscovery) {
+        throw new Error(
+          "A composite failed after screenshot preflight; no mixed PNG was produced.",
+        );
+      }
     }
     screenshotRenderer.gl.finish();
+  }
+
+  handleCompositeRenderErrors(screenshotRenderer) {
+    if (screenshotRenderer.compositeEntries.length === 0) return 0;
+    const { processor } = screenshotRenderer;
+    if (typeof processor.get_composite_error !== "function") {
+      throw new Error("Composite screenshot diagnostics require an updated WASM module.");
+    }
+    const failedLayerIds = new Set();
+    for (const entry of screenshotRenderer.compositeEntries) {
+      const error = processor.get_composite_error(entry.layerId);
+      if (!error) continue;
+      failedLayerIds.add(entry.layerId);
+      screenshotRenderer.buildState.excludedCompositeClientIds.add(
+        entry.clientId,
+      );
+      const key = `${entry.clientId}:${error}`;
+      if (screenshotRenderer.reportedCompositeErrors.has(key)) continue;
+      screenshotRenderer.reportedCompositeErrors.add(key);
+      this.reportCompositeError(entry.name, error);
+    }
+    if (failedLayerIds.size === 0) return 0;
+    const { canvas, gl, renderState, includeBackground, buildState } =
+      screenshotRenderer;
+    processor.clear();
+    const rebuilt = this.initializeRenderer(
+      canvas,
+      gl,
+      processor,
+      renderState,
+      includeBackground,
+      buildState,
+    );
+    Object.assign(screenshotRenderer, rebuilt);
+    return failedLayerIds.size;
+  }
+
+  reportCompositeError(name, error) {
+    try {
+      this.onCompositeError?.({ name, error });
+    } catch (_error) {
+      // Diagnostics cannot turn an isolated composite failure into a failed
+      // screenshot export.
+    }
   }
 
   yieldToBrowser() {

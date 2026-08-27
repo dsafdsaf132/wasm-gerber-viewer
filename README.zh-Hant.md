@@ -33,6 +33,8 @@
 - 支援 NC drill 疊加渲染
 - 支援行動裝置觸控操作
 - 支援依圖層控制顏色、透明度與可見性
+- Composite Layer 支援 Union、Intersection、Difference 與自訂 coverage
+  組合
 - 支援特徵選取與選取區域醒目提示
 - 支援水平/垂直翻轉
 - 尺規測量支援 mm/inch 單位切換
@@ -107,6 +109,9 @@ Node.js 與 CLI 渲染透過
 
 ## 專案結構
 
+Rust/WASM 管線與模組詳情請參閱
+[wasm/README.md](wasm/README.md)。
+
 ```text
 wasm-gerber-viewer/
 ├── index.html                         # 應用程式外殼
@@ -116,9 +121,11 @@ wasm-gerber-viewer/
 │   ├── main.js                        # 瀏覽器進入點
 │   ├── core/                          # GerberViewer 狀態與流程編排
 │   ├── loading/                       # 檔案、壓縮檔、URL、repeat 與 worker 載入
-│   ├── layers/                        # 圖層清單 UI、篩選、顏色與右鍵操作
+│   ├── layers/                        # 圖層清單 UI、篩選、顏色與 composite bitset
+│   │   └── composite-layers.js        # preset、source slot 與 visible-area bitset
 │   ├── rendering/                     # viewport 計算、測量與截圖匯出
-│   └── ui/                            # DOM 查詢、抽屜、通知、診斷與選項
+│   └── ui/                            # dialog、DOM 查詢、通知、診斷與選項
+│       └── composite-layer-dialog.js   # Composite 建立、編輯與重新命名 dialog
 ├── vendor/                            # 內建瀏覽器第三方函式庫
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm 套件與 Node CLI
@@ -133,7 +140,9 @@ wasm-gerber-viewer/
 │       ├── parser/                    # Gerber 解析、aperture、命令處理與測試
 │       ├── drill/                     # Excellon/NC drill 解析與測試
 │       ├── interaction/               # picking、compact payload 與 highlight 資料
-│       ├── renderer/                  # WebGL 渲染器、GPU 資源、shader 與測試
+│       ├── renderer/                  # Gerber/composite mask、GPU 資源、shader 與測試
+│       │   ├── composite.rs           # membership、lookup、outline、cache 與 picking 狀態
+│       │   └── shaders/composite_*.frag.glsl
 │       └── util/                      # 格式化與工具函式
 ├── demo/                              # 範例與效能測試 Gerber
 ├── docs/                              # README assets

@@ -9,6 +9,7 @@ import {
 } from "../loading/file-utils.js";
 import { LayerFilterStore } from "../layers/layer-filters.js";
 import {
+  clearLayerList as clearLayerListView,
   refreshLayerListInheritedAlpha,
   renderLayerList as renderLayerListView,
 } from "../layers/layer-list.js";
@@ -40,6 +41,18 @@ import {
   zoomCameraAtCanvasPoint,
 } from "../rendering/viewport.js";
 import { ViewerOptionsStore } from "../ui/viewer-options.js";
+import { CompositeLayerDialog } from "../ui/composite-layer-dialog.js";
+import { RenameLayerDialog } from "../ui/rename-layer-dialog.js";
+import {
+  COMPOSITE_LAYER_KIND,
+  createCompositeLayerPresetBitset,
+  createCompositePresetBitset,
+  getCompositeAreaVisible,
+  getCompositeBitsetByteLength,
+  getCompositeSourceSlots,
+  reconcileCompositeSources,
+  setCompositeAreaVisible,
+} from "../layers/composite-layers.js";
 
 const WASM_INPUT_RESERVE_MARGIN_BYTES = 1024 * 1024;
 const MAX_PARSE_WORKERS = 4;
@@ -115,6 +128,70 @@ function isParseWorkerUnavailableError(error) {
   return error instanceof ParseWorkerUnavailableError;
 }
 
+function hasRendererLayerId(value) {
+  if (value === undefined || value === null) return false;
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0;
+}
+
+function compositeBitsetsEqual(left, right) {
+  if (left === right) return true;
+  if (left?.byteLength !== right?.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function mergeCompositeAreaCodes(current, discovered) {
+  if (!(current instanceof Uint32Array) || current.length === 0) {
+    return discovered;
+  }
+  if (!(discovered instanceof Uint32Array) || discovered.length === 0) {
+    return current;
+  }
+  const merged = new Uint32Array(current.length + discovered.length);
+  let currentIndex = 0;
+  let discoveredIndex = 0;
+  let outputIndex = 0;
+  while (currentIndex < current.length || discoveredIndex < discovered.length) {
+    const currentCode = currentIndex < current.length
+      ? current[currentIndex]
+      : Number.POSITIVE_INFINITY;
+    const discoveredCode = discoveredIndex < discovered.length
+      ? discovered[discoveredIndex]
+      : Number.POSITIVE_INFINITY;
+    const code = Math.min(currentCode, discoveredCode);
+    merged[outputIndex] = code;
+    outputIndex += 1;
+    if (currentCode === code) currentIndex += 1;
+    if (discoveredCode === code) discoveredIndex += 1;
+  }
+  if (outputIndex === current.length) {
+    let unchanged = true;
+    for (let index = 0; index < outputIndex; index += 1) {
+      if (merged[index] !== current[index]) {
+        unchanged = false;
+        break;
+      }
+    }
+    if (unchanged) return current;
+  }
+  if (outputIndex === merged.length) return merged;
+  return merged.slice(0, outputIndex);
+}
+
+function compositeAreaPseudoColor(code) {
+  const mask = 0xffffff;
+  let value = (Number(code) + 1) & mask;
+  value = (value ^ (value >>> 12)) & mask;
+  value = Math.imul(value, 0x45d9f3) & mask;
+  value = (value ^ (value >>> 11)) & mask;
+  value = Math.imul(value, 0x119de1) & mask;
+  value = (value ^ (value >>> 13)) & mask;
+  return `rgb(${value & 0xff} ${(value >>> 8) & 0xff} ${(value >>> 16) & 0xff})`;
+}
+
 function isParseWorkerCapabilityErrorMessage(message) {
   const normalizedMessage = String(message ?? "").toLowerCase();
   return (
@@ -147,14 +224,24 @@ function isDrillLayer(layer) {
   return layer?.kind === DRILL_LAYER_KIND;
 }
 
-function isBoardOutlineLayer(layer) {
-  if (!layer || isDrillLayer(layer)) return false;
+function isCompositeLayer(layer) {
+  return layer?.kind === COMPOSITE_LAYER_KIND;
+}
 
-  return [layer.name, layer.sourceName, layer.fileName].some(isBoardOutlineName);
+function isCompositeAreaSelection(selection) {
+  return (
+    selection?.featureType === "composite-area" &&
+    isCompositeLayer(selection.layer)
+  );
+}
+
+function isBoardOutlineLayer(layer) {
+  if (!layer || isDrillLayer(layer) || isCompositeLayer(layer)) return false;
+  return isBoardOutlineName(layer.name);
 }
 
 function isGerberLayer(layer) {
-  return Boolean(layer && !isDrillLayer(layer));
+  return Boolean(layer && !isDrillLayer(layer) && !isCompositeLayer(layer));
 }
 
 function isBoardOutlineName(name) {
@@ -409,6 +496,8 @@ function formatFeatureTypeLabel(feature, layer) {
     }
     case "region":
       return "Region";
+    case "composite-area":
+      return "Composite area";
     case "drill-hit":
       return "Drill hit";
     case "drill-slot":
@@ -702,8 +791,7 @@ function isFatalWasmRuntimeError(error) {
   const message = getErrorMessage(error);
   return (
     (typeof WebAssembly !== "undefined" &&
-      error instanceof WebAssembly.RuntimeError &&
-      message.includes("unreachable")) ||
+      error instanceof WebAssembly.RuntimeError) ||
     message.includes("recursive use of an object detected")
   );
 }
@@ -722,12 +810,17 @@ export class GerberViewer {
     this.featurePickingAvailable = true;
     this.isWebGlContextLost = false;
     this.isRestoringWebGlContext = false;
+    this.webGlContextGeneration = 0;
+    this.webGlRestorePromise = null;
+    this.activeWebGlRestoreState = null;
     this.isRecoveringWasmProcessor = false;
     this.wasmRecoveryPromise = null;
+    this.activeWasmRecoveryState = null;
     this.pendingFatalWasmRecovery = false;
     this.isInitialUrlLoading = Boolean(getInitialSourceUrl());
     this.isLoadingLayers = false;
     this.loadingWorkspaceStatus = "Loading files";
+    this.loadingModalFocusReturn = null;
     this.pendingRenderFrame = null;
 
     // Layers
@@ -743,12 +836,19 @@ export class GerberViewer {
     this.layerContextMenuButtons = new Map();
     this.layerContextMenu = this.createLayerContextMenu();
     this.layerContextMenuLayerId = null;
+    this.layerContextMenuRestoreLayerId = null;
+    this.layerContextMenuTrigger = null;
+    this.pendingViewerFocusRestore = null;
     this.pendingLayerRecordsForRecovery = null;
     this.wasmMemoryExhausted = false;
     this.pendingLazyRenderTimer = null;
     this.lazyViewportRenderState = null;
     this.isViewportTransformActive = false;
     this.boardOutlineSelection = BOARD_OUTLINE_AUTO;
+    this.compositeSelection = null;
+    this.compositeSelectionPresets = null;
+    this.nextCompositeNumber = 1;
+    this.compositeLayerListRefreshPending = false;
 
     // Camera
     this.camera = {
@@ -765,6 +865,8 @@ export class GerberViewer {
     // Interaction
     this.isPanning = false;
     this.pointerGestureDidPan = false;
+    this.rendererInteractionGeneration = 0;
+    this.mouseGestureRendererGeneration = null;
     this.lastMousePos = { x: 0, y: 0 };
     this.mouseDownPos = { x: 0, y: 0 };
     this.selectedFeature = null;
@@ -781,6 +883,7 @@ export class GerberViewer {
     this.touchTapIdentifier = null;
     this.touchTapCandidate = false;
     this.touchGestureWasMultitouch = false;
+    this.touchGestureRendererGeneration = null;
     this.activeRulerTouchIdentifier = null;
     this.rulerTouchStartPoint = null;
     this.rulerTouchPoint = null;
@@ -858,6 +961,13 @@ export class GerberViewer {
       durationMs: NOTIFICATION_DURATION_MS,
       onNotify: (level, title, detail) => this.addDiagnostic(level, title, detail),
     });
+    this.compositeLayerDialog = new CompositeLayerDialog({
+      getGerberLayers: () => this.layers.filter(isGerberLayer),
+      refreshIcons: () => this.refreshIcons(),
+    });
+    this.renameLayerDialog = new RenameLayerDialog({
+      refreshIcons: () => this.refreshIcons(),
+    });
     this.screenshotExporter = new ScreenshotExporter({
       canvas: this.canvas,
       screenshotButton: this.screenshotBtn,
@@ -890,12 +1000,24 @@ export class GerberViewer {
         globalAlpha: this.getCompositeAlpha(),
         compositeMode: this.compositeMode,
         backgroundColor: this.isCanvasLight ? "#f8fafc" : "#020617",
+        measurements: this.measurements.map((measurement) => ({
+          start: { ...measurement.start },
+          end: { ...measurement.end },
+        })),
+        rulerStartPoint: this.rulerStartPoint ? { ...this.rulerStartPoint } : null,
+        rulerHoverPoint: this.rulerHoverPoint ? { ...this.rulerHoverPoint } : null,
+        measurementUnit: this.measurementUnit,
       }),
-      isWebGlUnavailable: () =>
-        this.isWebGlContextLost || this.isRestoringWebGlContext,
+      isWebGlUnavailable: () => this.isRendererBusy(),
       drawMeasurements: (context, renderState) =>
         this.drawMeasurementsOnContext(context, renderState),
       showError: (message) => this.showError(message),
+      onCompositeError: ({ name, error }) =>
+        this.addDiagnostic(
+          "warning",
+          `Screenshot skipped composite: ${name}`,
+          error,
+        ),
       getBoardOutlineSelection: () => this.boardOutlineSelection,
     });
   }
@@ -940,6 +1062,7 @@ export class GerberViewer {
   createLayerContextMenu() {
     const menu = document.createElement("div");
     menu.className = "layer-context-menu";
+    menu.id = "layer-context-menu";
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "Layer actions");
     menu.hidden = true;
@@ -952,6 +1075,14 @@ export class GerberViewer {
       [
         { action: "show-top", icon: "panel-top", label: "Show Top" },
         { action: "show-bottom", icon: "panel-bottom", label: "Show Bottom" },
+      ],
+      [
+        { action: "rename-layer", icon: "pencil", label: "Rename Layer" },
+        { action: "edit-composite", icon: "settings-2", label: "Edit Composite" },
+        { action: "composite-union", icon: "combine", label: "Apply Union" },
+        { action: "composite-intersection", icon: "scan", label: "Apply Intersection" },
+        { action: "composite-difference", icon: "minus", label: "Apply Difference" },
+        { action: "select-visible-area", icon: "mouse-pointer-2", label: "Select Visible Area" },
       ],
       [
         {
@@ -1006,13 +1137,12 @@ export class GerberViewer {
       event.stopPropagation();
       this.runLayerContextMenuAction(button.dataset.layerMenuAction);
     });
-
     this.dropZone.appendChild(menu);
     return menu;
   }
 
-  showLayerContextMenu({ layerId, clientX, clientY }) {
-    if (this.draggedLayerId) return;
+  showLayerContextMenu({ layerId, clientX, clientY, trigger = null }) {
+    if (this.draggedLayerId || this.isRendererBusy()) return;
 
     const layer = this.layers.find((candidate) => candidate.id === layerId);
     if (!layer) {
@@ -1020,15 +1150,46 @@ export class GerberViewer {
       return;
     }
 
+    if (!this.layerContextMenu.hidden) {
+      this.closeLayerContextMenu();
+    }
+
     this.layerContextMenuLayerId = layerId;
+    this.layerContextMenuRestoreLayerId = layerId;
+    this.layerContextMenuTrigger = trigger instanceof HTMLElement ? trigger : null;
+    this.layerContextMenuTrigger?.setAttribute("aria-expanded", "true");
+    this.layerContextMenu.setAttribute("aria-label", `${layer.name} actions`);
     this.syncLayerContextMenuState(layer);
     this.positionLayerContextMenu(clientX, clientY);
   }
 
   syncLayerContextMenuState(layer) {
     this.setLayerContextMenuItemDisabled("delete-layer", !layer);
-    this.setLayerContextMenuItemDisabled("invert-layer", !this.canInvertLayer(layer));
+    const isComposite = isCompositeLayer(layer);
+    const renameButton = this.layerContextMenuButtons.get("rename-layer");
+    if (renameButton) renameButton.hidden = isComposite;
+    this.setLayerContextMenuItemDisabled("rename-layer", !layer || isComposite);
+    const canInvert = this.canInvertLayer(layer);
+    this.setLayerContextMenuItemDisabled("invert-layer", !canInvert);
+    const invertButton = this.layerContextMenuButtons.get("invert-layer");
+    if (invertButton) {
+      invertButton.title =
+        isCompositeLayer(layer) && !layer.inverted && !canInvert
+          ? "Composite inversion needs a board outline or finite fallback bounds."
+          : "";
+    }
     this.setLayerContextMenuItemChecked("invert-layer", Boolean(layer?.inverted));
+    for (const action of [
+      "edit-composite",
+      "composite-union",
+      "composite-intersection",
+      "composite-difference",
+      "select-visible-area",
+    ]) {
+      const button = this.layerContextMenuButtons.get(action);
+      if (button) button.hidden = !isComposite;
+      this.setLayerContextMenuItemDisabled(action, !isComposite);
+    }
   }
 
   setLayerContextMenuItemDisabled(action, disabled) {
@@ -1082,17 +1243,144 @@ export class GerberViewer {
     this.refreshIcons();
 
     const firstEnabledButton = menu.querySelector(
-      ".layer-context-menu-item:not(:disabled)",
+      ".layer-context-menu-item:not(:disabled):not([hidden])",
     );
     firstEnabledButton?.focus({ preventScroll: true });
   }
 
-  closeLayerContextMenu() {
+  closeLayerContextMenu({ restoreFocus = false } = {}) {
     if (!this.layerContextMenu || this.layerContextMenu.hidden) return;
 
+    const restoreLayerId = this.layerContextMenuRestoreLayerId;
+    const trigger = this.layerContextMenuTrigger;
+    trigger?.setAttribute("aria-expanded", "false");
     this.layerContextMenu.hidden = true;
     this.layerContextMenu.classList.remove("open");
     this.layerContextMenuLayerId = null;
+    this.layerContextMenuRestoreLayerId = null;
+    this.layerContextMenuTrigger = null;
+    if (restoreFocus) this.focusLayerActionButton(restoreLayerId, trigger);
+  }
+
+  focusLayerActionButton(layerId, preferred = null) {
+    requestAnimationFrame(() => {
+      if (this.isRendererBusy()) {
+        this.pendingViewerFocusRestore = { type: "layer", layerId };
+        return;
+      }
+      if (preferred?.isConnected && !preferred.disabled) {
+        this.pendingViewerFocusRestore = null;
+        preferred.focus({ preventScroll: true });
+        return;
+      }
+      const row = Array.from(this.layerList.querySelectorAll(".layer-item")).find(
+        (candidate) => candidate.dataset.layerId === layerId,
+      );
+      const target = row?.querySelector(".layer-menu-btn:not(:disabled)");
+      if (target) {
+        this.pendingViewerFocusRestore = null;
+        target.focus({ preventScroll: true });
+      } else {
+        this.focusCreateCompositeButton();
+      }
+    });
+  }
+
+  focusCreateCompositeButton() {
+    requestAnimationFrame(() => {
+      if (this.isRendererBusy()) {
+        this.pendingViewerFocusRestore = { type: "create-composite" };
+        return;
+      }
+      const target =
+        this.layerList.querySelector(".layer-create-composite button:not(:disabled)") ??
+        (!this.selectFilesBtn.disabled ? this.selectFilesBtn : null) ??
+        (!this.drawerToggleBtn.disabled ? this.drawerToggleBtn : null);
+      if (!target) return;
+      this.pendingViewerFocusRestore = null;
+      target.focus({ preventScroll: true });
+    });
+  }
+
+  restorePendingViewerFocus(rendererBusy = this.isRendererBusy()) {
+    if (rendererBusy || !this.pendingViewerFocusRestore) return;
+    const pending = this.pendingViewerFocusRestore;
+    this.pendingViewerFocusRestore = null;
+    if (pending.type === "layer") {
+      this.focusLayerActionButton(pending.layerId);
+    } else if (pending.type === "layer-control") {
+      this.focusLayerControl(pending.layerId, pending.selector);
+    } else if (pending.type === "element") {
+      this.focusViewerElement(pending.element);
+    } else {
+      this.focusCreateCompositeButton();
+    }
+  }
+
+  captureViewerFocusRestore(element = document.activeElement) {
+    if (!(element instanceof HTMLElement)) return null;
+    const layerRow = element.closest(".layer-item[data-layer-id]");
+    if (layerRow) {
+      const selector = [".layer-color-picker", ".layer-checkbox", ".layer-menu-btn"]
+        .find((candidate) => element.matches(candidate));
+      if (selector) {
+        return {
+          type: "layer-control",
+          layerId: layerRow.dataset.layerId,
+          selector,
+        };
+      }
+    }
+    if (element.closest(".layer-create-composite")) {
+      return { type: "create-composite" };
+    }
+    return { type: "element", element };
+  }
+
+  focusLayerControl(layerId, selector) {
+    requestAnimationFrame(() => {
+      if (this.isRendererBusy()) {
+        this.pendingViewerFocusRestore = { type: "layer-control", layerId, selector };
+        return;
+      }
+      const row = Array.from(this.layerList.querySelectorAll(".layer-item")).find(
+        (candidate) => candidate.dataset.layerId === layerId,
+      );
+      const target = row?.querySelector(`${selector}:not(:disabled)`);
+      if (target) {
+        this.pendingViewerFocusRestore = null;
+        target.focus({ preventScroll: true });
+      } else {
+        this.focusLayerActionButton(layerId);
+      }
+    });
+  }
+
+  restoreViewerFocusTarget(target) {
+    if (!target) {
+      this.focusCreateCompositeButton();
+    } else if (target.type === "layer-control") {
+      this.focusLayerControl(target.layerId, target.selector);
+    } else if (target.type === "create-composite") {
+      this.focusCreateCompositeButton();
+    } else {
+      this.focusViewerElement(target.element);
+    }
+  }
+
+  focusViewerElement(element) {
+    requestAnimationFrame(() => {
+      if (this.isRendererBusy()) {
+        this.pendingViewerFocusRestore = { type: "element", element };
+        return;
+      }
+      if (element?.isConnected && !element.disabled && !element.closest?.("[inert]")) {
+        this.pendingViewerFocusRestore = null;
+        element.focus({ preventScroll: true });
+      } else {
+        this.focusCreateCompositeButton();
+      }
+    });
   }
 
   handleLayerContextMenuPointerDown(event) {
@@ -1112,7 +1400,13 @@ export class GerberViewer {
 
     if (event.key === "Escape") {
       event.preventDefault();
-      this.closeLayerContextMenu();
+      this.closeLayerContextMenu({ restoreFocus: true });
+      return;
+    }
+
+    if (event.key === "Tab") {
+      event.preventDefault();
+      this.closeLayerContextMenu({ restoreFocus: true });
       return;
     }
 
@@ -1122,7 +1416,7 @@ export class GerberViewer {
 
     const buttons = Array.from(
       this.layerContextMenu.querySelectorAll(
-        ".layer-context-menu-item:not(:disabled)",
+        ".layer-context-menu-item:not(:disabled):not([hidden])",
       ),
     );
     if (buttons.length === 0) return;
@@ -1154,6 +1448,7 @@ export class GerberViewer {
     const layerId = this.layerContextMenuLayerId;
     const layer = this.layers.find((candidate) => candidate.id === layerId);
     this.closeLayerContextMenu();
+    let restoreFocus = true;
 
     switch (action) {
       case "show-all":
@@ -1173,18 +1468,55 @@ export class GerberViewer {
           this.updateLayerInverted(layer, !layer.inverted);
         }
         break;
+      case "rename-layer":
+        if (layer && !isCompositeLayer(layer)) {
+          restoreFocus = false;
+          void this.renameLayer(layer).finally(() => this.focusLayerActionButton(layerId));
+        }
+        break;
+      case "edit-composite":
+        if (isCompositeLayer(layer)) {
+          restoreFocus = false;
+          void this.editCompositeLayer(layer).finally(() =>
+            this.focusLayerActionButton(layerId));
+        }
+        break;
+      case "composite-union":
+        if (isCompositeLayer(layer)) this.applyCompositePreset(layer, "union");
+        break;
+      case "composite-intersection":
+        if (isCompositeLayer(layer)) this.applyCompositePreset(layer, "intersection");
+        break;
+      case "composite-difference":
+        if (isCompositeLayer(layer)) this.applyCompositePreset(layer, "difference");
+        break;
+      case "select-visible-area":
+        if (isCompositeLayer(layer)) {
+          restoreFocus = false;
+          if (!this.startCompositeSelection(layer)) {
+            this.focusLayerActionButton(layerId);
+          }
+        }
+        break;
       case "delete-layer":
         if (layerId) {
-          this.deleteLayer(layerId);
+          restoreFocus = false;
+          void this.deleteLayer(layerId).finally(() =>
+            this.focusLayerActionButton(layerId));
         }
         break;
       default:
         break;
     }
+    if (restoreFocus) this.focusLayerActionButton(layerId);
   }
 
   canInvertLayer(layer) {
-    return Boolean(layer && !isDrillLayer(layer));
+    if (!layer || isDrillLayer(layer)) return false;
+    if (isCompositeLayer(layer) && !layer.inverted) {
+      return Boolean(this.getCompositeOutlineSource(layer));
+    }
+    return true;
   }
 
   createWebGlContext() {
@@ -1327,32 +1659,87 @@ export class GerberViewer {
     allowProcessorResize = false,
     preserveViewState = null,
     commitDrawerLayout = false,
+    skipProcessorResize = false,
+    targetSize = null,
   } = {}) {
     this.flushLazyViewportRender();
     this.drawerController.syncLayout({ commitLayout: commitDrawerLayout });
 
-    const rect = this.canvas.getBoundingClientRect();
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
-    this.canvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
-    this.restoreCanvasViewState(preserveViewState);
+    const nextSize = targetSize ?? this.getCanvasBackingSize();
+    const previousSize = {
+      width: this.canvas.width,
+      height: this.canvas.height,
+    };
+    const sizeChanged =
+      previousSize.width !== nextSize.width ||
+      previousSize.height !== nextSize.height;
 
     const canResizeProcessor =
+      !skipProcessorResize &&
+      sizeChanged &&
       this.wasmProcessor &&
       !this.isWebGlContextLost &&
       (!this.isRestoringWebGlContext || allowProcessorResize);
     if (canResizeProcessor) {
+      let canvasChangedForLegacyResize = false;
       try {
-        this.wasmProcessor.resize();
-        this.interactionProcessor?.resize?.();
+        if (typeof this.wasmProcessor.resize_to === "function") {
+          // Allocate the replacement FBO set before changing the drawing
+          // buffer. Rust commits resize_to atomically, so an allocation error
+          // leaves both the canvas and renderer on their previous dimensions.
+          this.wasmProcessor.resize_to(nextSize.width, nextSize.height);
+        } else {
+          this.canvas.width = nextSize.width;
+          this.canvas.height = nextSize.height;
+          canvasChangedForLegacyResize = true;
+          this.wasmProcessor.resize();
+        }
       } catch (error) {
+        if (canvasChangedForLegacyResize) {
+          this.canvas.width = previousSize.width;
+          this.canvas.height = previousSize.height;
+        }
         const message = getErrorMessage(error);
         console.error("[Render] Failed to resize renderer:", error);
         this.addDiagnostic("error", "Resize failed", message);
+        this.restoreCanvasViewState(preserveViewState);
+        this.requestRender();
+        return false;
       }
     }
 
+    if (sizeChanged) {
+      this.canvas.width = nextSize.width;
+      this.canvas.height = nextSize.height;
+    }
+    if (canResizeProcessor && this.interactionProcessor) {
+      try {
+        if (typeof this.interactionProcessor.resize_to === "function") {
+          this.interactionProcessor.resize_to(nextSize.width, nextSize.height);
+        } else {
+          this.interactionProcessor.resize?.();
+        }
+      } catch (error) {
+        this.disableFeaturePickingForCurrentDocument(
+          "Feature picking failed",
+          `Picking data could not be resized: ${getErrorMessage(error)}`,
+          { abandon: isFatalWasmRuntimeError(error) },
+        );
+      }
+    }
+
+    this.restoreCanvasViewState(preserveViewState);
     this.requestRender();
+    return true;
+  }
+
+  getCanvasBackingSize() {
+    const rect = this.canvas.getBoundingClientRect();
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    return {
+      width: Math.max(1, Math.round(rect.width * pixelRatio)),
+      height: Math.max(1, Math.round(rect.height * pixelRatio)),
+    };
   }
 
   setupEventListeners() {
@@ -1402,27 +1789,30 @@ export class GerberViewer {
     });
     this.screenshotForm.addEventListener("submit", (e) => {
       e.preventDefault();
-      if (this.isExportingScreenshot) return;
+      if (this.isExportingScreenshot || this.isRendererBusy()) return;
 
       const options = {
         includeBackground: this.screenshotBackgroundToggle.checked,
         scale: this.getSelectedScreenshotScale(),
       };
-      const isTiled = this.shouldTileScreenshot(options.scale);
-      if (!isTiled) {
-        this.closeScreenshotDialog();
-      }
-      void this.exportScreenshot(options).finally(() => {
-        if (isTiled) {
-          this.closeScreenshotDialog();
-        }
-      });
+      void this.exportScreenshot(options)
+        .then((exported) => {
+          if (exported) {
+            this.closeScreenshotDialog();
+          }
+        })
+        .catch((error) => {
+          this.showError(`Failed to export screenshot: ${getErrorMessage(error)}`);
+        });
     });
     this.screenshotScaleSelect.addEventListener("change", () => {
       this.updateScreenshotResolutionPreview();
     });
     this.screenshotCancelBtn.addEventListener("click", () => {
-      if (this.isExportingScreenshot) return;
+      if (this.isExportingScreenshot) {
+        this.screenshotExporter.cancelExport();
+        return;
+      }
       this.closeScreenshotDialog();
     });
     this.screenshotDismissBtn.addEventListener("click", () => {
@@ -1432,6 +1822,31 @@ export class GerberViewer {
     this.screenshotDialog.addEventListener("click", (e) => {
       if (e.target === this.screenshotDialog && !this.isExportingScreenshot) {
         this.closeScreenshotDialog();
+      }
+    });
+    this.screenshotDialog.addEventListener("cancel", (e) => {
+      if (this.isExportingScreenshot) {
+        e.preventDefault();
+        this.screenshotExporter.cancelExport();
+      }
+    });
+    this.screenshotDialog.addEventListener("keydown", (event) => {
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        this.screenshotDialog.querySelectorAll(
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.closest("[hidden]"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (
+        !this.screenshotDialog.contains(document.activeElement) ||
+        (event.shiftKey && document.activeElement === first) ||
+        (!event.shiftKey && document.activeElement === last)
+      ) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus({ preventScroll: true });
       }
     });
 
@@ -1462,6 +1877,9 @@ export class GerberViewer {
     );
     document.addEventListener("keydown", (event) =>
       this.handleLayerContextMenuKeyDown(event),
+    );
+    document.addEventListener("keydown", (event) =>
+      this.handleCompositeSelectionKeyDown(event),
     );
     document.addEventListener(
       "contextmenu",
@@ -1649,6 +2067,7 @@ export class GerberViewer {
     this.resizeCanvas();
     this.panelTabs.forEach((button) => {
       button.addEventListener("click", () => {
+        if (this.compositeSelection) return;
         this.setActivePanel(button.dataset.panelTab);
       });
     });
@@ -1697,37 +2116,133 @@ export class GerberViewer {
 
   handleWebGlContextLost(e) {
     e.preventDefault();
+    this.webGlContextGeneration += 1;
+    if (this.activeWebGlRestoreState) {
+      this.activeWebGlRestoreState.requiresRebuild = true;
+    }
+    this.invalidateRendererInteractionState();
+    // Create/edit/rename results contain layer object references and source IDs
+    // from the current renderer generation. Recovery replaces those records,
+    // so cancel any pending dialog before its result can be committed stale.
+    this.compositeLayerDialog.finish(null);
+    this.renameLayerDialog.finish(null);
+    if (this.compositeSelection) {
+      // GPU calls are no longer valid at this point. The JS layer still owns
+      // the original bitset, and restore/rebuild will recreate the renderer
+      // definition from that state.
+      this.finishCompositeSelection(false, { skipRenderer: true });
+    }
+    this.clearSelectedFeature({ refresh: false });
     this.isWebGlContextLost = true;
-    this.isRestoringWebGlContext = false;
     this.gl = null;
     this.addDiagnostic(
       "warning",
       "WebGL context lost",
       "Waiting for the browser to restore the GPU context.",
     );
+    this.renderLayerList();
     this.updateUiState();
   }
 
   async handleWebGlContextRestored() {
-    if (this.isRestoringWebGlContext) return;
+    const generation = this.webGlContextGeneration;
+    while (this.webGlRestorePromise) {
+      await this.webGlRestorePromise;
+      if (
+        generation !== this.webGlContextGeneration ||
+        !this.isWebGlContextLost
+      ) {
+        return;
+      }
+    }
 
-    const layerSnapshot = this.layers.map((layer) =>
-      this.createLayerRecoverySnapshot(layer),
-    );
-    const viewState = this.captureCanvasViewState();
+    if (
+      generation !== this.webGlContextGeneration ||
+      !this.isWebGlContextLost
+    ) {
+      return;
+    }
+
+    let finishRestore = null;
+    const restorePromise = new Promise((resolve) => {
+      finishRestore = resolve;
+    });
+    this.webGlRestorePromise = restorePromise;
+
+    this.compositeLayerDialog.finish(null);
+    this.renameLayerDialog.finish(null);
+
+    const interruptedWasmRecovery = this.activeWasmRecoveryState;
+    const recoveredPendingLayerIds = this.collectPendingLayerRecoveryIds();
+    const restoreState = this.activeWebGlRestoreState ?? {
+      layerSnapshot: interruptedWasmRecovery
+        ? interruptedWasmRecovery.layerSnapshot
+        : this.snapshotLayersForRecovery(),
+      viewState:
+        interruptedWasmRecovery?.viewState ?? this.captureCanvasViewState(),
+      nextLayerDomId:
+        interruptedWasmRecovery?.nextLayerDomId ?? this.nextLayerDomId,
+      nextColorIndex:
+        interruptedWasmRecovery?.nextColorIndex ?? this.nextColorIndex,
+      requiresRebuild: Boolean(interruptedWasmRecovery),
+    };
+    this.activeWebGlRestoreState = restoreState;
+    const { layerSnapshot, viewState } = restoreState;
+    const ownsRestore = () => generation === this.webGlContextGeneration;
 
     this.isRestoringWebGlContext = true;
     this.updateUiState();
+    let restoredPendingLayerRecords = false;
 
     try {
+      if (this.isRecoveringWasmProcessor) {
+        await this.waitForWasmProcessorRecovery();
+      }
+      if (!ownsRestore()) return;
       this.gl = this.createWebGlContext();
-      if (!this.wasmProcessor) {
+      this.isWebGlContextLost = false;
+      if (!this.wasmProcessor && !interruptedWasmRecovery) {
         throw new Error("No parsed layer data available for WebGL restore");
       }
       try {
-        this.wasmProcessor.restore_context(this.gl);
+        if (restoreState.requiresRebuild || interruptedWasmRecovery) {
+          throw new Error(
+            "WebGL context was lost while the renderer was rebuilding",
+          );
+        }
+        if (!ownsRestore()) return;
+        this.drawerController.syncLayout();
+        const restoreCanvasSize = this.getCanvasBackingSize();
+        const restoredAtTargetSize =
+          typeof this.wasmProcessor.restore_context_with_size === "function";
+        if (restoredAtTargetSize) {
+          this.wasmProcessor.restore_context_with_size(
+            this.gl,
+            restoreCanvasSize.width,
+            restoreCanvasSize.height,
+          );
+        } else {
+          this.wasmProcessor.restore_context(this.gl);
+        }
+        if (!ownsRestore()) return;
+        this.synchronizeCompositeBitsetsAfterCachedRestore(
+          layerSnapshot,
+          this.wasmProcessor,
+        );
+        if (!ownsRestore()) return;
         try {
-          this.interactionProcessor?.restore_context?.(this.gl);
+          if (
+            restoredAtTargetSize &&
+            typeof this.interactionProcessor?.restore_context_with_size === "function"
+          ) {
+            this.interactionProcessor.restore_context_with_size(
+              this.gl,
+              restoreCanvasSize.width,
+              restoreCanvasSize.height,
+            );
+          } else {
+            this.interactionProcessor?.restore_context?.(this.gl);
+          }
         } catch (interactionRestoreError) {
           this.disableFeaturePickingForCurrentDocument(
             "Feature picking failed",
@@ -1735,32 +2250,66 @@ export class GerberViewer {
             { abandon: isFatalWasmRuntimeError(interactionRestoreError) },
           );
         }
-        this.isWebGlContextLost = false;
-        this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
-        this.layers = layerSnapshot;
+        if (!ownsRestore()) return;
+        this.resizeCanvas({
+          allowProcessorResize: true,
+          preserveViewState: viewState,
+          skipProcessorResize: restoredAtTargetSize,
+          targetSize: restoreCanvasSize,
+        });
+        if (!ownsRestore()) return;
+        // Cached-context restore keeps pending renderer IDs valid. Leave those
+        // records in the loader so it can commit them and build interactions.
+        this.layers = layerSnapshot.filter(
+          (layer) => !recoveredPendingLayerIds.has(layer.id),
+        );
       } catch (restoreError) {
-        await this.rebuildWebGlProcessorFromSnapshot(
+        if (!ownsRestore()) return;
+        const rebuilt = await this.rebuildWebGlProcessorFromSnapshot(
           layerSnapshot,
           viewState,
           restoreError,
+          { ownsRestore },
         );
+        if (!rebuilt || !ownsRestore()) return;
+        restoredPendingLayerRecords = true;
       }
 
+      if (!ownsRestore()) return;
+      this.nextLayerDomId = restoreState.nextLayerDomId;
+      this.nextColorIndex = restoreState.nextColorIndex;
+      this.activeWasmRecoveryState = null;
+      this.activeWebGlRestoreState = null;
       this.renderLayerList();
     } catch (error) {
+      if (!ownsRestore()) return;
       this.isWebGlContextLost = true;
       const message = getErrorMessage(error);
       console.error("[Render] Failed to restore WebGL context:", error);
       this.addDiagnostic("error", "WebGL restore failed", message);
       this.showError(`Failed to restore WebGL context: ${message}`);
     } finally {
-      this.isRestoringWebGlContext = false;
+      if (this.webGlRestorePromise === restorePromise) {
+        this.webGlRestorePromise = null;
+        this.isRestoringWebGlContext = false;
+      }
+      if (ownsRestore() && restoredPendingLayerRecords) {
+        this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
+      }
+      finishRestore?.();
+      this.renderLayerList();
       this.updateUiState();
       this.requestRender();
     }
   }
 
-  async rebuildWebGlProcessorFromSnapshot(layerSnapshot, viewState, restoreError) {
+  async rebuildWebGlProcessorFromSnapshot(
+    layerSnapshot,
+    viewState,
+    restoreError,
+    { ownsRestore = () => true } = {},
+  ) {
+    if (!ownsRestore()) return false;
     this.addDiagnostic(
       "warning",
       "WebGL renderer rebuilt",
@@ -1776,9 +2325,52 @@ export class GerberViewer {
     this.disableProcessorInteractions(this.wasmProcessor);
     this.isWebGlContextLost = false;
     this.resizeCanvas({ allowProcessorResize: true, preserveViewState: viewState });
+    const processor = this.wasmProcessor;
 
     for (const layer of layerSnapshot) {
-      await this.restoreLayerFromSnapshot(layer);
+      if (!ownsRestore() || processor !== this.wasmProcessor) return false;
+      try {
+        const restored = await this.restoreLayerFromSnapshot(layer, {
+          processor,
+          ownsRestore: () =>
+            ownsRestore() && processor === this.wasmProcessor,
+        });
+        if (!restored || !ownsRestore() || processor !== this.wasmProcessor) {
+          return false;
+        }
+      } catch (layerError) {
+        if (!ownsRestore() || processor !== this.wasmProcessor) return false;
+        const message = getErrorMessage(layerError);
+        console.error(`[WebGL] Failed to restore layer ${layer.name}:`, layerError);
+        this.addDiagnostic("error", `Restore failed: ${layer.name}`, message);
+        if (isFatalWasmRuntimeError(layerError)) throw layerError;
+      }
+    }
+    return ownsRestore() && processor === this.wasmProcessor;
+  }
+
+  synchronizeCompositeBitsetsAfterCachedRestore(
+    layerSnapshot,
+    processor = this.wasmProcessor,
+  ) {
+    const composites = layerSnapshot.filter(
+      (layer) => isCompositeLayer(layer) && hasRendererLayerId(layer.layerId),
+    );
+    if (composites.length === 0) return;
+    if (typeof processor?.set_composite_visible_bits !== "function") {
+      throw new Error(
+        "Composite context recovery requires an updated WASM module.",
+      );
+    }
+    for (const layer of composites) {
+      // Selection edits live in Rust so toggles can update one LUT byte. A
+      // context loss cancels that draft without making another GPU call, so
+      // restore the authoritative JS snapshot before the cached renderer is
+      // allowed to draw again.
+      processor.set_composite_visible_bits(
+        layer.layerId,
+        layer.visibleBitset,
+      );
     }
   }
 
@@ -1960,12 +2552,21 @@ export class GerberViewer {
       this.boardOutlineSelection = BOARD_OUTLINE_AUTO;
     }
 
+    const duplicateNames = new Set(
+      outlineLayers
+        .map((layer) => layer.name)
+        .filter(
+          (name, index, names) => names.indexOf(name) !== names.lastIndexOf(name),
+        ),
+    );
     const options = [
       { value: BOARD_OUTLINE_AUTO, label: "Auto" },
       { value: BOARD_OUTLINE_BOUNDS, label: "Bounds" },
       ...outlineLayers.map((layer) => ({
         value: layer.id,
-        label: layer.name,
+        label: duplicateNames.has(layer.name)
+          ? `${layer.name} (${layer.id.slice(-8)})`
+          : layer.name,
       })),
     ];
     this.boardOutlineSelect.replaceChildren(
@@ -1981,7 +2582,7 @@ export class GerberViewer {
     this.syncBoardOutlineStatus();
 
     if (currentValue !== this.boardOutlineSelection) {
-      this.clearAllInvertedLayerCaches();
+      if (!this.clearAllInvertedLayerCaches()) return;
       this.requestRender();
     }
   }
@@ -2049,6 +2650,10 @@ export class GerberViewer {
   }
 
   setBoardOutlineSelection(value) {
+    if (this.isRendererBusy()) {
+      this.syncBoardOutlineSelect();
+      return;
+    }
     const nextValue = String(value ?? BOARD_OUTLINE_AUTO);
     const validLayer = this.layers.some(
       (layer) => isGerberLayer(layer) && layer.id === nextValue,
@@ -2063,7 +2668,22 @@ export class GerberViewer {
       this.boardOutlineSelection = nextValue;
     }
 
-    this.clearAllInvertedLayerCaches();
+    if (!this.invalidateCompositeRendererDefinitions()) {
+      this.syncBoardOutlineSelect();
+      this.updateUiState();
+      return;
+    }
+    if (!this.clearAllInvertedLayerCaches()) {
+      this.syncBoardOutlineSelect();
+      this.updateUiState();
+      return;
+    }
+    for (const layer of this.layers) {
+      if (isCompositeLayer(layer)) {
+        layer.outlineFallbackForKey = null;
+        layer.outlineFallbackWarningKey = null;
+      }
+    }
     this.syncBoardOutlineSelect();
     this.requestRender();
     this.updateUiState();
@@ -2098,7 +2718,7 @@ export class GerberViewer {
   }
 
   shouldRenderViewportRealtime() {
-    return this.isRealtimeRendering();
+    return Boolean(this.compositeSelection) || this.isRealtimeRendering();
   }
 
   setCompositeMode(mode) {
@@ -2345,7 +2965,13 @@ export class GerberViewer {
       "boardOutlineBoundsMarginMm",
       this.boardOutlineBoundsMarginMm,
     );
-    this.clearAllInvertedLayerCaches();
+    if (
+      !this.invalidateBoundsCompositeRendererDefinitions() ||
+      !this.clearAllInvertedLayerCaches()
+    ) {
+      this.updateUiState();
+      return;
+    }
     this.requestRender();
     this.updateUiState();
   }
@@ -2498,7 +3124,10 @@ export class GerberViewer {
     );
 
     if (
-      layerSnapshot.some((layer) => typeof layer.sourceContent !== "string")
+      layerSnapshot.some(
+        (layer) =>
+          !isCompositeLayer(layer) && typeof layer.sourceContent !== "string",
+      )
     ) {
       throw new Error("Reload files before changing parser options.");
     }
@@ -2522,7 +3151,9 @@ export class GerberViewer {
           total: layerSnapshot.length,
         });
 
-        if (layer.kind === DRILL_LAYER_KIND) {
+        if (isCompositeLayer(layer)) {
+          parsedLayers.push({ ...layer, parsedLayer: null });
+        } else if (layer.kind === DRILL_LAYER_KIND) {
           parsedLayers.push({ ...layer, parsedLayer: null });
         } else {
           try {
@@ -2562,33 +3193,47 @@ export class GerberViewer {
             total: parsedLayers.length,
           });
 
-          const layerOptions = {
-            id: layer.id,
-            visible: layer.visible,
-            color: layer.color,
-            alpha: layer.alpha,
-            inverted: layer.inverted,
-            sourceContent: layer.sourceContent,
-            offset: layer.offset,
-            drillType: layer.drillType,
-            interactionPayload: layer.interactionPayload,
-            skipFatalRecovery: true,
-          };
-          const layerRecord =
-            layer.kind === DRILL_LAYER_KIND
-              ? await this.createDrillLayerRecord(
-                  layer.name,
-                  layer.sourceContent,
-                  layerOptions,
-                  stagedProcessor,
-                )
-              : await this.createParsedLayerRecord(
-                  layer.name,
-                  layer.parsedLayer,
-                  layerOptions,
-                  stagedProcessor,
-                );
-          if (layer.kind !== DRILL_LAYER_KIND) {
+          let layerRecord;
+          if (isCompositeLayer(layer)) {
+            layerRecord = {
+              ...layer,
+              layerId: null,
+              rendererDefinitionKey: null,
+              sourceIds: [...layer.sourceIds],
+              slotSourceIds: [...layer.slotSourceIds],
+              visibleBitset: new Uint8Array(layer.visibleBitset),
+              renderError: null,
+            };
+          } else {
+            const layerOptions = {
+              id: layer.id,
+              visible: layer.visible,
+              color: layer.color,
+              alpha: layer.alpha,
+              inverted: layer.inverted,
+              sourceContent: layer.sourceContent,
+              sourceName: layer.sourceName,
+              offset: layer.offset,
+              drillType: layer.drillType,
+              interactionPayload: layer.interactionPayload,
+              skipFatalRecovery: true,
+            };
+            layerRecord =
+              layer.kind === DRILL_LAYER_KIND
+                ? await this.createDrillLayerRecord(
+                    layer.name,
+                    layer.sourceContent,
+                    layerOptions,
+                    stagedProcessor,
+                  )
+                : await this.createParsedLayerRecord(
+                    layer.name,
+                    layer.parsedLayer,
+                    layerOptions,
+                    stagedProcessor,
+                  );
+          }
+          if (isGerberLayer(layerRecord)) {
             layerRecord.interactionPayload = layer.interactionPayload ?? null;
           }
           this.prepareLayerMetadata(layerRecord);
@@ -2650,7 +3295,10 @@ export class GerberViewer {
     return (
       this.isLoadingLayers ||
       this.isWebGlContextLost ||
-      this.isRestoringWebGlContext
+      this.isRestoringWebGlContext ||
+      this.isRecoveringWasmProcessor ||
+      this.pendingFatalWasmRecovery ||
+      Boolean(this.compositeSelection)
     );
   }
 
@@ -2663,7 +3311,11 @@ export class GerberViewer {
     const totalLayers = this.layers.length;
     const visibleLayers = this.layers.filter((layer) => layer.visible).length;
 
-    if (this.isLoadingLayers) {
+    if (this.compositeSelection) {
+      this.workspaceStatus.textContent = "Selecting composite areas";
+    } else if (this.pendingFatalWasmRecovery || this.isRecoveringWasmProcessor) {
+      this.workspaceStatus.textContent = "Rebuilding renderer";
+    } else if (this.isLoadingLayers) {
       this.workspaceStatus.textContent = this.loadingWorkspaceStatus;
     } else if (this.isRestoringWebGlContext) {
       this.workspaceStatus.textContent = "Restoring WebGL";
@@ -2677,9 +3329,35 @@ export class GerberViewer {
     }
 
     const rendererBusy = this.isRendererBusy();
+    const compositeSelectionLocked = Boolean(this.compositeSelection);
+    if (compositeSelectionLocked && this.activePanel !== "layers") {
+      this.setActivePanel("layers");
+    }
+    for (const button of this.panelTabs) {
+      button.disabled = compositeSelectionLocked;
+    }
+    this.drawerController.setLocked(compositeSelectionLocked);
+    if (rendererBusy && (this.draggedLayerId || this.layerTouchDrag)) {
+      this.cancelLayerReorderGesture();
+    }
+    this.screenshotExporter?.setRendererUnavailable(rendererBusy);
     this.fileInput.disabled = rendererBusy;
     this.selectFilesBtn.disabled = rendererBusy;
     this.emptyUploadBtn.disabled = rendererBusy;
+    this.screenshotBtn.disabled = rendererBusy;
+    this.selectAllBtn.disabled = rendererBusy;
+    this.selectTopBtn.disabled = rendererBusy;
+    this.selectBottomBtn.disabled = rendererBusy;
+    this.unselectAllBtn.disabled = rendererBusy;
+    this.flipHorizontalBtn.disabled = rendererBusy;
+    this.flipVerticalBtn.disabled = rendererBusy;
+    this.canvasThemeToggle.disabled = rendererBusy;
+    this.fullscreenBtn.disabled = rendererBusy;
+    this.rulerToggleBtn.disabled = rendererBusy;
+    this.rulerClearBtn.disabled =
+      rendererBusy ||
+      (this.measurements.length === 0 && this.rulerStartPoint === null);
+    this.measurementUnitToggle.disabled = rendererBusy;
     this.updateAlphaControlState(rendererBusy);
     this.syncBoardOutlineSelect();
     this.clearAllBtn.disabled = rendererBusy || totalLayers === 0;
@@ -2716,6 +3394,7 @@ export class GerberViewer {
     this.boundsReadout.textContent = this.formatCombinedBounds();
     this.renderDiagnostics();
     this.refreshIcons();
+    this.restorePendingViewerFocus(rendererBusy);
   }
 
   updateEmptyLayerListActionState(disabled) {
@@ -2802,9 +3481,21 @@ export class GerberViewer {
     progress = 0,
     indeterminate = false,
   } = {}) {
+    const isNewLoadingSession = !this.isLoadingLayers;
+    if (isNewLoadingSession) {
+      this.loadingModalFocusReturn = this.captureViewerFocusRestore();
+      this.compositeLayerDialog.finish(null);
+      this.renameLayerDialog.finish(null);
+      this.closeLayerContextMenu();
+      if (!this.isExportingScreenshot) this.closeScreenshotDialog();
+    }
     this.isLoadingLayers = true;
     this.loadingWorkspaceStatus = title;
     this.loadingModal.hidden = false;
+    this.loadingModal.setAttribute("aria-busy", "true");
+    for (const target of document.querySelectorAll(".top-toolbar, .workspace")) {
+      target.inert = true;
+    }
     this.updateLoadingModal({
       title,
       stage,
@@ -2814,6 +3505,12 @@ export class GerberViewer {
       progress,
       indeterminate,
     });
+    if (isNewLoadingSession) {
+      this.renderLayerList();
+      requestAnimationFrame(() => {
+        if (this.isLoadingLayers) this.loadingModal.focus({ preventScroll: true });
+      });
+    }
     this.updateUiState();
   }
 
@@ -2859,10 +3556,21 @@ export class GerberViewer {
   }
 
   hideLoadingModal() {
+    const wasLoading = this.isLoadingLayers;
     this.loadingModal.hidden = true;
+    this.loadingModal.removeAttribute("aria-busy");
     this.isLoadingLayers = false;
     this.loadingWorkspaceStatus = "Loading files";
+    for (const target of document.querySelectorAll(".top-toolbar, .workspace")) {
+      target.inert = false;
+    }
+    if (wasLoading) this.renderLayerList();
     this.updateUiState();
+    if (wasLoading) {
+      const focusReturn = this.loadingModalFocusReturn;
+      this.loadingModalFocusReturn = null;
+      this.restoreViewerFocusTarget(focusReturn);
+    }
   }
 
   addDiagnostic(level, title, detail = "") {
@@ -2881,6 +3589,7 @@ export class GerberViewer {
 
   setActivePanel(panelName) {
     if (!panelName) return;
+    if (this.compositeSelection && panelName !== "layers") return;
     this.activePanel = panelName;
 
     this.panelTabs.forEach((button) => {
@@ -2901,6 +3610,7 @@ export class GerberViewer {
   }
 
   toggleViewFlip(axis) {
+    if (this.compositeSelection) return;
     this.flushLazyViewportRender();
     const viewportCenter = this.getVisibleCanvasViewportCenter();
 
@@ -2982,6 +3692,7 @@ export class GerberViewer {
   }
 
   toggleCanvasTheme() {
+    if (this.compositeSelection) return;
     this.isCanvasLight = !this.isCanvasLight;
     this.updateCanvasTheme();
     this.requestRender();
@@ -3005,6 +3716,7 @@ export class GerberViewer {
   }
 
   openScreenshotDialog() {
+    if (this.isRendererBusy()) return;
     this.flushLazyViewportRender();
     this.screenshotExporter.openDialog();
   }
@@ -3031,21 +3743,25 @@ export class GerberViewer {
   }
 
   async exportScreenshot({ includeBackground = false, scale = 1 } = {}) {
+    if (this.isRendererBusy()) {
+      throw new Error("Screenshot export is unavailable while the renderer is busy");
+    }
     this.flushLazyViewportRender();
     return this.screenshotExporter.export({ includeBackground, scale });
   }
 
   drawMeasurementsOnContext(context, renderState = null) {
     drawMeasurementsOnContext(context, {
-      measurements: this.measurements,
-      rulerStartPoint: this.rulerStartPoint,
-      rulerHoverPoint: this.rulerHoverPoint,
+      measurements: renderState ? renderState.measurements : this.measurements,
+      rulerStartPoint: renderState ? renderState.rulerStartPoint : this.rulerStartPoint,
+      rulerHoverPoint: renderState ? renderState.rulerHoverPoint : this.rulerHoverPoint,
       worldToCanvasPoint: (point) => this.worldToCanvasPoint(point, renderState),
-      unit: this.measurementUnit,
+      unit: renderState ? renderState.measurementUnit : this.measurementUnit,
     });
   }
 
   toggleRuler() {
+    if (this.compositeSelection) return;
     this.isRulerActive = !this.isRulerActive;
     if (!this.isRulerActive) {
       this.resetRulerTouch();
@@ -3058,6 +3774,7 @@ export class GerberViewer {
   }
 
   clearRulerMeasurements() {
+    if (this.compositeSelection) return;
     this.measurements = [];
     this.resetRulerTouch();
     this.rulerStartPoint = null;
@@ -3067,6 +3784,7 @@ export class GerberViewer {
   }
 
   toggleMeasurementUnit() {
+    if (this.compositeSelection) return;
     this.measurementUnit = this.measurementUnit === "mm" ? "inch" : "mm";
     this.updateMeasurementUnitControl();
     this.renderMeasurements();
@@ -3429,17 +4147,32 @@ export class GerberViewer {
         isResolved = true;
         let didCommitLayer = false;
         const committedLayers = [];
+        const previousAutoOutlineId = this.findAutomaticBoardOutlineLayer()?.id ?? null;
         for (let index = 0; index < layerRecords.length; index++) {
           const layerRecord = layerRecords[index];
           if (layerRecord) {
             this.prepareLayerMetadata(layerRecord);
-            this.commitLayerMetadata(layerRecord, { updateUiState: false });
+            this.commitLayerMetadata(layerRecord, {
+              updateUiState: false,
+              invalidateCompositeBounds: false,
+            });
             committedLayers.push(layerRecord);
             layerRecords[index] = null;
             didCommitLayer = true;
           }
         }
+        const definitionsInvalidated =
+          !committedLayers.some(isGerberLayer) ||
+          this.invalidateCompositeDefinitionsForGerberSetChange(
+            previousAutoOutlineId,
+          );
         restorePendingLayerRecords();
+        if (!definitionsInvalidated) {
+          this.clearInteractionPayloads(committedLayers);
+          this.updateUiState();
+          resolve(results);
+          return;
+        }
         void (async () => {
           if (didCommitLayer) {
             this.updateUiState();
@@ -3788,7 +4521,15 @@ export class GerberViewer {
             sourceContent: content,
           });
           layerRecord.interactionPayload = interactionPayload;
-          await this.buildInteractionLayersForRecords([layerRecord], { title });
+          if (
+            this.pendingFatalWasmRecovery ||
+            this.isRecoveringWasmProcessor ||
+            this.isWebGlContextLost
+          ) {
+            this.clearInteractionPayloads([layerRecord]);
+          } else {
+            await this.buildInteractionLayersForRecords([layerRecord], { title });
+          }
         } finally {
           renderPayload = null;
           interactionPayload = null;
@@ -3909,7 +4650,7 @@ export class GerberViewer {
         layer &&
         !isDrillLayer(layer) &&
         layer.interactionPayload &&
-        Number.isFinite(Number(layer.layerId)),
+        hasRendererLayerId(layer.layerId),
     );
     if (candidates.length === 0) {
       this.clearInteractionPayloads(layerRecords);
@@ -3917,6 +4658,16 @@ export class GerberViewer {
     }
 
     let processor = this.wasmProcessor;
+    const processorIsCurrent = () =>
+      processor === this.wasmProcessor &&
+      !this.pendingFatalWasmRecovery &&
+      !this.isRecoveringWasmProcessor &&
+      !this.isWebGlContextLost &&
+      !this.isRestoringWebGlContext;
+    if (!processorIsCurrent()) {
+      this.clearInteractionPayloads(layerRecords);
+      return;
+    }
     try {
       if (typeof processor?.add_interaction_payload !== "function") {
         throw new Error("Feature picking requires an updated WASM module");
@@ -3936,7 +4687,9 @@ export class GerberViewer {
           total: candidates.length,
         });
         await new Promise((resolve) => requestAnimationFrame(resolve));
+        if (!processorIsCurrent()) return;
         this.ensureInteractionMemoryHeadroom();
+        if (!processorIsCurrent()) return;
         processor.add_interaction_payload(layer.layerId, layer.interactionPayload);
       }
 
@@ -4053,6 +4806,7 @@ export class GerberViewer {
       invertedErrorKey: layer.invertedErrorKey ?? null,
       invertedSourceKey: layer.invertedSourceKey ?? null,
       sourceContent: layer.sourceContent,
+      sourceName: layer.sourceName,
       offset: { ...normalizeLayerOffset(layer.offset) },
       bounds: layer.bounds ? { ...layer.bounds } : null,
       renderBounds: layer.renderBounds ? { ...layer.renderBounds } : null,
@@ -4063,11 +4817,37 @@ export class GerberViewer {
       snapshot.drillMetadata = layer.drillMetadata;
       snapshot.drillType = layer.drillType;
       snapshot.rawBounds = layer.rawBounds ? { ...layer.rawBounds } : null;
+    } else if (isCompositeLayer(layer)) {
+      snapshot.sourceIds = [...layer.sourceIds];
+      snapshot.slotSourceIds = [...layer.slotSourceIds];
+      snapshot.visibleBitset = layer.visibleBitset.slice();
+      snapshot.error = layer.error ?? null;
     }
     return snapshot;
   }
 
-  async restoreLayerFromSnapshot(layer) {
+  async restoreLayerFromSnapshot(
+    layer,
+    {
+      processor = this.wasmProcessor,
+      ownsRestore = () => true,
+    } = {},
+  ) {
+    if (!ownsRestore() || processor !== this.wasmProcessor) return false;
+    if (layer.kind === COMPOSITE_LAYER_KIND) {
+      const restored = {
+        ...layer,
+        layerId: null,
+        rendererDefinitionKey: null,
+        sourceIds: [...layer.sourceIds],
+        slotSourceIds: [...layer.slotSourceIds],
+        visibleBitset: new Uint8Array(layer.visibleBitset),
+      };
+      if (!ownsRestore() || processor !== this.wasmProcessor) return false;
+      this.prepareLayerMetadata(restored);
+      this.layers.push(restored);
+      return true;
+    }
     const options = {
       id: layer.id,
       visible: layer.visible,
@@ -4075,16 +4855,30 @@ export class GerberViewer {
       alpha: layer.alpha,
       inverted: layer.inverted,
       sourceContent: layer.sourceContent,
+      sourceName: layer.sourceName,
       offset: layer.offset,
       drillType: layer.drillType,
       skipFatalRecovery: true,
     };
 
-    if (layer.kind === DRILL_LAYER_KIND) {
-      await this.addDrillLayer(layer.name, layer.sourceContent, options);
-    } else {
-      await this.addLayer(layer.name, layer.sourceContent, options);
+    const restored = layer.kind === DRILL_LAYER_KIND
+      ? await this.createDrillLayerRecord(
+          layer.name,
+          layer.sourceContent,
+          options,
+          processor,
+        )
+      : await this.createGerberLayerRecord(
+          layer.name,
+          layer.sourceContent,
+          options,
+          processor,
+        );
+    if (!ownsRestore() || processor !== this.wasmProcessor) {
+      return false;
     }
+    this.commitLayerMetadata(restored);
+    return true;
   }
 
   preparePendingLayerRecordsForRecovery() {
@@ -4207,8 +5001,15 @@ export class GerberViewer {
   }
 
   async waitForWasmProcessorRecovery() {
-    if (this.isRecoveringWasmProcessor && this.wasmRecoveryPromise) {
-      await this.wasmRecoveryPromise;
+    while (this.pendingFatalWasmRecovery || this.isRecoveringWasmProcessor) {
+      if (this.wasmRecoveryPromise) {
+        await this.wasmRecoveryPromise;
+      } else {
+        // Fatal recovery is scheduled in a microtask. Yield until it publishes
+        // the recovery promise instead of letting another queued layer mutate
+        // the processor that is about to be abandoned.
+        await Promise.resolve();
+      }
     }
   }
 
@@ -4219,6 +5020,15 @@ export class GerberViewer {
     }
     if (this.isWebGlContextLost) {
       return;
+    }
+    this.invalidateRendererInteractionState();
+    this.compositeLayerDialog.finish(null);
+    this.renameLayerDialog.finish(null);
+    if (this.compositeSelection) {
+      // A trapped processor cannot safely accept the rollback upload. The
+      // authoritative layer bitset is still the pre-selection value because
+      // edits live only in the draft until Done.
+      this.finishCompositeSelection(false, { skipRenderer: true });
     }
 
     const recoveredPendingLayerIds = this.collectPendingLayerRecoveryIds();
@@ -4242,11 +5052,21 @@ export class GerberViewer {
     this.wasmRecoveryPromise = new Promise((resolve) => {
       finishRecovery = resolve;
     });
+    this.activeWasmRecoveryState = {
+      layerSnapshot,
+      viewState,
+      nextLayerDomId,
+      nextColorIndex,
+    };
     this.isRecoveringWasmProcessor = true;
+    this.cancelPendingRenderFrame();
+    this.cancelLazyViewportRender();
+    this.renderLayerList();
+    this.updateUiState();
     this.addDiagnostic(
       "warning",
       "Renderer recovered",
-      `Rebuilding layers after ${failedLayerName} caused a fatal WebAssembly error: ${getErrorMessage(error)}`,
+      `Rebuilding layers after ${failedLayerName} left renderer state unusable: ${getErrorMessage(error)}`,
     );
 
     try {
@@ -4263,6 +5083,7 @@ export class GerberViewer {
       for (const layer of layerSnapshot) {
         try {
           await this.restoreLayerFromSnapshot(layer);
+          if (this.isWebGlContextLost) break;
         } catch (restoreError) {
           const message = getErrorMessage(restoreError);
           console.error(`[WASM] Failed to restore layer ${layer.name}:`, restoreError);
@@ -4271,10 +5092,11 @@ export class GerberViewer {
             restoreCausedFatalError = true;
             break;
           }
+          if (this.isWebGlContextLost) break;
         }
       }
 
-      if (restoreCausedFatalError) {
+      if (restoreCausedFatalError && !this.isWebGlContextLost) {
         // The new processor also OOM'd during restore; create a fresh empty one
         // so subsequent callers don't encounter a trapped WASM module.
         this.layers = [];
@@ -4288,13 +5110,17 @@ export class GerberViewer {
       this.nextColorIndex = nextColorIndex;
       this.restoreCanvasViewState(viewState);
       this.renderLayerList();
-      this.requestRender();
     } finally {
       this.clearRecoveredPendingLayerRecords(recoveredPendingLayerIds);
       this.isRecoveringWasmProcessor = false;
+      if (!this.isWebGlContextLost && !this.isRestoringWebGlContext) {
+        this.activeWasmRecoveryState = null;
+      }
       finishRecovery?.();
       this.wasmRecoveryPromise = null;
+      this.renderLayerList();
       this.updateUiState();
+      this.requestRender();
     }
   }
 
@@ -4354,9 +5180,20 @@ export class GerberViewer {
     };
   }
 
-  commitLayerMetadata(layer, { updateUiState = true } = {}) {
+  commitLayerMetadata(
+    layer,
+    { updateUiState = true, invalidateCompositeBounds = true } = {},
+  ) {
+    const previousAutoOutlineId = this.findAutomaticBoardOutlineLayer()?.id ?? null;
     this.prepareLayerMetadata(layer);
     this.layers.push(layer);
+    if (
+      invalidateCompositeBounds &&
+      isGerberLayer(layer) &&
+      !this.invalidateCompositeDefinitionsForGerberSetChange(previousAutoOutlineId)
+    ) {
+      return layer;
+    }
     if (updateUiState) {
       this.updateUiState();
     }
@@ -4400,15 +5237,23 @@ export class GerberViewer {
     name,
     content,
     options = {},
-    processor = this.wasmProcessor,
+    processor = undefined,
   ) {
     try {
+      const useCurrentProcessor = processor === undefined;
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
+        // Multiple parsed layers can resume from their initial wait in the
+        // same microtask checkpoint. A preceding layer may start recovery
+        // before this continuation runs, so re-check ownership here.
+        while (this.pendingFatalWasmRecovery || this.isRecoveringWasmProcessor) {
+          await this.waitForWasmProcessorRecovery();
+        }
         if (this.wasmMemoryExhausted) {
           throw new Error("WASM memory limit reached");
         }
       }
+      if (useCurrentProcessor) processor = this.wasmProcessor;
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
@@ -4456,15 +5301,20 @@ export class GerberViewer {
     name,
     content,
     options = {},
-    processor = this.wasmProcessor,
+    processor = undefined,
   ) {
     try {
+      const useCurrentProcessor = processor === undefined;
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
+        while (this.pendingFatalWasmRecovery || this.isRecoveringWasmProcessor) {
+          await this.waitForWasmProcessorRecovery();
+        }
         if (this.wasmMemoryExhausted) {
           throw new Error("WASM memory limit reached");
         }
       }
+      if (useCurrentProcessor) processor = this.wasmProcessor;
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
@@ -4509,6 +5359,7 @@ export class GerberViewer {
         outlineLayerId,
         fillLayerId,
         drillMetadata: normalizeDrillMetadata(result?.metadata),
+        sourceName: options.sourceName ?? name,
         sourceContent: options.sourceContent ?? content,
         offset,
         rawBounds,
@@ -4542,15 +5393,20 @@ export class GerberViewer {
     name,
     parsedLayer,
     options = {},
-    processor = this.wasmProcessor,
+    processor = undefined,
   ) {
     try {
+      const useCurrentProcessor = processor === undefined;
       if (!options.skipFatalRecovery) {
         await this.waitForWasmProcessorRecovery();
+        while (this.pendingFatalWasmRecovery || this.isRecoveringWasmProcessor) {
+          await this.waitForWasmProcessorRecovery();
+        }
         if (this.wasmMemoryExhausted) {
           throw new Error("WASM memory limit reached");
         }
       }
+      if (useCurrentProcessor) processor = this.wasmProcessor;
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
@@ -4676,15 +5532,31 @@ export class GerberViewer {
     if (
       !this.wasmProcessor ||
       this.isWebGlContextLost ||
-      this.isRestoringWebGlContext
+      this.isRestoringWebGlContext ||
+      this.isRecoveringWasmProcessor ||
+      this.pendingFatalWasmRecovery
     ) {
       this.renderMeasurements();
       return;
     }
 
     try {
-      const { activeLayerIds, colorData, blendModes, alpha } =
-        this.getRenderLayerPayload();
+      if (this.compositeSelection) {
+        const previewRendered = this.renderCompositeSelectionPreview();
+        if (previewRendered && this.compositeSelection) {
+          this.compositeSelection.lastPixelKey = null;
+        }
+        this.zoomReadout.textContent = this.formatZoom();
+        this.boundsReadout.textContent = this.formatCombinedBounds();
+        this.renderMeasurements();
+        return;
+      }
+      const payload = this.getRenderLayerPayload();
+      if (!payload) {
+        this.renderMeasurements();
+        return;
+      }
+      const { activeLayerIds, colorData, blendModes, alpha } = payload;
 
       // Render with active layers
       if (blendModes.some((mode) => mode !== 0)) {
@@ -4713,39 +5585,108 @@ export class GerberViewer {
           alpha,
         );
       }
+      this.syncCompositeRenderErrors();
       this.renderSelectedFeatureHighlight();
       this.zoomReadout.textContent = this.formatZoom();
       this.boundsReadout.textContent = this.formatCombinedBounds();
     } catch (error) {
-      const message = getErrorMessage(error);
-      console.error("[Render] Failed to render:", error);
-      this.addDiagnostic("error", "Render failed", message);
+      if (!this.scheduleCompositeFatalRecovery(null, error, "rendering")) {
+        const message = getErrorMessage(error);
+        console.error("[Render] Failed to render:", error);
+        this.addDiagnostic("error", "Render failed", message);
+      }
     }
 
     this.renderMeasurements();
   }
 
-  renderSelectedFeatureHighlight() {
-    if (
-      !this.selectedFeature ||
-      typeof this.wasmProcessor?.render_interaction_highlight !== "function"
-    ) {
-      return;
+  syncCompositeRenderErrors() {
+    if (typeof this.wasmProcessor?.get_composite_error !== "function") return;
+    let layerListChanged = false;
+    for (const layer of this.layers) {
+      if (!isCompositeLayer(layer) || !hasRendererLayerId(layer.layerId)) {
+        continue;
+      }
+      let nextError = null;
+      try {
+        nextError = this.wasmProcessor.get_composite_error(layer.layerId) || null;
+      } catch (error) {
+        if (this.scheduleCompositeFatalRecovery(layer, error, "rendering")) {
+          return;
+        }
+        nextError = getErrorMessage(error);
+      }
+      if (nextError) {
+        if (layer.renderError !== nextError) {
+          this.addDiagnostic(
+            "error",
+            `Composite failed: ${layer.name}`,
+            nextError,
+          );
+          layerListChanged = true;
+        }
+        layer.renderError = nextError;
+        layer.error = nextError;
+      } else if (layer.renderError) {
+        if (layer.error === layer.renderError) layer.error = null;
+        layer.renderError = null;
+        layerListChanged = true;
+      }
     }
+    if (layerListChanged) this.renderLayerList();
+  }
+
+  renderSelectedFeatureHighlight() {
+    if (!this.selectedFeature) return;
 
     try {
       if (this.clearSelectedFeatureIfUnavailable()) {
         return;
       }
-      this.wasmProcessor.render_interaction_highlight(
-        this.selectedFeature.layerId,
-        this.selectedFeature.featureId,
-        this.getViewScaleX(),
-        this.getViewScaleY(),
-        this.camera.offsetX,
-        this.camera.offsetY,
-      );
+      if (isCompositeAreaSelection(this.selectedFeature)) {
+        if (
+          typeof this.wasmProcessor?.render_composite_area_highlight !==
+          "function"
+        ) {
+          this.clearSelectedFeature({ refresh: false });
+          return;
+        }
+        const result = this.wasmProcessor.render_composite_area_highlight(
+          this.selectedFeature.layerId,
+          this.selectedFeature.coverageCode,
+          this.getViewScaleX(),
+          this.getViewScaleY(),
+          this.camera.offsetX,
+          this.camera.offsetY,
+        );
+        if (result === "highlight_skipped") {
+          this.clearSelectedFeature({ refresh: false });
+          this.updateUiState();
+        }
+      } else if (
+        typeof this.wasmProcessor?.render_interaction_highlight === "function"
+      ) {
+        this.wasmProcessor.render_interaction_highlight(
+          this.selectedFeature.layerId,
+          this.selectedFeature.featureId,
+          this.getViewScaleX(),
+          this.getViewScaleY(),
+          this.camera.offsetX,
+          this.camera.offsetY,
+        );
+      }
     } catch (error) {
+      const layer = this.selectedFeature?.layer;
+      if (
+        isCompositeLayer(layer) &&
+        this.scheduleCompositeFatalRecovery(
+          layer,
+          error,
+          `composite area highlight ${layer.name}`,
+        )
+      ) {
+        return;
+      }
       const message = getErrorMessage(error);
       console.error("[Render] Failed to render feature highlight:", error);
       this.addDiagnostic("error", "Feature highlight failed", message);
@@ -4765,11 +5706,12 @@ export class GerberViewer {
     let count = 0;
 
     for (const layer of this.layers) {
+      const selectedByDependency = selectedLayerIds?.has(layer.id) ?? false;
       if (
         isDrillLayer(layer) ||
-        !layer.visible ||
+        isCompositeLayer(layer) ||
+        (selectedLayerIds ? !selectedByDependency : !layer.visible) ||
         layer.id === excludeLayerId ||
-        (selectedLayerIds && !selectedLayerIds.has(layer.id)) ||
         !(useRenderBounds ? getLayerRenderBounds(layer) : getLayerRawBounds(layer))
       ) {
         continue;
@@ -4800,7 +5742,7 @@ export class GerberViewer {
   }
 
   getLayerDisplayBounds(layer, selectedLayerIds = null) {
-    if (!layer?.inverted || isDrillLayer(layer)) {
+    if (isCompositeLayer(layer) || !layer?.inverted || isDrillLayer(layer)) {
       return getLayerRenderBounds(layer);
     }
     const fillSource = this.getInvertedFillSource(layer, selectedLayerIds);
@@ -4851,6 +5793,414 @@ export class GerberViewer {
     );
   }
 
+  getCompositeSourceLayers(layer) {
+    return layer.slotSourceIds
+      .map((sourceId) => this.layers.find((candidate) => candidate.id === sourceId))
+      .filter(isGerberLayer);
+  }
+
+  getCompositeBoundsFallback(layer) {
+    const candidates = [
+      ...this.layers.filter(
+        (candidate) => isGerberLayer(candidate) && candidate.visible,
+      ),
+      ...this.getCompositeSourceLayers(layer),
+    ];
+    let bounds = null;
+    for (const candidate of candidates) {
+      const next = getLayerRenderBounds(candidate);
+      if (!next) continue;
+      bounds = bounds
+        ? {
+            minX: Math.min(bounds.minX, next.minX),
+            maxX: Math.max(bounds.maxX, next.maxX),
+            minY: Math.min(bounds.minY, next.minY),
+            maxY: Math.max(bounds.maxY, next.maxY),
+          }
+        : { ...next };
+    }
+    return bounds ? expandBounds(bounds, this.boardOutlineBoundsMarginMm) : null;
+  }
+
+  getCompositeOutlineSource(layer) {
+    const selected =
+      this.boardOutlineSelection !== BOARD_OUTLINE_AUTO &&
+      this.boardOutlineSelection !== BOARD_OUTLINE_BOUNDS
+        ? this.layers.find(
+            (candidate) =>
+              candidate.id === this.boardOutlineSelection && isGerberLayer(candidate),
+          )
+        : null;
+    const outline = selected ??
+      (this.boardOutlineSelection === BOARD_OUTLINE_AUTO
+        ? this.findAutomaticBoardOutlineLayer()
+        : null);
+    if (outline && typeof outline.sourceContent === "string") {
+      return {
+        type: "outline",
+        outline,
+        // Clipping reparses the ordinary Gerber source, even if that layer is
+        // displayed inverted. Keep the dependency bounds tied to the same raw
+        // geometry rather than its expanded inverted display bounds.
+        bounds: getLayerRawBounds(outline),
+        allowBoundsFallback: this.boardOutlineSelection === BOARD_OUTLINE_AUTO,
+      };
+    }
+    const bounds = this.getCompositeBoundsFallback(layer);
+    return bounds ? { type: "bounds", bounds } : null;
+  }
+
+  getCompositeDefinitionKey(layer, sourceRendererIds, outlineSource) {
+    const outlineKey = outlineSource?.type === "outline"
+      ? (() => {
+          const offset = normalizeLayerOffset(outlineSource.outline.offset);
+          return `outline:${outlineSource.outline.id}:${outlineSource.outline.layerId}:${offset.x}:${offset.y}`;
+        })()
+      : outlineSource?.bounds
+        ? `bounds:${outlineSource.bounds.minX}:${outlineSource.bounds.maxX}:${outlineSource.bounds.minY}:${outlineSource.bounds.maxY}`
+        : "missing";
+    return `${sourceRendererIds.join(",")}|${outlineKey}`;
+  }
+
+  setCompositeLayerError(layer, message) {
+    const nextError = String(message || "Composite rendering failed");
+    const changed = layer.error !== nextError;
+    layer.error = nextError;
+    if (layer.reportedError !== nextError) {
+      layer.reportedError = nextError;
+      this.addDiagnostic("error", `Composite failed: ${layer.name}`, nextError);
+    }
+    if (changed) this.scheduleCompositeLayerListRefresh();
+  }
+
+  clearCompositeLayerError(layer) {
+    const changed = Boolean(layer.error || layer.renderError);
+    layer.error = null;
+    layer.reportedError = null;
+    layer.renderError = null;
+    if (changed) this.scheduleCompositeLayerListRefresh();
+  }
+
+  scheduleCompositeFatalRecovery(layer, error, operation = "composite layer") {
+    if (!isFatalWasmRuntimeError(error)) return false;
+    this.scheduleAuthoritativeRendererRecovery(layer, error, operation);
+    return true;
+  }
+
+  scheduleAuthoritativeRendererRecovery(
+    layer,
+    error,
+    operation = "renderer mutation",
+  ) {
+    this.invalidateRendererInteractionState();
+    if (this.compositeSelection) {
+      this.finishCompositeSelection(false, { skipRenderer: true });
+    }
+    if (isCompositeLayer(layer)) {
+      layer.layerId = null;
+      layer.rendererDefinitionKey = null;
+      this.setCompositeLayerError(layer, getErrorMessage(error));
+    }
+    if (
+      this.pendingFatalWasmRecovery ||
+      this.isRecoveringWasmProcessor ||
+      this.isWebGlContextLost
+    ) {
+      this.renderLayerList();
+      this.updateUiState();
+      return;
+    }
+
+    this.pendingFatalWasmRecovery = true;
+    this.renderLayerList();
+    this.updateUiState();
+    void Promise.resolve().then(async () => {
+      try {
+        await this.recoverWasmProcessorAfterFatalError(operation, error);
+      } catch (recoveryError) {
+        console.error("[WASM] Failed to recover composite renderer:", recoveryError);
+        this.addDiagnostic(
+          "error",
+          "Renderer recovery failed",
+          getErrorMessage(recoveryError),
+        );
+      } finally {
+        this.pendingFatalWasmRecovery = false;
+        this.renderLayerList();
+        this.updateUiState();
+      }
+    });
+  }
+
+  scheduleCompositeLayerListRefresh() {
+    if (this.compositeLayerListRefreshPending) return;
+    this.compositeLayerListRefreshPending = true;
+    queueMicrotask(() => {
+      this.compositeLayerListRefreshPending = false;
+      this.renderLayerList();
+    });
+  }
+
+  getCompositeDependencyLayerIds(additionalComposite = null) {
+    const selectedLayerIds = this.getSelectedLayerIds();
+    for (const composite of this.layers) {
+      if (
+        isCompositeLayer(composite) &&
+        (composite.visible || composite === additionalComposite)
+      ) {
+        for (const sourceId of composite.sourceIds) {
+          selectedLayerIds.add(sourceId);
+        }
+      }
+    }
+    return selectedLayerIds;
+  }
+
+  ensureCompositeRendererLayer(layer, selectedLayerIds = null) {
+    if (!isCompositeLayer(layer)) return null;
+    const sourceLayers = this.getCompositeSourceLayers(layer);
+    if (sourceLayers.length !== layer.slotSourceIds.length) {
+      this.setCompositeLayerError(
+        layer,
+        "One or more source layers are unavailable.",
+      );
+      return null;
+    }
+    selectedLayerIds ??= this.getCompositeDependencyLayerIds(layer);
+    const sourceRendererIds = [];
+    for (const source of sourceLayers) {
+      const rendererId = this.getInvertedRenderLayerId(source, selectedLayerIds);
+      if (
+        this.pendingFatalWasmRecovery ||
+        this.isRecoveringWasmProcessor ||
+        this.isWebGlContextLost
+      ) {
+        return null;
+      }
+      if (source.inverted && !this.hasInvertedLayerCache(source)) {
+        this.setCompositeLayerError(
+          layer,
+          `Inverted source is unavailable: ${source.name}`,
+        );
+        return null;
+      }
+      if (!hasRendererLayerId(rendererId)) {
+        this.setCompositeLayerError(
+          layer,
+          `Source renderer is unavailable: ${source.name}`,
+        );
+        return null;
+      }
+      sourceRendererIds.push(rendererId);
+    }
+    const outlineSource = this.getCompositeOutlineSource(layer);
+    if (!outlineSource) {
+      this.setCompositeLayerError(
+        layer,
+        "Board outline or fallback bounds are unavailable.",
+      );
+      return null;
+    }
+    const primaryDefinitionKey = this.getCompositeDefinitionKey(
+      layer,
+      sourceRendererIds,
+      outlineSource,
+    );
+    let effectiveOutlineSource = outlineSource;
+    let definitionKey = primaryDefinitionKey;
+    if (
+      outlineSource.type === "outline" &&
+      outlineSource.allowBoundsFallback &&
+      layer.outlineFallbackForKey === primaryDefinitionKey
+    ) {
+      const fallbackBounds = this.getCompositeBoundsFallback(layer);
+      if (fallbackBounds) {
+        effectiveOutlineSource = { type: "bounds", bounds: fallbackBounds };
+        definitionKey = `${primaryDefinitionKey}|auto-fallback:${fallbackBounds.minX}:${fallbackBounds.maxX}:${fallbackBounds.minY}:${fallbackBounds.maxY}`;
+      } else {
+        layer.outlineFallbackForKey = null;
+      }
+    }
+    if (hasRendererLayerId(layer.layerId) && layer.rendererDefinitionKey === definitionKey) {
+      return Number(layer.layerId);
+    }
+    if (!this.removeCompositeRendererLayer(layer)) return null;
+    let createdLayerId = null;
+    try {
+      let layerId;
+      const ids = new Uint32Array(sourceRendererIds);
+      if (effectiveOutlineSource.type === "outline") {
+        const outline = effectiveOutlineSource.outline;
+        const offset = normalizeLayerOffset(outline.offset);
+        if (typeof this.wasmProcessor.add_composite_layer_with_outline_content !== "function") {
+          throw new Error("Composite outline rendering requires an updated WASM module.");
+        }
+        try {
+          layerId = this.wasmProcessor.add_composite_layer_with_outline_content(
+            ids,
+            layer.visibleBitset,
+            Boolean(layer.inverted),
+            outline.layerId,
+            outline.sourceContent,
+            offset.x,
+            offset.y,
+          );
+          layer.outlineFallbackForKey = null;
+        } catch (outlineError) {
+          if (isFatalWasmRuntimeError(outlineError)) throw outlineError;
+          if (!effectiveOutlineSource.allowBoundsFallback) throw outlineError;
+          const fallbackBounds = this.getCompositeBoundsFallback(layer);
+          if (!fallbackBounds) throw outlineError;
+          layerId = this.wasmProcessor.add_composite_layer_with_bounds(
+            ids,
+            layer.visibleBitset,
+            Boolean(layer.inverted),
+            fallbackBounds.minX,
+            fallbackBounds.maxX,
+            fallbackBounds.minY,
+            fallbackBounds.maxY,
+          );
+          layer.outlineFallbackForKey = primaryDefinitionKey;
+          definitionKey = `${primaryDefinitionKey}|auto-fallback:${fallbackBounds.minX}:${fallbackBounds.maxX}:${fallbackBounds.minY}:${fallbackBounds.maxY}`;
+          if (layer.outlineFallbackWarningKey !== primaryDefinitionKey) {
+            layer.outlineFallbackWarningKey = primaryDefinitionKey;
+            this.addDiagnostic(
+              "warning",
+              `Composite outline fallback: ${layer.name}`,
+              `${getErrorMessage(outlineError)}; using Bounds instead.`,
+            );
+          }
+        }
+      } else {
+        const bounds = effectiveOutlineSource.bounds;
+        layerId = this.wasmProcessor.add_composite_layer_with_bounds(
+          ids,
+          layer.visibleBitset,
+          Boolean(layer.inverted),
+          bounds.minX,
+          bounds.maxX,
+          bounds.minY,
+          bounds.maxY,
+        );
+      }
+      createdLayerId = Number(layerId);
+      const rendererBounds = this.wasmProcessor.get_layer_boundary(createdLayerId);
+      layer.layerId = createdLayerId;
+      layer.rendererDefinitionKey = definitionKey;
+      layer.bounds = {
+        minX: rendererBounds.min_x,
+        maxX: rendererBounds.max_x,
+        minY: rendererBounds.min_y,
+        maxY: rendererBounds.max_y,
+      };
+      this.clearCompositeLayerError(layer);
+      return layer.layerId;
+    } catch (error) {
+      layer.layerId = null;
+      layer.rendererDefinitionKey = null;
+      let cleanupError = null;
+      if (hasRendererLayerId(createdLayerId) && !isFatalWasmRuntimeError(error)) {
+        try {
+          this.wasmProcessor.remove_layer(createdLayerId);
+        } catch (nextError) {
+          if (!/Invalid layer_id/i.test(getErrorMessage(nextError))) {
+            cleanupError = nextError;
+          }
+        }
+      }
+      if (cleanupError) {
+        this.scheduleAuthoritativeRendererRecovery(
+          layer,
+          cleanupError,
+          `failed composite ${layer.name} cleanup`,
+        );
+      } else if (!this.scheduleCompositeFatalRecovery(layer, error, `composite ${layer.name}`)) {
+        this.setCompositeLayerError(layer, getErrorMessage(error));
+      }
+      return null;
+    }
+  }
+
+  removeCompositeRendererLayer(layer) {
+    if (!isCompositeLayer(layer)) return true;
+    const rawLayerId = layer.layerId;
+    const layerId = Number(rawLayerId);
+    let removed = true;
+    if (this.wasmProcessor && hasRendererLayerId(rawLayerId)) {
+      try {
+        this.wasmProcessor.remove_layer(layerId);
+      } catch (error) {
+        const message = getErrorMessage(error);
+        if (/Invalid layer_id/i.test(message)) {
+          // A source-side renderer cascade may already have removed it.
+        } else {
+          removed = false;
+          this.scheduleAuthoritativeRendererRecovery(
+            layer,
+            error,
+            `composite ${layer.name} removal`,
+          );
+        }
+      }
+    }
+    layer.layerId = null;
+    layer.rendererDefinitionKey = null;
+    return removed;
+  }
+
+  invalidateCompositeRendererDefinitions() {
+    for (const layer of this.layers) {
+      if (isCompositeLayer(layer) && !this.removeCompositeRendererLayer(layer)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  invalidateBoundsCompositeRendererDefinitions(changedGerberIds = null) {
+    for (const layer of this.layers) {
+      if (!isCompositeLayer(layer) || !hasRendererLayerId(layer.layerId)) continue;
+      const outlineSource = this.getCompositeOutlineSource(layer);
+      const usesBounds =
+        outlineSource?.type === "bounds" ||
+        String(layer.rendererDefinitionKey ?? "").includes("|auto-fallback:");
+      if (!usesBounds) continue;
+      if (
+        changedGerberIds &&
+        [...changedGerberIds].every((sourceId) => layer.sourceIds.includes(sourceId))
+      ) {
+        // Source bounds participate regardless of source visibility.
+        continue;
+      }
+      if (!this.removeCompositeRendererLayer(layer)) return false;
+    }
+    return true;
+  }
+
+  invalidateCompositeDefinitionsForGerberSetChange(previousAutoOutlineId) {
+    const nextAutoOutlineId = this.findAutomaticBoardOutlineLayer()?.id ?? null;
+    if (
+      this.boardOutlineSelection === BOARD_OUTLINE_AUTO &&
+      previousAutoOutlineId !== nextAutoOutlineId
+    ) {
+      return this.invalidateCompositeRendererDefinitions();
+    }
+    return this.invalidateBoundsCompositeRendererDefinitions();
+  }
+
+  refreshCompositeLayerBounds(layer) {
+    if (!isCompositeLayer(layer) || !hasRendererLayerId(layer.layerId)) {
+      return;
+    }
+    const bounds = this.wasmProcessor.get_layer_boundary(layer.layerId);
+    layer.bounds = {
+      minX: bounds.min_x,
+      maxX: bounds.max_x,
+      minY: bounds.min_y,
+      maxY: bounds.max_y,
+    };
+  }
+
   getInvertedFillSource(layer, selectedLayerIds) {
     const selectedOutlineLayer =
       this.boardOutlineSelection !== BOARD_OUTLINE_AUTO &&
@@ -4871,7 +6221,7 @@ export class GerberViewer {
         key: `outline:${outlineLayer.id}:${outlineLayer.layerId}:${outlineOffset.x}:${outlineOffset.y}`,
         outlineLayer,
         outlineOffset,
-        bounds: getLayerRenderBounds(outlineLayer),
+        bounds: getLayerRawBounds(outlineLayer),
       };
     }
 
@@ -4935,12 +6285,7 @@ export class GerberViewer {
   }
 
   hasInvertedLayerCache(layer) {
-    const rawInvertedLayerId = layer?.invertedLayerId;
-    return (
-      rawInvertedLayerId !== undefined &&
-      rawInvertedLayerId !== null &&
-      Number.isFinite(Number(rawInvertedLayerId))
-    );
+    return hasRendererLayerId(layer?.invertedLayerId);
   }
 
   getInvertedFallbackSourceKey(sourceKey, fallbackSource) {
@@ -4989,6 +6334,9 @@ export class GerberViewer {
         );
       } finally {
         this.pendingFatalWasmRecovery = false;
+        this.renderLayerList();
+        this.updateUiState();
+        this.requestRender();
       }
     });
   }
@@ -5036,7 +6384,7 @@ export class GerberViewer {
       return layer.layerId;
     }
 
-    this.removeInvertedLayerCache(layer);
+    if (!this.removeInvertedLayerCache(layer)) return null;
     try {
       const invertedLayerId = this.addInvertedLayerToProcessor(
         layer,
@@ -5053,7 +6401,7 @@ export class GerberViewer {
       if (isFatalWasmRuntimeError(error)) {
         this.recoverAfterFatalInvertedLayerError(layer, error);
         layer.renderBounds = null;
-        return layer.layerId;
+        return null;
       }
       const message = getErrorMessage(error);
       if (
@@ -5087,7 +6435,7 @@ export class GerberViewer {
             if (isFatalWasmRuntimeError(fallbackError)) {
               this.recoverAfterFatalInvertedLayerError(layer, fallbackError);
               layer.renderBounds = null;
-              return layer.layerId;
+              return null;
             }
             this.reportInvertedLayerWarningOnce(
               layer,
@@ -5120,8 +6468,24 @@ export class GerberViewer {
     ) {
       try {
         this.wasmProcessor.remove_layer(invertedLayerId);
+        for (const composite of this.layers) {
+          if (
+            isCompositeLayer(composite) &&
+            composite.sourceIds.includes(layer.id)
+          ) {
+            composite.layerId = null;
+            composite.rendererDefinitionKey = null;
+          }
+        }
       } catch (error) {
-        console.warn("[Layer] Failed to remove inverted layer cache:", error);
+        if (!/Invalid layer_id/i.test(getErrorMessage(error))) {
+          this.scheduleAuthoritativeRendererRecovery(
+            layer,
+            error,
+            `inverted layer ${layer.name} cache removal`,
+          );
+          return false;
+        }
       }
     }
 
@@ -5131,16 +6495,25 @@ export class GerberViewer {
       layer.invertedErrorKey = null;
       layer.renderBounds = null;
     }
+    return true;
   }
 
   clearAllInvertedLayerCaches() {
     for (const layer of this.layers) {
-      this.removeInvertedLayerCache(layer);
+      if (isCompositeLayer(layer)) continue;
+      if (!this.removeInvertedLayerCache(layer)) return false;
     }
+    return true;
   }
 
   getRenderLayerPayload() {
-    const selectedLayerIds = this.getSelectedLayerIds();
+    const processor = this.wasmProcessor;
+    const rendererChangedOrRecovering = () =>
+      processor !== this.wasmProcessor ||
+      this.pendingFatalWasmRecovery ||
+      this.isRecoveringWasmProcessor ||
+      this.isWebGlContextLost;
+    const selectedLayerIds = this.getCompositeDependencyLayerIds();
     const activeLayerIds = [];
     const colorData = [];
     const blendModes = [];
@@ -5150,15 +6523,34 @@ export class GerberViewer {
       ? [248 / 255, 250 / 255, 252 / 255]
       : [2 / 255, 6 / 255, 23 / 255];
 
+    const effectiveGerberRendererIds = new Map();
+    for (const layer of this.layers) {
+      if (isGerberLayer(layer) && selectedLayerIds.has(layer.id)) {
+        const rendererId = this.getInvertedRenderLayerId(
+          layer,
+          selectedLayerIds,
+        );
+        if (rendererChangedOrRecovering()) return null;
+        effectiveGerberRendererIds.set(
+          layer.id,
+          rendererId,
+        );
+      }
+    }
     const gerberLayers = this.layers.filter(
-      (layer) => !isDrillLayer(layer) && selectedLayerIds.has(layer.id),
+      (layer) => !isDrillLayer(layer) && layer.visible,
     );
     const orderedGerberLayers = isStack
       ? [...gerberLayers].reverse()
       : gerberLayers;
     const drillLayerAlpha = 1;
-    orderedGerberLayers.forEach((layer) => {
-      activeLayerIds.push(this.getInvertedRenderLayerId(layer, selectedLayerIds));
+    for (const layer of orderedGerberLayers) {
+      const rendererLayerId = isCompositeLayer(layer)
+        ? this.ensureCompositeRendererLayer(layer, selectedLayerIds)
+        : effectiveGerberRendererIds.get(layer.id);
+      if (rendererChangedOrRecovering()) return null;
+      if (!hasRendererLayerId(rendererLayerId)) continue;
+      activeLayerIds.push(rendererLayerId);
       colorData.push(
         layer.color[0],
         layer.color[1],
@@ -5166,7 +6558,7 @@ export class GerberViewer {
         this.resolveLayerAlpha(layer, defaultLayerAlpha),
       );
       blendModes.push(isStack ? 1 : 0);
-    });
+    }
 
     this.layers.forEach((layer) => {
       if (isDrillLayer(layer) && layer.visible && this.shouldRenderDrillOutline(layer)) {
@@ -5300,6 +6692,7 @@ export class GerberViewer {
 
   handleWheel(e) {
     e.preventDefault();
+    if (this.isCanvasInteractionBlocked()) return;
 
     const zoomChange = Math.exp(-e.deltaY * this.getWheelZoomSensitivity(e));
     if (this.shouldRenderViewportRealtime()) {
@@ -5451,7 +6844,43 @@ export class GerberViewer {
     );
   }
 
+  isCanvasInteractionBlocked() {
+    return (
+      this.isLoadingLayers ||
+      this.isWebGlContextLost ||
+      this.isRestoringWebGlContext ||
+      this.isRecoveringWasmProcessor ||
+      this.pendingFatalWasmRecovery
+    );
+  }
+
+  resetCanvasGestureState() {
+    this.isPanning = false;
+    this.pointerGestureDidPan = false;
+    this.mouseGestureRendererGeneration = null;
+    this.lastMousePos = { x: 0, y: 0 };
+    this.mouseDownPos = { x: 0, y: 0 };
+
+    this.isTouching = false;
+    this.touches = [];
+    this.initialPinchDistance = null;
+    this.lastPinchDistance = null;
+    this.lastTouchCenter = { x: 0, y: 0 };
+    this.touchGestureRendererGeneration = null;
+    this.resetTouchTapTracking();
+    this.resetRulerTouch();
+    this.cancelLazyViewportRender();
+    this.syncRenderingModeControls();
+  }
+
+  invalidateRendererInteractionState() {
+    this.rendererInteractionGeneration += 1;
+    this.resetCanvasGestureState();
+    this.cancelLayerReorderGesture();
+  }
+
   handleMouseDown(e) {
+    if (this.isCanvasInteractionBlocked()) return;
     if (this.isRulerActive) {
       if (e.button !== 0) return;
       e.preventDefault();
@@ -5464,6 +6893,7 @@ export class GerberViewer {
       return;
     }
     this.isPanning = true;
+    this.mouseGestureRendererGeneration = this.rendererInteractionGeneration;
     this.pointerGestureDidPan = false;
     this.lastMousePos.x = e.clientX;
     this.lastMousePos.y = e.clientY;
@@ -5477,6 +6907,10 @@ export class GerberViewer {
 
   handleMouseMove(e) {
     this.updateCursorReadout(e.clientX, e.clientY);
+    if (this.isCanvasInteractionBlocked()) return;
+    if (this.compositeSelection && !this.isPanning) {
+      this.scheduleCompositeHover(e.clientX, e.clientY);
+    }
 
     if (this.isRulerActive) {
       if (this.rulerStartPoint) {
@@ -5487,6 +6921,13 @@ export class GerberViewer {
     }
 
     if (!this.isPanning) return;
+    if (
+      this.mouseGestureRendererGeneration !==
+      this.rendererInteractionGeneration
+    ) {
+      this.resetCanvasGestureState();
+      return;
+    }
 
     const totalDeltaX = e.clientX - this.mouseDownPos.x;
     const totalDeltaY = e.clientY - this.mouseDownPos.y;
@@ -5603,7 +7044,17 @@ export class GerberViewer {
   handleMouseUp(e) {
     if (!this.isPanning) return;
 
+    if (
+      this.isCanvasInteractionBlocked() ||
+      this.mouseGestureRendererGeneration !==
+        this.rendererInteractionGeneration
+    ) {
+      this.resetCanvasGestureState();
+      return;
+    }
+
     this.isPanning = false;
+    this.mouseGestureRendererGeneration = null;
 
     // Reset transform
     this.clearViewportCssTransform();
@@ -5621,15 +7072,20 @@ export class GerberViewer {
     if (
       !this.pointerGestureDidPan &&
       e.type === "mouseup" &&
+      e.button === 0 &&
       Math.hypot(totalDeltaX, totalDeltaY) <=
         this.getViewportRelativeDistance(POINTER_TAP_MAX_MOVEMENT_VIEWPORT_RATIO)
     ) {
       this.pointerGestureDidPan = false;
       this.cancelLazyViewportRender();
       this.syncRenderingModeControls();
-      this.selectFeatureAtCanvasPoint(e.clientX, e.clientY, {
-        inputType: "mouse",
-      });
+      if (this.compositeSelection) {
+        this.toggleCompositeAreaAtClient(e.clientX, e.clientY);
+      } else {
+        this.selectFeatureAtCanvasPoint(e.clientX, e.clientY, {
+          inputType: "mouse",
+        });
+      }
       return;
     }
 
@@ -5659,14 +7115,37 @@ export class GerberViewer {
 
   selectFeatureAtCanvasPoint(clientX, clientY, { inputType = "mouse" } = {}) {
     const point = this.canvasPointToWorld(clientX, clientY);
-    if (!point || !this.interactionsEnabled || !this.featurePickingAvailable) {
+    if (!point || !this.interactionsEnabled) {
       this.clearSelectedFeature();
       return;
     }
 
     const tolerance = this.getFeatureHitToleranceWorld(clientX, clientY, inputType);
     const shouldCycle = this.shouldCycleFeatureSelection(clientX, clientY, inputType);
-    const hit = this.pickFeatureAcrossProcessors(point, tolerance, shouldCycle);
+    const hit = shouldCycle
+      ? this.pickFeatureAcrossAllSources(
+          point,
+          tolerance,
+          clientX,
+          clientY,
+        )
+      : (
+          this.pickFeatureWithProcessor(
+            this.wasmProcessor,
+            this.getVisibleDrillInteractionLayerIds(),
+            point,
+            tolerance,
+            false,
+          ) ??
+          this.pickCompositeAreaAtCanvasPoint(clientX, clientY) ??
+          this.pickFeatureWithProcessor(
+            this.getFeaturePickingProcessorForGerber(),
+            this.getVisibleGerberInteractionLayerIds(),
+            point,
+            tolerance,
+            false,
+          )
+        );
     this.selectedFeature = hit ? this.attachLayerToSelectedFeature(hit) : null;
     if (this.selectedFeature) {
       this.lastFeaturePick = { x: clientX, y: clientY, inputType };
@@ -5678,61 +7157,137 @@ export class GerberViewer {
     this.requestRender();
   }
 
-  pickFeatureAcrossProcessors(point, tolerance, shouldCycle) {
-    const selectedIsDrill = isDrillLayer(this.selectedFeature?.layer);
-    if (shouldCycle && this.selectedFeature) {
-      const primaryHit = selectedIsDrill
-        ? this.pickFeatureWithProcessor(
-            this.wasmProcessor,
-            this.getVisibleDrillInteractionLayerIds(),
-            point,
-            tolerance,
-            true,
-          )
-        : this.pickFeatureWithProcessor(
-            this.getFeaturePickingProcessorForGerber(),
-            this.getVisibleGerberInteractionLayerIds(),
-            point,
-            tolerance,
-            true,
-          );
-      if (primaryHit && !this.isSelectedFeatureHit(primaryHit)) {
-        return primaryHit;
-      }
-
-      const alternateHit = selectedIsDrill
-        ? this.pickFeatureWithProcessor(
-            this.getFeaturePickingProcessorForGerber(),
-            this.getVisibleGerberInteractionLayerIds(),
-            point,
-            tolerance,
-            false,
-          )
-        : this.pickFeatureWithProcessor(
-            this.wasmProcessor,
-            this.getVisibleDrillInteractionLayerIds(),
-            point,
-            tolerance,
-            false,
-          );
-      return alternateHit ?? primaryHit;
+  pickCompositeAreaAtCanvasPoint(
+    clientX,
+    clientY,
+    { afterClientLayerId = null } = {},
+  ) {
+    const pixel = this.getCompositeCanvasPixel(clientX, clientY);
+    if (
+      !pixel ||
+      typeof this.wasmProcessor?.pick_composite_area !== "function"
+    ) {
+      return null;
     }
 
-    return (
+    let reachedAfterLayer = afterClientLayerId === null;
+    for (const layer of this.layers) {
+      if (!isCompositeLayer(layer) || !layer.visible || layer.error) continue;
+      if (!reachedAfterLayer) {
+        if (layer.id === afterClientLayerId) reachedAfterLayer = true;
+        continue;
+      }
+      try {
+        const layerId = this.ensureCompositeRendererLayer(layer);
+        if (!hasRendererLayerId(layerId)) continue;
+        const coverageCode = Number(
+          this.wasmProcessor.pick_composite_area(
+            layerId,
+            pixel.x,
+            pixel.y,
+            this.getViewScaleX(),
+            this.getViewScaleY(),
+            this.camera.offsetX,
+            this.camera.offsetY,
+          ),
+        );
+        if (Number.isInteger(coverageCode) && coverageCode >= 0) {
+          return {
+            layerId,
+            featureId: coverageCode,
+            coverageCode,
+            featureType: "composite-area",
+          };
+        }
+      } catch (error) {
+        if (
+          this.scheduleCompositeFatalRecovery(
+            layer,
+            error,
+            `composite area pick ${layer.name}`,
+          )
+        ) {
+          return null;
+        }
+        this.addDiagnostic(
+          "warning",
+          `Composite area pick failed: ${layer.name}`,
+          getErrorMessage(error),
+        );
+      }
+    }
+    return null;
+  }
+
+  pickFeatureAcrossAllSources(point, tolerance, clientX, clientY) {
+    const drillIds = this.getVisibleDrillInteractionLayerIds();
+    const gerberProcessor = this.getFeaturePickingProcessorForGerber();
+    const gerberIds = this.getVisibleGerberInteractionLayerIds();
+    const drillFirst = () =>
       this.pickFeatureWithProcessor(
         this.wasmProcessor,
-        this.getVisibleDrillInteractionLayerIds(),
+        drillIds,
         point,
         tolerance,
         false,
-      ) ??
+      );
+    const gerberFirst = () =>
       this.pickFeatureWithProcessor(
-        this.getFeaturePickingProcessorForGerber(),
-        this.getVisibleGerberInteractionLayerIds(),
+        gerberProcessor,
+        gerberIds,
         point,
         tolerance,
         false,
-      )
+      );
+    const compositeFirst = () =>
+      this.pickCompositeAreaAtCanvasPoint(clientX, clientY);
+    const ordinaryNextWithoutWrap = (processor, layerIds, first) => {
+      const next = this.pickFeatureWithProcessor(
+        processor,
+        layerIds,
+        point,
+        tolerance,
+        true,
+      );
+      return next && !this.isSameFeatureHit(next, first) ? next : null;
+    };
+
+    if (isCompositeAreaSelection(this.selectedFeature)) {
+      return (
+        this.pickCompositeAreaAtCanvasPoint(clientX, clientY, {
+          afterClientLayerId: this.selectedFeature.layer.id,
+        }) ??
+        gerberFirst() ??
+        drillFirst() ??
+        compositeFirst()
+      );
+    }
+
+    if (isDrillLayer(this.selectedFeature?.layer)) {
+      const first = drillFirst();
+      return (
+        ordinaryNextWithoutWrap(this.wasmProcessor, drillIds, first) ??
+        compositeFirst() ??
+        gerberFirst() ??
+        first
+      );
+    }
+
+    const first = gerberFirst();
+    return (
+      ordinaryNextWithoutWrap(gerberProcessor, gerberIds, first) ??
+      drillFirst() ??
+      compositeFirst() ??
+      first
+    );
+  }
+
+  isSameFeatureHit(left, right) {
+    return (
+      left !== null &&
+      right !== null &&
+      Number(left?.layerId) === Number(right?.layerId) &&
+      Number(left?.featureId) === Number(right?.featureId)
     );
   }
 
@@ -5791,6 +7346,17 @@ export class GerberViewer {
     this.updateUiState();
     this.renderMeasurements();
     this.requestRender();
+  }
+
+  clearSelectedCompositeAreaForLayer(layer) {
+    if (
+      !isCompositeAreaSelection(this.selectedFeature) ||
+      this.selectedFeature.layer !== layer
+    ) {
+      return false;
+    }
+    this.clearSelectedFeature({ refresh: false });
+    return true;
   }
 
   resetSelectionCycle() {
@@ -5876,7 +7442,7 @@ export class GerberViewer {
     // this.layers follows the layer-list UI order (top-to-bottom). Rust scans
     // ids in reverse, so pass bottom-to-top ids for top-first picking.
     for (const layer of [...this.layers].reverse()) {
-      if (layer.visible && !isDrillLayer(layer)) {
+      if (layer.visible && isGerberLayer(layer)) {
         layerIds.push(layer.layerId);
       }
     }
@@ -5917,6 +7483,7 @@ export class GerberViewer {
   // Touch event handlers
   handleTouchStart(e) {
     e.preventDefault();
+    if (this.isCanvasInteractionBlocked()) return;
 
     if (
       !this.isTouching &&
@@ -5927,6 +7494,7 @@ export class GerberViewer {
     }
 
     this.isTouching = true;
+    this.touchGestureRendererGeneration = this.rendererInteractionGeneration;
     this.touches = Array.from(e.touches);
     this.syncRenderingModeControls();
 
@@ -5977,6 +7545,14 @@ export class GerberViewer {
     e.preventDefault();
 
     if (!this.isTouching) return;
+    if (
+      this.isCanvasInteractionBlocked() ||
+      this.touchGestureRendererGeneration !==
+        this.rendererInteractionGeneration
+    ) {
+      this.resetCanvasGestureState();
+      return;
+    }
 
     this.touches = Array.from(e.touches);
 
@@ -6111,6 +7687,14 @@ export class GerberViewer {
     if (!this.isTouching && this.activeRulerTouchIdentifier === null) {
       return;
     }
+    if (
+      this.isCanvasInteractionBlocked() ||
+      this.touchGestureRendererGeneration !==
+        this.rendererInteractionGeneration
+    ) {
+      this.resetCanvasGestureState();
+      return;
+    }
 
     this.touches = Array.from(e.touches);
 
@@ -6130,6 +7714,7 @@ export class GerberViewer {
 
       if (this.touches.length === 0) {
         this.isTouching = false;
+        this.touchGestureRendererGeneration = null;
         this.syncRenderingModeControls();
       }
 
@@ -6145,6 +7730,7 @@ export class GerberViewer {
       if (this.touches.length === 0) {
         this.resetTouchViewportGesture();
         this.isTouching = false;
+        this.touchGestureRendererGeneration = null;
       } else {
         this.isTouching = true;
         this.resetSelectionCycle();
@@ -6191,6 +7777,7 @@ export class GerberViewer {
       this.resetTouchViewportGesture();
       // All touches ended
       this.isTouching = false;
+      this.touchGestureRendererGeneration = null;
       this.syncRenderingModeControls();
     } else if (this.touches.length === 1) {
       this.cancelTouchTapTracking();
@@ -6295,7 +7882,11 @@ export class GerberViewer {
       x: endedTouch.clientX,
       y: endedTouch.clientY,
     };
-    this.selectFeatureAtCanvasPoint(point.x, point.y, { inputType: "touch" });
+    if (this.compositeSelection) {
+      this.toggleCompositeAreaAtClient(point.x, point.y);
+    } else {
+      this.selectFeatureAtCanvasPoint(point.x, point.y, { inputType: "touch" });
+    }
     return true;
   }
 
@@ -6378,6 +7969,7 @@ export class GerberViewer {
   }
 
   updateLayerColor(layerId, color, alpha = undefined) {
+    if (this.compositeSelection) return;
     const layer = this.layers.find((l) => l.id === layerId);
     if (!layer) return;
 
@@ -6402,7 +7994,1145 @@ export class GerberViewer {
     this.updateUiState();
   }
 
+  createCompositeLayerRecord(result, { visibleBitset = null, temporary = false } = {}) {
+    const sourceIds = [...result.sourceIds];
+    const slotSourceIds = result.slotSourceIds
+      ? [...result.slotSourceIds]
+      : [...sourceIds];
+    const resolvedBitset =
+      visibleBitset ??
+      result.visibleBitset ??
+      (result.presetCommand === "none"
+        ? new Uint8Array(getCompositeBitsetByteLength(slotSourceIds.length))
+        : createCompositePresetBitset(
+            slotSourceIds.length,
+            result.presetCommand ?? "union",
+          ));
+    return {
+      id: temporary ? "composite-create-draft" : null,
+      layerId: null,
+      kind: COMPOSITE_LAYER_KIND,
+      name: result.name,
+      visible: true,
+      color: null,
+      alpha: null,
+      inverted: false,
+      sourceIds,
+      slotSourceIds,
+      visibleBitset: resolvedBitset,
+      rendererDefinitionKey: null,
+      bounds: null,
+      renderBounds: null,
+      error: null,
+    };
+  }
+
+  async createCompositeLayer(dialogState = null) {
+    if (this.isRendererBusy()) return;
+    const defaultName =
+      dialogState?.defaultName ?? `Composite ${this.nextCompositeNumber}`;
+    const result = await this.compositeLayerDialog.openCreate(
+      defaultName,
+      dialogState,
+    );
+    if (!result || this.isRendererBusy()) {
+      this.focusCreateCompositeButton();
+      return;
+    }
+
+    if (result.enterSelection) {
+      const draftLayer = this.createCompositeLayerRecord(result, {
+        visibleBitset: result.selectionBitset,
+        temporary: true,
+      });
+      if (
+        this.startCompositeSelection(draftLayer, {
+          createDialogState: result.createDialogState,
+        })
+      ) {
+        return;
+      }
+      this.removeCompositeRendererLayer(draftLayer);
+      return this.createCompositeLayer(result.createDialogState);
+    }
+
+    const layer = this.createCompositeLayerRecord(result);
+    this.prepareLayerMetadata(layer);
+    this.layers.unshift(layer);
+    this.nextCompositeNumber += 1;
+    this.ensureCompositeRendererLayer(layer);
+    this.renderLayerList();
+    this.requestRender();
+    this.updateUiState();
+    this.focusLayerActionButton(layer.id);
+  }
+
+  async editCompositeLayer(layer) {
+    if (!isCompositeLayer(layer) || this.isRendererBusy()) return;
+    const previousState = {
+      name: layer.name,
+      sourceIds: [...layer.sourceIds],
+      slotSourceIds: [...layer.slotSourceIds],
+      visibleBitset: layer.visibleBitset,
+      bounds: layer.bounds ? { ...layer.bounds } : null,
+      renderBounds: layer.renderBounds ? { ...layer.renderBounds } : null,
+      error: layer.error,
+      reportedError: layer.reportedError,
+      renderError: layer.renderError,
+      outlineFallbackForKey: layer.outlineFallbackForKey,
+      outlineFallbackWarningKey: layer.outlineFallbackWarningKey,
+    };
+    const result = await this.compositeLayerDialog.openEdit(layer);
+    if (!result || this.isRendererBusy() || !this.layers.includes(layer)) return;
+    try {
+      const previousSlots = [...layer.slotSourceIds];
+      const previousBitset = layer.visibleBitset;
+      // Older test doubles and integrations may omit the explicit flag. Keep
+      // their prior behavior while allowing the dialog to transfer a clean
+      // reorder/name draft without scanning or replacing the bitset.
+      const bitsetDirty = result.bitsetDirty ?? Boolean(result.visibleBitset);
+      const reconciled = result.visibleBitset
+        ? {
+            sourceIds: [...result.sourceIds],
+            slotSourceIds: [...result.slotSourceIds],
+            visibleBitset: bitsetDirty
+              ? result.visibleBitset
+              : previousBitset,
+          }
+        : reconcileCompositeSources(layer, result.sourceIds);
+      const slotsChanged =
+        previousSlots.length !== reconciled.slotSourceIds.length ||
+        previousSlots.some(
+          (sourceId, index) => sourceId !== reconciled.slotSourceIds[index],
+        );
+      layer.name = result.name;
+      layer.sourceIds = reconciled.sourceIds;
+      layer.slotSourceIds = reconciled.slotSourceIds;
+      layer.visibleBitset = reconciled.visibleBitset;
+      if (slotsChanged || bitsetDirty) {
+        this.clearSelectedCompositeAreaForLayer?.(layer);
+      }
+      if (slotsChanged) {
+        if (!this.removeCompositeRendererLayer(layer)) return;
+        if (layer.visible) this.ensureCompositeRendererLayer(layer);
+      } else if (
+        bitsetDirty &&
+        hasRendererLayerId(layer.layerId)
+      ) {
+        this.wasmProcessor.set_composite_visible_bits(
+          layer.layerId,
+          layer.visibleBitset,
+        );
+        this.refreshCompositeLayerBounds(layer);
+      }
+      this.renderLayerList();
+      this.requestRender();
+      this.updateUiState();
+      if (result.enterSelection) {
+        if (!this.startCompositeSelection(layer, { cancelLayerState: previousState })) {
+          this.restoreCompositeLayerState(layer, previousState);
+          this.renderLayerList();
+          this.requestRender();
+          this.updateUiState();
+        }
+      }
+    } catch (error) {
+      if (!this.scheduleCompositeFatalRecovery(layer, error, `composite ${layer.name}`)) {
+        this.removeCompositeRendererLayer(layer);
+        this.setCompositeLayerError(layer, getErrorMessage(error));
+        this.showError(getErrorMessage(error));
+      }
+    }
+  }
+
+  async renameLayer(layer) {
+    if (!layer || isCompositeLayer(layer) || this.isRendererBusy()) return;
+    const name = await this.renameLayerDialog.open(layer.name);
+    if (!name || this.isRendererBusy() || !this.layers.includes(layer)) return;
+    const previousAutoOutlineId = isGerberLayer(layer)
+      ? this.findAutomaticBoardOutlineLayer()?.id ?? null
+      : null;
+    layer.name = name;
+    if (
+      isGerberLayer(layer) &&
+      this.boardOutlineSelection === BOARD_OUTLINE_AUTO &&
+      previousAutoOutlineId !== (this.findAutomaticBoardOutlineLayer()?.id ?? null)
+    ) {
+      if (!this.invalidateCompositeRendererDefinitions()) return;
+      if (!this.clearAllInvertedLayerCaches()) return;
+    }
+    this.renderLayerList();
+    this.syncBoardOutlineSelect();
+    this.requestRender();
+  }
+
+  setCompositePresetState(layer, preset) {
+    layer.visibleBitset = createCompositeLayerPresetBitset(layer, preset);
+  }
+
+  applyCompositePreset(layer, preset) {
+    if (!isCompositeLayer(layer) || this.isRendererBusy()) return;
+    this.clearSelectedCompositeAreaForLayer?.(layer);
+    this.setCompositePresetState(layer, preset);
+    if (hasRendererLayerId(layer.layerId)) {
+      try {
+        this.wasmProcessor.set_composite_visible_bits(
+          layer.layerId,
+          layer.visibleBitset,
+        );
+        this.refreshCompositeLayerBounds(layer);
+      } catch (error) {
+        if (!this.scheduleCompositeFatalRecovery(layer, error, `composite ${layer.name}`)) {
+          this.removeCompositeRendererLayer(layer);
+          this.setCompositeLayerError(layer, getErrorMessage(error));
+        }
+      }
+    }
+    this.requestRender();
+    this.renderLayerList();
+    this.updateUiState();
+  }
+
+  startCompositeSelection(
+    layer,
+    { createDialogState = null, cancelLayerState = null } = {},
+  ) {
+    if (!isCompositeLayer(layer) || this.isRendererBusy()) return false;
+    const layerId = this.ensureCompositeRendererLayer(layer);
+    if (!hasRendererLayerId(layerId)) {
+      this.showError(layer.error || "Composite preview is unavailable.");
+      return false;
+    }
+    const rulerWasActive = this.isRulerActive;
+    if (rulerWasActive) {
+      this.isRulerActive = false;
+      this.resetRulerTouch();
+      this.rulerStartPoint = null;
+      this.rulerHoverPoint = null;
+      this.updateRulerControls();
+      this.renderMeasurements();
+    }
+    this.compositeSelection = {
+      layer,
+      // The authoritative layer bitset is immutable while this locked draft
+      // is active, so cancellation can reuse it without a second 2 MiB copy.
+      original: layer.visibleBitset,
+      draft: layer.visibleBitset.slice(),
+      lastCode: null,
+      hoverFrame: null,
+      pendingHoverPixel: null,
+      lastPixelKey: null,
+      previewStateKey: null,
+      changedByteIndices: new Set(),
+      bulkBitsetChanged: false,
+      areaCodes: new Uint32Array(0),
+      areaCodesScanned: false,
+      areaScanError: null,
+      areaScanTimer: null,
+      areaScanKey: null,
+      areaScanNextRow: 0,
+      areaScanCodes: new Uint32Array(0),
+      areaScanInProgress: false,
+      areaScanSessionStarted: false,
+      areaRenderLimit: 200,
+      rulerWasActive,
+      returnFocusLayerId: layer.id,
+      createDialogState,
+      cancelLayerState,
+    };
+    this.createCompositeSelectionBar();
+    this.cancelLazyViewportRender();
+    this.clearSelectedFeature({ refresh: false });
+    this.renderLayerList();
+    this.updateUiState();
+    this.requestRender();
+    requestAnimationFrame(() =>
+      this.compositeSelectionBar
+        ?.querySelector("[data-composite-selection-done]")
+        ?.focus({ preventScroll: true }));
+    return true;
+  }
+
+  createCompositeSelectionBar() {
+    this.compositeSelectionBar?.remove();
+    this.compositeSelectionPresets?.remove();
+    const bar = document.createElement("div");
+    bar.className = "composite-selection-bar";
+    bar.setAttribute("role", "region");
+    bar.setAttribute("aria-label", "Composite visible area selection");
+    const presets = document.createElement("div");
+    presets.className = "composite-selection-presets";
+    presets.setAttribute("role", "toolbar");
+    presets.setAttribute("aria-label", "Visible area presets");
+    for (const [command, label] of [
+      ["union", "Union"],
+      ["intersection", "Intersection"],
+      ["difference", "Difference"],
+      ["none", "None"],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chip-button";
+      button.dataset.compositeSelectionPreset = command;
+      button.textContent = label;
+      button.addEventListener("click", () =>
+        this.applyCompositeSelectionPreset(command));
+      presets.appendChild(button);
+    }
+    const divider = document.createElement("span");
+    divider.className = "composite-selection-divider";
+    divider.setAttribute("aria-hidden", "true");
+    presets.appendChild(divider);
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "chip-button composite-selection-cancel";
+    cancel.dataset.compositeSelectionCancel = "true";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => this.finishCompositeSelection(false));
+    presets.appendChild(cancel);
+    const done = document.createElement("button");
+    done.type = "button";
+    done.className = "chip-button tool-button primary composite-selection-done";
+    done.dataset.compositeSelectionDone = "true";
+    done.textContent = "Done";
+    done.addEventListener("click", () => this.finishCompositeSelection(true));
+    presets.appendChild(done);
+    bar.appendChild(presets);
+    this.viewerSurface.appendChild(bar);
+    this.compositeSelectionInfo.hidden = false;
+    this.compositeSelectionInfo.textContent = "No area selected";
+    this.compositeSelectionBar = bar;
+    this.compositeSelectionNames = this.compositeSelectionInfo;
+    this.compositeSelectionPresets = presets;
+  }
+
+  applyCompositeSelectionPreset(preset) {
+    const selection = this.compositeSelection;
+    if (!selection || this.isRecoveringWasmProcessor || this.isWebGlContextLost) {
+      return false;
+    }
+    const next = preset === "none"
+      ? new Uint8Array(selection.draft.byteLength)
+      : createCompositeLayerPresetBitset(selection.layer, preset);
+    try {
+      this.wasmProcessor.set_composite_visible_bits(
+        selection.layer.layerId,
+        next,
+      );
+    } catch (error) {
+      if (
+        this.scheduleCompositeFatalRecovery(
+          selection.layer,
+          error,
+          `composite selection ${selection.layer.name}`,
+        )
+      ) {
+        return false;
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite preset update failed",
+        getErrorMessage(error),
+      );
+      this.requestRender();
+      return false;
+    }
+
+    selection.draft = next;
+    selection.changedByteIndices.clear();
+    selection.bulkBitsetChanged = !compositeBitsetsEqual(
+      selection.original,
+      next,
+    );
+    this.syncCompositeAreaCheckboxes();
+    try {
+      this.refreshCompositeLayerBounds(selection.layer);
+    } catch (error) {
+      if (
+        this.scheduleCompositeFatalRecovery(
+          selection.layer,
+          error,
+          `composite selection ${selection.layer.name}`,
+        )
+      ) {
+        return false;
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite bounds update failed",
+        getErrorMessage(error),
+      );
+    }
+    this.requestRender();
+    return true;
+  }
+
+  handleCompositeSelectionKeyDown(event) {
+    if (!this.compositeSelection) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.finishCompositeSelection(false);
+    } else if (event.key === "Enter") {
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          ".composite-selection-presets button, .composite-area-item, .composite-area-more",
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      this.finishCompositeSelection(true);
+    }
+  }
+
+  finishCompositeSelection(commit, { skipRenderer = false } = {}) {
+    const selection = this.compositeSelection;
+    if (!selection) return;
+    if (selection.hoverFrame !== null) cancelAnimationFrame(selection.hoverFrame);
+    this.cancelCompositeAreaScan(selection);
+    let rebuildRendererLayer = false;
+    let fatalCleanupError = null;
+    try {
+      if (commit) {
+        selection.layer.visibleBitset = selection.draft;
+      } else if (
+        !selection.createDialogState &&
+        !skipRenderer &&
+        hasRendererLayerId(selection.layer.layerId) &&
+        (selection.bulkBitsetChanged || selection.changedByteIndices.size > 0)
+      ) {
+        if (!selection.bulkBitsetChanged && selection.changedByteIndices.size === 1) {
+          const [byteIndex] = selection.changedByteIndices;
+          this.wasmProcessor.set_composite_visible_byte(
+            selection.layer.layerId,
+            byteIndex,
+            selection.original[byteIndex],
+          );
+        } else {
+          // Each byte update runs a fullscreen lookup pass. Once more than one
+          // byte differs, one bulk upload and one lookup is cheaper than N
+          // output passes, even for the largest 24-source LUT.
+          this.wasmProcessor.set_composite_visible_bits(
+            selection.layer.layerId,
+            selection.original,
+          );
+        }
+        this.refreshCompositeLayerBounds(selection.layer);
+      }
+      if (!skipRenderer) this.wasmProcessor.end_composite_selection?.();
+    } catch (error) {
+      if (isFatalWasmRuntimeError(error)) {
+        fatalCleanupError = error;
+      } else {
+        rebuildRendererLayer = true;
+        try {
+          this.wasmProcessor.end_composite_selection?.();
+        } catch (_cleanupError) {
+          // Rebuilding the renderer layer below also clears selection ownership.
+        }
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite selection cleanup failed",
+        getErrorMessage(error),
+      );
+    }
+    this.compositeSelection = null;
+    if (selection.rulerWasActive) {
+      this.isRulerActive = true;
+      this.updateRulerControls();
+    }
+    if (fatalCleanupError) {
+      selection.layer.layerId = null;
+      selection.layer.rendererDefinitionKey = null;
+      this.scheduleCompositeFatalRecovery(
+        selection.layer,
+        fatalCleanupError,
+        `composite selection ${selection.layer.name}`,
+      );
+    } else if (rebuildRendererLayer) {
+      const removed = this.removeCompositeRendererLayer(selection.layer);
+      if (removed && selection.layer.visible) {
+        this.ensureCompositeRendererLayer(selection.layer);
+      }
+    } else if (
+      !skipRenderer &&
+      !selection.layer.visible &&
+      hasRendererLayerId(selection.layer.layerId)
+    ) {
+      this.releaseHiddenCompositeRendererCache(selection.layer);
+    }
+    let resumeCreateState = null;
+    if (selection.createDialogState) {
+      resumeCreateState = commit
+        ? {
+            ...selection.createDialogState,
+            name: selection.layer.name,
+            sourceIds: [...selection.layer.sourceIds],
+            slotSourceIds: [...selection.layer.slotSourceIds],
+            visibleBitset: selection.draft,
+            presetCommand: "custom",
+            requiresAreaMode: false,
+          }
+        : selection.createDialogState;
+      if (!skipRenderer) this.removeCompositeRendererLayer(selection.layer);
+    } else if (!commit && selection.cancelLayerState) {
+      this.restoreCompositeLayerState(selection.layer, selection.cancelLayerState, {
+        skipRenderer,
+      });
+    }
+    this.compositeSelectionBar?.remove();
+    this.compositeSelectionBar = null;
+    if (this.compositeSelectionInfo) {
+      this.compositeSelectionInfo.hidden = true;
+      this.compositeSelectionInfo.textContent = "";
+    }
+    this.compositeSelectionNames = null;
+    this.compositeSelectionPresets?.remove();
+    this.compositeSelectionPresets = null;
+    this.renderLayerList();
+    this.updateUiState();
+    this.requestRender();
+    if (resumeCreateState && !skipRenderer) {
+      void this.createCompositeLayer(resumeCreateState);
+    } else {
+      this.focusLayerActionButton(selection.returnFocusLayerId);
+    }
+  }
+
+  restoreCompositeLayerState(layer, state, { skipRenderer = false } = {}) {
+    if (!isCompositeLayer(layer) || !state) return false;
+    const rendererRemoved = skipRenderer
+      ? true
+      : this.removeCompositeRendererLayer(layer);
+    layer.name = state.name;
+    layer.sourceIds = [...state.sourceIds];
+    layer.slotSourceIds = [...state.slotSourceIds];
+    layer.visibleBitset = state.visibleBitset;
+    layer.bounds = state.bounds ? { ...state.bounds } : null;
+    layer.renderBounds = state.renderBounds ? { ...state.renderBounds } : null;
+    layer.error = state.error ?? null;
+    layer.reportedError = state.reportedError ?? null;
+    layer.renderError = state.renderError ?? null;
+    layer.outlineFallbackForKey = state.outlineFallbackForKey ?? null;
+    layer.outlineFallbackWarningKey = state.outlineFallbackWarningKey ?? null;
+    layer.layerId = null;
+    layer.rendererDefinitionKey = null;
+    this.clearSelectedCompositeAreaForLayer?.(layer);
+    if (!skipRenderer && rendererRemoved && layer.visible) {
+      this.ensureCompositeRendererLayer(layer);
+    }
+    return rendererRemoved;
+  }
+
+  getCompositeCanvasPixel(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      clientX < rect.left ||
+      clientX >= rect.right ||
+      clientY < rect.top ||
+      clientY >= rect.bottom
+    ) {
+      return null;
+    }
+    return {
+      x: Math.min(
+        this.canvas.width - 1,
+        Math.max(0, Math.floor(((clientX - rect.left) / rect.width) * this.canvas.width)),
+      ),
+      y: Math.min(
+        this.canvas.height - 1,
+        Math.max(
+          0,
+          this.canvas.height -
+            1 -
+            Math.floor(((clientY - rect.top) / rect.height) * this.canvas.height),
+        ),
+      ),
+    };
+  }
+
+  readCompositeCodeAtClient(clientX, clientY) {
+    const selection = this.compositeSelection;
+    const pixel = this.getCompositeCanvasPixel(clientX, clientY);
+    if (!selection || !pixel) return -1;
+    try {
+      if (!this.ensureCompositeSelectionPreviewCurrent()) return -1;
+      if (this.compositeSelection !== selection) return -1;
+      return Number(
+        this.wasmProcessor.pick_composite_code(
+          selection.layer.layerId,
+          pixel.x,
+          pixel.y,
+        ),
+      );
+    } catch (error) {
+      if (
+        this.scheduleCompositeFatalRecovery(
+          selection.layer,
+          error,
+          `composite selection ${selection.layer.name}`,
+        )
+      ) {
+        return -1;
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite area read failed",
+        getErrorMessage(error),
+      );
+      return -1;
+    }
+  }
+
+  renderCompositeSelectionPreview() {
+    const selection = this.compositeSelection;
+    if (!selection) return false;
+    try {
+      const layerId = this.ensureCompositeRendererLayer(selection.layer);
+      if (!hasRendererLayerId(layerId)) {
+        throw new Error(selection.layer.error || "Composite preview is unavailable");
+      }
+      this.wasmProcessor.render_composite_selection(
+        layerId,
+        this.getViewScaleX(),
+        this.getViewScaleY(),
+        this.camera.offsetX,
+        this.camera.offsetY,
+      );
+      const nextPreviewStateKey = this.getCompositeSelectionPreviewStateKey(
+        selection.layer,
+      );
+      const shouldScanAreas =
+        !selection.areaCodesScanned ||
+        selection.previewStateKey !== nextPreviewStateKey;
+      selection.previewStateKey = nextPreviewStateKey;
+      if (
+        shouldScanAreas &&
+        selection.areaScanKey !== nextPreviewStateKey
+      ) {
+        this.scheduleCompositeAreaScan(selection);
+      }
+      return true;
+    } catch (error) {
+      this.handleCompositeSelectionPreviewFailure(selection, error);
+      return false;
+    }
+  }
+
+  handleCompositeSelectionPreviewFailure(selection, error) {
+    if (!selection || this.compositeSelection !== selection) return;
+    const layer = selection.layer;
+    const message = getErrorMessage(error);
+    if (
+      this.scheduleCompositeFatalRecovery(
+        layer,
+        error,
+        `composite selection ${layer.name}`,
+      )
+    ) {
+      return;
+    }
+    this.finishCompositeSelection(false);
+    this.removeCompositeRendererLayer(layer);
+    this.setCompositeLayerError(layer, message);
+    this.showError(`Composite preview failed: ${message}`);
+    this.renderLayerList();
+    this.updateUiState();
+    this.requestRender();
+  }
+
+  scheduleCompositeAreaScan(selection) {
+    if (!selection || this.compositeSelection !== selection) return;
+    this.cancelCompositeAreaScan(selection);
+    selection.areaScanKey = selection.previewStateKey;
+    selection.areaScanNextRow = 0;
+    selection.areaScanCodes = new Uint32Array(0);
+    selection.areaScanInProgress = true;
+    selection.areaScanError = null;
+    if (!selection.areaCodesScanned) this.renderCompositeAreaList();
+    selection.areaScanTimer = setTimeout(() => {
+      selection.areaScanTimer = null;
+      this.scanCompositeSelectionAreas(selection);
+    }, selection.areaCodesScanned ? 140 : 0);
+  }
+
+  scanCompositeSelectionAreas(selection) {
+    if (!selection || this.compositeSelection !== selection) return false;
+    if (
+      selection.areaScanKey !== selection.previewStateKey ||
+      selection.previewStateKey !==
+        this.getCompositeSelectionPreviewStateKey(selection.layer)
+    ) {
+      this.cancelCompositeAreaScan(selection, { refresh: true });
+      return false;
+    }
+    try {
+      const scanHeight = this.canvas.height;
+      if (scanHeight <= 0) {
+        selection.areaCodesScanned = true;
+        selection.areaScanInProgress = false;
+        selection.areaScanError = null;
+        this.renderCompositeAreaList();
+        return true;
+      }
+      const supportsBands =
+        typeof this.wasmProcessor?.get_composite_area_codes_band === "function";
+      const supportsScanSession =
+        typeof this.wasmProcessor?.begin_composite_area_scan === "function" &&
+        typeof this.wasmProcessor?.scan_composite_area_band === "function" &&
+        typeof this.wasmProcessor?.finish_composite_area_scan === "function";
+      if (
+        !supportsScanSession &&
+        !supportsBands &&
+        typeof this.wasmProcessor?.get_composite_area_codes !== "function"
+      ) {
+        throw new TypeError("Composite area scan API is unavailable");
+      }
+      const bandRows = Math.min(128, scanHeight - selection.areaScanNextRow);
+      if (supportsScanSession && !selection.areaScanSessionStarted) {
+        this.wasmProcessor.begin_composite_area_scan(selection.layer.layerId);
+        selection.areaScanSessionStarted = true;
+      }
+      const discovered = supportsScanSession
+        ? (this.wasmProcessor.scan_composite_area_band(
+            selection.layer.layerId,
+            selection.areaScanNextRow,
+            bandRows,
+          ), null)
+        : supportsBands
+          ? this.wasmProcessor.get_composite_area_codes_band(
+            selection.layer.layerId,
+            selection.areaScanNextRow,
+            bandRows,
+          )
+          : this.wasmProcessor.get_composite_area_codes(
+              selection.layer.layerId,
+            );
+      if (discovered !== null && !(discovered instanceof Uint32Array)) {
+        throw new TypeError("Composite area scan did not return a Uint32Array");
+      }
+      if (discovered !== null) {
+        selection.areaScanCodes = mergeCompositeAreaCodes(
+          selection.areaScanCodes,
+          discovered,
+        );
+      }
+      selection.areaScanNextRow = supportsScanSession || supportsBands
+        ? selection.areaScanNextRow + bandRows
+        : scanHeight;
+      if (selection.areaScanNextRow < scanHeight) {
+        selection.areaScanTimer = setTimeout(() => {
+          selection.areaScanTimer = null;
+          this.scanCompositeSelectionAreas(selection);
+        }, 0);
+        return true;
+      }
+
+      const completedCodes = supportsScanSession
+        ? this.wasmProcessor.finish_composite_area_scan(
+            selection.layer.layerId,
+          )
+        : selection.areaScanCodes;
+      selection.areaScanSessionStarted = false;
+      if (!(completedCodes instanceof Uint32Array)) {
+        throw new TypeError("Composite area scan did not return a Uint32Array");
+      }
+      // The list describes the current preview viewport. Replace it
+      // atomically so pan/zoom does not retain stale rows (or grow a
+      // session-long union of every viewport the user has visited).
+      selection.areaCodes = completedCodes;
+      selection.areaScanCodes = new Uint32Array(0);
+      selection.areaCodesScanned = true;
+      selection.areaScanInProgress = false;
+      selection.areaScanError = null;
+      this.renderCompositeAreaList();
+      return true;
+    } catch (error) {
+      if (
+        this.scheduleCompositeFatalRecovery(
+          selection.layer,
+          error,
+          `composite area list ${selection.layer.name}`,
+        )
+      ) {
+        return false;
+      }
+      selection.areaCodesScanned = true;
+      selection.areaScanInProgress = false;
+      this.cancelCompositeAreaScanSession(selection);
+      selection.areaScanCodes = new Uint32Array(0);
+      selection.areaScanError = getErrorMessage(error);
+      this.addDiagnostic(
+        "warning",
+        "Composite area list failed",
+        selection.areaScanError,
+      );
+      this.renderCompositeAreaList();
+      return false;
+    }
+  }
+
+  cancelCompositeAreaScan(selection, { refresh = false } = {}) {
+    if (!selection) return;
+    if (selection.areaScanTimer !== null) {
+      clearTimeout(selection.areaScanTimer);
+    }
+    selection.areaScanTimer = null;
+    this.cancelCompositeAreaScanSession(selection);
+    selection.areaScanKey = null;
+    selection.areaScanNextRow = 0;
+    selection.areaScanCodes = new Uint32Array(0);
+    selection.areaScanInProgress = false;
+    if (refresh && this.compositeSelection === selection) {
+      this.renderCompositeAreaList();
+    }
+  }
+
+  cancelCompositeAreaScanSession(selection) {
+    if (!selection?.areaScanSessionStarted) return;
+    selection.areaScanSessionStarted = false;
+    try {
+      this.wasmProcessor?.cancel_composite_area_scan?.(
+        selection.layer.layerId,
+      );
+    } catch (_error) {
+      // Context loss or renderer recovery drops the scan state with the
+      // processor. The JS accumulator is cleared by the caller either way.
+    }
+  }
+
+  getCompositeSelectionPreviewStateKey(layer) {
+    return [
+      layer.layerId,
+      layer.rendererDefinitionKey,
+      this.canvas.width,
+      this.canvas.height,
+      this.getViewScaleX(),
+      this.getViewScaleY(),
+      this.camera.offsetX,
+      this.camera.offsetY,
+    ].join("|");
+  }
+
+  ensureCompositeSelectionPreviewCurrent() {
+    const selection = this.compositeSelection;
+    if (!selection) return false;
+    const expectedKey = this.getCompositeSelectionPreviewStateKey(selection.layer);
+    if (selection.previewStateKey === expectedKey) return true;
+    return this.renderCompositeSelectionPreview();
+  }
+
+  updateCompositeSelectionInfo(code) {
+    const selection = this.compositeSelection;
+    if (!selection || code < 0) {
+      if (this.compositeSelectionNames) this.compositeSelectionNames.textContent = "Outside outline";
+      return;
+    }
+    selection.lastCode = code;
+    this.compositeSelectionNames.textContent = this.getCompositeAreaLabel(code);
+  }
+
+  getCompositeAreaLabel(code) {
+    const selection = this.compositeSelection;
+    if (!selection || code < 0) return "Outside outline";
+    const slots = getCompositeSourceSlots(selection.layer);
+    const sources = selection.layer.sourceIds
+      .map((sourceId, index) => ({
+        source: this.layers.find((layer) => layer.id === sourceId),
+        index,
+      }))
+      .filter(({ source }) => Boolean(source));
+    const nameCounts = new Map();
+    for (const { source } of sources) {
+      const key = source.name.trim().toLowerCase();
+      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+    }
+    const names = sources
+      .filter(({ index }) => (code & 2 ** slots[index]) !== 0)
+      .map(({ source }) => {
+        const key = source.name.trim().toLowerCase();
+        if ((nameCounts.get(key) ?? 0) <= 1) return source.name;
+        const provenance = String(source.sourceName ?? "")
+          .split(/[\\/]/)
+          .filter(Boolean)
+          .at(-1);
+        return `${source.name} — ${provenance || "source"} (${source.id})`;
+      });
+    return names.length
+      ? names.join(", ")
+      : "No source layers";
+  }
+
+  renderCompositeAreaList() {
+    const selection = this.compositeSelection;
+    if (!selection) return;
+    const focusedAreaCode = document.activeElement instanceof HTMLInputElement
+      ? document.activeElement.dataset.compositeAreaCode ?? null
+      : null;
+    const focusedShowMore = document.activeElement instanceof HTMLButtonElement &&
+      document.activeElement.dataset.compositeAreaMore === "true";
+    if (focusedAreaCode !== null) {
+      const focusedIndex = selection.areaCodes.indexOf(Number(focusedAreaCode));
+      if (focusedIndex >= 0) {
+        selection.areaRenderLimit = Math.max(
+          selection.areaRenderLimit,
+          focusedIndex + 1,
+        );
+      }
+    }
+    clearLayerListView(this.layerList);
+    this.layerList.classList.remove("is-locked");
+
+    const heading = document.createElement("li");
+    heading.className = "layer-group-heading composite-area-heading";
+    const title = document.createElement("h3");
+    title.textContent = "Coverage Areas";
+    const count = document.createElement("span");
+    count.textContent = !selection.areaCodesScanned || selection.areaScanInProgress
+      ? selection.areaCodes.length > 0
+        ? `${selection.areaCodes.length} · Scanning…`
+        : "Scanning…"
+      : `${selection.areaCodes.length}`;
+    heading.append(title, count);
+    this.layerList.appendChild(heading);
+
+    if (selection.areaScanError) {
+      const errorItem = document.createElement("li");
+      errorItem.className = "composite-area-empty layer-item-error";
+      errorItem.textContent = "Coverage areas are unavailable.";
+      errorItem.title = selection.areaScanError;
+      this.layerList.appendChild(errorItem);
+      return;
+    }
+    if (!selection.areaCodesScanned ||
+        (selection.areaScanInProgress && selection.areaCodes.length === 0)) {
+      const scanning = document.createElement("li");
+      scanning.className = "composite-area-empty";
+      scanning.textContent = "Scanning coverage combinations in the current view…";
+      this.layerList.appendChild(scanning);
+      return;
+    }
+    if (selection.areaCodes.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "composite-area-empty";
+      empty.textContent = "No coverage areas in the current view.";
+      this.layerList.appendChild(empty);
+      return;
+    }
+
+    const displayedCount = Math.min(
+      selection.areaRenderLimit,
+      selection.areaCodes.length,
+    );
+    for (let index = 0; index < displayedCount; index += 1) {
+      const code = selection.areaCodes[index];
+      const item = document.createElement("li");
+      item.className = "composite-area-item";
+      const label = document.createElement("label");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.compositeAreaCode = String(code);
+      checkbox.checked = getCompositeAreaVisible(selection.draft, code);
+      const areaLabel = this.getCompositeAreaLabel(code);
+      checkbox.setAttribute("aria-label", `${areaLabel} visibility`);
+      checkbox.addEventListener("change", () => {
+        if (!this.setCompositeAreaVisibility(code, checkbox.checked)) {
+          checkbox.checked = getCompositeAreaVisible(selection.draft, code);
+        }
+      });
+      const swatch = document.createElement("span");
+      swatch.className = "composite-area-swatch";
+      swatch.style.background = compositeAreaPseudoColor(code);
+      const name = document.createElement("span");
+      name.className = "composite-area-name";
+      name.textContent = areaLabel;
+      name.title = areaLabel;
+      label.append(checkbox, swatch, name);
+      item.appendChild(label);
+      this.layerList.appendChild(item);
+    }
+
+    if (displayedCount < selection.areaCodes.length) {
+      const moreItem = document.createElement("li");
+      moreItem.className = "composite-area-more";
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "chip-button";
+      more.dataset.compositeAreaMore = "true";
+      more.textContent = `Show more (${displayedCount} / ${selection.areaCodes.length})`;
+      more.addEventListener("click", () => {
+        selection.areaRenderLimit += 200;
+        this.renderCompositeAreaList();
+      });
+      moreItem.appendChild(more);
+      this.layerList.appendChild(moreItem);
+    }
+
+    if (focusedAreaCode !== null) {
+      const sameArea = this.layerList.querySelector(
+        `[data-composite-area-code="${focusedAreaCode}"]`,
+      );
+      const fallbackArea = this.layerList.querySelector(
+        "[data-composite-area-code]",
+      );
+      if (sameArea instanceof HTMLInputElement) {
+        sameArea.focus({ preventScroll: true });
+      } else if (fallbackArea instanceof HTMLInputElement) {
+        fallbackArea.focus({ preventScroll: true });
+      } else {
+        this.compositeSelectionBar
+          ?.querySelector("[data-composite-selection-done]")
+          ?.focus({ preventScroll: true });
+      }
+    } else if (focusedShowMore) {
+      const nextShowMore = this.layerList.querySelector(
+        '[data-composite-area-more="true"]',
+      );
+      if (nextShowMore instanceof HTMLButtonElement) {
+        nextShowMore.focus({ preventScroll: true });
+      } else {
+        const checkboxes = this.layerList.querySelectorAll(
+          "[data-composite-area-code]",
+        );
+        checkboxes.item(checkboxes.length - 1)?.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  syncCompositeAreaCheckboxes(code = null) {
+    const selection = this.compositeSelection;
+    if (!selection) return;
+    const selector = code === null
+      ? "[data-composite-area-code]"
+      : `[data-composite-area-code="${code}"]`;
+    for (const checkbox of this.layerList.querySelectorAll(selector)) {
+      const areaCode = Number(checkbox.dataset.compositeAreaCode);
+      checkbox.checked = getCompositeAreaVisible(selection.draft, areaCode);
+    }
+  }
+
+  setCompositeAreaVisibility(code, nextVisible) {
+    const selection = this.compositeSelection;
+    if (!selection || !Number.isInteger(code) || code < 0) return false;
+    if (getCompositeAreaVisible(selection.draft, code) === nextVisible) {
+      this.updateCompositeSelectionInfo(code);
+      return true;
+    }
+    const oldByte = selection.draft[code >> 3];
+    const byteIndex = setCompositeAreaVisible(selection.draft, code, nextVisible);
+    try {
+      this.wasmProcessor.set_composite_visible_byte(
+        selection.layer.layerId,
+        byteIndex,
+        selection.draft[byteIndex],
+      );
+      if (!selection.bulkBitsetChanged) {
+        if (selection.draft[byteIndex] === selection.original[byteIndex]) {
+          selection.changedByteIndices.delete(byteIndex);
+        } else {
+          selection.changedByteIndices.add(byteIndex);
+        }
+      }
+    } catch (error) {
+      selection.draft[byteIndex] = oldByte;
+      selection.previewStateKey = null;
+      if (
+        this.scheduleCompositeFatalRecovery(
+          selection.layer,
+          error,
+          `composite selection ${selection.layer.name}`,
+        )
+      ) {
+        return false;
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite area update failed",
+        getErrorMessage(error),
+      );
+      this.requestRender();
+      return false;
+    }
+    try {
+      this.refreshCompositeLayerBounds(selection.layer);
+    } catch (error) {
+      if (
+        this.scheduleCompositeFatalRecovery(
+          selection.layer,
+          error,
+          `composite selection ${selection.layer.name}`,
+        )
+      ) {
+        return false;
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite bounds update failed",
+        getErrorMessage(error),
+      );
+    }
+    this.updateCompositeSelectionInfo(code);
+    this.syncCompositeAreaCheckboxes(code);
+    this.requestRender();
+    return true;
+  }
+
+  toggleCompositeAreaAtClient(clientX, clientY) {
+    const selection = this.compositeSelection;
+    if (!selection) return false;
+    const code = this.readCompositeCodeAtClient(clientX, clientY);
+    if (code < 0) return false;
+    const nextVisible = !getCompositeAreaVisible(selection.draft, code);
+    return this.setCompositeAreaVisibility(code, nextVisible);
+  }
+
+  scheduleCompositeHover(clientX, clientY) {
+    const selection = this.compositeSelection;
+    if (!selection || this.isPanning) return;
+    const pixel = this.getCompositeCanvasPixel(clientX, clientY);
+    if (!pixel) return;
+    const key = `${pixel.x}:${pixel.y}`;
+    if (selection.lastPixelKey === key) return;
+    selection.pendingHoverPixel = pixel;
+    if (selection.hoverFrame !== null) return;
+    selection.hoverFrame = requestAnimationFrame(() => {
+      selection.hoverFrame = null;
+      const pendingPixel = selection.pendingHoverPixel;
+      selection.pendingHoverPixel = null;
+      if (!pendingPixel || this.compositeSelection !== selection) return;
+      const pendingKey = `${pendingPixel.x}:${pendingPixel.y}`;
+      try {
+        if (!this.ensureCompositeSelectionPreviewCurrent()) return;
+        if (this.compositeSelection !== selection) return;
+        this.updateCompositeSelectionInfo(
+          this.wasmProcessor.pick_composite_code(
+            selection.layer.layerId,
+            pendingPixel.x,
+            pendingPixel.y,
+          ),
+        );
+        selection.lastPixelKey = pendingKey;
+      } catch (error) {
+        selection.lastPixelKey = null;
+        if (
+          !this.scheduleCompositeFatalRecovery(
+            selection.layer,
+            error,
+            `composite selection ${selection.layer.name}`,
+          )
+        ) {
+          // Preview may be rebuilding after a camera update; the next move retries.
+        }
+      }
+    });
+  }
+
   updateLayerAlphaOverride(layerId, alpha) {
+    if (this.compositeSelection) return;
     const layer = this.layers.find((l) => l.id === layerId);
     if (!layer || isDrillLayer(layer)) return;
 
@@ -6412,6 +9142,7 @@ export class GerberViewer {
   }
 
   updateLayerAlpha(layerId, alpha) {
+    if (this.compositeSelection) return;
     const layer = this.layers.find((l) => l.id === layerId);
     if (!layer || isDrillLayer(layer)) return;
 
@@ -6420,30 +9151,117 @@ export class GerberViewer {
   }
 
   updateLayerInverted(layer, inverted) {
+    if (this.compositeSelection) return;
     if (!layer || isDrillLayer(layer)) return;
 
+    if (isCompositeLayer(layer)) {
+      const previousInverted = Boolean(layer.inverted);
+      const nextInverted = Boolean(inverted);
+      if (previousInverted === nextInverted) return;
+      if (nextInverted && !this.getCompositeOutlineSource(layer)) {
+        const message = "Composite inversion needs a board outline or finite fallback bounds.";
+        this.addDiagnostic("warning", `Cannot invert ${layer.name}`, message);
+        this.showError(message);
+        this.syncLayerContextMenuState(layer);
+        return;
+      }
+      if (hasRendererLayerId(layer.layerId)) {
+        try {
+          this.wasmProcessor.set_composite_inverted(layer.layerId, nextInverted);
+          layer.inverted = nextInverted;
+          this.refreshCompositeLayerBounds(layer);
+        } catch (error) {
+          layer.inverted = previousInverted;
+          if (this.scheduleCompositeFatalRecovery(layer, error, `composite ${layer.name}`)) {
+            return;
+          }
+          let restored = false;
+          try {
+            this.wasmProcessor.set_composite_inverted(
+              layer.layerId,
+              previousInverted,
+            );
+            this.refreshCompositeLayerBounds(layer);
+            restored = true;
+          } catch (rollbackError) {
+            if (
+              this.scheduleCompositeFatalRecovery(
+                layer,
+                rollbackError,
+                `composite ${layer.name} inversion rollback`,
+              )
+            ) {
+              return;
+            }
+            if (this.removeCompositeRendererLayer(layer)) {
+              restored = !layer.visible || hasRendererLayerId(
+                this.ensureCompositeRendererLayer(layer),
+              );
+            }
+          }
+          if (!restored) {
+            this.setCompositeLayerError(layer, getErrorMessage(error));
+          }
+          this.showError(getErrorMessage(error));
+        }
+      } else {
+        layer.inverted = nextInverted;
+      }
+      this.clearSelectedCompositeAreaForLayer?.(layer);
+      this.renderLayerList();
+      this.requestRender();
+      this.updateUiState();
+      return;
+    }
     layer.inverted = Boolean(inverted);
-    this.removeInvertedLayerCache(layer);
+    if (!this.removeInvertedLayerCache(layer)) return;
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
   }
 
   updateGlobalAlpha(alpha) {
+    if (this.compositeSelection) return;
     this.globalAlpha = clampAlpha(alpha);
     refreshLayerListInheritedAlpha(this.layerList);
     this.requestRender();
   }
 
-  deleteLayer(layerId) {
+  async deleteLayer(layerId) {
+    if (this.compositeSelection) return;
     const index = this.layers.findIndex((l) => l.id === layerId);
     if (index !== -1) {
       const layer = this.layers[index];
+      const previousAutoOutlineId = this.findAutomaticBoardOutlineLayer()?.id ?? null;
+      const dependents = isGerberLayer(layer)
+        ? this.layers.filter((candidate) => {
+            if (!isCompositeLayer(candidate)) return false;
+            if (candidate.sourceIds.includes(layer.id)) return true;
+            return this.getCompositeOutlineSource(candidate)?.outline?.id === layer.id;
+          })
+        : [];
+      if (
+        dependents.length > 0 &&
+        !window.confirm(
+          `Delete ${layer.name} and ${dependents.length} dependent composite layer${dependents.length === 1 ? "" : "s"}?`,
+        )
+      ) {
+        return;
+      }
 
       try {
-        // remove from WASM processor and handle errors
+        // Explicitly remove JS-resolved dependents first. Their stored Rust
+        // outline can be stale while hidden, so source-side cascade alone is
+        // not authoritative for the current outline selection.
+        for (const dependent of dependents) {
+          if (!this.removeCompositeRendererLayer(dependent)) return;
+        }
         if (this.wasmProcessor) {
           this.removeWasmLayerRecord(layer);
+        }
+        for (const dependent of dependents) {
+          const dependentIndex = this.layers.indexOf(dependent);
+          if (dependentIndex >= 0) this.layers.splice(dependentIndex, 1);
         }
         if (!isDrillLayer(layer) && this.interactionProcessor) {
           this.invalidateFeaturePickingAfterLayerSetChange(
@@ -6452,7 +9270,8 @@ export class GerberViewer {
         }
 
         // remove from JS array only if WASM removal succeeded
-        this.layers.splice(index, 1);
+        const currentIndex = this.layers.indexOf(layer);
+        if (currentIndex >= 0) this.layers.splice(currentIndex, 1);
         if (
           this.selectedFeature?.layerId === this.getLayerInteractionLayerId(layer)
         ) {
@@ -6461,9 +9280,20 @@ export class GerberViewer {
         if (this.layers.length === 0) {
           this.fitViewZoom = null;
         }
-        this.clearAllInvertedLayerCaches();
+        if (
+          isGerberLayer(layer) &&
+          !this.invalidateCompositeDefinitionsForGerberSetChange(previousAutoOutlineId)
+        ) {
+          return;
+        }
+        if (!this.clearAllInvertedLayerCaches()) return;
       } catch (error) {
         console.error(`[Layer] Failed to remove layer ${layer.name}:`, error);
+        this.scheduleAuthoritativeRendererRecovery(
+          layer,
+          error,
+          `layer ${layer.name} removal`,
+        );
         return;
       }
     }
@@ -6485,6 +9315,8 @@ export class GerberViewer {
 
     const layerIds = isDrillLayer(layer)
       ? [layer.outlineLayerId, layer.fillLayerId]
+      : isCompositeLayer(layer)
+        ? [layer.layerId]
       : [layer.layerId, layer.invertedLayerId];
 
     for (const layerId of layerIds) {
@@ -6495,6 +9327,7 @@ export class GerberViewer {
   }
 
   clearAllLayers() {
+    if (this.isRendererBusy()) return;
     try {
       // remove all layers from WASM processor
       if (this.wasmProcessor) {
@@ -6508,6 +9341,7 @@ export class GerberViewer {
       this.featurePickingAvailable = this.interactionsEnabled;
       this.nextColorIndex = 0;
       this.nextLayerDomId = 0;
+      this.nextCompositeNumber = 1;
       this.fitViewZoom = null;
       this.renderLayerList();
       this.requestRender();
@@ -6515,26 +9349,39 @@ export class GerberViewer {
     } catch (error) {
       console.error("[Layer] Failed to clear all layers:", error);
       this.addDiagnostic("error", "Clear failed", error.message);
+      this.scheduleAuthoritativeRendererRecovery(null, error, "Clear All");
     }
   }
 
   selectAllLayerCheckboxes() {
+    if (this.isRendererBusy()) return;
+    const changedLayers = [];
     this.layers.forEach((layer) => {
+      const wasVisible = layer.visible;
       layer.visible = true;
+      if (wasVisible !== layer.visible) {
+        changedLayers.push(layer);
+      }
     });
-    this.clearAllInvertedLayerCaches();
+    if (!this.handleCompositeVisibilityDependencyChanges(changedLayers)) return;
     this.renderLayerList();
     this.requestRender();
     this.updateUiState();
   }
 
   selectLayersByFilter(kind) {
+    if (this.isRendererBusy()) return;
+    const changedLayers = [];
     this.layers.forEach((layer) => {
       if (!isDrillLayer(layer)) {
+        const wasVisible = layer.visible;
         layer.visible = this.layerFilterStore.matches(layer, kind);
+        if (wasVisible !== layer.visible) {
+          changedLayers.push(layer);
+        }
       }
     });
-    this.clearAllInvertedLayerCaches();
+    if (!this.handleCompositeVisibilityDependencyChanges(changedLayers)) return;
     this.clearSelectedFeatureIfUnavailable();
     this.renderLayerList();
     this.requestRender();
@@ -6542,10 +9389,16 @@ export class GerberViewer {
   }
 
   unselectAllLayerCheckboxes() {
+    if (this.isRendererBusy()) return;
+    const changedLayers = [];
     this.layers.forEach((layer) => {
+      const wasVisible = layer.visible;
       layer.visible = false;
+      if (wasVisible !== layer.visible) {
+        changedLayers.push(layer);
+      }
     });
-    this.clearAllInvertedLayerCaches();
+    if (!this.handleCompositeVisibilityDependencyChanges(changedLayers)) return;
     this.clearSelectedFeature();
     this.renderLayerList();
     this.requestRender();
@@ -6553,6 +9406,10 @@ export class GerberViewer {
   }
 
   handleLayerDragStart(event, layerId) {
+    if (this.isRendererBusy()) {
+      event.preventDefault();
+      return;
+    }
     if (
       event.target instanceof Element &&
       event.target.closest("input, button, select")
@@ -6580,6 +9437,10 @@ export class GerberViewer {
   }
 
   handleLayerListDragOver(event) {
+    if (this.isRendererBusy()) {
+      this.cancelLayerReorderGesture();
+      return;
+    }
     if (!this.draggedLayerId) return;
 
     const placement = this.getLayerDropPlacement(event.clientY);
@@ -6598,6 +9459,10 @@ export class GerberViewer {
   }
 
   handleLayerDrop(event) {
+    if (this.isRendererBusy()) {
+      this.cancelLayerReorderGesture();
+      return;
+    }
     if (!this.draggedLayerId || this.layerDropIndex === null) return;
 
     event.preventDefault();
@@ -6609,23 +9474,38 @@ export class GerberViewer {
   }
 
   reorderGerberLayer(layerId, dropIndex) {
-    const gerberLayers = this.layers.filter((layer) => !isDrillLayer(layer));
-    const drillLayers = this.layers.filter(isDrillLayer);
-    const fromIndex = gerberLayers.findIndex(
+    if (this.isRendererBusy()) return false;
+    const targetLayer = this.layers.find((layer) => layer.id === layerId);
+    if (!targetLayer || isDrillLayer(targetLayer)) return false;
+    const sameGroup = isCompositeLayer(targetLayer)
+      ? (layer) => isCompositeLayer(layer)
+      : (layer) => !isDrillLayer(layer) && !isCompositeLayer(layer);
+    const groupLayers = this.layers.filter(sameGroup);
+    const fromIndex = groupLayers.findIndex(
       (layer) => layer.id === layerId,
     );
     if (fromIndex === -1) return false;
 
-    let toIndex = dropIndex;
+    let toIndex = Math.min(groupLayers.length, Math.max(0, dropIndex));
     if (fromIndex < toIndex) {
       toIndex -= 1;
     }
 
     if (fromIndex !== toIndex) {
+      const previousAutoOutlineId = this.findAutomaticBoardOutlineLayer()?.id ?? null;
       const previousRects = this.captureLayerItemRects();
-      const [layer] = gerberLayers.splice(fromIndex, 1);
-      gerberLayers.splice(toIndex, 0, layer);
-      this.layers = [...gerberLayers, ...drillLayers];
+      const [layer] = groupLayers.splice(fromIndex, 1);
+      groupLayers.splice(toIndex, 0, layer);
+      let groupIndex = 0;
+      this.layers = this.layers.map((candidate) =>
+        sameGroup(candidate) ? groupLayers[groupIndex++] : candidate);
+      if (
+        this.boardOutlineSelection === BOARD_OUTLINE_AUTO &&
+        previousAutoOutlineId !== (this.findAutomaticBoardOutlineLayer()?.id ?? null)
+      ) {
+        if (!this.invalidateCompositeRendererDefinitions()) return false;
+        if (!this.clearAllInvertedLayerCaches()) return false;
+      }
       this.renderLayerList();
       this.animateLayerReorder(previousRects);
       this.requestRender();
@@ -6674,9 +9554,14 @@ export class GerberViewer {
   }
 
   getLayerDropPlacement(clientY) {
+    const draggedLayer = this.layers.find(
+      (layer) => layer.id === this.draggedLayerId,
+    );
+    if (!draggedLayer || isDrillLayer(draggedLayer)) return null;
+    const layerGroup = isCompositeLayer(draggedLayer) ? "composite" : "gerber";
     const items = Array.from(
       this.layerList.querySelectorAll('.layer-item[draggable="true"][data-layer-id]'),
-    );
+    ).filter((item) => item.dataset.layerGroup === layerGroup);
     if (items.length === 0) return null;
 
     for (const item of items) {
@@ -6705,14 +9590,18 @@ export class GerberViewer {
   }
 
   handleLayerTouchStart(event) {
+    if (this.isRendererBusy()) return;
     if (event.touches.length !== 1 || this.layerTouchDrag) {
       this.cancelLayerTouchDrag();
       return;
     }
-    if (
-      event.target instanceof Element &&
-      event.target.closest("input, button, select")
-    ) {
+    const control = event.target instanceof Element
+      ? event.target.closest("input, button, select")
+      : null;
+    const touchReorderHandle = event.target instanceof Element
+      ? event.target.closest("[data-layer-touch-reorder]")
+      : null;
+    if (control && !touchReorderHandle) {
       return;
     }
 
@@ -6735,14 +9624,30 @@ export class GerberViewer {
       startY: touch.clientY,
       lastClientY: touch.clientY,
       scrollElement,
+      touchReorder: Boolean(touchReorderHandle),
     };
     this.layerTouchDragTimer = window.setTimeout(() => {
-      this.activateLayerTouchDrag();
+      const layer = this.layers.find((candidate) => candidate.id === layerId);
+      if (isCompositeLayer(layer) && !this.layerTouchDrag?.touchReorder) {
+        this.layerTouchSuppressClickUntil = Date.now() + 500;
+        this.showLayerContextMenu({
+          layerId,
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+        });
+        this.cancelLayerTouchDrag();
+      } else {
+        this.activateLayerTouchDrag();
+      }
     }, LAYER_TOUCH_DRAG_DELAY_MS);
   }
 
   handleLayerTouchMove(event) {
     if (!this.layerTouchDrag) return;
+    if (this.isRendererBusy()) {
+      this.cancelLayerReorderGesture();
+      return;
+    }
 
     if (event.touches.length !== 1) {
       if (this.layerTouchDrag.active) {
@@ -6782,6 +9687,10 @@ export class GerberViewer {
 
   handleLayerTouchEnd(event) {
     if (!this.layerTouchDrag) return;
+    if (this.isRendererBusy()) {
+      this.cancelLayerReorderGesture();
+      return;
+    }
 
     const drag = this.layerTouchDrag;
     if (!this.findLayerTouch(event.changedTouches)) {
@@ -6813,6 +9722,10 @@ export class GerberViewer {
   activateLayerTouchDrag() {
     const drag = this.layerTouchDrag;
     if (!drag || drag.active) return;
+    if (this.isRendererBusy()) {
+      this.cancelLayerReorderGesture();
+      return;
+    }
 
     drag.active = true;
     this.draggedLayerId = drag.layerId;
@@ -6836,6 +9749,14 @@ export class GerberViewer {
     this.layerDropIndex = null;
     this.layerTouchScrollVelocity = 0;
     this.clearLayerDropIndicator();
+  }
+
+  cancelLayerReorderGesture() {
+    this.cancelLayerTouchDrag();
+    this.layerList
+      .querySelectorAll(".dragging, .touch-dragging")
+      .forEach((item) => item.classList.remove("dragging", "touch-dragging"));
+    this.dropZone.classList.remove("drag-active");
   }
 
   findLayerTouch(touchList) {
@@ -6924,9 +9845,23 @@ export class GerberViewer {
 
   renderLayerList() {
     this.closeLayerContextMenu();
+    const layerPanel = this.layerList.closest('[data-panel="layers"]');
+    layerPanel?.classList.toggle(
+      "composite-area-selection-active",
+      Boolean(this.compositeSelection),
+    );
+    if (this.compositeSelection) {
+      this.layerList.classList.remove("is-locked");
+      this.renderCompositeAreaList();
+      this.refreshIcons();
+      return;
+    }
+    const locked = this.isRendererBusy();
+    this.layerList.classList.toggle("is-locked", locked);
     renderLayerListView({
       container: this.layerList,
       layers: this.layers,
+      locked,
       formatBounds: (layer) => this.formatLayerBounds(layer),
       onDragStart: (event, layerId) =>
         this.handleLayerDragStart(event, layerId),
@@ -6936,24 +9871,66 @@ export class GerberViewer {
       onAlphaOverrideChange: (layerId, alpha) =>
         this.updateLayerAlphaOverride(layerId, alpha),
       onVisibilityChange: (layer, visible) => {
+        if (locked) return;
         layer.visible = visible;
-        this.clearAllInvertedLayerCaches();
+        if (!this.handleCompositeVisibilityDependencyChange(layer)) return;
         this.clearSelectedFeatureForHiddenLayer(layer);
         this.requestRender();
         this.updateUiState();
       },
       onToggleVisibility: (layer) => {
+        if (locked) return;
         layer.visible = !layer.visible;
-        this.clearAllInvertedLayerCaches();
+        if (!this.handleCompositeVisibilityDependencyChange(layer)) return;
         this.clearSelectedFeatureForHiddenLayer(layer);
         this.requestRender();
         this.updateUiState();
       },
       onContextMenu: (detail) => this.showLayerContextMenu(detail),
+      onCreateComposite: () => void this.createCompositeLayer(),
       onOpenFiles: () => this.openFilePicker(),
       getGlobalAlpha: () => this.getCompositeAlpha(),
     });
     this.refreshIcons();
+  }
+
+  handleCompositeVisibilityDependencyChange(layer) {
+    return this.handleCompositeVisibilityDependencyChanges([layer]);
+  }
+
+  handleCompositeVisibilityDependencyChanges(changedLayers) {
+    for (const layer of changedLayers) {
+      if (
+        isCompositeLayer(layer) &&
+        !layer.visible &&
+        hasRendererLayerId(layer.layerId) &&
+        !this.releaseHiddenCompositeRendererCache(layer)
+      ) {
+        return false;
+      }
+    }
+    const changedGerberIds = new Set(
+      changedLayers.filter(isGerberLayer).map((layer) => layer.id),
+    );
+    return changedGerberIds.size === 0 ||
+      this.invalidateBoundsCompositeRendererDefinitions(changedGerberIds);
+  }
+
+  releaseHiddenCompositeRendererCache(layer) {
+    try {
+      this.wasmProcessor.release_composite_cache(layer.layerId);
+      return true;
+    } catch (error) {
+      if (this.scheduleCompositeFatalRecovery(layer, error, `composite ${layer.name}`)) {
+        return false;
+      }
+      this.addDiagnostic(
+        "warning",
+        "Composite cache release failed",
+        `${getErrorMessage(error)}; rebuilding this composite when it is shown again.`,
+      );
+      return this.removeCompositeRendererLayer(layer);
+    }
   }
 
   formatLayerBounds(layer) {

@@ -15,7 +15,7 @@ wasm/src/
 ├── parser/            # Gerber parser, aperture handling, command geometry, tests
 ├── drill/             # Excellon/NC drill parser, metadata, tests
 ├── interaction/       # picking, compact interaction payloads, highlight batches
-├── renderer/          # WebGL renderer, GPU buffers, shaders, render tests
+├── renderer/          # WebGL renderer, composite masks, GPU buffers, shaders, tests
 └── util/              # formatting and small utility helpers
 ```
 
@@ -476,23 +476,84 @@ Screenshot export uses the same renderer pipeline.
 - Each tile still follows the layer FBO pass and final composite pass.
 - Measurement overlay is drawn later on a 2D canvas.
 
-### 9. Highlight Rendering
+### 9. Composite Mask Rendering
+
+Composite layers are logical views over the final raster masks of 2–24 ordinary
+Gerber layers. They do not reparse geometry or construct CPU boolean geometry.
+Consequently source polarity, negative drawing, aperture blocks, step-and-repeat,
+rotation, mirror, offset, exact arc regions, source inversion, and minimum feature
+width are already reflected in the source FBO alpha sampled by the composite.
+Source display color, display alpha, and visibility are not part of membership.
+
+The renderer keeps source order separate from stable bit slots. Slots 0–7 encode
+into red, 8–15 into green, and 16–23 into blue in a shared viewport-sized RGBA8
+membership FBO. The membership shader uses pixel-aligned `texelFetch`, thresholds
+source alpha at 0.5, and handles at most eight source textures per additive pass.
+Thus a 24-source composite takes at most three encode passes and cannot carry
+between RGB bytes.
+
+The authoritative visible-area state is a CPU bitset with one bit for every
+membership code. A matching R8UI texture is addressed by `code >> 3`; the lookup
+shader tests `code & 7` and writes the selected result to an R8 mask FBO. If an R8
+attachment is explicitly unsupported or incomplete on the current WebGL2/GLES
+implementation, allocation falls back to nearest-filtered RGBA8 and the final
+composite texture shader hides the format difference. Allocation failures and
+unrelated WebGL errors remain fatal for that composite instead of attempting the
+larger fallback.
+
+Membership code zero is meaningful only inside the resolved board fill mask.
+An explicit Gerber outline is converted with the existing robust contour/region
+path, including nested holes and exact arcs. Otherwise a finite bounds rectangle
+is used. Internal outline fills are nearest-filtered red-channel masks, using
+R8 when supported and RGBA8 otherwise, and are shared by composites with the
+same outline cache key. Parsed-outline keys contain the
+stable layer token, a fixed-size SHA-256 content revision and length, exact
+offset bit patterns, and the full arc parse signature; they do not retain or
+duplicate the Gerber source string. Composite inversion happens after lookup
+and is clipped to that fill mask, so it never fills the infinite canvas.
+
+Each composite caches its output mask, source FBO generation snapshot, outline
+generation, and camera transform. Source geometry/camera changes re-encode
+membership; a visible-bit toggle uploads only the affected R8UI byte and reruns
+the lookup pass. Color, alpha, or z-order changes only affect final composition.
+Hidden composites release their output FBO and lookup texture while retaining
+the CPU bitset. A shared RGBA8 membership scratch survives for reuse. Allocation
+failure is recorded per composite, whose final draw is skipped without aborting
+ordinary layers or other healthy composites.
+
+Selection preview reuses the same membership scratch and hashes each 24-bit code
+to a deterministic bijective RGB pseudo-color. Active areas add the normal
+2-by-2 black/white selection checker over that base. Inactive areas keep the
+uniform base pseudo-color with no dimming or stipple, so only selected areas are
+visually emphasized. Pixel readback reads one membership texel; code zero
+additionally checks the outline mask. The Viewer enumerates coverage codes
+in 128-row tasks so a 4K framebuffer scan does not monopolize the main thread.
+Screenshot, full-frame Node output, and tiled/stream output rebuild the same
+source dependencies and bitset for their target transform.
+
+### 10. Highlight Rendering
 
 Selected-feature highlight is an extra pass after normal layer composition.
+Ordinary Gerber/drill features and Composite coverage areas use separate
+geometry-identity and membership-code paths.
 
 Flow:
 
 1. Normal layer rendering finishes.
-2. JS calls `render_interaction_highlight(layer_id, feature_id, camera...)`.
-3. Rust retrieves the stored `InteractionFeature`.
-4. Highlight shaders render the selected area, using stencil/blend state as
-   needed.
+2. For a Gerber/drill feature, JS calls
+   `render_interaction_highlight(layer_id, feature_id, camera...)`; Rust
+   retrieves the stored `InteractionFeature` and renders its geometry.
+3. For a Composite area, JS calls
+   `render_composite_area_highlight(composite_id, coverage_code, camera...)`;
+   Rust rebuilds/reuses the membership mask and highlights every pixel with the
+   same active coverage code, clipping code zero and inversion to the outline.
+4. Both paths restore caller WebGL state after their stencil/blend pass.
 
 The visible app render includes highlight after normal layer composition.
 Screenshot export intentionally omits selected-feature highlight and only draws
 measurements after the WebGL render.
 
-### 10. Performance Invariants
+### 11. Performance Invariants
 
 - Geometry upload and layer FBO redraws happen only when needed.
 - Camera transform changes invalidate the layer FBO result.
@@ -505,3 +566,6 @@ measurements after the WebGL render.
   parsing or render payload construction, not on every render.
 - Render payload layers with path regions must keep stencil-FBO behavior in
   parity with directly parsed layers.
+- Composite membership must be re-encoded only when source masks, outline,
+  viewport, or camera state changes; visible-bit, color, and alpha changes do
+  not redraw source geometry.

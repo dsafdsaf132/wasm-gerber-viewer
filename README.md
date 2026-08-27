@@ -33,6 +33,8 @@ WASM/WebGL2-based Gerber file viewer for PCB visualization.
 - NC drill overlay rendering support
 - Touch support for mobile devices
 - Multi-layer rendering with per-layer color and visibility control
+- Composite Layers with Union, Intersection, Difference, and custom coverage
+  combinations
 - Feature picking with selected-area highlighting
 - Horizontal/vertical flip controls
 - Ruler measurements with mm/inch unit switching
@@ -120,9 +122,11 @@ wasm-gerber-viewer/
 │   ├── main.js                        # Browser entry point
 │   ├── core/                          # GerberViewer state and orchestration
 │   ├── loading/                       # File, archive, URL, repeat, and worker loading
-│   ├── layers/                        # Layer list UI, filters, colors, and context actions
+│   ├── layers/                        # Layer list UI, filters, colors, and composite bitsets
+│   │   └── composite-layers.js        # Presets, source slots, and visible-area bitsets
 │   ├── rendering/                     # Viewport math, measurements, and screenshot export
-│   └── ui/                            # DOM lookup, drawer, notifications, diagnostics, options
+│   └── ui/                            # Dialogs, DOM lookup, notifications, diagnostics, options
+│       └── composite-layer-dialog.js   # Composite create, edit, and rename dialog
 ├── vendor/                            # Vendored browser libraries
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm package and Node CLI
@@ -137,7 +141,9 @@ wasm-gerber-viewer/
 │       ├── parser/                    # Gerber parser, apertures, commands, and tests
 │       ├── drill/                     # Excellon/NC drill parser and tests
 │       ├── interaction/               # Picking, compact payloads, and highlight data
-│       ├── renderer/                  # WebGL renderer, GPU resources, shaders, and tests
+│       ├── renderer/                  # Gerber/composite masks, GPU resources, shaders, tests
+│       │   ├── composite.rs           # Membership, lookup, outline, cache, and picking state
+│       │   └── shaders/composite_*.frag.glsl
 │       └── util/                      # Formatting and utility helpers
 ├── demo/                              # Sample and performance Gerbers
 ├── docs/                              # README assets

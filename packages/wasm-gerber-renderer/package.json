@@ -33,6 +33,9 @@
     "node.d.ts",
     "shared.js",
     "README.md",
+    "README.kr.md",
+    "README.zh-Hans.md",
+    "README.zh-Hant.md",
     "SKILL.md",
     "LICENSE",
     "wasm/**/*"
@@ -41,10 +44,11 @@
     "build:wasm": "../../scripts/vercel-build.sh",
     "stage:wasm": "node scripts/stage-wasm.mjs",
     "clean:wasm": "node scripts/clean-wasm.mjs",
+    "benchmark:composite-4k": "node scripts/benchmark-composite-4k.mjs",
     "prepack": "npm run build:wasm && npm run stage:wasm",
     "postpack": "npm run clean:wasm",
     "prepublishOnly": "npm run check",
-    "check": "node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs && node --test test/*.test.mjs",
+    "check": "node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs && node --check scripts/benchmark-composite-4k.mjs && tsc -p test/types/tsconfig.json && node --test test/*.test.mjs",
     "verify:publish": "npm run check && npm pack --dry-run"
   },
   "license": "MIT",

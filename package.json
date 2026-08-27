@@ -1,4 +1,16 @@
 {
   "private": true,
-  "type": "module"
+  "type": "module",
+  "scripts": {
+    "benchmark:composite:4k:chrome": "node scripts/benchmark-composite-4k-chrome.mjs",
+    "check:readme-composite": "node scripts/check-composite-readme-parity.mjs",
+    "test:playwright": "playwright test",
+    "validate:composite": "bash scripts/validate-composite.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.3.0",
+    "node-gles-webgl2": "^0.4.0",
+    "typescript": "^7.0.2"
+  }
 }

@@ -76,6 +76,21 @@ pub const HIGHLIGHT_FRAGMENT_SHADER: &str = include_str!("shaders/highlight.frag
 pub const HIGHLIGHT_STENCIL_FRAGMENT_SHADER: &str =
     include_str!("shaders/highlight_stencil.frag.glsl");
 
+pub const COMPOSITE_MEMBERSHIP_FRAGMENT_SHADER: &str =
+    include_str!("shaders/composite_membership.frag.glsl");
+
+pub const COMPOSITE_LOOKUP_FRAGMENT_SHADER: &str =
+    include_str!("shaders/composite_lookup.frag.glsl");
+
+pub const COMPOSITE_PREVIEW_FRAGMENT_SHADER: &str =
+    include_str!("shaders/composite_preview.frag.glsl");
+
+pub const COMPOSITE_HIGHLIGHT_FRAGMENT_SHADER: &str =
+    include_str!("shaders/composite_highlight.frag.glsl");
+
+pub const COMPOSITE_TEXTURE_FRAGMENT_SHADER: &str =
+    include_str!("shaders/composite_texture.frag.glsl");
+
 /// Shader program with uniform locations
 pub struct ShaderProgram {
     pub program: WebGlProgram,
@@ -95,6 +110,11 @@ pub struct ShaderPrograms {
     pub texture: ShaderProgram,
     pub path_solid: ShaderProgram,
     pub path_sector: ShaderProgram,
+    pub composite_membership: ShaderProgram,
+    pub composite_lookup: ShaderProgram,
+    pub composite_preview: ShaderProgram,
+    pub composite_highlight: ShaderProgram,
+    pub composite_texture: ShaderProgram,
 }
 
 struct ShaderProgramsBuildGuard {
@@ -107,7 +127,7 @@ impl ShaderProgramsBuildGuard {
     fn new(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
         let mut programs = Vec::new();
         programs
-            .try_reserve(10)
+            .try_reserve(15)
             .map_err(|_| JsValue::from_str("Unable to reserve shader program build state"))?;
         Ok(Self {
             gl: gl.clone(),
@@ -291,6 +311,73 @@ impl ShaderPrograms {
         )?;
         pending.track(&path_sector);
 
+        let composite_membership = compile_program(
+            gl,
+            TEXTURE_VERTEX_SHADER,
+            COMPOSITE_MEMBERSHIP_FRAGMENT_SHADER,
+            &["position"],
+            &[
+                "u_source0",
+                "u_source1",
+                "u_source2",
+                "u_source3",
+                "u_source4",
+                "u_source5",
+                "u_source6",
+                "u_source7",
+                "u_source_count",
+                "u_base_slot",
+            ],
+        )?;
+        pending.track(&composite_membership);
+
+        let composite_lookup = compile_program(
+            gl,
+            TEXTURE_VERTEX_SHADER,
+            COMPOSITE_LOOKUP_FRAGMENT_SHADER,
+            &["position"],
+            &[
+                "u_membership",
+                "u_lookup",
+                "u_outline",
+                "u_lookup_width",
+                "u_inverted",
+            ],
+        )?;
+        pending.track(&composite_lookup);
+
+        let composite_preview = compile_program(
+            gl,
+            TEXTURE_VERTEX_SHADER,
+            COMPOSITE_PREVIEW_FRAGMENT_SHADER,
+            &["position"],
+            &["u_membership", "u_lookup", "u_outline", "u_lookup_width"],
+        )?;
+        pending.track(&composite_preview);
+
+        let composite_highlight = compile_program(
+            gl,
+            TEXTURE_VERTEX_SHADER,
+            COMPOSITE_HIGHLIGHT_FRAGMENT_SHADER,
+            &["position"],
+            &[
+                "u_membership",
+                "u_outline",
+                "u_selected_code",
+                "u_clip_to_outline",
+            ],
+        )?;
+        pending.track(&composite_highlight);
+
+        let composite_texture = compile_program(
+            gl,
+            TEXTURE_VERTEX_SHADER,
+            COMPOSITE_TEXTURE_FRAGMENT_SHADER,
+            &["position"],
+            &["u_texture", "u_color", "u_mask_is_red"],
+        )?;
+        pending.track(&composite_texture);
+
         let programs = ShaderPrograms {
             triangle,
             triangle_template,
@@ -302,6 +389,11 @@ impl ShaderPrograms {
             texture,
             path_solid,
             path_sector,
+            composite_membership,
+            composite_lookup,
+            composite_preview,
+            composite_highlight,
+            composite_texture,
         };
         pending.commit();
         Ok(programs)

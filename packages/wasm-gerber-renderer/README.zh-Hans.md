@@ -28,6 +28,7 @@
 - [浏览器 API](#浏览器-api)
 - [Node.js 用法](#nodejs-用法)
 - [Node.js API](#nodejs-api)
+- [复合图层](#复合图层)
 - [API 选项](#api-选项)
 - [CLI](#cli)
 - [开源协议](#开源协议)
@@ -128,6 +129,7 @@ type GerberLayer =
       name?: string;
       color?: RGBColor;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       kind?: LayerKind;
@@ -155,6 +157,7 @@ type GerberNodeLayer =
       name?: string;
       color?: RGBColor | string;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
@@ -165,6 +168,7 @@ type GerberNodeLayer =
       name?: string;
       color?: RGBColor | string;
       alpha?: number;
+      visible?: boolean;
       offsetX?: number;
       offsetY?: number;
       inverted?: boolean;
@@ -174,6 +178,20 @@ type GerberNodeLayer =
 
 在 Node.js API 中，普通 `string` 仍然表示 Gerber 内容。从文件系统读取并渲染时，请使用 `{ path: "board.gbr" }`、`fileLayer("board.gbr")` 或 `file:` URL。
 
+```ts
+type CompositePreset = "union" | "intersection" | "difference";
+type CompositeLayerOptions = {
+  name?: string;
+  color?: RGBColor | string;
+  alpha?: number;
+  visible?: boolean;
+  inverted?: boolean;
+  outlineLayerId?: number;
+  preset?: CompositePreset;
+  visibleAreas?: string[];
+};
+```
+
 ## 浏览器 API
 
 - `renderGerberToCanvas(canvas, layers, frameOptions)`：一次调用即可将图层批量渲染到现有的 WebGL2 canvas。`layers` 可以是单个 `GerberLayer`、数组或 `FileList`。失败的图层默认会被跳过。
@@ -181,15 +199,20 @@ type GerberNodeLayer =
 - `renderGerberToPngStream(canvas, writable, layers, frameOptions, exportOptions)`：把 PNG 数据块写入 `WritableStream`，成功时关闭，失败时中止。需要浏览器支持 `CompressionStream`。
 - `createGerberRenderer(canvas, rendererOptions)`：创建可复用渲染器，用于渲染多个帧或多个图层。
 - `renderer.withFrame(frameOptions, callback)`：开始一个渲染帧，应用 canvas 和视图选项，并在回调函数结束后显示渲染后的图层。
-- `renderer.renderLayer(layer, layerOptions)`：向当前帧添加一个图层，并返回数值型图层 ID。必须在 `withFrame()` 内调用；这是严格接口，失败时会以该错误 reject。
+- `renderer.renderLayer(layer, layerOptions)`：向当前帧添加一个图层，并返回数值型图层 ID；使用 `renderDrills: false` 主动跳过钻孔时返回 `null`。必须在 `withFrame()` 内调用；这是严格接口，失败时会以该错误 reject。
+- `renderer.renderCompositeLayer(sourceLayerIds, options)`：组合当前帧中的 2–24 个 Gerber ID。必须先添加源图层，并在 `withFrame()` 内调用。
 - `renderer.renderLayers(layers, options)`：添加多个图层，并返回 `{ renderedCount, failures }`。失败的图层默认会被跳过；需要严格行为时使用 `layerErrorMode: "throw"`。
 - `renderer.exportPng(exportOptions)`：把最后一个浏览器帧导出为 PNG `Blob`。
 - `renderer.exportPngStream(writable, exportOptions)`：把最后一个浏览器帧导出到 `WritableStream`，成功时关闭，失败时中止，无需先组装成 `Blob`。
 - `renderer.dispose()`：释放 WebGL 上下文。
 
+浏览器导出仅在 `withFrame()` 成功完成后可用；在帧开始前、执行期间或帧失败后都会被拒绝。`withFrame()` 回调执行期间会拒绝 `dispose()`。导出进行期间也会拒绝新帧、其他导出和 `dispose()`，以防 canvas 在导出中途发生变化。
+
 ## Node.js 用法
 
 使用 Node.js 入口前请安装 `node-gles-webgl2`。Node.js 和 CLI 渲染通过 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) 支持 Linux x64/arm64、macOS arm64/x64 和 Windows x64/arm64。
+通过 `fileLayer()`、`{ path }` 或 `file:` URL 传入的文件系统源必须是
+不超过 300 MiB 的普通文件。
 
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";
@@ -219,17 +242,20 @@ await renderGerberToPngFile(
 - `renderGerberToPngBuffer(layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，并以 `Uint8Array` 返回 PNG 字节数据。
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，把 PNG 字节数据写入临时文件，成功后替换 `outputPath`。父目录必须已存在。
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`：一次调用即可批量渲染，把 PNG 数据块写入 Node 可写流。
-- `fileLayer(path, options)`：创建基于路径的 Node 图层配置。`options` 接受 `name`、`color`、`alpha`、`offsetX`、`offsetY`、`inverted`、`kind`。
+- `fileLayer(path, options)`：创建基于路径的 Node 图层配置。`options` 接受 `name`、`color`、`alpha`、`visible`、`offsetX`、`offsetY`、`inverted`、`kind`。
 - `packageRoot()`：返回已安装包的目录路径。
-- `renderer.loadLayer(layer, layerOptions)`：解析一个 Node 图层，并返回可跨帧复用的预加载图层。
+- `renderer.loadLayer(layer, layerOptions)`：解析一个 Node 图层，并返回可跨帧复用的预加载图层。仅当使用 `renderDrills: false` 主动跳过钻孔输入时返回 `null`。
 - `renderer.loadLayers(layers, options)`：解析多个图层，并返回 `{ layers, loadedCount, failures }`。失败的图层默认会被跳过。
 - `renderer.withFrame(frameOptions, callback)`：开始无界面渲染帧，并在回调函数结束后保存渲染出的像素数据。
-- `renderer.renderLayer(layer, layerOptions)`：向当前帧添加一个图层，并返回数值型图层 ID。必须在 `withFrame()` 内调用；这是严格接口，失败时会以该错误 reject。
+- `renderer.renderLayer(layer, layerOptions)`：向当前帧添加一个图层，并返回数值型图层 ID；使用 `renderDrills: false` 主动跳过钻孔时返回 `null`。必须在 `withFrame()` 内调用；这是严格接口，失败时会以该错误 reject。
+- `renderer.renderCompositeLayer(sourceLayerIds, options)`：组合当前帧中的 2–24 个 Gerber ID。必须先添加源图层，并在 `withFrame()` 内调用。
 - `renderer.renderLayers(layers, options)`：添加多个图层，并返回 `{ renderedCount, failures }`。失败的图层默认会被跳过；需要严格行为时使用 `layerErrorMode: "throw"`。
 - `renderer.exportPng(exportOptions)`：把最后一个 Node 帧导出为内存中的 PNG 字节数据。
 - `renderer.exportPngStream(writable, exportOptions)`：把最后一个 Node 帧导出到可写流。
 - `renderer.exportPngFile(outputPath, exportOptions)`：把最后一个 Node 帧导出到临时文件，成功后替换 `outputPath`。
 - `renderer.dispose()`：释放 GLES 上下文。
+
+`withFrame()` 回调执行期间会拒绝 `dispose()`。可复用 Node 导出进行期间，会拒绝新帧、其他导出和 `dispose()`，以免其中途替换 GLES 上下文。
 
 如果同一批 Gerber 输入需要渲染多次，请使用预加载图层。
 
@@ -257,8 +283,86 @@ try {
 ```
 
 预加载图层的几何数据会使用加载时的 `offsetX`、`offsetY`、`preserveArcRegions` 和 `arcTessellationQuality` 值进行解析。要修改这些选项，需要重新加载图层。每一帧的颜色和透明度（alpha）可以在 `renderLayer(preparedLayer, layerOptions)` 中覆盖。
+如果把 prepared 对象连同冲突的 parse option 再次传给 `loadLayer()` 或 `loadLayers()`，调用会被拒绝。解析完成后也不能再补加 source content retention；请使用 `retainSourceContentForInversion: true` 重新加载原始 source。
 
 批量 API（`renderGerberToCanvas`、`renderGerberToPng`、`renderGerberToPngStream`、`renderGerberToPngBuffer`、`renderGerberToPngFile` 和 `renderLayers`）会渲染所有可加载的有效图层。如果所有图层都失败，操作会以第一个图层错误 reject。
+
+## 复合图层
+
+在 `withFrame()` 中先添加普通 Gerber 源，再创建复合图层。复合图层接受
+2–24 个互不相同的 Gerber 图层 ID；钻孔 ID、复合 ID、重复或失效 ID，
+以及上一帧返回的 ID 都会被拒绝。
+
+复合错误采用严格传播。Browser API 的校验/构造错误会 reject
+`renderCompositeLayer()`，GPU 分配/渲染错误会 reject 外层 `withFrame()`
+Promise。Node API 先记录逻辑定义，因此构造和 GPU 错误都会由
+`exportPng()`、`exportPngStream()` 或 `exportPngFile()` reject；应捕获导出
+Promise。
+
+```js
+await renderer.withFrame({ width: 1600, height: 1000, compositeMode: "stack" }, async () => {
+  const paste = await renderer.renderLayer(
+    { source: pasteGerber, name: "top.gtp" },
+    { visible: false },
+  );
+  const notes = await renderer.renderLayer(
+    { source: fabGerber, name: "fab.gbr" },
+    { visible: false },
+  );
+  await renderer.renderCompositeLayer([paste, notes], {
+    name: "Paste without notes",
+    preset: "difference",
+    color: "#00a81c",
+    alpha: 0.7,
+  });
+});
+```
+
+`visible: false` 只会从最终输出隐藏源图层，其最终 Gerber mask 仍作为复合
+依赖渲染。Polarity、aperture block、step-and-repeat、变换、精确 region、
+反相和最小线宽都会影响 coverage；源颜色和 alpha 不影响 coverage。
+`CompositeLayerOptions.visible: false` 则保留当前帧中的复合定义，但从最终
+输出排除该复合。
+
+`preset` 可为 `"union"`、`"intersection"` 或 `"difference"`。Difference
+表示第一个源减去其余源的 union。要精确选择 coverage 组合，请用
+`visibleAreas` 代替 `preset`：
+
+```js
+await renderer.renderCompositeLayer([top, mask, notes], {
+  visibleAreas: ["110", "101", "000"],
+  outlineLayerId: outline,
+});
+```
+
+最左侧 bit 对应第一个源 ID。重复 pattern 会去重，空数组会报错。`"000"`
+仅在 resolved outline 内选择未被任何源覆盖的像素。`outlineLayerId` 必须是
+当前帧的普通 Gerber；省略时使用有限的 frame bounds。复合反相也裁剪到该
+区域。`blend` 使用 additive，`stack` 按调用顺序 source-over。一次性的
+`renderLayers()` 数组不支持复合声明。
+
+CLI 通过 `--composite-config <path>` 读取 JSON：
+
+```json
+{
+  "hiddenSources": ["top.gtp", "fab.gbr"],
+  "composites": [{
+    "name": "Paste without notes",
+    "sources": ["top.gtp", "fab.gbr"],
+    "preset": "difference",
+    "color": "#00a81c",
+    "alpha": 0.7,
+    "outline": "auto"
+  }]
+}
+```
+
+Selector 可以是 1-based 输入序号、完整名称或 basename。JSON number 始终
+表示序号；string 匹配有歧义时会报错，不会猜测。`hiddenSources` 会从最终
+输出隐藏匹配的输入；隐藏的 Gerber 仍保留为复合依赖。Outline 优先级为复合 JSON
+`outline`、CLI `--outline-layer`、自动检测、bounds fallback。某个源解析
+失败时只跳过依赖它的复合，其他有效图层和复合继续渲染。显式使用
+`"bounds"` 会跳过自动检测。
 
 ## API 选项
 
@@ -267,7 +371,7 @@ try {
 - `width`：输出宽度，单位为像素。默认使用浏览器 canvas 的 width，Node 中默认 `1200`。
 - `height`：输出高度，单位为像素。默认使用浏览器 canvas 的 height，Node 中默认 `800`。
 - `clear`：渲染前清空帧。默认 `true`；Node 总是渲染到新的缓冲区。
-- `background`：输出背景。默认 `null`，表示透明输出。接受 CSS 颜色字符串或 `[r, g, b, a]`。
+- `background`：输出背景。默认 `null`，表示透明输出。Browser export 接受 canvas 支持的所有 CSS 颜色；Node 接受命名 CSS 颜色、hex 以及逗号形式的 `rgb()`/`rgba()`。两者都接受 `[r, g, b, a]`。
 - `fit`：把所有已加载图层的边界适配到输出帧。默认 `true`。
 - `padding`：启用 `fit` 时应用的像素内边距。默认 `0`。
 - `flipX`：围绕帧中心水平镜像输出。默认 `false`。
@@ -286,13 +390,15 @@ try {
 - `framebufferMemorySafetyFactor`：仅 Node 使用的 full-frame framebuffer memory estimate multiplier。默认 `2`。
 - `strategy`：仅 Node 使用的 PNG export strategy，可为 `"auto"`、`"full-frame"` 或 `"stream"`。默认 `"auto"`。
 - `layerErrorMode`：`"skip"` 会继续渲染剩余有效图层；`"throw"` 会在第一次失败时中断。默认 `"skip"`。
-- `onLayerError`：`"skip"` 模式下接收被跳过图层的回调函数，参数为 `{ layer, name, error }`。
+- `onLayerError`：`"skip"` 模式下接收被跳过图层的同步或异步回调，参数为 `{ layer, name, error }`。渲染器会等待该回调；回调 reject 会使批量操作 reject。
 - `rendererOptions`：仅用于浏览器一次性辅助函数；创建渲染器时会原样传入。
 
 `layerOptions` 控制单个图层：
 
-- `color`：图层颜色。浏览器接受 `[r, g, b]`；Node 也接受 hex 和 `rgb()`/`rgba()` 字符串。默认使用自动颜色循环。
+- `color`：图层颜色。浏览器普通图层选项接受 `[r, g, b]`；浏览器 `CompositeLayerOptions.color` 接受 canvas 支持的所有 CSS 颜色，包括现代 `hsl()` 和空格分隔的 `rgb()`。Node 接受数组、命名 CSS 颜色、hex 以及逗号形式的 `rgb()`/`rgba()`。图层或复合颜色字符串中的 alpha 分量会被忽略；请使用单独的 `alpha` 选项。默认使用自动颜色循环。
 - `alpha`：每层透明度。设置后会覆盖该图层的帧默认值；在 `stack` 模式下，显式 Gerber `alpha` 会覆盖不透明的默认值。钻孔图层默认不透明。
+- `visible`：是否包含在最终输出中，默认 `true`。隐藏的普通 Gerber 图层
+  仍可作为复合依赖。
 - `offsetX`：加载几何数据时应用的 X 方向偏移。默认 `0`。
 - `offsetY`：加载几何数据时应用的 Y 方向偏移。默认 `0`。
 - `inverted`：仅 Node 使用。把此 Gerber 图层按 `frameOptions.invertedOutline` 渲染为反相/negative 图层。默认 `false`。
@@ -304,6 +410,7 @@ try {
 - `preserveArcRegions`：为 prepared layer 保留 exact region arc。默认 `true`。
 - `arcTessellationQuality`：当 region arc 需要 approximate 时，指定 prepared layer 的 arc quality。
 - `retainSourceContentForInversion`：仅 Node 使用；保留原始 Gerber text，使 prepared layer 之后可作为 inverted layer 或 explicit outline source 使用。
+- `renderDrills`：仅用于 Node 加载。设为 `false` 时跳过钻孔输入；`loadLayer()` 返回 `null`，`loadLayers()` 则从返回的 `layers` 中省略该输入。
 
 `exportOptions` 控制 PNG 导出：
 
@@ -348,6 +455,7 @@ gerber-renderer top.gbr bottom.gbr \
   --alpha 0.7 \
   --composite-mode blend \
   --minimum-feature-pixels 1 \
+  --composite-config composites.json \
   --invert-layer mask.gbr \
   --outline-layer board.gko
 ```
@@ -381,12 +489,19 @@ CLI 选项：
 - `--arc-quality <0|1|2>`：圆弧近似质量。默认 `1`。
 - `--invert-layer <selector>`：把 Gerber 图层渲染为反相/negative 图层。需要反相多个图层时可重复指定。Selector 支持 1-based 图层序号、完整图层名和 basename。
 - `--outline-layer <selector>`：反相图层使用的 board outline。可使用 `auto`、`bounds`、1-based 图层序号、完整图层名或 basename。默认 `auto`。
+- `--composite-config <path>`：包含复合定义和隐藏源 selector 的 JSON 文件。
 - `--flip-x`：水平镜像输出。
 - `--flip-y`：垂直镜像输出。
 - `--no-drill`：跳过 NC drill 图层。
 - `--no-fit`：禁用自适应视图。
 - `--skill`：打印面向 AI agent 的[包使用说明](SKILL.md)。
 - `-h, --help`：打印 CLI 用法并退出。
+
+CLI Gerber/drill 输入和压缩包文件分别限制为 300 MiB，复合 JSON 限制为
+16 MiB。一个 TAR 压缩包最多可包含 1,000 个头和总计 300 MiB 的普通文件
+数据；单个条目上限为 300 MiB，总体解压比上限为 1,000:1。每个 TAR
+元数据头限制为 1 MiB，压缩包路径限制为 4 KiB；格式错误或截断的压缩包
+会在渲染前失败。
 
 `--arc-quality` 主要在与 `--approx-region-arcs` 一起使用时有意义。取值 `0`、`1`、`2` 分别对应 low、normal、high。
 

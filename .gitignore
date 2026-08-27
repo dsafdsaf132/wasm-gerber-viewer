@@ -32,6 +32,7 @@ wasm/pkg/
 packages/gerber-renderer/wasm/
 packages/gerber-renderer/node_modules/
 packages/gerber-renderer/package-lock.json
+packages/wasm-gerber-renderer/wasm/
 packages/wasm-gerber-renderer/node_modules/
 packages/wasm-gerber-renderer/package-lock.json
 
@@ -43,3 +44,5 @@ demo/performance-test-stars-100K.gbr
 demo/performance-test-stars-1M.gbr
 .vercel
 .env*.local
+test-results/
+playwright-report/

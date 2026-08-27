@@ -1,10 +1,18 @@
 mod buffer;
 mod camera;
+mod composite;
 mod shader;
 
 // Internal use only
 use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
 use camera::Camera;
+use composite::{
+    get_bit as composite_get_bit, normalize_fallback_bounds, preset_bitset,
+    validate_bitset as validate_composite_bitset,
+    validate_source_count as validate_composite_source_count, CompositeDiagnostics,
+    CompositeLayerMetadata, CompositePreset, MaskSourceKind, OutlineMaskCacheKey,
+    ResolvedMaskSource, MAX_COMPOSITE_SOURCES,
+};
 use shader::{
     compile_program, ShaderProgram, ShaderPrograms, ALWAYS, ARRAY_BUFFER, BLEND, COLOR_BUFFER_BIT,
     EQUAL, FLOAT, FUNC_ADD, HIGHLIGHT_FRAGMENT_SHADER, HIGHLIGHT_STENCIL_FRAGMENT_SHADER,
@@ -21,14 +29,54 @@ use crate::interaction::{HighlightBatch, InteractionFeature, PathRegionRef};
 use crate::parser::geometry::{build_path_regions, canonical_arc_curve_bounds};
 use crate::parser::ParserState;
 use js_sys::{Array, Float32Array, Reflect, Uint32Array};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{
-    WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlRenderbuffer, WebGlTexture,
-    WebGlVertexArrayObject,
+    WebGl2RenderingContext, WebGlBuffer, WebGlFramebuffer, WebGlProgram, WebGlRenderbuffer,
+    WebGlSampler, WebGlTexture, WebGlVertexArrayObject,
 };
 
 const PATH_SECTOR_VERTEX_FLOATS_U32: u32 = PATH_SECTOR_VERTEX_FLOATS as u32;
+const COMPOSITE_SOURCE_UNIFORMS: [&str; 8] = [
+    "u_source0",
+    "u_source1",
+    "u_source2",
+    "u_source3",
+    "u_source4",
+    "u_source5",
+    "u_source6",
+    "u_source7",
+];
 type OutlineFillLayers = (Vec<GerberData>, Vec<RegionContour>);
+
+enum CompositeVisibleBits<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl CompositeVisibleBits<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bits) => bits,
+            Self::Owned(bits) => bits,
+        }
+    }
+
+    fn into_owned(self) -> Result<Vec<u8>, JsValue> {
+        match self {
+            Self::Owned(bits) => Ok(bits),
+            Self::Borrowed(bits) => {
+                let mut owned = Vec::new();
+                owned.try_reserve_exact(bits.len()).map_err(|_| {
+                    JsValue::from_str("Unable to reserve memory for composite visible areas")
+                })?;
+                owned.extend_from_slice(bits);
+                Ok(owned)
+            }
+        }
+    }
+}
 
 /// Metadata for a single user layer (may contain multiple polarity sublayers)
 pub struct LayerMetadata {
@@ -38,10 +86,12 @@ pub struct LayerMetadata {
     boundary: Boundary,              // Combined boundary
     fbo_dirty: bool,
     fbo_transform: Option<[f32; 9]>,
+    fbo_generation: u64,
     inner_outline_pixels: f32,
     inner_outline_world: f32,
     cpu_geometry_released: bool,
     has_path_regions: bool,
+    mask_in_red: bool,
 }
 
 /// WebGL renderer for Gerber graphics with multi-layer support
@@ -49,15 +99,42 @@ pub struct Renderer {
     gl: WebGl2RenderingContext,
     explicit_size: Option<(u32, u32)>,
     layers: Vec<Option<LayerMetadata>>, // Sparse vec (None = deallocated slot)
-    layer_count: usize,                 // Active layer count
+    composites: Vec<Option<CompositeLayerMetadata>>,
+    internal_layer_ids: HashSet<usize>,
+    outline_mask_cache: HashMap<OutlineMaskCacheKey, OutlineMaskCacheEntry>,
+    composite_errors: HashMap<usize, String>,
+    layer_count: usize, // Active layer count
     programs: ShaderPrograms,
     camera: Camera,
     quad_buffer: WebGlBuffer, // Shared quad buffer for all layers
+    fullscreen_vertex_array: WebGlVertexArrayObject,
     minimum_feature_pixels: f32,
     highlight_program: Option<ShaderProgram>,
     highlight_stencil_program: Option<ShaderProgram>,
     highlight_buffer: Option<WebGlBuffer>,
     highlight_vertex_array: Option<WebGlVertexArrayObject>,
+    membership_scratch: Option<Fbo>,
+    membership_scratch_owner: Option<(usize, [f32; 9])>,
+    active_composite_scratch: HashSet<usize>,
+    render_scratch_growth_count: u64,
+    selection_composite_id: Option<usize>,
+    composite_area_scan: Option<CompositeAreaScanState>,
+}
+
+struct CompositeAreaScanState {
+    composite_id: usize,
+    transform: [f32; 9],
+    width: u32,
+    height: u32,
+    next_row: u32,
+    present: Vec<u8>,
+    membership_pixels: Vec<u8>,
+    outline_pixels: Vec<u8>,
+}
+
+struct OutlineMaskCacheEntry {
+    layer_id: usize,
+    references: usize,
 }
 
 struct BufferCacheBuildGuard {
@@ -73,15 +150,630 @@ struct FboBuildGuard {
     stencil: Option<WebGlRenderbuffer>,
 }
 
+enum FboBuildError {
+    UnsupportedFormat(JsValue),
+    Fatal(JsValue),
+}
+
+impl FboBuildError {
+    fn into_js_value(self) -> JsValue {
+        match self {
+            Self::UnsupportedFormat(error) | Self::Fatal(error) => error,
+        }
+    }
+}
+
 struct FboListBuildGuard {
     gl: WebGl2RenderingContext,
     fbos: Vec<Option<Fbo>>,
+}
+
+struct GlCapabilityGuard {
+    gl: WebGl2RenderingContext,
+    capability: u32,
+    was_enabled: bool,
+}
+
+struct PixelStoreUnpackAlignmentGuard {
+    gl: WebGl2RenderingContext,
+    states: [(u32, i32); 6],
+}
+
+struct PixelStorePackAlignmentGuard {
+    gl: WebGl2RenderingContext,
+    states: [(u32, i32); 4],
+}
+
+struct GlObjectBindingStateGuard {
+    gl: WebGl2RenderingContext,
+    draw_framebuffer: Option<JsValue>,
+    read_framebuffer: Option<JsValue>,
+    renderbuffer: Option<JsValue>,
+    program: Option<JsValue>,
+    vertex_array: Option<JsValue>,
+    array_buffer: Option<JsValue>,
+    pixel_pack_buffer: Option<JsValue>,
+    pixel_unpack_buffer: Option<JsValue>,
+    active_texture: u32,
+    texture_2d_bindings: Vec<(u32, Option<JsValue>, Option<JsValue>)>,
+    read_buffer: u32,
+    draw_buffers: Vec<u32>,
+}
+
+struct RasterWriteStateGuard {
+    gl: WebGl2RenderingContext,
+    capability_states: [(u32, bool); 9],
+    viewport: [i32; 4],
+    blend: BlendState,
+    clear_color: [f32; 4],
+    clear_stencil: i32,
+    color_mask: [bool; 4],
+    stencil_front: StencilFaceState,
+    stencil_back: StencilFaceState,
+    _object_bindings: GlObjectBindingStateGuard,
+}
+
+#[derive(Clone, Copy)]
+struct BlendState {
+    equation_rgb: u32,
+    equation_alpha: u32,
+    source_rgb: u32,
+    destination_rgb: u32,
+    source_alpha: u32,
+    destination_alpha: u32,
+}
+
+#[derive(Clone, Copy)]
+struct StencilFaceState {
+    func: u32,
+    reference: i32,
+    value_mask: u32,
+    write_mask: u32,
+    fail: u32,
+    depth_fail: u32,
+    depth_pass: u32,
+}
+
+impl GlObjectBindingStateGuard {
+    const COMPOSITE_TEXTURE_UNIT_COUNT: u32 = 8;
+
+    fn optional_object(
+        gl: &WebGl2RenderingContext,
+        parameter: u32,
+    ) -> Result<Option<JsValue>, JsValue> {
+        let value = gl.get_parameter(parameter)?;
+        if value.is_null() || value.is_undefined() || value.as_f64() == Some(0.0) {
+            return Ok(None);
+        }
+        Ok(Some(value))
+    }
+
+    fn parameter_u32(
+        gl: &WebGl2RenderingContext,
+        parameter: u32,
+        label: &str,
+    ) -> Result<u32, JsValue> {
+        gl.get_parameter(parameter)?
+            .as_f64()
+            .map(|value| value as u32)
+            .ok_or_else(|| JsValue::from_str(&format!("WebGL {label} is unavailable")))
+    }
+
+    fn capture(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
+        let draw_framebuffer =
+            Self::optional_object(gl, WebGl2RenderingContext::DRAW_FRAMEBUFFER_BINDING)?;
+        let read_framebuffer =
+            Self::optional_object(gl, WebGl2RenderingContext::READ_FRAMEBUFFER_BINDING)?;
+        let renderbuffer = Self::optional_object(gl, WebGl2RenderingContext::RENDERBUFFER_BINDING)?;
+        let program = Self::optional_object(gl, WebGl2RenderingContext::CURRENT_PROGRAM)?;
+        let vertex_array = Self::optional_object(gl, WebGl2RenderingContext::VERTEX_ARRAY_BINDING)?;
+        let array_buffer = Self::optional_object(gl, WebGl2RenderingContext::ARRAY_BUFFER_BINDING)?;
+        let pixel_pack_buffer =
+            Self::optional_object(gl, WebGl2RenderingContext::PIXEL_PACK_BUFFER_BINDING)?;
+        let pixel_unpack_buffer =
+            Self::optional_object(gl, WebGl2RenderingContext::PIXEL_UNPACK_BUFFER_BINDING)?;
+        let active_texture =
+            Self::parameter_u32(gl, WebGl2RenderingContext::ACTIVE_TEXTURE, "ACTIVE_TEXTURE")?;
+        let read_buffer =
+            Self::parameter_u32(gl, WebGl2RenderingContext::READ_BUFFER, "READ_BUFFER")?;
+        let draw_buffer_count = if draw_framebuffer.is_some() {
+            Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::MAX_DRAW_BUFFERS,
+                "MAX_DRAW_BUFFERS",
+            )? as usize
+        } else {
+            1
+        };
+        let mut draw_buffers = Vec::new();
+        draw_buffers
+            .try_reserve_exact(draw_buffer_count)
+            .map_err(|_| JsValue::from_str("Unable to reserve WebGL draw-buffer state"))?;
+        for index in 0..draw_buffer_count {
+            draw_buffers.push(Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::DRAW_BUFFER0 + index as u32,
+                "DRAW_BUFFER",
+            )?);
+        }
+
+        let mut texture_2d_bindings = Vec::new();
+        texture_2d_bindings
+            .try_reserve_exact(Self::COMPOSITE_TEXTURE_UNIT_COUNT as usize + 1)
+            .map_err(|_| JsValue::from_str("Unable to reserve WebGL texture binding state"))?;
+        for unit in 0..Self::COMPOSITE_TEXTURE_UNIT_COUNT {
+            let texture_unit = WebGl2RenderingContext::TEXTURE0 + unit;
+            gl.active_texture(texture_unit);
+            let binding = Self::optional_object(gl, WebGl2RenderingContext::TEXTURE_BINDING_2D);
+            let sampler = Self::optional_object(gl, WebGl2RenderingContext::SAMPLER_BINDING);
+            match (binding, sampler) {
+                (Ok(binding), Ok(sampler)) => {
+                    texture_2d_bindings.push((texture_unit, binding, sampler))
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    gl.active_texture(active_texture);
+                    return Err(error);
+                }
+            }
+        }
+        if active_texture >= WebGl2RenderingContext::TEXTURE0 + Self::COMPOSITE_TEXTURE_UNIT_COUNT {
+            gl.active_texture(active_texture);
+            let binding = Self::optional_object(gl, WebGl2RenderingContext::TEXTURE_BINDING_2D);
+            let sampler = Self::optional_object(gl, WebGl2RenderingContext::SAMPLER_BINDING);
+            match (binding, sampler) {
+                (Ok(binding), Ok(sampler)) => {
+                    texture_2d_bindings.push((active_texture, binding, sampler))
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    gl.active_texture(active_texture);
+                    return Err(error);
+                }
+            }
+        }
+        gl.active_texture(active_texture);
+        for (texture_unit, _, _) in &texture_2d_bindings {
+            gl.bind_sampler(*texture_unit - WebGl2RenderingContext::TEXTURE0, None);
+        }
+        // All renderer uploads/readbacks use direct typed-array overloads.
+        // A caller-owned PBO would reinterpret or reject those operations.
+        gl.bind_buffer(WebGl2RenderingContext::PIXEL_PACK_BUFFER, None);
+        gl.bind_buffer(WebGl2RenderingContext::PIXEL_UNPACK_BUFFER, None);
+
+        Ok(Self {
+            gl: gl.clone(),
+            draw_framebuffer,
+            read_framebuffer,
+            renderbuffer,
+            program,
+            vertex_array,
+            array_buffer,
+            pixel_pack_buffer,
+            pixel_unpack_buffer,
+            active_texture,
+            texture_2d_bindings,
+            read_buffer,
+            draw_buffers,
+        })
+    }
+}
+
+impl Drop for GlObjectBindingStateGuard {
+    fn drop(&mut self) {
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::DRAW_FRAMEBUFFER,
+            self.draw_framebuffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlFramebuffer>),
+        );
+        let draw_buffers = Array::new();
+        for buffer in &self.draw_buffers {
+            draw_buffers.push(&JsValue::from_f64(*buffer as f64));
+        }
+        self.gl.draw_buffers(&draw_buffers);
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            self.read_framebuffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlFramebuffer>),
+        );
+        self.gl.read_buffer(self.read_buffer);
+        self.gl.bind_renderbuffer(
+            WebGl2RenderingContext::RENDERBUFFER,
+            self.renderbuffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlRenderbuffer>),
+        );
+        self.gl.use_program(
+            self.program
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlProgram>),
+        );
+        self.gl.bind_vertex_array(
+            self.vertex_array
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlVertexArrayObject>),
+        );
+        self.gl.bind_buffer(
+            WebGl2RenderingContext::ARRAY_BUFFER,
+            self.array_buffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlBuffer>),
+        );
+        self.gl.bind_buffer(
+            WebGl2RenderingContext::PIXEL_PACK_BUFFER,
+            self.pixel_pack_buffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlBuffer>),
+        );
+        self.gl.bind_buffer(
+            WebGl2RenderingContext::PIXEL_UNPACK_BUFFER,
+            self.pixel_unpack_buffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlBuffer>),
+        );
+        for (unit, texture, sampler) in &self.texture_2d_bindings {
+            self.gl.active_texture(*unit);
+            self.gl.bind_texture(
+                WebGl2RenderingContext::TEXTURE_2D,
+                texture.as_ref().map(JsValue::unchecked_ref::<WebGlTexture>),
+            );
+            self.gl.bind_sampler(
+                *unit - WebGl2RenderingContext::TEXTURE0,
+                sampler.as_ref().map(JsValue::unchecked_ref::<WebGlSampler>),
+            );
+        }
+        self.gl.active_texture(self.active_texture);
+    }
+}
+
+impl RasterWriteStateGuard {
+    fn parameter_i32(
+        gl: &WebGl2RenderingContext,
+        parameter: u32,
+        label: &str,
+    ) -> Result<i32, JsValue> {
+        gl.get_parameter(parameter)?
+            .as_f64()
+            .map(|value| value as i32)
+            .ok_or_else(|| JsValue::from_str(&format!("WebGL {label} is unavailable")))
+    }
+
+    fn parameter_u32(
+        gl: &WebGl2RenderingContext,
+        parameter: u32,
+        label: &str,
+    ) -> Result<u32, JsValue> {
+        gl.get_parameter(parameter)?
+            .as_f64()
+            .map(|value| value as u32)
+            .ok_or_else(|| JsValue::from_str(&format!("WebGL {label} is unavailable")))
+    }
+
+    fn stencil_face_state(
+        gl: &WebGl2RenderingContext,
+        back: bool,
+    ) -> Result<StencilFaceState, JsValue> {
+        let prefix = if back { "BACK_STENCIL" } else { "STENCIL" };
+        let parameters = if back {
+            [
+                WebGl2RenderingContext::STENCIL_BACK_FUNC,
+                WebGl2RenderingContext::STENCIL_BACK_REF,
+                WebGl2RenderingContext::STENCIL_BACK_VALUE_MASK,
+                WebGl2RenderingContext::STENCIL_BACK_WRITEMASK,
+                WebGl2RenderingContext::STENCIL_BACK_FAIL,
+                WebGl2RenderingContext::STENCIL_BACK_PASS_DEPTH_FAIL,
+                WebGl2RenderingContext::STENCIL_BACK_PASS_DEPTH_PASS,
+            ]
+        } else {
+            [
+                WebGl2RenderingContext::STENCIL_FUNC,
+                WebGl2RenderingContext::STENCIL_REF,
+                WebGl2RenderingContext::STENCIL_VALUE_MASK,
+                WebGl2RenderingContext::STENCIL_WRITEMASK,
+                WebGl2RenderingContext::STENCIL_FAIL,
+                WebGl2RenderingContext::STENCIL_PASS_DEPTH_FAIL,
+                WebGl2RenderingContext::STENCIL_PASS_DEPTH_PASS,
+            ]
+        };
+        Ok(StencilFaceState {
+            func: Self::parameter_u32(gl, parameters[0], &format!("{prefix}_FUNC"))?,
+            reference: Self::parameter_i32(gl, parameters[1], &format!("{prefix}_REF"))?,
+            value_mask: Self::parameter_u32(gl, parameters[2], &format!("{prefix}_VALUE_MASK"))?,
+            write_mask: Self::parameter_u32(gl, parameters[3], &format!("{prefix}_WRITEMASK"))?,
+            fail: Self::parameter_u32(gl, parameters[4], &format!("{prefix}_FAIL"))?,
+            depth_fail: Self::parameter_u32(
+                gl,
+                parameters[5],
+                &format!("{prefix}_PASS_DEPTH_FAIL"),
+            )?,
+            depth_pass: Self::parameter_u32(
+                gl,
+                parameters[6],
+                &format!("{prefix}_PASS_DEPTH_PASS"),
+            )?,
+        })
+    }
+
+    fn parameter_i32_array4(
+        gl: &WebGl2RenderingContext,
+        parameter: u32,
+        label: &str,
+    ) -> Result<[i32; 4], JsValue> {
+        let value = gl.get_parameter(parameter)?;
+        let mut result = [0; 4];
+        for (index, element) in result.iter_mut().enumerate() {
+            *element = Reflect::get(&value, &JsValue::from_f64(index as f64))?
+                .as_f64()
+                .map(|number| number as i32)
+                .ok_or_else(|| JsValue::from_str(&format!("WebGL {label} is unavailable")))?;
+        }
+        Ok(result)
+    }
+
+    fn parameter_f32_array4(
+        gl: &WebGl2RenderingContext,
+        parameter: u32,
+        label: &str,
+    ) -> Result<[f32; 4], JsValue> {
+        let value = gl.get_parameter(parameter)?;
+        let mut result = [0.0; 4];
+        for (index, element) in result.iter_mut().enumerate() {
+            *element = Reflect::get(&value, &JsValue::from_f64(index as f64))?
+                .as_f64()
+                .map(|number| number as f32)
+                .ok_or_else(|| JsValue::from_str(&format!("WebGL {label} is unavailable")))?;
+        }
+        Ok(result)
+    }
+
+    fn normalize(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
+        let object_bindings = GlObjectBindingStateGuard::capture(gl)?;
+        let viewport =
+            Self::parameter_i32_array4(gl, WebGl2RenderingContext::VIEWPORT, "VIEWPORT")?;
+        let blend = BlendState {
+            equation_rgb: Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::BLEND_EQUATION_RGB,
+                "BLEND_EQUATION_RGB",
+            )?,
+            equation_alpha: Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::BLEND_EQUATION_ALPHA,
+                "BLEND_EQUATION_ALPHA",
+            )?,
+            source_rgb: Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::BLEND_SRC_RGB,
+                "BLEND_SRC_RGB",
+            )?,
+            destination_rgb: Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::BLEND_DST_RGB,
+                "BLEND_DST_RGB",
+            )?,
+            source_alpha: Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::BLEND_SRC_ALPHA,
+                "BLEND_SRC_ALPHA",
+            )?,
+            destination_alpha: Self::parameter_u32(
+                gl,
+                WebGl2RenderingContext::BLEND_DST_ALPHA,
+                "BLEND_DST_ALPHA",
+            )?,
+        };
+        let clear_color = Self::parameter_f32_array4(
+            gl,
+            WebGl2RenderingContext::COLOR_CLEAR_VALUE,
+            "COLOR_CLEAR_VALUE",
+        )?;
+        let clear_stencil = Self::parameter_i32(
+            gl,
+            WebGl2RenderingContext::STENCIL_CLEAR_VALUE,
+            "STENCIL_CLEAR_VALUE",
+        )?;
+        let mask_value = gl.get_parameter(WebGl2RenderingContext::COLOR_WRITEMASK)?;
+        let mut color_mask = [false; 4];
+        for (index, channel) in color_mask.iter_mut().enumerate() {
+            *channel = Reflect::get(&mask_value, &JsValue::from_f64(index as f64))?
+                .as_bool()
+                .ok_or_else(|| JsValue::from_str("WebGL COLOR_WRITEMASK is unavailable"))?;
+        }
+        let stencil_front = Self::stencil_face_state(gl, false)?;
+        let stencil_back = Self::stencil_face_state(gl, true)?;
+        let mut capability_states = [
+            (WebGl2RenderingContext::SCISSOR_TEST, false),
+            (WebGl2RenderingContext::CULL_FACE, false),
+            (WebGl2RenderingContext::DEPTH_TEST, false),
+            (WebGl2RenderingContext::STENCIL_TEST, false),
+            (WebGl2RenderingContext::RASTERIZER_DISCARD, false),
+            (WebGl2RenderingContext::SAMPLE_ALPHA_TO_COVERAGE, false),
+            (WebGl2RenderingContext::SAMPLE_COVERAGE, false),
+            (WebGl2RenderingContext::DITHER, false),
+            (WebGl2RenderingContext::BLEND, false),
+        ];
+        for (capability, was_enabled) in &mut capability_states {
+            *was_enabled = gl.is_enabled(*capability);
+            gl.disable(*capability);
+        }
+        gl.color_mask(true, true, true, true);
+        Ok(Self {
+            gl: gl.clone(),
+            capability_states,
+            viewport,
+            blend,
+            clear_color,
+            clear_stencil,
+            color_mask,
+            stencil_front,
+            stencil_back,
+            _object_bindings: object_bindings,
+        })
+    }
+
+    fn restore_stencil_face(&self, face: u32, state: StencilFaceState) {
+        self.gl
+            .stencil_func_separate(face, state.func, state.reference, state.value_mask);
+        self.gl.stencil_mask_separate(face, state.write_mask);
+        self.gl
+            .stencil_op_separate(face, state.fail, state.depth_fail, state.depth_pass);
+    }
+}
+
+impl Drop for RasterWriteStateGuard {
+    fn drop(&mut self) {
+        self.gl.viewport(
+            self.viewport[0],
+            self.viewport[1],
+            self.viewport[2],
+            self.viewport[3],
+        );
+        self.gl
+            .blend_equation_separate(self.blend.equation_rgb, self.blend.equation_alpha);
+        self.gl.blend_func_separate(
+            self.blend.source_rgb,
+            self.blend.destination_rgb,
+            self.blend.source_alpha,
+            self.blend.destination_alpha,
+        );
+        self.gl.clear_color(
+            self.clear_color[0],
+            self.clear_color[1],
+            self.clear_color[2],
+            self.clear_color[3],
+        );
+        self.gl.clear_stencil(self.clear_stencil);
+        self.restore_stencil_face(WebGl2RenderingContext::FRONT, self.stencil_front);
+        self.restore_stencil_face(WebGl2RenderingContext::BACK, self.stencil_back);
+        self.gl.color_mask(
+            self.color_mask[0],
+            self.color_mask[1],
+            self.color_mask[2],
+            self.color_mask[3],
+        );
+        for (capability, was_enabled) in self.capability_states {
+            if was_enabled {
+                self.gl.enable(capability);
+            } else {
+                self.gl.disable(capability);
+            }
+        }
+    }
+}
+
+impl PixelStoreUnpackAlignmentGuard {
+    fn set_one(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
+        let parameters = [
+            WebGl2RenderingContext::UNPACK_ALIGNMENT,
+            WebGl2RenderingContext::UNPACK_ROW_LENGTH,
+            WebGl2RenderingContext::UNPACK_IMAGE_HEIGHT,
+            WebGl2RenderingContext::UNPACK_SKIP_PIXELS,
+            WebGl2RenderingContext::UNPACK_SKIP_ROWS,
+            WebGl2RenderingContext::UNPACK_SKIP_IMAGES,
+        ];
+        let mut states = [(0u32, 0i32); 6];
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            let value = gl
+                .get_parameter(parameter)?
+                .as_f64()
+                .map(|value| value as i32)
+                .ok_or_else(|| JsValue::from_str("WebGL UNPACK state is unavailable"))?;
+            states[index] = (parameter, value);
+        }
+        for &(parameter, _) in &states {
+            gl.pixel_storei(
+                parameter,
+                if parameter == WebGl2RenderingContext::UNPACK_ALIGNMENT {
+                    1
+                } else {
+                    0
+                },
+            );
+        }
+        Ok(Self {
+            gl: gl.clone(),
+            states,
+        })
+    }
+}
+
+impl Drop for PixelStoreUnpackAlignmentGuard {
+    fn drop(&mut self) {
+        for &(parameter, value) in &self.states {
+            self.gl.pixel_storei(parameter, value);
+        }
+    }
+}
+
+impl PixelStorePackAlignmentGuard {
+    fn set_one(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
+        let parameters = [
+            WebGl2RenderingContext::PACK_ALIGNMENT,
+            WebGl2RenderingContext::PACK_ROW_LENGTH,
+            WebGl2RenderingContext::PACK_SKIP_PIXELS,
+            WebGl2RenderingContext::PACK_SKIP_ROWS,
+        ];
+        let mut states = [(0u32, 0i32); 4];
+        for (index, parameter) in parameters.into_iter().enumerate() {
+            let value = gl
+                .get_parameter(parameter)?
+                .as_f64()
+                .map(|value| value as i32)
+                .ok_or_else(|| JsValue::from_str("WebGL PACK state is unavailable"))?;
+            states[index] = (parameter, value);
+        }
+        for &(parameter, _) in &states {
+            gl.pixel_storei(
+                parameter,
+                if parameter == WebGl2RenderingContext::PACK_ALIGNMENT {
+                    1
+                } else {
+                    0
+                },
+            );
+        }
+        Ok(Self {
+            gl: gl.clone(),
+            states,
+        })
+    }
+}
+
+impl Drop for PixelStorePackAlignmentGuard {
+    fn drop(&mut self) {
+        for &(parameter, value) in &self.states {
+            self.gl.pixel_storei(parameter, value);
+        }
+    }
+}
+
+impl GlCapabilityGuard {
+    fn disable(gl: &WebGl2RenderingContext, capability: u32) -> Self {
+        let was_enabled = gl.is_enabled(capability);
+        gl.disable(capability);
+        Self {
+            gl: gl.clone(),
+            capability,
+            was_enabled,
+        }
+    }
+}
+
+impl Drop for GlCapabilityGuard {
+    fn drop(&mut self) {
+        if self.was_enabled {
+            self.gl.enable(self.capability);
+        } else {
+            self.gl.disable(self.capability);
+        }
+    }
 }
 
 struct RendererResourcesBuildGuard {
     gl: WebGl2RenderingContext,
     programs: Option<ShaderPrograms>,
     quad_buffer: Option<WebGlBuffer>,
+    fullscreen_vertex_array: Option<WebGlVertexArrayObject>,
     fbos: Vec<Option<Fbo>>,
 }
 
@@ -99,6 +791,49 @@ fn include_optional_boundary(boundary: &mut Option<Boundary>, next: Boundary) {
     } else {
         *boundary = Some(next);
     }
+}
+
+fn try_composite_source_bookkeeping(
+    source_count: usize,
+) -> Result<(HashSet<usize>, Vec<ResolvedMaskSource>), &'static str> {
+    let mut unique_sources = HashSet::new();
+    unique_sources
+        .try_reserve(source_count)
+        .map_err(|_| "Unable to reserve composite source validation state")?;
+    let mut normalized_sources = Vec::new();
+    normalized_sources
+        .try_reserve_exact(source_count)
+        .map_err(|_| "Unable to reserve composite source IDs")?;
+    Ok((unique_sources, normalized_sources))
+}
+
+fn try_reserve_internal_layer_id_slot(
+    internal_layer_ids: &mut HashSet<usize>,
+    additional: usize,
+) -> Result<(), &'static str> {
+    internal_layer_ids
+        .try_reserve(additional)
+        .map_err(|_| "Unable to reserve internal outline layer state")
+}
+
+fn try_reserve_outline_cache_slot(
+    outline_mask_cache: &mut HashMap<OutlineMaskCacheKey, OutlineMaskCacheEntry>,
+    additional: usize,
+) -> Result<(), &'static str> {
+    outline_mask_cache
+        .try_reserve(additional)
+        .map_err(|_| "Unable to reserve outline mask cache state")
+}
+
+fn js_value_message(error: &JsValue) -> String {
+    error
+        .as_string()
+        .or_else(|| {
+            Reflect::get(error, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|message| message.as_string())
+        })
+        .unwrap_or_else(|| "Composite rendering failed".to_string())
 }
 
 fn fill_layers_boundary(fill_layers: &[GerberData]) -> Result<Boundary, JsValue> {
@@ -145,7 +880,7 @@ impl FboBuildGuard {
         }
     }
 
-    fn commit(mut self) -> Fbo {
+    fn commit(mut self, color_bytes_per_pixel: usize, color_format: &'static str) -> Fbo {
         Fbo {
             framebuffer: self
                 .framebuffer
@@ -156,6 +891,8 @@ impl FboBuildGuard {
                 .take()
                 .expect("completed FBO must have a texture"),
             stencil: self.stencil.take(),
+            color_bytes_per_pixel,
+            color_format,
         }
     }
 }
@@ -218,11 +955,19 @@ impl RendererResourcesBuildGuard {
             gl: gl.clone(),
             programs: None,
             quad_buffer: None,
+            fullscreen_vertex_array: None,
             fbos,
         })
     }
 
-    fn commit(mut self) -> (ShaderPrograms, WebGlBuffer, Vec<Option<Fbo>>) {
+    fn commit(
+        mut self,
+    ) -> (
+        ShaderPrograms,
+        WebGlBuffer,
+        WebGlVertexArrayObject,
+        Vec<Option<Fbo>>,
+    ) {
         (
             self.programs
                 .take()
@@ -230,6 +975,9 @@ impl RendererResourcesBuildGuard {
             self.quad_buffer
                 .take()
                 .expect("completed renderer resources must have a quad buffer"),
+            self.fullscreen_vertex_array
+                .take()
+                .expect("completed renderer resources must have a fullscreen vertex array"),
             std::mem::take(&mut self.fbos),
         )
     }
@@ -243,6 +991,9 @@ impl Drop for RendererResourcesBuildGuard {
         if let Some(quad_buffer) = self.quad_buffer.take() {
             self.gl.delete_buffer(Some(&quad_buffer));
         }
+        if let Some(vertex_array) = self.fullscreen_vertex_array.take() {
+            self.gl.delete_vertex_array(Some(&vertex_array));
+        }
         if let Some(programs) = self.programs.take() {
             Renderer::delete_shader_programs(&self.gl, &programs);
         }
@@ -250,6 +1001,43 @@ impl Drop for RendererResourcesBuildGuard {
 }
 
 impl Renderer {
+    const MAX_GL_ERROR_DRAIN: usize = 32;
+
+    fn drain_gl_errors(gl: &WebGl2RenderingContext) {
+        for _ in 0..Self::MAX_GL_ERROR_DRAIN {
+            if gl.get_error() == WebGl2RenderingContext::NO_ERROR {
+                return;
+            }
+        }
+    }
+
+    fn check_gl_stage(gl: &WebGl2RenderingContext, stage: &str) -> Result<(), JsValue> {
+        let error = gl.get_error();
+        if error == WebGl2RenderingContext::NO_ERROR {
+            return Ok(());
+        }
+        Self::drain_gl_errors(gl);
+        Err(JsValue::from_str(&format!(
+            "{stage} failed with WebGL error 0x{error:x}"
+        )))
+    }
+
+    fn bind_draw_target(gl: &WebGl2RenderingContext, framebuffer: Option<&WebGlFramebuffer>) {
+        gl.bind_framebuffer(WebGl2RenderingContext::DRAW_FRAMEBUFFER, framebuffer);
+        let buffers = Array::new();
+        buffers.push(&JsValue::from_f64(if framebuffer.is_some() {
+            WebGl2RenderingContext::COLOR_ATTACHMENT0
+        } else {
+            WebGl2RenderingContext::BACK
+        } as f64));
+        gl.draw_buffers(&buffers);
+    }
+
+    fn bind_read_target(gl: &WebGl2RenderingContext, framebuffer: &WebGlFramebuffer) {
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, Some(framebuffer));
+        gl.read_buffer(WebGl2RenderingContext::COLOR_ATTACHMENT0);
+    }
+
     /// Create a new renderer with WebGL context (no layers initially)
     pub fn new(gl: WebGl2RenderingContext) -> Result<Renderer, JsValue> {
         Self::new_with_size(gl, None)
@@ -269,32 +1057,41 @@ impl Renderer {
         gl: WebGl2RenderingContext,
         explicit_size: Option<(u32, u32)>,
     ) -> Result<Renderer, JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&gl)?;
         let mut pending = RendererResourcesBuildGuard::new(&gl, 0)?;
         pending.programs = Some(ShaderPrograms::new(&gl)?);
         pending.quad_buffer = Some(Self::create_quad_buffer(&gl)?);
-        let (programs, quad_buffer, _) = pending.commit();
+        pending.fullscreen_vertex_array = Some(
+            gl.create_vertex_array()
+                .ok_or_else(|| JsValue::from_str("Failed to create fullscreen vertex array"))?,
+        );
+        let (programs, quad_buffer, fullscreen_vertex_array, _) = pending.commit();
 
         Ok(Renderer {
             gl,
             explicit_size,
             layers: Vec::new(),
+            composites: Vec::new(),
+            internal_layer_ids: HashSet::new(),
+            outline_mask_cache: HashMap::new(),
+            composite_errors: HashMap::new(),
             layer_count: 0,
             programs,
             camera: Camera::new(),
             quad_buffer,
+            fullscreen_vertex_array,
             minimum_feature_pixels: 0.0,
             highlight_program: None,
             highlight_stencil_program: None,
             highlight_buffer: None,
             highlight_vertex_array: None,
+            membership_scratch: None,
+            membership_scratch_owner: None,
+            active_composite_scratch: HashSet::new(),
+            render_scratch_growth_count: 0,
+            selection_composite_id: None,
+            composite_area_scan: None,
         })
-    }
-
-    /// Update explicit framebuffer dimensions used by headless renderers.
-    pub fn set_framebuffer_size(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
-        Self::validate_framebuffer_size(width, height)?;
-        self.explicit_size = Some((width, height));
-        Ok(())
     }
 
     /// Configure a display-space minimum feature size in CSS/device pixels.
@@ -332,23 +1129,40 @@ impl Renderer {
         } else {
             0.0
         };
-        let layer = self.get_layer_mut(layer_id)?;
-        if (layer.inner_outline_pixels - next_pixels).abs() <= f32::EPSILON
-            && (layer.inner_outline_world - next_world).abs() <= f32::EPSILON
         {
-            return Ok(());
+            let layer = self.get_layer_mut(layer_id)?;
+            if (layer.inner_outline_pixels - next_pixels).abs() <= f32::EPSILON
+                && (layer.inner_outline_world - next_world).abs() <= f32::EPSILON
+            {
+                return Ok(());
+            }
+
+            layer.inner_outline_pixels = next_pixels;
+            layer.inner_outline_world = next_world;
+            layer.fbo_dirty = true;
+            layer.fbo_transform = None;
         }
 
-        layer.inner_outline_pixels = next_pixels;
-        layer.inner_outline_world = next_world;
-        layer.fbo_dirty = true;
-        layer.fbo_transform = None;
+        self.invalidate_composites_for_source_change(layer_id);
         Ok(())
     }
 
     /// Add a new layer with parsed Gerber data
     /// Returns the layer index (layer_id)
     pub fn add_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
+        self.add_layer_with_mask_format(gerber_data, false)
+    }
+
+    fn add_internal_mask_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
+        self.add_layer_with_mask_format(gerber_data, true)
+    }
+
+    fn add_layer_with_mask_format(
+        &mut self,
+        gerber_data: Vec<GerberData>,
+        mask_in_red: bool,
+    ) -> Result<usize, JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
         let (width, height) = self.get_canvas_size()?;
         Self::validate_gerber_data_layers(&gerber_data)?;
 
@@ -371,11 +1185,16 @@ impl Renderer {
         }
 
         let boundary = Boundary::new(min_x, max_x, min_y, max_y);
-        let free_slot = self.layers.iter().position(|layer| layer.is_none());
+        let free_slot = self.layers.iter().enumerate().position(|(index, layer)| {
+            layer.is_none() && self.composites.get(index).is_none_or(Option::is_none)
+        });
         if free_slot.is_none() {
             self.layers
                 .try_reserve(1)
                 .map_err(|_| JsValue::from_str("Unable to reserve memory for renderer layers"))?;
+            self.composites.try_reserve(1).map_err(|_| {
+                JsValue::from_str("Unable to reserve memory for composite renderer layers")
+            })?;
         }
 
         // Create buffer caches before allocating GPU resources so a CPU
@@ -386,7 +1205,11 @@ impl Renderer {
         let needs_stencil = gerber_data
             .iter()
             .any(|data| data.path_regions.has_geometry());
-        let fbo = Self::create_fbo(&self.gl, width, height, needs_stencil)?;
+        let fbo = if mask_in_red {
+            Self::create_red_mask_fbo(&self.gl, width, height, needs_stencil)?
+        } else {
+            Self::create_fbo(&self.gl, width, height, needs_stencil)?
+        };
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -395,10 +1218,12 @@ impl Renderer {
             boundary,
             fbo_dirty: true,
             fbo_transform: None,
+            fbo_generation: 0,
             inner_outline_pixels: 0.0,
             inner_outline_world: 0.0,
             cpu_geometry_released: false,
             has_path_regions: needs_stencil,
+            mask_in_red,
         };
 
         // Find next free slot or extend vec
@@ -408,9 +1233,750 @@ impl Renderer {
             Ok(free_slot)
         } else {
             self.layers.push(Some(layer_metadata));
+            self.composites.push(None);
             self.layer_count += 1;
             Ok(self.layers.len() - 1)
         }
+    }
+
+    pub fn add_composite_layer_from_bounds(
+        &mut self,
+        source_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        bounds: Boundary,
+    ) -> Result<usize, JsValue> {
+        self.add_composite_layer_from_bounds_bits(
+            source_ids,
+            CompositeVisibleBits::Borrowed(visible_bits),
+            inverted,
+            bounds,
+        )
+    }
+
+    fn add_composite_layer_from_bounds_bits(
+        &mut self,
+        source_ids: &[u32],
+        visible_bits: CompositeVisibleBits<'_>,
+        inverted: bool,
+        bounds: Boundary,
+    ) -> Result<usize, JsValue> {
+        let bounds =
+            normalize_fallback_bounds(bounds).map_err(|error| JsValue::from_str(&error))?;
+        let key = OutlineMaskCacheKey::Bounds {
+            min_x: bounds.min_x.to_bits(),
+            max_x: bounds.max_x.to_bits(),
+            min_y: bounds.min_y.to_bits(),
+            max_y: bounds.max_y.to_bits(),
+        };
+        self.add_composite_layer(source_ids, visible_bits, inverted, key, move || {
+            Ok(vec![Self::bounds_fill_layer(bounds)?])
+        })
+    }
+
+    pub fn add_composite_preset_from_bounds(
+        &mut self,
+        source_ids: &[u32],
+        preset: &str,
+        inverted: bool,
+        bounds: Boundary,
+    ) -> Result<usize, JsValue> {
+        let bits = preset_bitset(source_ids.len(), CompositePreset::parse(preset)?)?;
+        self.add_composite_layer_from_bounds_bits(
+            source_ids,
+            CompositeVisibleBits::Owned(bits),
+            inverted,
+            bounds,
+        )
+    }
+
+    pub fn add_composite_layer_from_outline(
+        &mut self,
+        source_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        outline_layer_id: usize,
+    ) -> Result<usize, JsValue> {
+        self.add_composite_layer_from_outline_bits(
+            source_ids,
+            CompositeVisibleBits::Borrowed(visible_bits),
+            inverted,
+            outline_layer_id,
+        )
+    }
+
+    fn add_composite_layer_from_outline_bits(
+        &mut self,
+        source_ids: &[u32],
+        visible_bits: CompositeVisibleBits<'_>,
+        inverted: bool,
+        outline_layer_id: usize,
+    ) -> Result<usize, JsValue> {
+        if self.internal_layer_ids.contains(&outline_layer_id)
+            || self
+                .composites
+                .get(outline_layer_id)
+                .is_some_and(Option::is_some)
+        {
+            return Err(JsValue::from_str(
+                "Composite outlineLayerId must reference a Gerber layer",
+            ));
+        }
+        let fill_layers = {
+            let outline = self.get_layer(outline_layer_id)?;
+            Self::inverted_outline_fill_layers(&outline.gerber_data)?.0
+        };
+        let key = OutlineMaskCacheKey::Layer {
+            layer_id: outline_layer_id,
+        };
+        self.add_composite_layer(source_ids, visible_bits, inverted, key, move || {
+            Ok(fill_layers)
+        })
+    }
+
+    pub fn add_composite_layer_from_outline_data(
+        &mut self,
+        source_ids: &[u32],
+        visible_bits: &[u8],
+        inverted: bool,
+        outline_cache_token: usize,
+        outline_content: &str,
+        outline_offset_x: f32,
+        outline_offset_y: f32,
+        outline_preserve_arc_regions: bool,
+        outline_arc_tessellation_quality: u32,
+        outline_data: &[GerberData],
+    ) -> Result<usize, JsValue> {
+        if self.internal_layer_ids.contains(&outline_cache_token)
+            || self
+                .composites
+                .get(outline_cache_token)
+                .is_some_and(Option::is_some)
+        {
+            return Err(JsValue::from_str(
+                "Composite outlineLayerId must reference a Gerber layer",
+            ));
+        }
+        self.get_layer(outline_cache_token)?;
+        let fill_layers = Self::inverted_outline_fill_layers(outline_data)?.0;
+        let key = OutlineMaskCacheKey::Parsed {
+            layer_id: outline_cache_token,
+            content_sha256: Sha256::digest(outline_content.as_bytes()).into(),
+            content_len: outline_content.len(),
+            offset_x: outline_offset_x.to_bits(),
+            offset_y: outline_offset_y.to_bits(),
+            preserve_arc_regions: outline_preserve_arc_regions,
+            arc_tessellation_quality: outline_arc_tessellation_quality,
+        };
+        self.add_composite_layer(
+            source_ids,
+            CompositeVisibleBits::Borrowed(visible_bits),
+            inverted,
+            key,
+            move || Ok(fill_layers),
+        )
+    }
+
+    pub fn add_composite_preset_from_outline(
+        &mut self,
+        source_ids: &[u32],
+        preset: &str,
+        inverted: bool,
+        outline_layer_id: usize,
+    ) -> Result<usize, JsValue> {
+        let bits = preset_bitset(source_ids.len(), CompositePreset::parse(preset)?)?;
+        self.add_composite_layer_from_outline_bits(
+            source_ids,
+            CompositeVisibleBits::Owned(bits),
+            inverted,
+            outline_layer_id,
+        )
+    }
+
+    fn add_composite_layer<F>(
+        &mut self,
+        source_ids: &[u32],
+        visible_bits: CompositeVisibleBits<'_>,
+        inverted: bool,
+        outline_key: OutlineMaskCacheKey,
+        create_outline: F,
+    ) -> Result<usize, JsValue>
+    where
+        F: FnOnce() -> Result<Vec<GerberData>, JsValue>,
+    {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        validate_composite_source_count(source_ids.len())?;
+        validate_composite_bitset(source_ids.len(), visible_bits.as_slice())?;
+        let owned_visible_bits = visible_bits.into_owned()?;
+        let (mut unique_sources, mut normalized_sources) =
+            try_composite_source_bookkeeping(source_ids.len()).map_err(JsValue::from_str)?;
+        let mut source_boundary: Option<Boundary> = None;
+        for &source_id in source_ids {
+            let source_id = source_id as usize;
+            if !unique_sources.insert(source_id) {
+                return Err(JsValue::from_str(
+                    "Composite source layer IDs must be unique",
+                ));
+            }
+            let source = self.resolve_composite_source(source_id)?;
+            include_optional_boundary(&mut source_boundary, self.mask_source_boundary(source)?);
+            normalized_sources.push(source);
+        }
+
+        let outline_mask_id = if let Some(entry) = self.outline_mask_cache.get_mut(&outline_key) {
+            entry.references = entry
+                .references
+                .checked_add(1)
+                .ok_or_else(|| JsValue::from_str("Composite outline reference count overflow"))?;
+            entry.layer_id
+        } else {
+            try_reserve_internal_layer_id_slot(&mut self.internal_layer_ids, 1)
+                .map_err(JsValue::from_str)?;
+            try_reserve_outline_cache_slot(&mut self.outline_mask_cache, 1)
+                .map_err(JsValue::from_str)?;
+            let cache_key = outline_key;
+            let outline_id = self.add_internal_mask_layer(create_outline()?)?;
+            self.internal_layer_ids.insert(outline_id);
+            self.outline_mask_cache.insert(
+                cache_key,
+                OutlineMaskCacheEntry {
+                    layer_id: outline_id,
+                    references: 1,
+                },
+            );
+            outline_id
+        };
+
+        let allocation = (|| -> Result<(usize, Boundary), JsValue> {
+            let outline_boundary = self.mask_source_boundary(ResolvedMaskSource::new(
+                outline_mask_id,
+                MaskSourceKind::InternalOutline,
+            ))?;
+            let mut boundary = source_boundary.ok_or_else(|| {
+                JsValue::from_str("Composite source layers do not have a finite boundary")
+            })?;
+            if inverted || composite_get_bit(&owned_visible_bits, 0) {
+                boundary.include_boundary(&outline_boundary);
+            }
+
+            let free_slot = self.layers.iter().enumerate().position(|(index, layer)| {
+                layer.is_none() && self.composites.get(index).is_none_or(Option::is_none)
+            });
+            let layer_id = if let Some(index) = free_slot {
+                index
+            } else {
+                self.layers.try_reserve(1).map_err(|_| {
+                    JsValue::from_str("Unable to reserve memory for renderer layers")
+                })?;
+                self.composites.try_reserve(1).map_err(|_| {
+                    JsValue::from_str("Unable to reserve memory for composite renderer layers")
+                })?;
+                self.layers.push(None);
+                self.composites.push(None);
+                self.layers.len() - 1
+            };
+            Ok((layer_id, boundary))
+        })();
+        let (layer_id, boundary) = match allocation {
+            Ok(value) => value,
+            Err(error) => {
+                self.release_outline_mask_reference(&outline_key);
+                return Err(error);
+            }
+        };
+
+        self.composites[layer_id] = Some(CompositeLayerMetadata {
+            sources: normalized_sources,
+            visible_bits: owned_visible_bits,
+            outline_mask_id,
+            outline_cache_key: outline_key,
+            boundary,
+            inverted,
+            output_fbo: None,
+            output_is_r8: false,
+            lookup_texture: None,
+            lookup_width: 0,
+            dirty: true,
+            membership_dirty: true,
+            source_generations: Vec::new(),
+            outline_generation: None,
+            transform: None,
+            membership_encode_count: 0,
+            membership_encode_pass_count: 0,
+            last_membership_encode_pass_count: 0,
+            lookup_render_count: 0,
+        });
+        self.layer_count += 1;
+        Ok(layer_id)
+    }
+
+    pub fn set_composite_visible_bits(
+        &mut self,
+        composite_id: usize,
+        visible_bits: &[u8],
+    ) -> Result<(), JsValue> {
+        let source_count = self
+            .composites
+            .get(composite_id)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?
+            .sources
+            .len();
+        validate_composite_bitset(source_count, visible_bits)?;
+        let composite = self.composites[composite_id].as_mut().unwrap();
+        composite.visible_bits.clear();
+        composite.visible_bits.extend_from_slice(visible_bits);
+        if let Some(texture) = composite.lookup_texture.take() {
+            self.gl.delete_texture(Some(&texture));
+        }
+        composite.lookup_width = 0;
+        composite.dirty = true;
+        self.recompute_composite_boundary(composite_id)?;
+        self.composite_errors.remove(&composite_id);
+        Ok(())
+    }
+
+    pub fn set_composite_visible_byte(
+        &mut self,
+        composite_id: usize,
+        byte_index: usize,
+        value: u8,
+    ) -> Result<(), JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        // The upload uses a one-byte integer row. Preserve the embedding
+        // application's pixel-store contract across success and every error.
+        let _unpack_alignment = PixelStoreUnpackAlignmentGuard::set_one(&self.gl)?;
+        let (old_value, texture, lookup_width) = {
+            let composite = self
+                .composites
+                .get_mut(composite_id)
+                .and_then(Option::as_mut)
+                .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+            let Some(byte) = composite.visible_bits.get_mut(byte_index) else {
+                return Err(JsValue::from_str(
+                    "Composite lookup byte index is out of range",
+                ));
+            };
+            let old_value = *byte;
+            *byte = value;
+            (
+                old_value,
+                composite.lookup_texture.clone(),
+                composite.lookup_width,
+            )
+        };
+        if let Some(texture) = texture {
+            let x = (byte_index % lookup_width as usize) as i32;
+            let y = (byte_index / lookup_width as usize) as i32;
+            self.gl
+                .bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
+            // An unrelated caller may have left errors queued on the shared
+            // context. Drain those before attributing errors to this upload.
+            Self::drain_gl_errors(&self.gl);
+            let update_result = self
+                .gl
+                .tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_u8_array(
+                    WebGl2RenderingContext::TEXTURE_2D,
+                    0,
+                    x,
+                    y,
+                    1,
+                    1,
+                    WebGl2RenderingContext::RED_INTEGER,
+                    WebGl2RenderingContext::UNSIGNED_BYTE,
+                    Some(&[value]),
+                );
+            self.gl
+                .bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+            let update_gl_error = self.gl.get_error();
+            if let Err(error) = update_result {
+                let failed_texture = {
+                    let composite = self.composites[composite_id].as_mut().unwrap();
+                    composite.visible_bits[byte_index] = old_value;
+                    composite.lookup_width = 0;
+                    composite.dirty = true;
+                    composite.lookup_texture.take()
+                };
+                if let Some(texture) = failed_texture {
+                    self.gl.delete_texture(Some(&texture));
+                }
+                return Err(error);
+            }
+            if update_gl_error != WebGl2RenderingContext::NO_ERROR {
+                let failed_texture = {
+                    let composite = self.composites[composite_id].as_mut().unwrap();
+                    composite.visible_bits[byte_index] = old_value;
+                    composite.lookup_width = 0;
+                    composite.dirty = true;
+                    composite.lookup_texture.take()
+                };
+                if let Some(texture) = failed_texture {
+                    self.gl.delete_texture(Some(&texture));
+                }
+                return Err(JsValue::from_str(&format!(
+                    "Composite lookup byte upload failed with WebGL error 0x{:x}",
+                    update_gl_error
+                )));
+            }
+        }
+        let composite = self.composites[composite_id].as_mut().unwrap();
+        composite.dirty = true;
+        self.recompute_composite_boundary(composite_id)?;
+        self.composite_errors.remove(&composite_id);
+        Ok(())
+    }
+
+    pub fn set_composite_inverted(
+        &mut self,
+        composite_id: usize,
+        inverted: bool,
+    ) -> Result<(), JsValue> {
+        let composite = self
+            .composites
+            .get_mut(composite_id)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+        if composite.inverted != inverted {
+            composite.inverted = inverted;
+            composite.dirty = true;
+        }
+        self.recompute_composite_boundary(composite_id)?;
+        self.composite_errors.remove(&composite_id);
+        Ok(())
+    }
+
+    pub fn set_composite_bounds(
+        &mut self,
+        composite_id: usize,
+        bounds: Boundary,
+    ) -> Result<(), JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        if self
+            .composites
+            .get(composite_id)
+            .is_none_or(Option::is_none)
+        {
+            return Err(JsValue::from_str("Invalid composite layer ID"));
+        }
+        let bounds =
+            normalize_fallback_bounds(bounds).map_err(|error| JsValue::from_str(&error))?;
+        let next_key = OutlineMaskCacheKey::Bounds {
+            min_x: bounds.min_x.to_bits(),
+            max_x: bounds.max_x.to_bits(),
+            min_y: bounds.min_y.to_bits(),
+            max_y: bounds.max_y.to_bits(),
+        };
+        if self.composites[composite_id]
+            .as_ref()
+            .is_some_and(|composite| composite.outline_cache_key == next_key)
+        {
+            return Ok(());
+        }
+
+        // Validate and build the replacement before changing the composite so a
+        // failed allocation leaves its previous outline mask fully intact.
+        let fill_layer = Self::bounds_fill_layer(bounds)?;
+        let mut sources = [ResolvedMaskSource::default(); MAX_COMPOSITE_SOURCES];
+        let (source_count, include_outline) = {
+            let composite = self.composites[composite_id].as_ref().unwrap();
+            let source_count = composite.sources.len();
+            sources[..source_count].copy_from_slice(&composite.sources);
+            (
+                source_count,
+                composite.inverted || composite_get_bit(&composite.visible_bits, 0),
+            )
+        };
+        let mut next_boundary = None;
+        for &source in &sources[..source_count] {
+            include_optional_boundary(&mut next_boundary, self.mask_source_boundary(source)?);
+        }
+        let mut next_boundary = next_boundary.ok_or_else(|| {
+            JsValue::from_str("Composite source layers do not have a finite boundary")
+        })?;
+        if include_outline {
+            next_boundary.include_boundary(&fill_layer.boundary);
+        }
+        let next_outline_id = if let Some(entry) = self.outline_mask_cache.get_mut(&next_key) {
+            entry.references = entry
+                .references
+                .checked_add(1)
+                .ok_or_else(|| JsValue::from_str("Composite outline reference count overflow"))?;
+            entry.layer_id
+        } else {
+            try_reserve_internal_layer_id_slot(&mut self.internal_layer_ids, 1)
+                .map_err(JsValue::from_str)?;
+            try_reserve_outline_cache_slot(&mut self.outline_mask_cache, 1)
+                .map_err(JsValue::from_str)?;
+            let cache_key = next_key;
+            let mut fill_layers = Self::reserved_vec("composite bounds fill layers", 1)?;
+            fill_layers.push(fill_layer);
+            let outline_id = self.add_internal_mask_layer(fill_layers)?;
+            self.internal_layer_ids.insert(outline_id);
+            self.outline_mask_cache.insert(
+                cache_key,
+                OutlineMaskCacheEntry {
+                    layer_id: outline_id,
+                    references: 1,
+                },
+            );
+            outline_id
+        };
+
+        let previous_key = {
+            let composite = self.composites[composite_id].as_mut().unwrap();
+            let previous_key = std::mem::replace(&mut composite.outline_cache_key, next_key);
+            composite.outline_mask_id = next_outline_id;
+            composite.boundary = next_boundary;
+            composite.outline_generation = None;
+            composite.dirty = true;
+            previous_key
+        };
+        self.release_outline_mask_reference(&previous_key);
+        self.invalidate_composite_selection_freshness(composite_id);
+        self.composite_errors.remove(&composite_id);
+        Ok(())
+    }
+
+    fn invalidate_composite_selection_freshness(&mut self, composite_id: usize) {
+        if self
+            .membership_scratch_owner
+            .as_ref()
+            .is_some_and(|(owner_id, _)| *owner_id == composite_id)
+        {
+            self.membership_scratch_owner = None;
+        }
+        if self
+            .composite_area_scan
+            .as_ref()
+            .is_some_and(|scan| scan.composite_id == composite_id)
+        {
+            self.composite_area_scan = None;
+        }
+    }
+
+    fn invalidate_composites_for_source_change(&mut self, source_id: usize) {
+        let mut scratch_owner_is_stale = false;
+        for (composite_id, composite) in self.composites.iter_mut().enumerate() {
+            let Some(composite) = composite else {
+                continue;
+            };
+            if !composite
+                .sources
+                .iter()
+                .any(|source| source.layer_id() == source_id)
+            {
+                continue;
+            }
+
+            composite.dirty = true;
+            composite.membership_dirty = true;
+            composite.source_generations.clear();
+            self.composite_errors.remove(&composite_id);
+            scratch_owner_is_stale |= self
+                .membership_scratch_owner
+                .as_ref()
+                .is_some_and(|(owner_id, _)| *owner_id == composite_id);
+        }
+        if scratch_owner_is_stale {
+            self.membership_scratch_owner = None;
+            self.composite_area_scan = None;
+        }
+    }
+
+    fn recompute_composite_boundary(&mut self, composite_id: usize) -> Result<(), JsValue> {
+        let mut sources = [ResolvedMaskSource::default(); MAX_COMPOSITE_SOURCES];
+        let (source_count, outline_mask_id, include_outline) = {
+            let composite = self
+                .composites
+                .get(composite_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+            let source_count = composite.sources.len();
+            sources[..source_count].copy_from_slice(&composite.sources);
+            (
+                source_count,
+                composite.outline_mask_id,
+                composite.inverted || composite_get_bit(&composite.visible_bits, 0),
+            )
+        };
+
+        let mut boundary = None;
+        for &source in &sources[..source_count] {
+            include_optional_boundary(&mut boundary, self.mask_source_boundary(source)?);
+        }
+        let mut boundary = boundary.ok_or_else(|| {
+            JsValue::from_str("Composite source layers do not have a finite boundary")
+        })?;
+        if include_outline {
+            boundary.include_boundary(&self.mask_source_boundary(ResolvedMaskSource::new(
+                outline_mask_id,
+                MaskSourceKind::InternalOutline,
+            ))?);
+        }
+        self.composites[composite_id].as_mut().unwrap().boundary = boundary;
+        Ok(())
+    }
+
+    pub fn update_composite_sources(
+        &mut self,
+        composite_id: usize,
+        source_ids: &[u32],
+        visible_bits: &[u8],
+    ) -> Result<(), JsValue> {
+        validate_composite_source_count(source_ids.len())?;
+        validate_composite_bitset(source_ids.len(), visible_bits)?;
+        let mut owned_visible_bits = Vec::new();
+        owned_visible_bits
+            .try_reserve_exact(visible_bits.len())
+            .map_err(|_| {
+                JsValue::from_str("Unable to reserve memory for composite visible areas")
+            })?;
+        owned_visible_bits.extend_from_slice(visible_bits);
+        let (mut unique, mut normalized) =
+            try_composite_source_bookkeeping(source_ids.len()).map_err(JsValue::from_str)?;
+        let mut boundary: Option<Boundary> = None;
+        for &source_id in source_ids {
+            let source_id = source_id as usize;
+            if !unique.insert(source_id) {
+                return Err(JsValue::from_str(
+                    "Composite source layer IDs must be unique",
+                ));
+            }
+            let source = self.resolve_composite_source(source_id)?;
+            include_optional_boundary(&mut boundary, self.mask_source_boundary(source)?);
+            normalized.push(source);
+        }
+        let (outline_id, inverted) = {
+            let composite = self
+                .composites
+                .get(composite_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+            (composite.outline_mask_id, composite.inverted)
+        };
+        let mut boundary = boundary.ok_or_else(|| {
+            JsValue::from_str("Composite source layers do not have a finite boundary")
+        })?;
+        if inverted || composite_get_bit(visible_bits, 0) {
+            boundary.include_boundary(&self.mask_source_boundary(ResolvedMaskSource::new(
+                outline_id,
+                MaskSourceKind::InternalOutline,
+            ))?);
+        }
+        let composite = self.composites[composite_id].as_mut().unwrap();
+        composite.sources = normalized;
+        composite.visible_bits = owned_visible_bits;
+        composite.boundary = boundary;
+        if let Some(texture) = composite.lookup_texture.take() {
+            self.gl.delete_texture(Some(&texture));
+        }
+        composite.lookup_width = 0;
+        composite.dirty = true;
+        composite.membership_dirty = true;
+        composite.source_generations.clear();
+        composite.transform = None;
+        self.invalidate_composite_selection_freshness(composite_id);
+        self.composite_errors.remove(&composite_id);
+        Ok(())
+    }
+
+    pub fn release_composite_cache(&mut self, composite_id: usize) -> Result<(), JsValue> {
+        let composite = self
+            .composites
+            .get_mut(composite_id)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+        if let Some(output) = composite.output_fbo.take() {
+            Self::delete_fbo(&self.gl, output);
+        }
+        if let Some(texture) = composite.lookup_texture.take() {
+            self.gl.delete_texture(Some(&texture));
+        }
+        composite.lookup_width = 0;
+        composite.dirty = true;
+        composite.membership_dirty = true;
+        composite.transform = None;
+        if self.selection_composite_id == Some(composite_id) {
+            self.selection_composite_id = None;
+        }
+        self.invalidate_composite_selection_freshness(composite_id);
+        self.composite_errors.remove(&composite_id);
+        Ok(())
+    }
+
+    pub fn get_composite_error(&self, composite_id: usize) -> Result<Option<String>, JsValue> {
+        if self
+            .composites
+            .get(composite_id)
+            .is_none_or(Option::is_none)
+        {
+            return Err(JsValue::from_str("Invalid composite layer ID"));
+        }
+        Ok(self.composite_errors.get(&composite_id).cloned())
+    }
+
+    pub fn get_composite_diagnostics(
+        &self,
+        composite_id: usize,
+    ) -> Result<CompositeDiagnostics, JsValue> {
+        let composite = self
+            .composites
+            .get(composite_id)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+        let (viewport_width, viewport_height) = self.get_canvas_size()?;
+        let pixel_count = (viewport_width as usize)
+            .checked_mul(viewport_height as usize)
+            .ok_or_else(|| JsValue::from_str("Composite diagnostic byte count overflow"))?;
+        let gpu_lookup_bytes = if composite.lookup_texture.is_some() {
+            let width = composite.lookup_width.max(1) as usize;
+            width
+                .checked_mul(composite.visible_bits.len().div_ceil(width))
+                .ok_or_else(|| JsValue::from_str("Composite lookup byte count overflow"))?
+        } else {
+            0
+        };
+        let output_mask_bytes = if composite.output_fbo.is_some() {
+            pixel_count
+                .checked_mul(if composite.output_is_r8 { 1 } else { 4 })
+                .ok_or_else(|| JsValue::from_str("Composite output byte count overflow"))?
+        } else {
+            0
+        };
+        let outline_fbo = &self.get_layer(composite.outline_mask_id)?.fbo;
+        let shared_outline_bytes = pixel_count
+            .checked_mul(outline_fbo.color_bytes_per_pixel)
+            .ok_or_else(|| JsValue::from_str("Composite outline byte count overflow"))?;
+
+        Ok(CompositeDiagnostics {
+            viewport_width,
+            viewport_height,
+            source_count: composite.sources.len(),
+            encode_pass_count: composite.last_membership_encode_pass_count,
+            cpu_bitset_bytes: composite.visible_bits.len(),
+            gpu_lookup_bytes,
+            output_mask_bytes,
+            shared_membership_bytes: if self.membership_scratch.is_some() {
+                pixel_count
+                    .checked_mul(4)
+                    .ok_or_else(|| JsValue::from_str("Composite membership byte count overflow"))?
+            } else {
+                0
+            },
+            shared_outline_bytes,
+            outline_format: outline_fbo.color_format,
+            output_format: if composite.output_fbo.is_none() {
+                "unallocated"
+            } else if composite.output_is_r8 {
+                "R8"
+            } else {
+                "RGBA8"
+            },
+            membership_encode_count: composite.membership_encode_count,
+            membership_encode_pass_count: composite.membership_encode_pass_count,
+            render_scratch_growth_count: self.render_scratch_growth_count,
+            lookup_render_count: composite.lookup_render_count,
+        })
     }
 
     /// Add a display-only layer that fills the board outline, then clears the
@@ -548,7 +2114,7 @@ impl Renderer {
         outline_data: &[GerberData],
     ) -> Result<(GerberData, Vec<RegionContour>), JsValue> {
         let segments = Self::outline_segments(outline_data)?;
-        let contours = Self::closed_outline_regions(&segments);
+        let contours = Self::closed_outline_regions(&segments)?;
         if contours.is_empty() {
             return Err(JsValue::from_str(
                 "Board outline must contain a closed aperture draw contour",
@@ -881,34 +2447,41 @@ impl Renderer {
             && sweep_angle.abs() > f32::EPSILON
     }
 
-    fn closed_outline_regions(segments: &[OutlineSegment]) -> Vec<RegionContour> {
+    fn closed_outline_regions(segments: &[OutlineSegment]) -> Result<Vec<RegionContour>, JsValue> {
         if segments.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let tolerance = Self::outline_close_tolerance(segments);
         let mut contours = Vec::new();
-        let mut consumed = vec![false; segments.len()];
+        let mut consumed =
+            Self::try_zeroed_outline_flags(segments.len()).map_err(JsValue::from_str)?;
+        let mut used = Self::try_zeroed_outline_flags(segments.len()).map_err(JsValue::from_str)?;
 
         for start_idx in 0..segments.len() {
             if consumed[start_idx] {
                 continue;
             }
 
-            let mut used = vec![false; segments.len()];
+            used.fill(false);
             used[start_idx] = true;
-            let mut contour = Self::outline_segment_to_region_contour(&segments[start_idx], false);
+            let mut contour = Self::outline_segment_to_region_contour(&segments[start_idx], false)?;
 
             for _ in 0..segments.len() {
                 if Self::outline_contour_is_closed(&contour.points, tolerance) {
                     if let Some(contour) =
-                        Self::normalize_outline_region_contour(contour, tolerance)
+                        Self::normalize_outline_region_contour(contour, tolerance)?
                     {
                         for (idx, is_used) in used.iter().enumerate() {
                             if *is_used {
                                 consumed[idx] = true;
                             }
                         }
+                        contours.try_reserve(1).map_err(|_| {
+                            JsValue::from_str(
+                                "Not enough memory to collect closed board outline contours",
+                            )
+                        })?;
                         contours.push(contour);
                     }
                     break;
@@ -942,27 +2515,95 @@ impl Renderer {
                     &segments[next_idx],
                     reverse,
                     tolerance,
-                );
+                )?;
             }
         }
 
-        contours
+        Self::orient_nested_outline_contours(&mut contours);
+        Ok(contours)
     }
 
-    fn outline_segment_to_region_contour(segment: &OutlineSegment, reverse: bool) -> RegionContour {
-        let mut points = segment.points.clone();
+    fn try_zeroed_outline_flags(len: usize) -> Result<Vec<bool>, &'static str> {
+        let mut flags = Vec::new();
+        flags
+            .try_reserve_exact(len)
+            .map_err(|_| "Not enough memory to chain board outline segments")?;
+        flags.resize(len, false);
+        Ok(flags)
+    }
+
+    fn orient_nested_outline_contours(contours: &mut [RegionContour]) {
+        for index in 0..contours.len() {
+            let Some(sample) = contours[index].points.first().copied() else {
+                continue;
+            };
+            let nesting_depth = contours
+                .iter()
+                .enumerate()
+                .filter(|(other_index, other)| {
+                    *other_index != index
+                        && Self::outline_contour_contains_point(&other.points, sample)
+                })
+                .count();
+            if nesting_depth % 2 == 1 {
+                Self::reverse_outline_contour(&mut contours[index]);
+            }
+        }
+    }
+
+    fn outline_contour_contains_point(points: &[[f32; 2]], point: [f32; 2]) -> bool {
+        if points.len() < 4 {
+            return false;
+        }
+        let mut inside = false;
+        for edge in points.windows(2) {
+            let [x1, y1] = edge[0];
+            let [x2, y2] = edge[1];
+            if (y1 > point[1]) == (y2 > point[1]) {
+                continue;
+            }
+            let crossing_x = x1 + (point[1] - y1) * (x2 - x1) / (y2 - y1);
+            if point[0] < crossing_x {
+                inside = !inside;
+            }
+        }
+        inside
+    }
+
+    fn reverse_outline_contour(contour: &mut RegionContour) {
+        contour.points.reverse();
+        contour.segments.reverse();
+        for segment in &mut contour.segments {
+            *segment = Self::reverse_region_segment(segment);
+        }
+    }
+
+    fn outline_segment_to_region_contour(
+        segment: &OutlineSegment,
+        reverse: bool,
+    ) -> Result<RegionContour, JsValue> {
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(segment.points.len())
+            .map_err(|_| JsValue::from_str("Not enough memory to copy a board outline segment"))?;
+        points.extend_from_slice(&segment.points);
         let mut region_segment = segment.segment.clone();
         if reverse {
             points.reverse();
             region_segment = Self::reverse_region_segment(&region_segment);
         }
         let has_arc = matches!(region_segment, RegionSegment::Arc { .. });
+        let mut region_segments = Vec::new();
+        region_segments
+            .try_reserve_exact(1)
+            .map_err(|_| JsValue::from_str("Not enough memory to start a board outline contour"))?;
+        region_segments.push(region_segment);
 
-        RegionContour {
+        Ok(RegionContour {
             points,
-            segments: vec![region_segment],
+            segments: region_segments,
             has_arc,
-        }
+        })
     }
 
     fn append_outline_segment_to_region(
@@ -970,13 +2611,28 @@ impl Renderer {
         segment: &OutlineSegment,
         reverse: bool,
         tolerance: f32,
-    ) {
-        let mut points = segment.points.clone();
+    ) -> Result<(), JsValue> {
+        let mut points = Vec::new();
+        points
+            .try_reserve_exact(segment.points.len())
+            .map_err(|_| {
+                JsValue::from_str("Not enough memory to copy a chained board outline segment")
+            })?;
+        points.extend_from_slice(&segment.points);
         let mut region_segment = segment.segment.clone();
         if reverse {
             points.reverse();
             region_segment = Self::reverse_region_segment(&region_segment);
         }
+
+        contour
+            .points
+            .try_reserve(points.len().saturating_sub(1))
+            .map_err(|_| JsValue::from_str("Not enough memory to extend a board outline"))?;
+        contour
+            .segments
+            .try_reserve(1)
+            .map_err(|_| JsValue::from_str("Not enough memory to extend a board outline"))?;
 
         for point in points.into_iter().skip(1) {
             if contour
@@ -992,6 +2648,7 @@ impl Renderer {
             contour.has_arc = true;
         }
         contour.segments.push(region_segment);
+        Ok(())
     }
 
     fn reverse_region_segment(segment: &RegionSegment) -> RegionSegment {
@@ -1023,11 +2680,19 @@ impl Renderer {
     fn normalize_outline_region_contour(
         mut contour: RegionContour,
         tolerance: f32,
-    ) -> Option<RegionContour> {
-        let mut points = Vec::with_capacity(contour.points.len().saturating_add(1));
+    ) -> Result<Option<RegionContour>, JsValue> {
+        let point_capacity = contour
+            .points
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| JsValue::from_str("Board outline point count overflow"))?;
+        let mut points = Vec::new();
+        points.try_reserve_exact(point_capacity).map_err(|_| {
+            JsValue::from_str("Not enough memory to normalize a board outline contour")
+        })?;
         for point in contour.points {
             if !Self::finite_outline_point(point) {
-                return None;
+                return Ok(None);
             }
             if points
                 .last()
@@ -1038,43 +2703,41 @@ impl Renderer {
         }
 
         if points.len() < 3 {
-            return None;
+            return Ok(None);
         }
 
-        if Self::outline_points_close(*points.first()?, *points.last()?, tolerance) {
-            let first = *points.first()?;
+        if Self::outline_points_close(
+            *points.first().expect("non-empty outline points"),
+            *points.last().expect("non-empty outline points"),
+            tolerance,
+        ) {
+            let first = *points.first().expect("non-empty outline points");
             if let Some(last) = points.last_mut() {
                 *last = first;
             }
         } else {
-            points.push(*points.first()?);
+            points.push(*points.first().expect("non-empty outline points"));
         }
 
         if points.len() < 4 {
-            return None;
+            return Ok(None);
         }
 
         let area = Self::outline_area(&points);
         if area.abs() <= tolerance * tolerance {
-            return None;
+            return Ok(None);
         }
 
         contour.points = points;
         if area < 0.0 {
-            contour.points.reverse();
-            contour.segments = contour
-                .segments
-                .iter()
-                .rev()
-                .map(Self::reverse_region_segment)
-                .collect();
+            Self::reverse_outline_contour(&mut contour);
         }
         contour.has_arc = contour
             .segments
             .iter()
             .any(|segment| matches!(segment, RegionSegment::Arc { .. }));
 
-        Some(contour)
+        Ok(Some(contour))
     }
 
     fn outline_regions_boundary(contours: &[RegionContour]) -> Option<Boundary> {
@@ -1262,18 +2925,23 @@ impl Renderer {
             boundary: Boundary::new(min_x, max_x, min_y, max_y),
             fbo_dirty: true,
             fbo_transform: None,
+            fbo_generation: 0,
             inner_outline_pixels: 0.0,
             inner_outline_world: 0.0,
             cpu_geometry_released: true,
             has_path_regions: needs_stencil,
+            mask_in_red: false,
         };
 
-        if let Some(free_slot) = self.layers.iter().position(|layer| layer.is_none()) {
+        if let Some(free_slot) = self.layers.iter().enumerate().position(|(index, layer)| {
+            layer.is_none() && self.composites.get(index).is_none_or(Option::is_none)
+        }) {
             self.layers[free_slot] = Some(layer_metadata);
             self.layer_count += 1;
             Ok(free_slot)
         } else {
             self.layers.push(Some(layer_metadata));
+            self.composites.push(None);
             self.layer_count += 1;
             Ok(self.layers.len() - 1)
         }
@@ -2099,12 +3767,18 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create path sector buffer"))?;
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        Self::upload_float_array_to_bound_buffer(&self.gl, data);
-
-        let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
-        self.enable_path_sector_attribute("position", 2, stride, 0)?;
-        self.enable_path_sector_attribute("center", 2, stride, 2 * 4)?;
-        self.enable_path_sector_attribute("radius", 1, stride, 4 * 4)?;
+        let setup_result = (|| {
+            Self::upload_float_array_to_bound_buffer(&self.gl, data)?;
+            let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
+            self.enable_path_sector_attribute("position", 2, stride, 0)?;
+            self.enable_path_sector_attribute("center", 2, stride, 2 * 4)?;
+            self.enable_path_sector_attribute("radius", 1, stride, 4 * 4)?;
+            Ok(())
+        })();
+        if let Err(error) = setup_result {
+            self.gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
         Ok(buffer)
     }
 
@@ -2134,7 +3808,10 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        Self::upload_float_array_to_bound_buffer(gl, data);
+        if let Err(error) = Self::upload_float_array_to_bound_buffer(gl, data) {
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
         let loc = match Self::shader_attribute(program, attr_name) {
             Ok(loc) => loc,
             Err(error) => {
@@ -2817,11 +4494,46 @@ impl Renderer {
 
     /// Remove a layer by index
     pub fn remove_layer(&mut self, layer_id: usize) -> Result<(), JsValue> {
-        if layer_id >= self.layers.len() || self.layers[layer_id].is_none() {
+        if layer_id >= self.layers.len()
+            || (self.layers[layer_id].is_none()
+                && self.composites.get(layer_id).is_none_or(Option::is_none))
+            || self.internal_layer_ids.contains(&layer_id)
+        {
             return Err(JsValue::from_str(&format!(
                 "Invalid layer_id: {}",
                 layer_id
             )));
+        }
+
+        if self.composites.get(layer_id).is_some_and(Option::is_some) {
+            self.remove_composite_layer(layer_id);
+            return Ok(());
+        }
+
+        // Renderer-level safety mirrors the Viewer cascade rule. Public APIs
+        // normally dispose the whole frame, while the Viewer confirms first.
+        let is_dependent = |composite: &CompositeLayerMetadata| {
+            composite
+                .sources
+                .iter()
+                .any(|source| source.layer_id() == layer_id)
+                || composite.outline_cache_key.references_layer(layer_id)
+        };
+        let dependent_count = self
+            .composites
+            .iter()
+            .flatten()
+            .filter(|composite| is_dependent(composite))
+            .count();
+        let mut dependent_ids =
+            Self::reserved_vec("dependent composite layer IDs", dependent_count)?;
+        for (id, composite) in self.composites.iter().enumerate() {
+            if composite.as_ref().is_some_and(&is_dependent) {
+                dependent_ids.push(id);
+            }
+        }
+        for dependent_id in dependent_ids {
+            self.remove_composite_layer(dependent_id);
         }
 
         // Remove layer metadata (which will drop cached WebGL resources)
@@ -2833,14 +4545,73 @@ impl Renderer {
         Ok(())
     }
 
+    fn remove_composite_layer(&mut self, layer_id: usize) {
+        let Some(mut composite) = self.composites.get_mut(layer_id).and_then(Option::take) else {
+            return;
+        };
+        Self::delete_composite_gpu_resources(&self.gl, &mut composite);
+        self.release_outline_mask_reference(&composite.outline_cache_key);
+        self.layer_count = self.layer_count.saturating_sub(1);
+        self.composite_errors.remove(&layer_id);
+        if self.selection_composite_id == Some(layer_id) {
+            self.selection_composite_id = None;
+        }
+        if self
+            .composite_area_scan
+            .as_ref()
+            .is_some_and(|scan| scan.composite_id == layer_id)
+        {
+            self.composite_area_scan = None;
+        }
+        if self
+            .membership_scratch_owner
+            .as_ref()
+            .is_some_and(|(owner_id, _)| *owner_id == layer_id)
+        {
+            self.membership_scratch_owner = None;
+        }
+    }
+
+    fn release_outline_mask_reference(&mut self, key: &OutlineMaskCacheKey) {
+        let remove_layer_id = match self.outline_mask_cache.get_mut(key) {
+            Some(entry) if entry.references > 1 => {
+                entry.references -= 1;
+                None
+            }
+            Some(entry) => Some(entry.layer_id),
+            None => None,
+        };
+        let Some(layer_id) = remove_layer_id else {
+            return;
+        };
+        self.outline_mask_cache.remove(key);
+        self.internal_layer_ids.remove(&layer_id);
+        if let Some(layer) = self.layers.get_mut(layer_id).and_then(Option::take) {
+            Self::delete_layer_gpu_resources(&self.gl, layer);
+            self.layer_count = self.layer_count.saturating_sub(1);
+        }
+    }
+
     /// Clear all layers and clean up WebGL resources
     pub fn clear_all(&mut self) {
-        let layers: Vec<_> = self.layers.drain(..).flatten().collect();
-
+        for mut composite in self.composites.drain(..).flatten() {
+            Self::delete_composite_gpu_resources(&self.gl, &mut composite);
+        }
         // Delete all cached resources for each layer
-        for layer in layers {
+        for layer in self.layers.drain(..).flatten() {
             Self::delete_layer_gpu_resources(&self.gl, layer);
         }
+        if let Some(scratch) = self.membership_scratch.take() {
+            Self::delete_fbo(&self.gl, scratch);
+        }
+        self.membership_scratch_owner = None;
+        self.active_composite_scratch = HashSet::new();
+        self.render_scratch_growth_count = 0;
+        self.internal_layer_ids.clear();
+        self.outline_mask_cache.clear();
+        self.composite_errors.clear();
+        self.selection_composite_id = None;
+        self.composite_area_scan = None;
         self.layer_count = 0;
     }
 
@@ -2850,11 +4621,33 @@ impl Renderer {
         Ok(caches)
     }
 
+    fn reserve_generation_snapshot(
+        generations: &mut Vec<u64>,
+        source_count: usize,
+    ) -> Result<(), JsValue> {
+        if generations.capacity() < source_count {
+            generations
+                .try_reserve_exact(source_count.saturating_sub(generations.len()))
+                .map_err(|_| {
+                    JsValue::from_str("Unable to reserve composite generation snapshot")
+                })?;
+        }
+        Ok(())
+    }
+
     fn mark_all_layers_dirty(&mut self) {
+        self.composite_errors.clear();
         for layer in self.layers.iter_mut().flatten() {
             layer.fbo_dirty = true;
             layer.fbo_transform = None;
         }
+        for composite in self.composites.iter_mut().flatten() {
+            composite.dirty = true;
+            composite.membership_dirty = true;
+            composite.transform = None;
+        }
+        self.membership_scratch_owner = None;
+        self.composite_area_scan = None;
     }
 
     fn delete_layer_gpu_resources(gl: &WebGl2RenderingContext, layer: LayerMetadata) {
@@ -2862,6 +4655,18 @@ impl Renderer {
 
         for cache in layer.buffer_caches {
             Self::delete_buffer_cache(gl, cache);
+        }
+    }
+
+    fn delete_composite_gpu_resources(
+        gl: &WebGl2RenderingContext,
+        composite: &mut CompositeLayerMetadata,
+    ) {
+        if let Some(fbo) = composite.output_fbo.take() {
+            Self::delete_fbo(gl, fbo);
+        }
+        if let Some(texture) = composite.lookup_texture.take() {
+            gl.delete_texture(Some(&texture));
         }
     }
 
@@ -2884,6 +4689,11 @@ impl Renderer {
         gl.delete_program(Some(&programs.texture.program));
         gl.delete_program(Some(&programs.path_solid.program));
         gl.delete_program(Some(&programs.path_sector.program));
+        gl.delete_program(Some(&programs.composite_membership.program));
+        gl.delete_program(Some(&programs.composite_lookup.program));
+        gl.delete_program(Some(&programs.composite_preview.program));
+        gl.delete_program(Some(&programs.composite_highlight.program));
+        gl.delete_program(Some(&programs.composite_texture.program));
     }
 
     fn delete_buffer_caches(gl: &WebGl2RenderingContext, caches: &mut Vec<BufferCache>) {
@@ -3109,47 +4919,162 @@ impl Renderer {
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
-        if width == 0 || height == 0 {
-            return Err(JsValue::from_str("Cannot create an FBO with zero size"));
-        }
+        Self::create_fbo_with_format(
+            gl,
+            width,
+            height,
+            with_stencil,
+            WebGl2RenderingContext::RGBA as i32,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::LINEAR,
+        )
+        .map_err(FboBuildError::into_js_value)
+    }
 
-        let max_texture_size = gl
-            .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)?
-            .as_f64()
-            .unwrap_or(0.0) as u32;
-        if max_texture_size > 0 && (width > max_texture_size || height > max_texture_size) {
-            return Err(JsValue::from_str(&format!(
-                "Canvas size {}x{} exceeds MAX_TEXTURE_SIZE {}",
-                width, height, max_texture_size
+    fn create_nearest_rgba_fbo(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+    ) -> Result<Fbo, JsValue> {
+        Self::create_fbo_with_format(
+            gl,
+            width,
+            height,
+            false,
+            WebGl2RenderingContext::RGBA8 as i32,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::NEAREST,
+        )
+        .map_err(FboBuildError::into_js_value)
+    }
+
+    fn create_red_mask_fbo(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+        with_stencil: bool,
+    ) -> Result<Fbo, JsValue> {
+        match Self::create_r8_mask_fbo_build(gl, width, height, with_stencil) {
+            Ok(fbo) => Ok(fbo),
+            Err(FboBuildError::UnsupportedFormat(_)) => {
+                Self::drain_gl_errors(gl);
+                Self::create_fbo_with_format(
+                    gl,
+                    width,
+                    height,
+                    with_stencil,
+                    WebGl2RenderingContext::RGBA8 as i32,
+                    WebGl2RenderingContext::RGBA,
+                    WebGl2RenderingContext::NEAREST,
+                )
+                .map_err(FboBuildError::into_js_value)
+            }
+            Err(FboBuildError::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn create_r8_mask_fbo_build(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+        with_stencil: bool,
+    ) -> Result<Fbo, FboBuildError> {
+        Self::create_fbo_with_format(
+            gl,
+            width,
+            height,
+            with_stencil,
+            WebGl2RenderingContext::R8 as i32,
+            WebGl2RenderingContext::RED,
+            WebGl2RenderingContext::NEAREST,
+        )
+    }
+
+    fn create_composite_output_fbo(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+    ) -> Result<(Fbo, bool), JsValue> {
+        match Self::create_r8_mask_fbo_build(gl, width, height, false) {
+            Ok(fbo) => Ok((fbo, true)),
+            Err(FboBuildError::UnsupportedFormat(_)) => {
+                Self::drain_gl_errors(gl);
+                Ok((Self::create_nearest_rgba_fbo(gl, width, height)?, false))
+            }
+            Err(FboBuildError::Fatal(error)) => Err(error),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_fbo_with_format(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+        with_stencil: bool,
+        internal_format: i32,
+        format: u32,
+        filter: u32,
+    ) -> Result<Fbo, FboBuildError> {
+        let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32;
+        let fatal = FboBuildError::Fatal;
+        if width == 0 || height == 0 {
+            return Err(fatal(JsValue::from_str(
+                "Cannot create an FBO with zero size",
             )));
         }
-        let width_i32 = Self::checked_u32_to_i32("FBO width", width)?;
-        let height_i32 = Self::checked_u32_to_i32("FBO height", height)?;
-        let mut pending = FboBuildGuard::new(gl);
 
-        let texture = gl.create_texture().ok_or("Failed to create texture")?;
+        Self::validate_texture_size(gl, width, height).map_err(fatal)?;
+        let width_i32 = Self::checked_u32_to_i32("FBO width", width).map_err(fatal)?;
+        let height_i32 = Self::checked_u32_to_i32("FBO height", height).map_err(fatal)?;
+        let mut pending = FboBuildGuard::new(gl);
+        Self::drain_gl_errors(gl);
+
+        let texture = gl
+            .create_texture()
+            .ok_or_else(|| fatal(JsValue::from_str("Failed to create texture")))?;
         pending.texture = Some(texture.clone());
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
-        gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
-            WebGl2RenderingContext::TEXTURE_2D,
-            0,
-            WebGl2RenderingContext::RGBA as i32,
-            width_i32,
-            height_i32,
-            0,
-            WebGl2RenderingContext::RGBA,
-            WebGl2RenderingContext::UNSIGNED_BYTE,
-            None,
-        )?;
+        let texture_upload = gl
+            .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                WebGl2RenderingContext::TEXTURE_2D,
+                0,
+                internal_format,
+                width_i32,
+                height_i32,
+                0,
+                format,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                None,
+            );
+        let texture_upload_error = gl.get_error();
+        texture_upload.map_err(fatal)?;
+        if texture_upload_error != WebGl2RenderingContext::NO_ERROR {
+            let error = JsValue::from_str(&format!(
+                "Framebuffer texture allocation failed with WebGL error 0x{texture_upload_error:x}"
+            ));
+            return Err(
+                if is_r8
+                    && matches!(
+                        texture_upload_error,
+                        WebGl2RenderingContext::INVALID_ENUM
+                            | WebGl2RenderingContext::INVALID_OPERATION
+                    )
+                {
+                    FboBuildError::UnsupportedFormat(error)
+                } else {
+                    fatal(error)
+                },
+            );
+        }
         gl.tex_parameteri(
             WebGl2RenderingContext::TEXTURE_2D,
             WebGl2RenderingContext::TEXTURE_MIN_FILTER,
-            WebGl2RenderingContext::LINEAR as i32,
+            filter as i32,
         );
         gl.tex_parameteri(
             WebGl2RenderingContext::TEXTURE_2D,
             WebGl2RenderingContext::TEXTURE_MAG_FILTER,
-            WebGl2RenderingContext::LINEAR as i32,
+            filter as i32,
         );
         gl.tex_parameteri(
             WebGl2RenderingContext::TEXTURE_2D,
@@ -3162,7 +5087,9 @@ impl Renderer {
             WebGl2RenderingContext::CLAMP_TO_EDGE as i32,
         );
 
-        let framebuffer = gl.create_framebuffer().ok_or("Failed to create FBO")?;
+        let framebuffer = gl
+            .create_framebuffer()
+            .ok_or_else(|| fatal(JsValue::from_str("Failed to create FBO")))?;
         pending.framebuffer = Some(framebuffer.clone());
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&framebuffer));
         gl.framebuffer_texture_2d(
@@ -3176,7 +5103,7 @@ impl Renderer {
         if with_stencil {
             let stencil = gl
                 .create_renderbuffer()
-                .ok_or_else(|| JsValue::from_str("Failed to create stencil renderbuffer"))?;
+                .ok_or_else(|| fatal(JsValue::from_str("Failed to create stencil renderbuffer")))?;
             pending.stencil = Some(stencil.clone());
             gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, Some(&stencil));
             gl.renderbuffer_storage(
@@ -3195,17 +5122,125 @@ impl Renderer {
 
         let status = gl.check_framebuffer_status(WebGl2RenderingContext::FRAMEBUFFER);
         if status != WebGl2RenderingContext::FRAMEBUFFER_COMPLETE {
-            return Err(JsValue::from_str(&format!(
-                "Framebuffer is incomplete: 0x{:x}",
-                status
-            )));
+            let error = JsValue::from_str(&format!("Framebuffer is incomplete: 0x{:x}", status));
+            return Err(
+                if is_r8
+                    && matches!(
+                        status,
+                        WebGl2RenderingContext::FRAMEBUFFER_UNSUPPORTED
+                            | WebGl2RenderingContext::FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+                    )
+                {
+                    FboBuildError::UnsupportedFormat(error)
+                } else {
+                    fatal(error)
+                },
+            );
         }
+        Self::check_gl_stage(gl, "Framebuffer configuration").map_err(fatal)?;
 
         gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
         gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
-        Ok(pending.commit())
+        Ok(pending.commit(
+            if is_r8 { 1 } else { 4 },
+            if is_r8 { "R8" } else { "RGBA8" },
+        ))
+    }
+
+    fn create_composite_lookup_texture(
+        gl: &WebGl2RenderingContext,
+        bits: &[u8],
+    ) -> Result<(WebGlTexture, i32), JsValue> {
+        let _unpack_alignment = PixelStoreUnpackAlignmentGuard::set_one(gl)?;
+        let max_texture_size = gl
+            .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)?
+            .as_f64()
+            .unwrap_or(0.0) as usize;
+        if max_texture_size == 0 {
+            return Err(JsValue::from_str("MAX_TEXTURE_SIZE is unavailable"));
+        }
+        // Bitset lengths are powers of two. Keep the row width a power of two
+        // as well so every row is complete and the authoritative slice can be
+        // uploaded without a padded copy. MAX_TEXTURE_SIZE is a numeric limit;
+        // WebGL callers and portable backends are not required to expose a
+        // power-of-two value themselves.
+        let width_limit = max_texture_size.min(4096);
+        let canonical_width = 1usize << width_limit.ilog2();
+        let width = bits.len().min(canonical_width).max(1);
+        let height = bits.len().div_ceil(width);
+        if height > max_texture_size {
+            return Err(JsValue::from_str(
+                "Composite lookup texture exceeds MAX_TEXTURE_SIZE",
+            ));
+        }
+        let padded_len = width
+            .checked_mul(height)
+            .ok_or_else(|| JsValue::from_str("Composite lookup texture is too large"))?;
+        // Valid composite bitsets have power-of-two byte lengths, and the
+        // selected row width therefore divides them exactly. Upload the
+        // authoritative CPU slice directly instead of transiently duplicating
+        // as much as 2 MiB for a 24-source lookup table.
+        if padded_len != bits.len() {
+            return Err(JsValue::from_str(
+                "Composite lookup bitset does not have a canonical texture layout",
+            ));
+        }
+
+        let texture = gl
+            .create_texture()
+            .ok_or_else(|| JsValue::from_str("Failed to create composite lookup texture"))?;
+        let result = (|| {
+            gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(&texture));
+            Self::drain_gl_errors(gl);
+            let upload_result = gl
+                .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                    WebGl2RenderingContext::TEXTURE_2D,
+                    0,
+                    WebGl2RenderingContext::R8UI as i32,
+                    width as i32,
+                    height as i32,
+                    0,
+                    WebGl2RenderingContext::RED_INTEGER,
+                    WebGl2RenderingContext::UNSIGNED_BYTE,
+                    Some(bits),
+                );
+            let upload_error = gl.get_error();
+            upload_result?;
+            if upload_error != WebGl2RenderingContext::NO_ERROR {
+                return Err(JsValue::from_str(&format!(
+                    "Composite lookup texture upload failed with WebGL error 0x{upload_error:x}"
+                )));
+            }
+            gl.tex_parameteri(
+                WebGl2RenderingContext::TEXTURE_2D,
+                WebGl2RenderingContext::TEXTURE_MIN_FILTER,
+                WebGl2RenderingContext::NEAREST as i32,
+            );
+            gl.tex_parameteri(
+                WebGl2RenderingContext::TEXTURE_2D,
+                WebGl2RenderingContext::TEXTURE_MAG_FILTER,
+                WebGl2RenderingContext::NEAREST as i32,
+            );
+            gl.tex_parameteri(
+                WebGl2RenderingContext::TEXTURE_2D,
+                WebGl2RenderingContext::TEXTURE_WRAP_S,
+                WebGl2RenderingContext::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameteri(
+                WebGl2RenderingContext::TEXTURE_2D,
+                WebGl2RenderingContext::TEXTURE_WRAP_T,
+                WebGl2RenderingContext::CLAMP_TO_EDGE as i32,
+            );
+            Self::check_gl_stage(gl, "Composite lookup texture configuration")?;
+            Ok((texture.clone(), width as i32))
+        })();
+        gl.bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+        if result.is_err() {
+            gl.delete_texture(Some(&texture));
+        }
+        result
     }
 
     /// Create and bind a single-channel instance buffer
@@ -3220,7 +5255,10 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        Self::upload_f32_slice_to_bound_buffer(gl, data);
+        if let Err(error) = Self::upload_f32_slice_to_bound_buffer(gl, data) {
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
         let loc = match program.attributes.get(attr_name) {
             Some(loc) => loc,
             None => {
@@ -3260,33 +5298,62 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create quad buffer"))?;
 
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-
-        Self::upload_f32_slice_to_bound_buffer(gl, &vertices);
+        if let Err(error) = Self::upload_f32_slice_to_bound_buffer(gl, &vertices) {
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
 
         Ok(buffer)
     }
 
-    fn upload_float_array_to_bound_buffer(gl: &WebGl2RenderingContext, data: &Float32Array) {
+    fn check_buffer_upload_error(
+        gl: &WebGl2RenderingContext,
+        operation: &str,
+    ) -> Result<(), JsValue> {
+        let error = gl.get_error();
+        if error == WebGl2RenderingContext::NO_ERROR {
+            Ok(())
+        } else {
+            Err(JsValue::from_str(&format!(
+                "WebGL {operation} failed with error 0x{error:x}"
+            )))
+        }
+    }
+
+    fn upload_float_array_to_bound_buffer(
+        gl: &WebGl2RenderingContext,
+        data: &Float32Array,
+    ) -> Result<(), JsValue> {
+        Self::drain_gl_errors(gl);
         gl.buffer_data_with_f64(ARRAY_BUFFER, data.byte_length() as f64, STATIC_DRAW);
+        Self::check_buffer_upload_error(gl, "bufferData")?;
+
+        Self::drain_gl_errors(gl);
         gl.buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
+        Self::check_buffer_upload_error(gl, "bufferSubData")
     }
 
     fn upload_f32_slice_to_bound_buffer_with_usage(
         gl: &WebGl2RenderingContext,
         data: &[f32],
         usage: u32,
-    ) {
+    ) -> Result<(), JsValue> {
+        Self::drain_gl_errors(gl);
         unsafe {
             let array = Float32Array::view(data);
             gl.buffer_data_with_array_buffer_view(ARRAY_BUFFER, &array, usage);
         }
+        Self::check_buffer_upload_error(gl, "bufferData")
     }
 
-    fn upload_f32_slice_to_bound_buffer(gl: &WebGl2RenderingContext, data: &[f32]) {
+    fn upload_f32_slice_to_bound_buffer(
+        gl: &WebGl2RenderingContext,
+        data: &[f32],
+    ) -> Result<(), JsValue> {
         // Avoid JS memory copy.
         unsafe {
             let array = Float32Array::view(data);
-            Self::upload_float_array_to_bound_buffer(gl, &array);
+            Self::upload_float_array_to_bound_buffer(gl, &array)
         }
     }
 
@@ -3319,6 +5386,24 @@ impl Renderer {
         Ok(())
     }
 
+    fn validate_texture_size(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let max_texture_size = gl
+            .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)?
+            .as_f64()
+            .unwrap_or(0.0) as u32;
+        if max_texture_size > 0 && (width > max_texture_size || height > max_texture_size) {
+            return Err(JsValue::from_str(&format!(
+                "Canvas size {}x{} exceeds MAX_TEXTURE_SIZE {}",
+                width, height, max_texture_size
+            )));
+        }
+        Ok(())
+    }
+
     /// Get layer reference with error handling
     fn get_layer(&self, layer_id: usize) -> Result<&LayerMetadata, JsValue> {
         if layer_id >= self.layers.len() {
@@ -3336,6 +5421,101 @@ impl Renderer {
         self.layers[layer_id]
             .as_mut()
             .ok_or_else(|| JsValue::from_str("Layer deallocated"))
+    }
+
+    fn resolve_mask_source(&self, layer_id: usize) -> Result<ResolvedMaskSource, JsValue> {
+        if self.composites.get(layer_id).is_some_and(Option::is_some) {
+            return Ok(ResolvedMaskSource::new(layer_id, MaskSourceKind::Composite));
+        }
+        if self.internal_layer_ids.contains(&layer_id) {
+            self.get_layer(layer_id)?;
+            return Ok(ResolvedMaskSource::new(
+                layer_id,
+                MaskSourceKind::InternalOutline,
+            ));
+        }
+        self.get_layer(layer_id)?;
+        Ok(ResolvedMaskSource::new(layer_id, MaskSourceKind::Gerber))
+    }
+
+    fn resolve_composite_source(&self, layer_id: usize) -> Result<ResolvedMaskSource, JsValue> {
+        let source = self.resolve_mask_source(layer_id)?;
+        if source.kind() != MaskSourceKind::Gerber {
+            return Err(JsValue::from_str(
+                "Composite sources must be ordinary Gerber layers",
+            ));
+        }
+        Ok(source)
+    }
+
+    fn mask_source_boundary(&self, source: ResolvedMaskSource) -> Result<Boundary, JsValue> {
+        match source.kind() {
+            MaskSourceKind::Gerber | MaskSourceKind::InternalOutline => {
+                Ok(self.get_layer(source.layer_id())?.boundary.clone())
+            }
+            MaskSourceKind::Composite => self
+                .composites
+                .get(source.layer_id())
+                .and_then(Option::as_ref)
+                .map(|composite| composite.boundary.clone())
+                .ok_or_else(|| JsValue::from_str("Composite mask source is deallocated")),
+        }
+    }
+
+    fn ensure_mask_source_rendered(
+        &mut self,
+        source: ResolvedMaskSource,
+        transform: [f32; 9],
+        width: u32,
+        height: u32,
+        width_i32: i32,
+        height_i32: i32,
+    ) -> Result<(), JsValue> {
+        match source.kind() {
+            MaskSourceKind::Gerber | MaskSourceKind::InternalOutline => {
+                self.render_gerber_fbo(
+                    source.layer_id(),
+                    transform,
+                    width,
+                    height,
+                    width_i32,
+                    height_i32,
+                )?;
+            }
+            MaskSourceKind::Composite => {
+                self.render_composite_fbo(source.layer_id(), transform, width, height)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn mask_source_generation(&self, source: ResolvedMaskSource) -> Result<u64, JsValue> {
+        match source.kind() {
+            MaskSourceKind::Gerber | MaskSourceKind::InternalOutline => {
+                Ok(self.get_layer(source.layer_id())?.fbo_generation)
+            }
+            MaskSourceKind::Composite => self
+                .composites
+                .get(source.layer_id())
+                .and_then(Option::as_ref)
+                .map(|composite| composite.lookup_render_count)
+                .ok_or_else(|| JsValue::from_str("Composite mask source is deallocated")),
+        }
+    }
+
+    fn mask_source_texture(&self, source: ResolvedMaskSource) -> Result<WebGlTexture, JsValue> {
+        match source.kind() {
+            MaskSourceKind::Gerber | MaskSourceKind::InternalOutline => {
+                Ok(self.get_layer(source.layer_id())?.fbo.texture.clone())
+            }
+            MaskSourceKind::Composite => self
+                .composites
+                .get(source.layer_id())
+                .and_then(Option::as_ref)
+                .and_then(|composite| composite.output_fbo.as_ref())
+                .map(|fbo| fbo.texture.clone())
+                .ok_or_else(|| JsValue::from_str("Composite mask texture is unavailable")),
+        }
     }
 
     fn shader_attribute(program: &ShaderProgram, attr_name: &str) -> Result<u32, JsValue> {
@@ -3428,13 +5608,7 @@ impl Renderer {
     fn draw_fbo_texture(&self, texture: &WebGlTexture, color: &[f32; 4]) -> Result<(), JsValue> {
         let program = &self.programs.texture;
         self.gl.use_program(Some(&program.program));
-
-        // Use the shared quad buffer
-        self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
-        let pos_loc = Self::shader_attribute(program, "position")?;
-        self.gl.enable_vertex_attrib_array(pos_loc);
-        self.gl
-            .vertex_attrib_pointer_with_i32(pos_loc, 2, FLOAT, false, 0, 0);
+        self.bind_fullscreen_quad(program)?;
 
         self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
         self.gl
@@ -3445,6 +5619,41 @@ impl Renderer {
 
         self.gl.draw_arrays(TRIANGLES, 0, 6);
 
+        Ok(())
+    }
+
+    fn bind_fullscreen_quad(&self, program: &ShaderProgram) -> Result<(), JsValue> {
+        self.gl
+            .bind_vertex_array(Some(&self.fullscreen_vertex_array));
+        self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
+        let position = Self::shader_attribute(program, "position")?;
+        self.gl.enable_vertex_attrib_array(position);
+        self.gl
+            .vertex_attrib_pointer_with_i32(position, 2, FLOAT, false, 0, 0);
+        self.gl.vertex_attrib_divisor(position, 0);
+        Ok(())
+    }
+
+    fn draw_composite_texture(
+        &self,
+        texture: &WebGlTexture,
+        color: &[f32; 4],
+        mask_is_red: bool,
+    ) -> Result<(), JsValue> {
+        let program = &self.programs.composite_texture;
+        self.gl.use_program(Some(&program.program));
+        self.bind_fullscreen_quad(program)?;
+        self.gl.active_texture(WebGl2RenderingContext::TEXTURE0);
+        self.gl
+            .bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(texture));
+        self.gl.uniform1i(program.uniforms.get("u_texture"), 0);
+        self.gl
+            .uniform4fv_with_f32_array(program.uniforms.get("u_color"), color);
+        self.gl.uniform1i(
+            program.uniforms.get("u_mask_is_red"),
+            i32::from(mask_is_red),
+        );
+        self.gl.draw_arrays(TRIANGLES, 0, 6);
         Ok(())
     }
 
@@ -3567,7 +5776,7 @@ impl Renderer {
             .bind_vertex_array(self.highlight_vertex_array.as_ref());
         self.gl
             .bind_buffer(ARRAY_BUFFER, self.highlight_buffer.as_ref());
-        Self::upload_f32_slice_to_bound_buffer_with_usage(&self.gl, vertices, STREAM_DRAW);
+        Self::upload_f32_slice_to_bound_buffer_with_usage(&self.gl, vertices, STREAM_DRAW)?;
         let position = Self::shader_attribute(program, "position")?;
         self.gl.enable_vertex_attrib_array(position);
         self.gl
@@ -3960,7 +6169,8 @@ impl Renderer {
             self.gl.color_mask(true, true, true, true);
             self.gl.enable(BLEND);
             self.gl.blend_equation(FUNC_ADD);
-            self.gl.blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA);
+            self.gl
+                .blend_func_separate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA);
             self.gl.stencil_func(EQUAL, 0x01, 0x01);
             self.gl.stencil_mask(0x00);
             self.gl.stencil_op(KEEP, KEEP, KEEP);
@@ -4035,7 +6245,7 @@ impl Renderer {
                     .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
                 pending_cache.cache.triangle_vertex_buffer = Some(vertex_buffer);
-                Self::upload_f32_slice_to_bound_buffer(&self.gl, &triangles.vertices);
+                Self::upload_f32_slice_to_bound_buffer(&self.gl, &triangles.vertices)?;
 
                 // Set up attributes
                 let position_loc = Self::shader_attribute(program, "position")?;
@@ -4207,7 +6417,7 @@ impl Renderer {
                     self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
                     pending_cache.cache.triangle_template_caches[0].vertex_buffer =
                         Some(vertex_buffer);
-                    Self::upload_f32_slice_to_bound_buffer(&self.gl, &template.vertices);
+                    Self::upload_f32_slice_to_bound_buffer(&self.gl, &template.vertices)?;
 
                     let position_loc = Self::shader_attribute(program, "position")?;
                     self.gl.enable_vertex_attrib_array(position_loc);
@@ -5091,7 +7301,11 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        Self::upload_f32_slice_to_bound_buffer(gl, data);
+        if let Err(error) = Self::upload_f32_slice_to_bound_buffer(gl, data) {
+            gl.bind_buffer(ARRAY_BUFFER, None);
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
         let loc = match Self::shader_attribute(program, attr_name) {
             Ok(loc) => loc,
             Err(error) => {
@@ -5114,7 +7328,11 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create path sector buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        Self::upload_f32_slice_to_bound_buffer(gl, data);
+        if let Err(error) = Self::upload_f32_slice_to_bound_buffer(gl, data) {
+            gl.bind_buffer(ARRAY_BUFFER, None);
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
 
         let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
         let setup_result = (|| {
@@ -5217,10 +7435,17 @@ impl Renderer {
         // Render each polarity sublayer with appropriate blending
         for sublayer_idx in 0..sublayer_count {
             let is_negative = self.get_layer(layer_id)?.gerber_data[sublayer_idx].is_negative;
+            let mask_in_red = self.get_layer(layer_id)?.mask_in_red;
 
             // Set polarity blending mode
             self.gl.enable(BLEND);
-            if is_negative {
+            if mask_in_red && is_negative {
+                // Internal outline masks use R8, so polarity is accumulated in
+                // red rather than alpha. Clear coverage erases destination red.
+                self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
+            } else if mask_in_red {
+                self.gl.blend_func(ONE, ONE);
+            } else if is_negative {
                 // Negative polarity: erase alpha
                 self.gl
                     .blend_func_separate(ZERO, ONE, ZERO, ONE_MINUS_SRC_ALPHA);
@@ -5292,6 +7517,7 @@ impl Renderer {
             offset_y,
             alpha,
         )?;
+        self.ensure_composite_selection_inactive()?;
 
         // Update camera state
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
@@ -5330,12 +7556,14 @@ impl Renderer {
             offset_y,
             alpha,
         )?;
+        self.ensure_composite_selection_inactive()?;
 
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
             return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
         }
+        Self::validate_texture_size(&self.gl, width, height)?;
 
         let transform = self.camera.get_transform_matrix(width, height);
 
@@ -5372,12 +7600,14 @@ impl Renderer {
             alpha,
         )?;
         Self::validate_blend_modes(active_layer_ids, blend_modes)?;
+        self.ensure_composite_selection_inactive()?;
 
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
             return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
         }
+        Self::validate_texture_size(&self.gl, width, height)?;
 
         let transform = self.camera.get_transform_matrix(width, height);
 
@@ -5389,6 +7619,816 @@ impl Renderer {
             clear_canvas,
             Some(blend_modes),
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_composite_selection(
+        &mut self,
+        composite_id: usize,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<(), JsValue> {
+        if self
+            .composites
+            .get(composite_id)
+            .is_none_or(Option::is_none)
+        {
+            return Err(JsValue::from_str("Invalid composite layer ID"));
+        }
+        Self::validate_selection_camera(zoom_x, zoom_y, offset_x, offset_y)?;
+        // Selection ownership is transactional. Once a refresh starts, the
+        // previous preview must no longer be pickable unless the membership
+        // scratch and canvas preview both finish successfully.
+        self.selection_composite_id = None;
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        let transform = self.camera.get_transform_matrix(width, height);
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let mut sources = [ResolvedMaskSource::default(); MAX_COMPOSITE_SOURCES];
+        let (source_count, outline_id, previous_transform, initially_dirty) = {
+            let composite = self.composites[composite_id].as_ref().unwrap();
+            let source_count = composite.sources.len();
+            sources[..source_count].copy_from_slice(&composite.sources);
+            (
+                source_count,
+                composite.outline_mask_id,
+                composite.transform,
+                composite.dirty,
+            )
+        };
+        let sources = &sources[..source_count];
+        for source in sources.iter().copied() {
+            self.ensure_mask_source_rendered(
+                source, transform, width, height, width_i32, height_i32,
+            )?;
+        }
+        let outline_source = ResolvedMaskSource::new(outline_id, MaskSourceKind::InternalOutline);
+        self.ensure_mask_source_rendered(
+            outline_source,
+            transform,
+            width,
+            height,
+            width_i32,
+            height_i32,
+        )?;
+        let mut source_generations = [0u64; MAX_COMPOSITE_SOURCES];
+        for (index, &source) in sources.iter().enumerate() {
+            source_generations[index] = self.mask_source_generation(source)?;
+        }
+        let source_generations = &source_generations[..source_count];
+        let outline_generation = self.mask_source_generation(outline_source)?;
+        self.ensure_composite_resources(composite_id, width, height)?;
+        let (membership_dirty, source_changed, outline_changed) = {
+            let composite = self.composites[composite_id].as_ref().unwrap();
+            (
+                composite.membership_dirty,
+                composite.source_generations.as_slice() != source_generations,
+                composite.outline_generation != Some(outline_generation),
+            )
+        };
+        let scratch_matches =
+            self.membership_scratch_owner
+                .as_ref()
+                .is_some_and(|(owner_id, owner_transform)| {
+                    *owner_id == composite_id && owner_transform == &transform
+                });
+        let encoded = membership_dirty || source_changed || !scratch_matches;
+        if encoded {
+            Self::reserve_generation_snapshot(
+                &mut self.composites[composite_id]
+                    .as_mut()
+                    .unwrap()
+                    .source_generations,
+                source_count,
+            )?;
+            self.membership_scratch_owner = None;
+            self.encode_composite_membership(composite_id, width, height)?;
+            self.membership_scratch_owner = Some((composite_id, transform));
+            let composite = self.composites[composite_id].as_mut().unwrap();
+            composite.membership_dirty = false;
+            composite.source_generations.clear();
+            composite
+                .source_generations
+                .extend_from_slice(source_generations);
+        }
+        let output_dirty = initially_dirty
+            || previous_transform.as_ref() != Some(&transform)
+            || outline_changed
+            || encoded
+            || self.composites[composite_id]
+                .as_ref()
+                .is_some_and(|composite| composite.dirty);
+        if output_dirty {
+            self.render_composite_lookup(composite_id, width, height)?;
+        }
+        if let Some(composite) = self.composites[composite_id].as_mut() {
+            composite.dirty = false;
+            composite.outline_generation = Some(outline_generation);
+            composite.transform = Some(transform);
+        }
+        self.draw_composite_preview(composite_id, width, height)?;
+        self.selection_composite_id = Some(composite_id);
+        Ok(())
+    }
+
+    fn validate_selection_camera(
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<(), JsValue> {
+        Self::validate_finite_value("zoom_x", zoom_x)?;
+        Self::validate_finite_value("zoom_y", zoom_y)?;
+        Self::validate_finite_value("offset_x", offset_x)?;
+        Self::validate_finite_value("offset_y", offset_y)?;
+        if zoom_x.abs() <= f32::EPSILON || zoom_y.abs() <= f32::EPSILON {
+            return Err(JsValue::from_str("Camera zoom must be non-zero"));
+        }
+        Ok(())
+    }
+
+    fn draw_composite_preview(
+        &self,
+        composite_id: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let composite = self.composites[composite_id].as_ref().unwrap();
+        let lookup = composite
+            .lookup_texture
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite lookup texture is unavailable"))?;
+        let scratch = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
+        let outline = self.mask_source_texture(ResolvedMaskSource::new(
+            composite.outline_mask_id,
+            MaskSourceKind::InternalOutline,
+        ))?;
+        Self::drain_gl_errors(&self.gl);
+        Self::bind_draw_target(&self.gl, None);
+        self.gl.viewport(0, 0, width as i32, height as i32);
+        self.gl.disable(BLEND);
+        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        self.gl.clear(COLOR_BUFFER_BIT);
+        let program = &self.programs.composite_preview;
+        self.gl.use_program(Some(&program.program));
+        self.bind_fullscreen_quad(program)?;
+        for (unit, (uniform, texture)) in [
+            ("u_membership", &scratch.texture),
+            ("u_lookup", lookup),
+            ("u_outline", &outline),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.gl
+                .active_texture(WebGl2RenderingContext::TEXTURE0 + unit as u32);
+            self.gl
+                .bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(texture));
+            self.gl
+                .uniform1i(program.uniforms.get(uniform), unit as i32);
+        }
+        self.gl.uniform1i(
+            program.uniforms.get("u_lookup_width"),
+            composite.lookup_width,
+        );
+        self.gl.draw_arrays(TRIANGLES, 0, 6);
+        Self::check_gl_stage(&self.gl, "Composite selection preview rendering")?;
+        Ok(())
+    }
+
+    pub fn end_composite_selection(&mut self) {
+        self.selection_composite_id = None;
+        self.composite_area_scan = None;
+    }
+
+    fn ensure_composite_selection_inactive(&self) -> Result<(), JsValue> {
+        if self.selection_composite_id.is_some() {
+            return Err(JsValue::from_str(
+                "Cannot render layers while a composite selection preview is active",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_composite_membership_scratch_owner(
+        &mut self,
+        composite_id: usize,
+        transform: [f32; 9],
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let scratch_matches =
+            self.membership_scratch_owner
+                .as_ref()
+                .is_some_and(|(owner_id, owner_transform)| {
+                    *owner_id == composite_id && owner_transform == &transform
+                });
+        if scratch_matches {
+            return Ok(());
+        }
+
+        self.membership_scratch_owner = None;
+        self.encode_composite_membership(composite_id, width, height)?;
+        self.membership_scratch_owner = Some((composite_id, transform));
+        Ok(())
+    }
+
+    fn read_composite_output_active(
+        &self,
+        composite_id: usize,
+        x: i32,
+        y: i32,
+    ) -> Result<bool, JsValue> {
+        let composite = self
+            .composites
+            .get(composite_id)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+        let output = composite
+            .output_fbo
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite output framebuffer is unavailable"))?;
+        Self::drain_gl_errors(&self.gl);
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            Some(&output.framebuffer),
+        );
+        // RGBA/UNSIGNED_BYTE is the portable normalized-framebuffer readback
+        // pair in WebGL2, including when the attachment itself is R8.
+        let mut pixel = [0u8; 4];
+        let read = self.gl.read_pixels_with_opt_u8_array(
+            x,
+            y,
+            1,
+            1,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixel),
+        );
+        let gl_result = Self::check_gl_stage(&self.gl, "Composite output pick readback");
+        read?;
+        gl_result?;
+        Ok(pixel[0] >= 128)
+    }
+
+    fn read_composite_membership_code(&self, x: i32, y: i32) -> Result<i32, JsValue> {
+        let scratch = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
+        let mut pixel = [0u8; 4];
+        Self::drain_gl_errors(&self.gl);
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            Some(&scratch.framebuffer),
+        );
+        let read = self.gl.read_pixels_with_opt_u8_array(
+            x,
+            y,
+            1,
+            1,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixel),
+        );
+        let gl_result = Self::check_gl_stage(&self.gl, "Composite membership pick readback");
+        read?;
+        gl_result?;
+        Ok(pixel[0] as i32 | ((pixel[1] as i32) << 8) | ((pixel[2] as i32) << 16))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick_composite_area(
+        &mut self,
+        composite_id: usize,
+        x: i32,
+        y: i32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<i32, JsValue> {
+        self.ensure_composite_selection_inactive()?;
+        if self
+            .composites
+            .get(composite_id)
+            .is_none_or(Option::is_none)
+        {
+            return Err(JsValue::from_str("Invalid composite layer ID"));
+        }
+        Self::validate_selection_camera(zoom_x, zoom_y, offset_x, offset_y)?;
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
+        let _pack_alignment_guard = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return Ok(-1);
+        }
+        let transform = self.camera.get_transform_matrix(width, height);
+        self.render_composite_fbo(composite_id, transform, width, height)?;
+        if !self.read_composite_output_active(composite_id, x, y)? {
+            return Ok(-1);
+        }
+        self.ensure_composite_membership_scratch_owner(composite_id, transform, width, height)?;
+        self.read_composite_membership_code(x, y)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_composite_area_highlight(
+        &mut self,
+        composite_id: usize,
+        selected_code: u32,
+        zoom_x: f32,
+        zoom_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) -> Result<bool, JsValue> {
+        self.ensure_composite_selection_inactive()?;
+        Self::validate_selection_camera(zoom_x, zoom_y, offset_x, offset_y)?;
+        let (inverted, selected_by_lookup, outline_mask_id) = {
+            let composite = self
+                .composites
+                .get(composite_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+            let source_count = composite.sources.len();
+            if selected_code as usize >= (1usize << source_count) {
+                return Err(JsValue::from_str(
+                    "Composite coverage code exceeds the source bit width",
+                ));
+            }
+            (
+                composite.inverted,
+                composite_get_bit(&composite.visible_bits, selected_code as usize),
+                composite.outline_mask_id,
+            )
+        };
+        let effectively_visible = if inverted {
+            !selected_by_lookup
+        } else {
+            selected_by_lookup
+        };
+        if !effectively_visible {
+            return Ok(false);
+        }
+
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
+        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+        let (width, height) = self.get_canvas_size()?;
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let transform = self.camera.get_transform_matrix(width, height);
+        self.render_composite_fbo(composite_id, transform, width, height)?;
+        self.ensure_composite_membership_scratch_owner(composite_id, transform, width, height)?;
+
+        let membership = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?
+            .texture
+            .clone();
+        let outline = self.mask_source_texture(ResolvedMaskSource::new(
+            outline_mask_id,
+            MaskSourceKind::InternalOutline,
+        ))?;
+        Self::drain_gl_errors(&self.gl);
+        Self::bind_draw_target(&self.gl, None);
+        self.gl.viewport(0, 0, width_i32, height_i32);
+        self.gl.disable(WebGl2RenderingContext::DEPTH_TEST);
+        self.gl.disable(WebGl2RenderingContext::CULL_FACE);
+        self.gl.color_mask(true, true, true, true);
+        self.gl.enable(BLEND);
+        self.gl.blend_equation(FUNC_ADD);
+        self.gl
+            .blend_func_separate(SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA);
+
+        let program = &self.programs.composite_highlight;
+        self.gl.use_program(Some(&program.program));
+        self.bind_fullscreen_quad(program)?;
+        for (unit, (uniform, texture)) in [("u_membership", &membership), ("u_outline", &outline)]
+            .into_iter()
+            .enumerate()
+        {
+            self.gl
+                .active_texture(WebGl2RenderingContext::TEXTURE0 + unit as u32);
+            self.gl
+                .bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(texture));
+            self.gl
+                .uniform1i(program.uniforms.get(uniform), unit as i32);
+        }
+        self.gl
+            .uniform1ui(program.uniforms.get("u_selected_code"), selected_code);
+        self.gl.uniform1i(
+            program.uniforms.get("u_clip_to_outline"),
+            i32::from(inverted || selected_code == 0),
+        );
+        self.gl.draw_arrays(TRIANGLES, 0, 6);
+        Self::check_gl_stage(&self.gl, "Composite area highlight rendering")?;
+        Ok(true)
+    }
+
+    pub fn pick_composite_code(&self, composite_id: usize, x: i32, y: i32) -> Result<i32, JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
+        if self.selection_composite_id != Some(composite_id) {
+            return Err(JsValue::from_str(
+                "Composite selection preview is not active",
+            ));
+        }
+        let composite = self
+            .composites
+            .get(composite_id)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+        let scratch_matches =
+            self.membership_scratch_owner
+                .as_ref()
+                .is_some_and(|(owner_id, owner_transform)| {
+                    *owner_id == composite_id
+                        && composite.transform.as_ref() == Some(owner_transform)
+                });
+        if !scratch_matches {
+            return Err(JsValue::from_str(
+                "Composite selection membership is stale; render the preview again",
+            ));
+        }
+        let (width, height) = self.get_canvas_size()?;
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return Ok(-1);
+        }
+        let scratch = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
+        let mut pixel = [0u8; 4];
+        Self::drain_gl_errors(&self.gl);
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            Some(&scratch.framebuffer),
+        );
+        let membership_read = self.gl.read_pixels_with_opt_u8_array(
+            x,
+            y,
+            1,
+            1,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut pixel),
+        );
+        let membership_gl_result = Self::check_gl_stage(&self.gl, "Composite membership readback");
+        membership_read?;
+        membership_gl_result?;
+        let code = pixel[0] as i32 | ((pixel[1] as i32) << 8) | ((pixel[2] as i32) << 16);
+        if code != 0 {
+            return Ok(code);
+        }
+
+        let outline = self.get_layer(composite.outline_mask_id)?;
+        let mut outline_pixel = [0u8; 4];
+        Self::drain_gl_errors(&self.gl);
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            Some(&outline.fbo.framebuffer),
+        );
+        let outline_read = self.gl.read_pixels_with_opt_u8_array(
+            x,
+            y,
+            1,
+            1,
+            WebGl2RenderingContext::RGBA,
+            WebGl2RenderingContext::UNSIGNED_BYTE,
+            Some(&mut outline_pixel),
+        );
+        let outline_gl_result = Self::check_gl_stage(&self.gl, "Composite outline readback");
+        outline_read?;
+        outline_gl_result?;
+        Ok(if outline_pixel[0] >= 128 { 0 } else { -1 })
+    }
+
+    pub fn get_composite_area_codes(&self, composite_id: usize) -> Result<Vec<u32>, JsValue> {
+        let (_, height) = self.get_canvas_size()?;
+        self.get_composite_area_codes_range(composite_id, 0, height)
+    }
+
+    pub fn get_composite_area_codes_band(
+        &self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<Vec<u32>, JsValue> {
+        self.get_composite_area_codes_range(composite_id, start_y, row_count)
+    }
+
+    fn get_composite_area_codes_range(
+        &self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<Vec<u32>, JsValue> {
+        let mut scan = self.create_composite_area_scan_state(composite_id)?;
+        self.accumulate_composite_area_presence_range(
+            composite_id,
+            start_y,
+            row_count,
+            &mut scan.present,
+            &mut scan.membership_pixels,
+            &mut scan.outline_pixels,
+        )?;
+        Self::composite_area_codes_from_presence(&scan.present)
+    }
+
+    pub fn begin_composite_area_scan(&mut self, composite_id: usize) -> Result<(), JsValue> {
+        self.composite_area_scan = None;
+        self.composite_area_scan = Some(self.create_composite_area_scan_state(composite_id)?);
+        Ok(())
+    }
+
+    pub fn scan_composite_area_band(
+        &mut self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+    ) -> Result<(), JsValue> {
+        let mut scan = self
+            .composite_area_scan
+            .take()
+            .ok_or_else(|| JsValue::from_str("Composite area scan is not active"))?;
+        let result = (|| {
+            if scan.composite_id != composite_id {
+                return Err(JsValue::from_str(
+                    "Composite area scan belongs to another layer",
+                ));
+            }
+            let (transform, width, height, _) =
+                self.composite_area_scan_descriptor(composite_id)?;
+            if scan.transform != transform || scan.width != width || scan.height != height {
+                return Err(JsValue::from_str(
+                    "Composite area scan preview changed; restart the scan",
+                ));
+            }
+            if start_y != scan.next_row {
+                return Err(JsValue::from_str(
+                    "Composite area scan bands must be contiguous and ordered",
+                ));
+            }
+            self.accumulate_composite_area_presence_range(
+                composite_id,
+                start_y,
+                row_count,
+                &mut scan.present,
+                &mut scan.membership_pixels,
+                &mut scan.outline_pixels,
+            )?;
+            scan.next_row = start_y.saturating_add(row_count).min(height);
+            Ok(())
+        })();
+        if result.is_ok() {
+            self.composite_area_scan = Some(scan);
+        }
+        result
+    }
+
+    pub fn finish_composite_area_scan(&mut self, composite_id: usize) -> Result<Vec<u32>, JsValue> {
+        let scan = self
+            .composite_area_scan
+            .take()
+            .ok_or_else(|| JsValue::from_str("Composite area scan is not active"))?;
+        if scan.composite_id != composite_id {
+            return Err(JsValue::from_str(
+                "Composite area scan belongs to another layer",
+            ));
+        }
+        let (transform, width, height, _) = self.composite_area_scan_descriptor(composite_id)?;
+        if scan.transform != transform || scan.width != width || scan.height != height {
+            return Err(JsValue::from_str(
+                "Composite area scan preview changed; restart the scan",
+            ));
+        }
+        if scan.next_row != height {
+            return Err(JsValue::from_str("Composite area scan is incomplete"));
+        }
+        Self::composite_area_codes_from_presence(&scan.present)
+    }
+
+    pub fn cancel_composite_area_scan(&mut self, composite_id: usize) {
+        if self
+            .composite_area_scan
+            .as_ref()
+            .is_some_and(|scan| scan.composite_id == composite_id)
+        {
+            self.composite_area_scan = None;
+        }
+    }
+
+    fn create_composite_area_scan_state(
+        &self,
+        composite_id: usize,
+    ) -> Result<CompositeAreaScanState, JsValue> {
+        let (transform, width, height, presence_len) =
+            self.composite_area_scan_descriptor(composite_id)?;
+        let band_rows = height.min(128);
+        let pixel_bytes = usize::try_from(
+            width
+                .checked_mul(band_rows)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| JsValue::from_str("Composite area scan byte size overflow"))?,
+        )
+        .map_err(|_| JsValue::from_str("Composite area scan byte size is too large"))?;
+        Ok(CompositeAreaScanState {
+            composite_id,
+            transform,
+            width,
+            height,
+            next_row: 0,
+            present: Self::try_zeroed_composite_scan_buffer(presence_len, "presence bits")?,
+            membership_pixels: Self::try_zeroed_composite_scan_buffer(
+                pixel_bytes,
+                "membership pixels",
+            )?,
+            outline_pixels: Self::try_zeroed_composite_scan_buffer(pixel_bytes, "outline pixels")?,
+        })
+    }
+
+    fn try_zeroed_composite_scan_buffer(len: usize, label: &str) -> Result<Vec<u8>, JsValue> {
+        let mut buffer = Vec::new();
+        buffer.try_reserve_exact(len).map_err(|_| {
+            JsValue::from_str(&format!("Unable to allocate composite area scan {label}"))
+        })?;
+        buffer.resize(len, 0);
+        Ok(buffer)
+    }
+
+    fn composite_area_scan_descriptor(
+        &self,
+        composite_id: usize,
+    ) -> Result<([f32; 9], u32, u32, usize), JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        if self.selection_composite_id != Some(composite_id) {
+            return Err(JsValue::from_str(
+                "Composite selection preview is not active",
+            ));
+        }
+        let composite = self
+            .composites
+            .get(composite_id)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| JsValue::from_str("Invalid composite layer ID"))?;
+        let scratch_matches =
+            self.membership_scratch_owner
+                .as_ref()
+                .is_some_and(|(owner_id, owner_transform)| {
+                    *owner_id == composite_id
+                        && composite.transform.as_ref() == Some(owner_transform)
+                });
+        if !scratch_matches {
+            return Err(JsValue::from_str(
+                "Composite selection membership is stale; render the preview again",
+            ));
+        }
+        let transform = composite
+            .transform
+            .ok_or_else(|| JsValue::from_str("Composite selection transform is unavailable"))?;
+        let (width, height) = self.get_canvas_size()?;
+        Ok((transform, width, height, composite.visible_bits.len()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accumulate_composite_area_presence_range(
+        &self,
+        composite_id: usize,
+        start_y: u32,
+        row_count: u32,
+        present: &mut [u8],
+        membership: &mut [u8],
+        outline: &mut [u8],
+    ) -> Result<(), JsValue> {
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
+        let (_, width, height, presence_len) = self.composite_area_scan_descriptor(composite_id)?;
+        if present.len() != presence_len {
+            return Err(JsValue::from_str(
+                "Composite area scan presence buffer has the wrong size",
+            ));
+        }
+
+        let composite = self.composites[composite_id].as_ref().unwrap();
+        let scratch_framebuffer = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?
+            .framebuffer
+            .clone();
+        let outline_framebuffer = self
+            .get_layer(composite.outline_mask_id)?
+            .fbo
+            .framebuffer
+            .clone();
+        if row_count == 0 || start_y >= height {
+            return Err(JsValue::from_str(
+                "Composite area scan range is outside the canvas",
+            ));
+        }
+        let end_y = start_y.saturating_add(row_count).min(height);
+        let band_height = (end_y - start_y).min(128);
+        let required_capacity = usize::try_from(
+            width
+                .checked_mul(band_height)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| JsValue::from_str("Composite area scan byte size overflow"))?,
+        )
+        .map_err(|_| JsValue::from_str("Composite area scan byte size is too large"))?;
+        if membership.len() < required_capacity || outline.len() < required_capacity {
+            return Err(JsValue::from_str(
+                "Composite area scan pixel buffer is too small",
+            ));
+        }
+
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let mut band_y = start_y;
+        while band_y < end_y {
+            let rows = (end_y - band_y).min(band_height);
+            let pixels = usize::try_from(width.checked_mul(rows).ok_or_else(|| {
+                JsValue::from_str("Composite area scan band dimensions overflow")
+            })?)
+            .map_err(|_| JsValue::from_str("Composite area scan band is too large"))?;
+            let membership_len = pixels
+                .checked_mul(4)
+                .ok_or_else(|| JsValue::from_str("Composite area scan band size overflow"))?;
+            let band_y_i32 = Self::checked_u32_to_i32("composite scan y", band_y)?;
+            let rows_i32 = Self::checked_u32_to_i32("composite scan height", rows)?;
+
+            Self::drain_gl_errors(&self.gl);
+            Self::bind_read_target(&self.gl, &scratch_framebuffer);
+            let membership_read = self.gl.read_pixels_with_opt_u8_array(
+                0,
+                band_y_i32,
+                width_i32,
+                rows_i32,
+                WebGl2RenderingContext::RGBA,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(&mut membership[..membership_len]),
+            );
+            let membership_result =
+                Self::check_gl_stage(&self.gl, "Composite area list membership readback");
+            membership_read?;
+            membership_result?;
+
+            Self::drain_gl_errors(&self.gl);
+            Self::bind_read_target(&self.gl, &outline_framebuffer);
+            let outline_read = self.gl.read_pixels_with_opt_u8_array(
+                0,
+                band_y_i32,
+                width_i32,
+                rows_i32,
+                WebGl2RenderingContext::RGBA,
+                WebGl2RenderingContext::UNSIGNED_BYTE,
+                Some(&mut outline[..membership_len]),
+            );
+            let outline_result =
+                Self::check_gl_stage(&self.gl, "Composite area list outline readback");
+            outline_read?;
+            outline_result?;
+
+            for (pixel_index, outline_pixel) in
+                outline[..membership_len].chunks_exact(4).enumerate()
+            {
+                let membership_index = pixel_index * 4;
+                let code = membership[membership_index] as u32
+                    | ((membership[membership_index + 1] as u32) << 8)
+                    | ((membership[membership_index + 2] as u32) << 16);
+                if code != 0 || outline_pixel[0] >= 128 {
+                    let code_index = code as usize;
+                    present[code_index >> 3] |= 1 << (code_index & 7);
+                }
+            }
+            band_y += rows;
+        }
+
+        Ok(())
+    }
+
+    fn composite_area_codes_from_presence(present: &[u8]) -> Result<Vec<u32>, JsValue> {
+        let area_count = present.iter().map(|byte| byte.count_ones() as usize).sum();
+        let mut codes = Vec::new();
+        codes
+            .try_reserve_exact(area_count)
+            .map_err(|_| JsValue::from_str("Unable to allocate composite area code list"))?;
+        for (byte_index, &byte) in present.iter().enumerate() {
+            let mut remaining = byte;
+            while remaining != 0 {
+                let bit_index = remaining.trailing_zeros() as usize;
+                codes.push((byte_index * 8 + bit_index) as u32);
+                remaining &= remaining - 1;
+            }
+        }
+        Ok(codes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5425,6 +8465,7 @@ impl Renderer {
             tile_width,
             tile_height,
         )?;
+        self.ensure_composite_selection_inactive()?;
 
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
         let transform = Self::tile_transform_matrix(
@@ -5477,6 +8518,7 @@ impl Renderer {
             tile_width,
             tile_height,
         )?;
+        self.ensure_composite_selection_inactive()?;
 
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
         let transform = Self::tile_transform_matrix(
@@ -5511,7 +8553,7 @@ impl Renderer {
         offset_x: f32,
         offset_y: f32,
         alpha: f32,
-        clear_canvas: bool,
+        _clear_canvas: bool,
     ) -> Result<Vec<u8>, JsValue> {
         Self::validate_render_inputs(
             active_layer_ids,
@@ -5522,12 +8564,16 @@ impl Renderer {
             offset_y,
             alpha,
         )?;
+        self.ensure_composite_selection_inactive()?;
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
 
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
             return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
         }
+        Self::validate_texture_size(&self.gl, width, height)?;
 
         let transform = self.camera.get_transform_matrix(width, height);
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
@@ -5546,11 +8592,17 @@ impl Renderer {
                 active_layer_ids,
                 color_data,
                 alpha,
-                clear_canvas,
+                // This target is newly allocated for every call, so retaining
+                // its prior contents is impossible and leaving it uncleared
+                // would expose implementation-defined texture memory.
+                true,
                 None,
                 Some(&output_fbo.framebuffer),
             )?;
-            self.gl
+            Self::bind_read_target(&self.gl, &output_fbo.framebuffer);
+            Self::drain_gl_errors(&self.gl);
+            let read_result = self
+                .gl
                 .read_pixels_with_opt_u8_array(
                     0,
                     0,
@@ -5566,7 +8618,10 @@ impl Renderer {
                     } else {
                         JsValue::from_str("Failed to read rendered pixels")
                     }
-                })?;
+                });
+            let gl_result = Self::check_gl_stage(&self.gl, "Rendered output readback");
+            read_result?;
+            gl_result?;
             Ok(pixels)
         })();
 
@@ -5586,7 +8641,7 @@ impl Renderer {
         offset_x: f32,
         offset_y: f32,
         alpha: f32,
-        clear_canvas: bool,
+        _clear_canvas: bool,
     ) -> Result<Vec<u8>, JsValue> {
         Self::validate_render_inputs(
             active_layer_ids,
@@ -5598,12 +8653,16 @@ impl Renderer {
             alpha,
         )?;
         Self::validate_blend_modes(active_layer_ids, blend_modes)?;
+        self.ensure_composite_selection_inactive()?;
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
 
         self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
         let (width, height) = self.get_canvas_size()?;
         if width == 0 || height == 0 {
             return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
         }
+        Self::validate_texture_size(&self.gl, width, height)?;
 
         let transform = self.camera.get_transform_matrix(width, height);
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
@@ -5622,11 +8681,16 @@ impl Renderer {
                 active_layer_ids,
                 color_data,
                 alpha,
-                clear_canvas,
+                // See render_pixels_with_clear: a fresh offscreen target must
+                // always start from deterministic transparent black.
+                true,
                 Some(blend_modes),
                 Some(&output_fbo.framebuffer),
             )?;
-            self.gl
+            Self::bind_read_target(&self.gl, &output_fbo.framebuffer);
+            Self::drain_gl_errors(&self.gl);
+            let read_result = self
+                .gl
                 .read_pixels_with_opt_u8_array(
                     0,
                     0,
@@ -5642,7 +8706,10 @@ impl Renderer {
                     } else {
                         JsValue::from_str("Failed to read rendered pixels")
                     }
-                })?;
+                });
+            let gl_result = Self::check_gl_stage(&self.gl, "Rendered output readback");
+            read_result?;
+            gl_result?;
             Ok(pixels)
         })();
 
@@ -5663,6 +8730,7 @@ impl Renderer {
         if width == 0 || height == 0 {
             return Err(JsValue::from_str("Cannot render to a zero-sized canvas"));
         }
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
 
         // STEP 1: Render active layer geometry to FBOs only when geometry/camera state changed.
         self.render_layer_fbos(active_layer_ids, transform, width, height)?;
@@ -5686,40 +8754,438 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<(), JsValue> {
+        self.ensure_composite_selection_inactive()?;
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
 
+        let active_composite_count = active_layer_ids
+            .iter()
+            .map(|&id| id as usize)
+            .filter(|&id| self.composites.get(id).is_some_and(Option::is_some))
+            .count();
+        self.active_composite_scratch.clear();
+        let previous_capacity = self.active_composite_scratch.capacity();
+        self.active_composite_scratch
+            .try_reserve(active_composite_count)
+            .map_err(|_| JsValue::from_str("Unable to reserve active composite render scratch"))?;
+        if self.active_composite_scratch.capacity() > previous_capacity {
+            self.render_scratch_growth_count = self.render_scratch_growth_count.wrapping_add(1);
+        }
         for &layer_id in active_layer_ids {
             let layer_idx = layer_id as usize;
-            let should_redraw = {
-                let layer = self.get_layer(layer_idx)?;
-                layer.fbo_dirty || layer.fbo_transform.as_ref() != Some(&transform)
-            };
-
-            if should_redraw {
-                // Validate layer exists and get FBO
-                let layer = self.get_layer(layer_idx)?;
-                let fbo = &layer.fbo;
-
-                // Bind layer FBO
-                self.gl
-                    .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, Some(&fbo.framebuffer));
-                self.gl.viewport(0, 0, width_i32, height_i32);
-
-                // Clear layer FBO
-                self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
-                self.gl.clear(COLOR_BUFFER_BIT);
-
-                // Render layer geometry (with polarity blending handled internally)
-                self.render_layer_geometry(layer_idx, &transform, width, height)?;
-
-                if let Some(layer) = &mut self.layers[layer_idx] {
-                    layer.fbo_dirty = false;
-                    layer.fbo_transform = Some(transform);
+            if self.composites.get(layer_idx).is_some_and(Option::is_some) {
+                self.active_composite_scratch.insert(layer_idx);
+            }
+        }
+        // A failed composite render must be recordable without allocating
+        // after any GPU/cache mutation has begun.
+        self.composite_errors
+            .try_reserve(active_composite_count)
+            .map_err(|_| JsValue::from_str("Unable to reserve composite diagnostic state"))?;
+        for (id, composite) in self.composites.iter_mut().enumerate() {
+            if self.active_composite_scratch.contains(&id)
+                || self.selection_composite_id == Some(id)
+            {
+                continue;
+            }
+            if let Some(composite) = composite {
+                if let Some(fbo) = composite.output_fbo.take() {
+                    Self::delete_fbo(&self.gl, fbo);
                 }
+                if let Some(texture) = composite.lookup_texture.take() {
+                    self.gl.delete_texture(Some(&texture));
+                }
+                composite.lookup_width = 0;
+                composite.dirty = true;
+                composite.transform = None;
             }
         }
 
+        for &layer_id in active_layer_ids {
+            let layer_idx = layer_id as usize;
+            if self.composites.get(layer_idx).is_some_and(Option::is_some) {
+                match self.render_composite_fbo(layer_idx, transform, width, height) {
+                    Ok(()) => {
+                        self.composite_errors.remove(&layer_idx);
+                    }
+                    Err(error) => {
+                        let message = js_value_message(&error);
+                        let _ = self.release_composite_cache(layer_idx);
+                        self.composite_errors.insert(layer_idx, message);
+                    }
+                }
+            } else {
+                self.render_gerber_fbo(layer_idx, transform, width, height, width_i32, height_i32)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn render_gerber_fbo(
+        &mut self,
+        layer_idx: usize,
+        transform: [f32; 9],
+        width: u32,
+        height: u32,
+        width_i32: i32,
+        height_i32: i32,
+    ) -> Result<bool, JsValue> {
+        let should_redraw = {
+            let layer = self.get_layer(layer_idx)?;
+            layer.fbo_dirty || layer.fbo_transform.as_ref() != Some(&transform)
+        };
+        if !should_redraw {
+            return Ok(false);
+        }
+
+        Self::drain_gl_errors(&self.gl);
+        let framebuffer = self.get_layer(layer_idx)?.fbo.framebuffer.clone();
+        Self::bind_draw_target(&self.gl, Some(&framebuffer));
+        self.gl.viewport(0, 0, width_i32, height_i32);
+        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        self.gl.clear(COLOR_BUFFER_BIT);
+        self.render_layer_geometry(layer_idx, &transform, width, height)?;
+        Self::check_gl_stage(&self.gl, "Gerber mask rendering")?;
+
+        if let Some(layer) = &mut self.layers[layer_idx] {
+            layer.fbo_dirty = false;
+            layer.fbo_transform = Some(transform);
+            layer.fbo_generation = layer.fbo_generation.wrapping_add(1);
+        }
+        Ok(true)
+    }
+
+    fn render_composite_fbo(
+        &mut self,
+        composite_id: usize,
+        transform: [f32; 9],
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let mut sources = [ResolvedMaskSource::default(); MAX_COMPOSITE_SOURCES];
+        let (source_count, outline_mask_id, previous_transform, initially_dirty) = {
+            let composite = self
+                .composites
+                .get(composite_id)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| JsValue::from_str("Composite layer is deallocated"))?;
+            let source_count = composite.sources.len();
+            sources[..source_count].copy_from_slice(&composite.sources);
+            (
+                source_count,
+                composite.outline_mask_id,
+                composite.transform,
+                composite.dirty,
+            )
+        };
+
+        let sources = &sources[..source_count];
+        for source in sources.iter().copied() {
+            self.ensure_mask_source_rendered(
+                source, transform, width, height, width_i32, height_i32,
+            )?;
+        }
+        let outline_source =
+            ResolvedMaskSource::new(outline_mask_id, MaskSourceKind::InternalOutline);
+        self.ensure_mask_source_rendered(
+            outline_source,
+            transform,
+            width,
+            height,
+            width_i32,
+            height_i32,
+        )?;
+        let mut source_generations = [0u64; MAX_COMPOSITE_SOURCES];
+        for (index, &source) in sources.iter().enumerate() {
+            source_generations[index] = self.mask_source_generation(source)?;
+        }
+        let source_generations = &source_generations[..source_count];
+        let outline_generation = self.mask_source_generation(outline_source)?;
+
+        self.ensure_composite_resources(composite_id, width, height)?;
+        let (source_changed, outline_changed) = {
+            let composite = self.composites[composite_id].as_ref().unwrap();
+            (
+                composite.source_generations.as_slice() != source_generations,
+                composite.outline_generation != Some(outline_generation),
+            )
+        };
+        let should_redraw = initially_dirty
+            || previous_transform.as_ref() != Some(&transform)
+            || outline_changed
+            || source_changed
+            || self.composites[composite_id]
+                .as_ref()
+                .is_some_and(|composite| composite.dirty);
+        if should_redraw {
+            let membership_dirty = self.composites[composite_id]
+                .as_ref()
+                .is_some_and(|composite| composite.membership_dirty);
+            let scratch_matches = self.membership_scratch_owner.as_ref().is_some_and(
+                |(owner_id, owner_transform)| {
+                    *owner_id == composite_id && owner_transform == &transform
+                },
+            );
+            if membership_dirty || source_changed || !scratch_matches {
+                Self::reserve_generation_snapshot(
+                    &mut self.composites[composite_id]
+                        .as_mut()
+                        .unwrap()
+                        .source_generations,
+                    source_count,
+                )?;
+                self.membership_scratch_owner = None;
+                self.encode_composite_membership(composite_id, width, height)?;
+                self.membership_scratch_owner = Some((composite_id, transform));
+                let composite = self.composites[composite_id].as_mut().unwrap();
+                composite.membership_dirty = false;
+                composite.source_generations.clear();
+                composite
+                    .source_generations
+                    .extend_from_slice(source_generations);
+            }
+            self.render_composite_lookup(composite_id, width, height)?;
+            if let Some(composite) = self.composites[composite_id].as_mut() {
+                composite.dirty = false;
+                composite.outline_generation = Some(outline_generation);
+                composite.transform = Some(transform);
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_composite_resources(
+        &mut self,
+        composite_id: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let needs_output = self.composites[composite_id]
+            .as_ref()
+            .is_some_and(|composite| composite.output_fbo.is_none());
+        let needs_lookup = self.composites[composite_id]
+            .as_ref()
+            .is_some_and(|composite| composite.lookup_texture.is_none());
+        let mut pending_output = if needs_output {
+            Some(Self::create_composite_output_fbo(&self.gl, width, height)?)
+        } else {
+            None
+        };
+        let pending_lookup = if needs_lookup {
+            let bits = &self.composites[composite_id].as_ref().unwrap().visible_bits;
+            match Self::create_composite_lookup_texture(&self.gl, bits) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    if let Some((fbo, _)) = pending_output.take() {
+                        Self::delete_fbo(&self.gl, fbo);
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let pending_scratch = if self.membership_scratch.is_none() {
+            match Self::create_nearest_rgba_fbo(&self.gl, width, height) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    if let Some((fbo, _)) = pending_output.take() {
+                        Self::delete_fbo(&self.gl, fbo);
+                    }
+                    if let Some((texture, _)) = pending_lookup {
+                        self.gl.delete_texture(Some(&texture));
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+
+        if let Some((fbo, is_r8)) = pending_output {
+            let composite = self.composites[composite_id].as_mut().unwrap();
+            composite.output_fbo = Some(fbo);
+            composite.output_is_r8 = is_r8;
+            composite.dirty = true;
+        }
+        if let Some((texture, lookup_width)) = pending_lookup {
+            let composite = self.composites[composite_id].as_mut().unwrap();
+            composite.lookup_texture = Some(texture);
+            composite.lookup_width = lookup_width;
+            composite.dirty = true;
+        }
+        if let Some(scratch) = pending_scratch {
+            self.membership_scratch = Some(scratch);
+            self.membership_scratch_owner = None;
+        }
+        Ok(())
+    }
+
+    fn encode_composite_membership(
+        &mut self,
+        composite_id: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let mut sources = [ResolvedMaskSource::default(); MAX_COMPOSITE_SOURCES];
+        let source_count = {
+            let composite = self.composites[composite_id]
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("Composite layer is deallocated"))?;
+            let source_count = composite.sources.len();
+            sources[..source_count].copy_from_slice(&composite.sources);
+            source_count
+        };
+        let mut source_textures: [Option<WebGlTexture>; MAX_COMPOSITE_SOURCES] =
+            std::array::from_fn(|_| None);
+        for (index, source) in sources[..source_count].iter().copied().enumerate() {
+            source_textures[index] = Some(self.mask_source_texture(source)?);
+        }
+        let scratch = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
+        let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
+        let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
+        let _dither_guard = GlCapabilityGuard::disable(&self.gl, WebGl2RenderingContext::DITHER);
+        Self::drain_gl_errors(&self.gl);
+        Self::bind_draw_target(&self.gl, Some(&scratch.framebuffer));
+        self.gl.viewport(0, 0, width_i32, height_i32);
+        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        self.gl.clear(COLOR_BUFFER_BIT);
+        self.gl.enable(BLEND);
+        self.gl.blend_equation(FUNC_ADD);
+        self.gl.blend_func(ONE, ONE);
+
+        let mut completed_passes = 0usize;
+        let result = (|| {
+            let program = &self.programs.composite_membership;
+            self.gl.use_program(Some(&program.program));
+            self.bind_fullscreen_quad(program)?;
+            let texture_units = self
+                .gl
+                .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_IMAGE_UNITS)?
+                .as_f64()
+                .unwrap_or(0.0) as usize;
+            let batch_size = texture_units.min(8);
+            if batch_size == 0 {
+                return Err(JsValue::from_str(
+                    "Composite rendering requires fragment texture units",
+                ));
+            }
+
+            for (batch_index, batch) in source_textures[..source_count]
+                .chunks(batch_size)
+                .enumerate()
+            {
+                for local_slot in 0..8usize {
+                    let unit = if local_slot < batch.len() {
+                        local_slot
+                    } else {
+                        0
+                    };
+                    self.gl.uniform1i(
+                        program.uniforms.get(COMPOSITE_SOURCE_UNIFORMS[local_slot]),
+                        unit as i32,
+                    );
+                    if local_slot < batch.len() {
+                        self.gl
+                            .active_texture(WebGl2RenderingContext::TEXTURE0 + unit as u32);
+                        self.gl.bind_texture(
+                            WebGl2RenderingContext::TEXTURE_2D,
+                            batch[local_slot].as_ref(),
+                        );
+                    }
+                }
+                self.gl
+                    .uniform1i(program.uniforms.get("u_source_count"), batch.len() as i32);
+                self.gl.uniform1i(
+                    program.uniforms.get("u_base_slot"),
+                    (batch_index * batch_size) as i32,
+                );
+                self.gl.draw_arrays(TRIANGLES, 0, 6);
+                completed_passes += 1;
+            }
+            Self::check_gl_stage(&self.gl, "Composite membership rendering")?;
+            Ok(())
+        })();
+        self.gl.disable(BLEND);
+        if result.is_ok() {
+            let composite = self.composites[composite_id].as_mut().unwrap();
+            composite.membership_encode_count = composite.membership_encode_count.wrapping_add(1);
+            composite.membership_encode_pass_count = composite
+                .membership_encode_pass_count
+                .wrapping_add(completed_passes as u64);
+            composite.last_membership_encode_pass_count = completed_passes;
+        }
+        result
+    }
+
+    fn render_composite_lookup(
+        &mut self,
+        composite_id: usize,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        let composite = self.composites[composite_id]
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite layer is deallocated"))?;
+        let output = composite
+            .output_fbo
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite output framebuffer is unavailable"))?;
+        let lookup = composite
+            .lookup_texture
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite lookup texture is unavailable"))?;
+        let scratch = self
+            .membership_scratch
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
+        let outline = self.mask_source_texture(ResolvedMaskSource::new(
+            composite.outline_mask_id,
+            MaskSourceKind::InternalOutline,
+        ))?;
+        Self::drain_gl_errors(&self.gl);
+        Self::bind_draw_target(&self.gl, Some(&output.framebuffer));
+        self.gl.viewport(0, 0, width as i32, height as i32);
+        self.gl.disable(BLEND);
+        self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        self.gl.clear(COLOR_BUFFER_BIT);
+
+        let program = &self.programs.composite_lookup;
+        self.gl.use_program(Some(&program.program));
+        self.bind_fullscreen_quad(program)?;
+        for (unit, (uniform, texture)) in [
+            ("u_membership", &scratch.texture),
+            ("u_lookup", lookup),
+            ("u_outline", &outline),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.gl
+                .active_texture(WebGl2RenderingContext::TEXTURE0 + unit as u32);
+            self.gl
+                .bind_texture(WebGl2RenderingContext::TEXTURE_2D, Some(texture));
+            self.gl
+                .uniform1i(program.uniforms.get(uniform), unit as i32);
+        }
+        self.gl.uniform1i(
+            program.uniforms.get("u_lookup_width"),
+            composite.lookup_width,
+        );
+        self.gl.uniform1i(
+            program.uniforms.get("u_inverted"),
+            i32::from(composite.inverted),
+        );
+        self.gl.draw_arrays(TRIANGLES, 0, 6);
+        Self::check_gl_stage(&self.gl, "Composite lookup rendering")?;
+        let composite = self.composites[composite_id].as_mut().unwrap();
+        composite.lookup_render_count = composite.lookup_render_count.wrapping_add(1);
         Ok(())
     }
 
@@ -5730,20 +9196,24 @@ impl Renderer {
         tile_y: u32,
         tile_width: u32,
         tile_height: u32,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), &'static str> {
+        const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
         if export_width == 0 || export_height == 0 || tile_width == 0 || tile_height == 0 {
-            return Err(JsValue::from_str("Tile dimensions must be non-zero"));
+            return Err("Tile dimensions must be non-zero");
+        }
+        if export_width > MAX_EXACT_F32_INTEGER || export_height > MAX_EXACT_F32_INTEGER {
+            return Err("Tile export dimensions exceed exact WebGL coordinate precision");
         }
 
         let tile_right = tile_x
             .checked_add(tile_width)
-            .ok_or_else(|| JsValue::from_str("Tile width overflows export bounds"))?;
+            .ok_or("Tile width overflows export bounds")?;
         let tile_bottom = tile_y
             .checked_add(tile_height)
-            .ok_or_else(|| JsValue::from_str("Tile height overflows export bounds"))?;
+            .ok_or("Tile height overflows export bounds")?;
 
         if tile_right > export_width || tile_bottom > export_height {
-            return Err(JsValue::from_str("Tile is outside export bounds"));
+            return Err("Tile is outside export bounds");
         }
 
         Ok(())
@@ -5812,14 +9282,15 @@ impl Renderer {
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
 
         // Bind output framebuffer
-        self.gl
-            .bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, target_framebuffer);
+        Self::drain_gl_errors(&self.gl);
+        Self::bind_draw_target(&self.gl, target_framebuffer);
         self.gl.viewport(0, 0, width_i32, height_i32);
 
         if clear_canvas {
             self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
             self.gl.clear(COLOR_BUFFER_BIT);
         }
+        Self::check_gl_stage(&self.gl, "Final render target preparation")?;
 
         self.gl.enable(BLEND);
         self.gl.blend_equation(FUNC_ADD);
@@ -5829,40 +9300,69 @@ impl Renderer {
         for (color_index, &layer_id) in active_layer_ids.iter().enumerate() {
             let layer_idx = layer_id as usize;
 
-            if let Some(layer) = &self.layers[layer_idx] {
-                let color_offset = color_index * color_stride;
-                if color_offset + color_stride <= color_data.len() {
-                    let layer_alpha = if color_stride == 4 {
-                        color_data[color_offset + 3] * alpha
-                    } else {
-                        alpha
-                    };
-                    let color = [
-                        color_data[color_offset],
-                        color_data[color_offset + 1],
-                        color_data[color_offset + 2],
-                        layer_alpha,
-                    ];
-                    match Self::blend_mode_at(blend_modes, color_index) {
-                        1 => {
-                            self.gl.blend_func_separate(
-                                ONE,
-                                ONE_MINUS_SRC_ALPHA,
-                                ONE,
-                                ONE_MINUS_SRC_ALPHA,
-                            );
-                        }
-                        2 => {
-                            self.gl.blend_func_separate(
-                                ZERO,
-                                ONE_MINUS_SRC_ALPHA,
-                                ZERO,
-                                ONE_MINUS_SRC_ALPHA,
-                            );
-                        }
-                        _ => self.gl.blend_func(ONE, ONE),
+            let color_offset = color_index * color_stride;
+            if color_offset + color_stride <= color_data.len() {
+                let layer_alpha = if color_stride == 4 {
+                    color_data[color_offset + 3] * alpha
+                } else {
+                    alpha
+                };
+                let color = [
+                    color_data[color_offset],
+                    color_data[color_offset + 1],
+                    color_data[color_offset + 2],
+                    layer_alpha,
+                ];
+                Self::drain_gl_errors(&self.gl);
+                match Self::blend_mode_at(blend_modes, color_index) {
+                    1 => {
+                        self.gl.blend_func_separate(
+                            ONE,
+                            ONE_MINUS_SRC_ALPHA,
+                            ONE,
+                            ONE_MINUS_SRC_ALPHA,
+                        );
                     }
-                    self.draw_fbo_texture(&layer.fbo.texture, &color)?;
+                    2 => {
+                        self.gl.blend_func_separate(
+                            ZERO,
+                            ONE_MINUS_SRC_ALPHA,
+                            ZERO,
+                            ONE_MINUS_SRC_ALPHA,
+                        );
+                    }
+                    _ => self.gl.blend_func(ONE, ONE),
+                }
+                let is_composite = self.composites.get(layer_idx).is_some_and(Option::is_some);
+                let draw_result = if let Some(composite) =
+                    self.composites.get(layer_idx).and_then(Option::as_ref)
+                {
+                    if let Some(output) = &composite.output_fbo {
+                        self.draw_composite_texture(&output.texture, &color, composite.output_is_r8)
+                    } else {
+                        continue;
+                    }
+                } else if let Some(layer) = self.layers.get(layer_idx).and_then(Option::as_ref) {
+                    self.draw_fbo_texture(&layer.fbo.texture, &color)
+                } else {
+                    continue;
+                };
+                let gl_result = Self::check_gl_stage(
+                    &self.gl,
+                    if is_composite {
+                        "Composite final draw"
+                    } else {
+                        "Gerber final draw"
+                    },
+                );
+                if let Err(error) = draw_result.and(gl_result) {
+                    if is_composite {
+                        self.composite_errors
+                            .insert(layer_idx, js_value_message(&error));
+                        continue;
+                    }
+                    self.gl.disable(BLEND);
+                    return Err(error);
                 }
             }
         }
@@ -5884,8 +9384,19 @@ impl Renderer {
         let mut min_y = f32::INFINITY;
         let mut max_y = f32::NEG_INFINITY;
 
-        for layer in self.layers.iter().flatten() {
+        for (id, layer) in self.layers.iter().enumerate() {
+            if self.internal_layer_ids.contains(&id) {
+                continue;
+            }
+            let Some(layer) = layer else { continue };
             let b = &layer.boundary;
+            min_x = min_x.min(b.min_x);
+            max_x = max_x.max(b.max_x);
+            min_y = min_y.min(b.min_y);
+            max_y = max_y.max(b.max_y);
+        }
+        for composite in self.composites.iter().flatten() {
+            let b = &composite.boundary;
             min_x = min_x.min(b.min_x);
             max_x = max_x.max(b.max_x);
             min_y = min_y.min(b.min_y);
@@ -5897,7 +9408,15 @@ impl Renderer {
 
     /// Get the boundary for one active user layer.
     pub fn get_layer_boundary(&self, layer_id: usize) -> Result<Boundary, JsValue> {
-        let boundary = &self.get_layer(layer_id)?.boundary;
+        if self.internal_layer_ids.contains(&layer_id) {
+            return Err(JsValue::from_str("Invalid layer index"));
+        }
+        let boundary =
+            if let Some(composite) = self.composites.get(layer_id).and_then(Option::as_ref) {
+                &composite.boundary
+            } else {
+                &self.get_layer(layer_id)?.boundary
+            };
         Ok(Boundary::new(
             boundary.min_x,
             boundary.max_x,
@@ -5915,16 +9434,16 @@ impl Renderer {
     /// Resize framebuffers to explicit dimensions.
     pub fn resize_to(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
         Self::validate_framebuffer_size(width, height)?;
+        let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
         let mut pending_fbos = FboListBuildGuard::new(&self.gl, self.layers.len())?;
 
         for layer in &self.layers {
             let fbo = match layer {
-                Some(layer) => Some(Self::create_fbo(
-                    &self.gl,
-                    width,
-                    height,
-                    layer.has_path_regions,
-                )?),
+                Some(layer) => Some(if layer.mask_in_red {
+                    Self::create_red_mask_fbo(&self.gl, width, height, layer.has_path_regions)?
+                } else {
+                    Self::create_fbo(&self.gl, width, height, layer.has_path_regions)?
+                }),
                 None => None,
             };
             pending_fbos.push(fbo);
@@ -5942,6 +9461,20 @@ impl Renderer {
                 layer.fbo_transform = None;
             }
         }
+        for composite in self.composites.iter_mut().flatten() {
+            if let Some(output) = composite.output_fbo.take() {
+                Self::delete_fbo(&self.gl, output);
+            }
+            composite.dirty = true;
+            composite.membership_dirty = true;
+            composite.transform = None;
+        }
+        if let Some(scratch) = self.membership_scratch.take() {
+            Self::delete_fbo(&self.gl, scratch);
+        }
+        self.membership_scratch_owner = None;
+        self.composite_area_scan = None;
+        self.composite_errors.clear();
 
         Ok(())
     }
@@ -5949,6 +9482,24 @@ impl Renderer {
     /// Recreate WebGL-owned resources after the browser restores a lost context.
     /// Parsed Gerber geometry and stable layer IDs are preserved.
     pub fn restore_context(&mut self, gl: WebGl2RenderingContext) -> Result<(), JsValue> {
+        self.restore_context_for_size(gl, self.explicit_size)
+    }
+
+    pub fn restore_context_with_size(
+        &mut self,
+        gl: WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+    ) -> Result<(), JsValue> {
+        Self::validate_framebuffer_size(width, height)?;
+        self.restore_context_for_size(gl, Some((width, height)))
+    }
+
+    fn restore_context_for_size(
+        &mut self,
+        gl: WebGl2RenderingContext,
+        next_explicit_size: Option<(u32, u32)>,
+    ) -> Result<(), JsValue> {
         if self
             .layers
             .iter()
@@ -5959,6 +9510,11 @@ impl Renderer {
                 "Layer geometry has been released from WebAssembly memory; rebuild layers from source files to restore WebGL context",
             ));
         }
+        // The replacement context can be shared with an embedding
+        // application just like the original one. Resource reconstruction
+        // must not leak its framebuffer/texture/buffer bindings on either a
+        // successful commit or any partial-build error path.
+        let _object_bindings = GlObjectBindingStateGuard::capture(&gl)?;
 
         let mut new_buffer_caches =
             Self::reserved_vec("restored buffer caches", self.layers.len())?;
@@ -5969,32 +9525,37 @@ impl Renderer {
             });
         }
 
-        let (width, height) = match self.explicit_size {
+        let (width, height) = match next_explicit_size {
             Some(size) => size,
             None => Self::get_canvas_size_from_gl(&gl)?,
         };
         let mut pending = RendererResourcesBuildGuard::new(&gl, self.layers.len())?;
         pending.programs = Some(ShaderPrograms::new(&gl)?);
         pending.quad_buffer = Some(Self::create_quad_buffer(&gl)?);
+        pending.fullscreen_vertex_array = Some(
+            gl.create_vertex_array()
+                .ok_or_else(|| JsValue::from_str("Failed to create fullscreen vertex array"))?,
+        );
 
         for layer in &self.layers {
             if layer.is_some() {
-                let has_path_regions = layer.as_ref().is_some_and(|layer| layer.has_path_regions);
-                pending.fbos.push(Some(Self::create_fbo(
-                    &gl,
-                    width,
-                    height,
-                    has_path_regions,
-                )?));
+                let layer = layer.as_ref().unwrap();
+                pending.fbos.push(Some(if layer.mask_in_red {
+                    Self::create_red_mask_fbo(&gl, width, height, layer.has_path_regions)?
+                } else {
+                    Self::create_fbo(&gl, width, height, layer.has_path_regions)?
+                }));
             } else {
                 pending.fbos.push(None);
             }
         }
-        let (programs, quad_buffer, new_fbos) = pending.commit();
+        let (programs, quad_buffer, fullscreen_vertex_array, new_fbos) = pending.commit();
 
         let old_gl = self.gl.clone();
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);
+        let old_fullscreen_vertex_array =
+            std::mem::replace(&mut self.fullscreen_vertex_array, fullscreen_vertex_array);
 
         for ((layer, new_fbo), new_caches) in
             self.layers.iter_mut().zip(new_fbos).zip(new_buffer_caches)
@@ -6013,6 +9574,7 @@ impl Renderer {
         }
 
         old_gl.delete_buffer(Some(&old_quad_buffer));
+        old_gl.delete_vertex_array(Some(&old_fullscreen_vertex_array));
         Self::delete_shader_programs(&old_gl, &old_programs);
         Self::delete_highlight_resources_from(
             &old_gl,
@@ -6021,6 +9583,27 @@ impl Renderer {
             &mut self.highlight_buffer,
             &mut self.highlight_vertex_array,
         );
+        for composite in self.composites.iter_mut().flatten() {
+            if let Some(output) = composite.output_fbo.take() {
+                Self::delete_fbo(&old_gl, output);
+            }
+            if let Some(lookup) = composite.lookup_texture.take() {
+                old_gl.delete_texture(Some(&lookup));
+            }
+            composite.lookup_width = 0;
+            composite.output_is_r8 = false;
+            composite.dirty = true;
+            composite.membership_dirty = true;
+            composite.transform = None;
+        }
+        if let Some(scratch) = self.membership_scratch.take() {
+            Self::delete_fbo(&old_gl, scratch);
+        }
+        self.membership_scratch_owner = None;
+        self.selection_composite_id = None;
+        self.composite_area_scan = None;
+        self.composite_errors.clear();
+        self.explicit_size = next_explicit_size;
         self.gl = gl;
 
         Ok(())
@@ -6031,6 +9614,8 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         self.clear_all();
         self.delete_highlight_resources();
+        self.gl
+            .delete_vertex_array(Some(&self.fullscreen_vertex_array));
         self.gl.delete_buffer(Some(&self.quad_buffer));
         Self::delete_shader_programs(&self.gl, &self.programs);
     }
