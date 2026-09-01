@@ -12,5 +12,8 @@
     "@types/node": "^26.3.0",
     "node-gles-webgl2": "^0.4.0",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "node-gles-webgl2": true
   }
 }
