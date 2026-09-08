@@ -1781,16 +1781,17 @@ export class GerberViewer {
     let nextPreserveArcRegions = this.preserveArcRegions;
     let nextArcTessellationQuality = this.arcTessellationQuality;
 
-    if (
-      !nextPreserveArcRegions &&
-      typeof this.wasmProcessor?.set_preserve_arc_regions !== "function"
-    ) {
+    const hasCapability = (method) =>
+      this.renderBackend?.name === "threaded" ||
+      typeof this.wasmProcessor?.[method] === "function";
+
+    if (!nextPreserveArcRegions && !hasCapability("set_preserve_arc_regions")) {
       nextPreserveArcRegions = true;
     }
 
     if (
       nextArcTessellationQuality !== "normal" &&
-      typeof this.wasmProcessor?.set_arc_tessellation_quality !== "function"
+      !hasCapability("set_arc_tessellation_quality")
     ) {
       nextArcTessellationQuality = "normal";
     }
@@ -1816,6 +1817,7 @@ export class GerberViewer {
     preserveArcRegions = this.preserveArcRegions,
     arcTessellationQuality = this.arcTessellationQuality,
   } = {}, processor = this.wasmProcessor) {
+    if (this.renderBackend?.name === "threaded") return;
     if (
       !preserveArcRegions &&
       typeof processor?.set_preserve_arc_regions !== "function"
@@ -4309,7 +4311,7 @@ export class GerberViewer {
               bounds: rawBounds ? expandBounds(rawBounds, outlineStyle.worldMm) : null,
             };
             this.applyDrillLayerOutlineStyle(layer);
-            this.commitLayerMetadata(layer);
+            this.commitLayerMetadata(layer, { updateUiState: false });
             results[item.sequence] = true;
           } else {
             const layer = {
@@ -4331,7 +4333,7 @@ export class GerberViewer {
               renderBounds: source.renderBounds ?? null,
               bounds: item.bounds,
             };
-            this.commitLayerMetadata(layer);
+            this.commitLayerMetadata(layer, { updateUiState: false });
             results[item.sequence] = true;
           }
         } catch (itemError) {
@@ -4341,6 +4343,7 @@ export class GerberViewer {
 
       this.updateEmptyStateHint();
       this.renderLayerList();
+      this.updateUiState();
       this.requestRender();
       return results;
     } finally {

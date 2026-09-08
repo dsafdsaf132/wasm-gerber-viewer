@@ -143,6 +143,10 @@ async function handleMessage(message) {
         if (!PROCESSOR_COMMANDS.has(message.method) || typeof processor?.[message.method] !== "function") {
           throw new Error(`Processor command is not allowed: ${message.method}`);
         }
+        if (message.method === "resize_to" && canvas && Array.isArray(message.args) && message.args.length >= 2) {
+          canvas.width = message.args[0];
+          canvas.height = message.args[1];
+        }
         reply(message.id, serializeProcessorResult(processor[message.method](...(message.args ?? []))));
         break;
       case "read-tile": {
@@ -171,53 +175,62 @@ async function handleMessage(message) {
             });
             continue;
           }
-          if (source.kind === "drill") {
-            const ids = processor.add_drill_render_payload(
-              source.outlineLayer,
-              source.fillLayer,
-              source.interactionPayload,
-            );
-            const boundary = processor.get_layer_boundary(ids.outlineLayerId);
-            const bounds = boundary ? {
-              minX: boundary.min_x,
-              maxX: boundary.max_x,
-              minY: boundary.min_y,
-              maxY: boundary.max_y,
-              min_x: boundary.min_x,
-              max_x: boundary.max_x,
-              min_y: boundary.min_y,
-              max_y: boundary.max_y,
-            } : null;
-            uploaded.push({
-              sequence: source.sequence,
-              kind: source.kind,
-              ok: true,
-              ...ids,
-              metadata: source.metadata,
-              bounds,
-            });
-          } else {
-            const layerId = processor.add_render_payload(source.renderPayload);
-            if (source.interactionPayload) {
-              processor.add_interaction_payload?.(layerId, source.interactionPayload);
+          try {
+            if (source.kind === "drill") {
+              const ids = processor.add_drill_render_payload(
+                source.outlineLayer,
+                source.fillLayer,
+                source.interactionPayload,
+              );
+              const boundary = processor.get_layer_boundary(ids.outlineLayerId);
+              const bounds = boundary ? {
+                minX: boundary.min_x,
+                maxX: boundary.max_x,
+                minY: boundary.min_y,
+                maxY: boundary.max_y,
+                min_x: boundary.min_x,
+                max_x: boundary.max_x,
+                min_y: boundary.min_y,
+                max_y: boundary.max_y,
+              } : null;
+              uploaded.push({
+                sequence: source.sequence,
+                kind: source.kind,
+                ok: true,
+                ...ids,
+                metadata: source.metadata,
+                bounds,
+              });
+            } else {
+              const layerId = processor.add_render_payload(source.renderPayload);
+              if (source.interactionPayload) {
+                processor.add_interaction_payload?.(layerId, source.interactionPayload);
+              }
+              const boundary = processor.get_layer_boundary(layerId);
+              const bounds = boundary ? {
+                minX: boundary.min_x,
+                maxX: boundary.max_x,
+                minY: boundary.min_y,
+                maxY: boundary.max_y,
+                min_x: boundary.min_x,
+                max_x: boundary.max_x,
+                min_y: boundary.min_y,
+                max_y: boundary.max_y,
+              } : null;
+              uploaded.push({
+                sequence: source.sequence,
+                kind: source.kind,
+                ok: true,
+                layerId,
+                bounds,
+              });
             }
-            const boundary = processor.get_layer_boundary(layerId);
-            const bounds = boundary ? {
-              minX: boundary.min_x,
-              maxX: boundary.max_x,
-              minY: boundary.min_y,
-              maxY: boundary.max_y,
-              min_x: boundary.min_x,
-              max_x: boundary.max_x,
-              min_y: boundary.min_y,
-              max_y: boundary.max_y,
-            } : null;
+          } catch (uploadError) {
             uploaded.push({
               sequence: source.sequence,
               kind: source.kind,
-              ok: true,
-              layerId,
-              bounds,
+              ok: false,
+              error: String(uploadError?.message ?? uploadError),
             });
           }
         }

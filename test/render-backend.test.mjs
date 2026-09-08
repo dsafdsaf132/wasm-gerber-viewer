@@ -171,3 +171,37 @@ test("ThreadedWorkerBackend dispatches load-source-batch and resolves responses"
   assert.equal(result[1].ok, true);
   assert.equal(result[1].layerId, 11);
 });
+
+test("ThreadedWorkerBackend handles mixed success and error results in batch loading", async () => {
+  class MockWorker {
+    constructor() {
+      this.listeners = [];
+    }
+    addEventListener(type, listener) {
+      this.listeners.push(listener);
+    }
+    postMessage(message) {
+      if (message.type === "load-source-batch") {
+        const response = {
+          id: message.id,
+          result: [
+            { sequence: 0, kind: "gerber", ok: true, layerId: 10, bounds: { minX: 0, maxX: 10, minY: 0, maxY: 10 } },
+            { sequence: 1, kind: "gerber", ok: false, error: "Invalid syntax" },
+          ],
+        };
+        for (const listener of this.listeners) {
+          listener({ data: response });
+        }
+      }
+    }
+  }
+  const backend = new ThreadedWorkerBackend(new MockWorker(), { write: () => 1 });
+  const result = await backend.loadSourceBatch([
+    { sequence: 0, kind: "gerber" },
+    { sequence: 1, kind: "gerber" },
+  ]);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].ok, true);
+  assert.equal(result[1].ok, false);
+  assert.equal(result[1].error, "Invalid syntax");
+});
