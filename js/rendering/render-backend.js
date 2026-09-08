@@ -183,6 +183,8 @@ export class RenderBackend {
   setRenderState(state) { return this.implementation.setRenderState(state); }
   renderCamera(camera) { return this.implementation.renderCamera(camera); }
   callProcessor(method, args) { return this.implementation.callProcessor(method, args); }
+  readTile(options) { return this.implementation.readTile?.(options); }
+  loadSourceBatch(sources) { return this.implementation.loadSourceBatch?.(sources); }
   dispose() { return this.implementation.dispose(); }
 }
 
@@ -194,7 +196,8 @@ export async function createRenderBackend({ executionBackend = "auto", processor
   const shouldThread = capabilities.threadedSupported &&
     (requested === "threaded" || (requested === "auto" && profile?.enabled));
   if (!shouldThread) {
-    return new RenderBackend(new SerialRenderBackend(processor), "serial", {
+    const serialProcessor = processor ?? (createSerialProcessor ? await createSerialProcessor(canvas) : null);
+    return new RenderBackend(new SerialRenderBackend(serialProcessor), "serial", {
       requested,
       capabilities,
       fallbackReason: requested === "serial"

@@ -34,6 +34,24 @@ const PROCESSOR_COMMANDS = new Set([
   "cancel_composite_area_scan", "end_composite_selection",
 ]);
 
+function serializeProcessorResult(result) {
+  if (result && typeof result === "object") {
+    if (typeof result.min_x === "number" && typeof result.max_x === "number") {
+      return {
+        minX: result.min_x,
+        maxX: result.max_x,
+        minY: result.min_y,
+        maxY: result.max_y,
+        min_x: result.min_x,
+        max_x: result.max_x,
+        min_y: result.min_y,
+        max_y: result.max_y,
+      };
+    }
+  }
+  return result;
+}
+
 function reply(id, result = null, error = null, transfer = []) {
   self.postMessage({ id, result, error }, transfer);
 }
@@ -125,7 +143,7 @@ async function handleMessage(message) {
         if (!PROCESSOR_COMMANDS.has(message.method) || typeof processor?.[message.method] !== "function") {
           throw new Error(`Processor command is not allowed: ${message.method}`);
         }
-        reply(message.id, processor[message.method](...(message.args ?? [])));
+        reply(message.id, serializeProcessorResult(processor[message.method](...(message.args ?? []))));
         break;
       case "read-tile": {
         const options = message.options;
@@ -137,26 +155,70 @@ async function handleMessage(message) {
         break;
       }
       case "load-source-batch": {
-        if (typeof wasmModule.parse_source_batch !== "function") {
+        if (typeof wasmModule?.parse_source_batch !== "function") {
           throw new Error("Threaded source batch API is unavailable");
         }
         const parsed = [...wasmModule.parse_source_batch(message.sources)]
           .sort((left, right) => left.sequence - right.sequence);
         const uploaded = [];
         for (const source of parsed) {
+          if (source.ok === false) {
+            uploaded.push({
+              sequence: source.sequence,
+              kind: source.kind,
+              ok: false,
+              error: source.error,
+            });
+            continue;
+          }
           if (source.kind === "drill") {
             const ids = processor.add_drill_render_payload(
               source.outlineLayer,
               source.fillLayer,
               source.interactionPayload,
             );
-            uploaded.push({ sequence: source.sequence, kind: source.kind, ...ids, metadata: source.metadata });
+            const boundary = processor.get_layer_boundary(ids.outlineLayerId);
+            const bounds = boundary ? {
+              minX: boundary.min_x,
+              maxX: boundary.max_x,
+              minY: boundary.min_y,
+              maxY: boundary.max_y,
+              min_x: boundary.min_x,
+              max_x: boundary.max_x,
+              min_y: boundary.min_y,
+              max_y: boundary.max_y,
+            } : null;
+            uploaded.push({
+              sequence: source.sequence,
+              kind: source.kind,
+              ok: true,
+              ...ids,
+              metadata: source.metadata,
+              bounds,
+            });
           } else {
             const layerId = processor.add_render_payload(source.renderPayload);
             if (source.interactionPayload) {
               processor.add_interaction_payload?.(layerId, source.interactionPayload);
             }
-            uploaded.push({ sequence: source.sequence, kind: source.kind, layerId });
+            const boundary = processor.get_layer_boundary(layerId);
+            const bounds = boundary ? {
+              minX: boundary.min_x,
+              maxX: boundary.max_x,
+              minY: boundary.min_y,
+              maxY: boundary.max_y,
+              min_x: boundary.min_x,
+              max_x: boundary.max_x,
+              min_y: boundary.min_y,
+              max_y: boundary.max_y,
+            } : null;
+            uploaded.push({
+              sequence: source.sequence,
+              kind: source.kind,
+              ok: true,
+              layerId,
+              bounds,
+            });
           }
         }
         reply(message.id, uploaded);

@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  RenderBackend,
   SerialRenderBackend,
+  ThreadedWorkerBackend,
   createCameraMailbox,
   createRenderBackend,
   detectThreadedCapabilities,
@@ -98,4 +100,74 @@ test("failed OffscreenCanvas initialization replaces the transferred canvas and 
   assert.equal(backend.implementation.processor, serialProcessor);
   assert.equal(replacement.width, 320);
   assert.equal(replacement.height, 200);
+});
+
+test("RenderBackend proxies loadSourceBatch and readTile to implementation", async () => {
+  const impl = {
+    loadSourceBatch: async (sources) => [{ sequence: 0, kind: "gerber", ok: true, layerId: 42 }],
+    readTile: async (options) => new Uint8Array([1, 2, 3, 4]),
+  };
+  const backend = new RenderBackend(impl, "threaded");
+  const batchResult = await backend.loadSourceBatch([{ sequence: 0 }]);
+  assert.deepEqual(batchResult, [{ sequence: 0, kind: "gerber", ok: true, layerId: 42 }]);
+  const tileResult = await backend.readTile({ tileX: 0 });
+  assert.deepEqual(tileResult, new Uint8Array([1, 2, 3, 4]));
+});
+
+test("createRenderBackend lazily initializes serial processor when not threading", async () => {
+  const canvas = { width: 640, height: 480 };
+  const mockProcessor = { id: "mock-serial" };
+  let created = false;
+  const backend = await createRenderBackend({
+    executionBackend: "serial",
+    canvas,
+    createSerialProcessor: async (targetCanvas) => {
+      assert.equal(targetCanvas, canvas);
+      created = true;
+      return mockProcessor;
+    },
+  });
+  assert.equal(created, true);
+  assert.equal(backend.name, "serial");
+  assert.equal(backend.implementation.processor, mockProcessor);
+});
+
+test("ThreadedWorkerBackend dispatches load-source-batch and resolves responses", async () => {
+  class MockWorker {
+    constructor() {
+      this.listeners = [];
+    }
+    addEventListener(type, listener) {
+      this.listeners.push(listener);
+    }
+    postMessage(message) {
+      if (message.type === "load-source-batch") {
+        const response = {
+          id: message.id,
+          result: message.sources.map((s) => ({
+            sequence: s.sequence,
+            kind: s.kind,
+            ok: true,
+            layerId: 10 + s.sequence,
+            bounds: { minX: 0, maxX: 100, minY: 0, maxY: 100 },
+          })),
+        };
+        for (const listener of this.listeners) {
+          listener({ data: response });
+        }
+      }
+    }
+  }
+  const worker = new MockWorker();
+  const mailbox = { write: () => 1 };
+  const backend = new ThreadedWorkerBackend(worker, mailbox);
+  const result = await backend.loadSourceBatch([
+    { sequence: 0, kind: "gerber" },
+    { sequence: 1, kind: "drill" },
+  ]);
+  assert.equal(result.length, 2);
+  assert.equal(result[0].ok, true);
+  assert.equal(result[0].layerId, 10);
+  assert.equal(result[1].ok, true);
+  assert.equal(result[1].layerId, 11);
 });

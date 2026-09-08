@@ -31,6 +31,7 @@ import {
 import { ScreenshotExporter } from "../rendering/screenshot-exporter.js";
 import { installBrowserBenchmark } from "../performance/browser-benchmark.js";
 import {
+  createRenderBackend,
   detectThreadedCapabilities,
   normalizeExecutionBackend,
   RenderBackend,
@@ -1068,7 +1069,7 @@ export class GerberViewer {
     this.threadedCapabilityProfile = selectThreadedCapabilityProfile(
       this.threadedCapabilities,
     );
-    this.createWebGlProcessor();
+    await this.setupRenderBackend();
     this.normalizePersistedParserOptions();
 
     // Resize Canvas
@@ -1593,6 +1594,64 @@ export class GerberViewer {
     this.lastSubmittedRenderPayload = null;
   }
 
+  async setupRenderBackend() {
+    const workerUrl = new URL("../rendering/render-worker.js", import.meta.url);
+    const threadedArtifactUrl = new URL(
+      "../../wasm/pkg-threaded/wasm_gerber_processor.js",
+      import.meta.url,
+    ).href;
+
+    this.renderBackend = await createRenderBackend({
+      executionBackend: this.executionBackend,
+      canvas: this.canvas,
+      workerUrl,
+      threadedArtifactUrl,
+      profile: this.threadedCapabilityProfile,
+      createSerialProcessor: async (fallbackCanvas) => {
+        const gl = fallbackCanvas.getContext("webgl2", {
+          alpha: true,
+          antialias: false,
+          preserveDrawingBuffer: false,
+          stencil: true,
+        });
+        if (!gl) {
+          throw new Error("WebGL2 not supported");
+        }
+        const processor = new this.wasmModule.GerberProcessor();
+        processor.init(gl);
+        this.configureWasmProcessorOptions(processor);
+        return processor;
+      },
+      onCanvasReplaced: (replacementCanvas) => {
+        this.canvas = replacementCanvas;
+        this.gl = replacementCanvas.getContext("webgl2");
+      },
+      onWorkerEvent: (event) => {
+        if (event?.type === "context-lost") {
+          this.isWebGlContextLost = true;
+          this.updateUiState();
+        } else if (event?.type === "context-restored") {
+          this.isWebGlContextLost = false;
+          this.updateUiState();
+          this.requestRender();
+        } else if (event?.type === "context-restore-failed") {
+          this.addDiagnostic("error", "Context restore failed", event?.error);
+        }
+      },
+    });
+
+    if (this.renderBackend.name === "threaded") {
+      this.wasmProcessor = null;
+      this.gl = null;
+      this.configureWasmProcessorOptions(null);
+    } else {
+      this.wasmProcessor = this.renderBackend.implementation.processor;
+      this.gl = this.canvas.getContext?.("webgl2") ?? null;
+    }
+    this.renderPayloadCache = null;
+    this.lastSubmittedRenderPayload = null;
+  }
+
   createBenchmarkAdapter() {
     return {
       getCanvas: () => this.canvas,
@@ -1683,6 +1742,14 @@ export class GerberViewer {
     processor,
     { interactionsEnabled = this.interactionsEnabled } = {},
   ) {
+    if (this.renderBackend?.name === "threaded") {
+      this.renderBackend.callProcessor("set_preserve_arc_regions", [this.preserveArcRegions]).catch(() => {});
+      this.renderBackend.callProcessor("set_arc_tessellation_quality", [this.getArcTessellationQualityLevel()]).catch(() => {});
+      this.renderBackend.callProcessor("set_minimum_feature_pixels", [this.minimumFeaturePixels]).catch(() => {});
+      this.renderBackend.callProcessor("set_interactions_enabled", [interactionsEnabled]).catch(() => {});
+      return;
+    }
+
     if (typeof processor?.set_preserve_arc_regions === "function") {
       processor.set_preserve_arc_regions(this.preserveArcRegions);
     }
@@ -1701,6 +1768,10 @@ export class GerberViewer {
   }
 
   disableProcessorInteractions(processor) {
+    if (this.renderBackend?.name === "threaded") {
+      this.renderBackend.callProcessor("set_interactions_enabled", [false]).catch(() => {});
+      return;
+    }
     if (typeof processor?.set_interactions_enabled === "function") {
       processor.set_interactions_enabled(false);
     }
@@ -1783,18 +1854,22 @@ export class GerberViewer {
     const canResizeProcessor =
       !skipProcessorResize &&
       sizeChanged &&
-      this.wasmProcessor &&
+      (this.wasmProcessor || this.renderBackend?.name === "threaded") &&
       !this.isWebGlContextLost &&
       (!this.isRestoringWebGlContext || allowProcessorResize);
     if (canResizeProcessor) {
       let canvasChangedForLegacyResize = false;
       try {
-        if (typeof this.wasmProcessor.resize_to === "function") {
+        if (this.renderBackend?.name === "threaded") {
+          this.renderBackend.callProcessor("resize_to", [nextSize.width, nextSize.height]).catch((error) => {
+            console.warn("[Render] Failed to resize threaded renderer:", error);
+          });
+        } else if (typeof this.wasmProcessor?.resize_to === "function") {
           // Allocate the replacement FBO set before changing the drawing
           // buffer. Rust commits resize_to atomically, so an allocation error
           // leaves both the canvas and renderer on their previous dimensions.
           this.wasmProcessor.resize_to(nextSize.width, nextSize.height);
-        } else {
+        } else if (this.wasmProcessor) {
           this.canvas.width = nextSize.width;
           this.canvas.height = nextSize.height;
           canvasChangedForLegacyResize = true;
@@ -1815,8 +1890,12 @@ export class GerberViewer {
     }
 
     if (sizeChanged) {
-      this.canvas.width = nextSize.width;
-      this.canvas.height = nextSize.height;
+      try {
+        this.canvas.width = nextSize.width;
+        this.canvas.height = nextSize.height;
+      } catch {
+        // Ignored if control was transferred to OffscreenCanvas
+      }
     }
     if (canResizeProcessor && this.interactionProcessor) {
       try {
@@ -3194,9 +3273,22 @@ export class GerberViewer {
   }
 
   applyDrillLayerOutlineStyle(layer, processor = this.wasmProcessor) {
-    if (!processor || !isDrillLayer(layer)) return;
+    if (!isDrillLayer(layer)) return;
 
     const style = this.getDrillOutlineStyle(layer);
+    if (this.renderBackend?.name === "threaded") {
+      this.renderBackend.callProcessor("set_layer_inner_outline", [
+        layer.outlineLayerId,
+        style.pixels,
+        style.worldMm,
+      ]).catch((err) => {
+        console.warn("[Drill] Failed to update drill outline in threaded backend:", err);
+      });
+      this.updateDrillLayerBounds(layer, style);
+      return;
+    }
+    if (!processor) return;
+
     if (typeof processor.set_layer_inner_outline === "function") {
       processor.set_layer_inner_outline(
         layer.outlineLayerId,
@@ -4086,6 +4178,18 @@ export class GerberViewer {
       });
     }
     const total = layerSources.length;
+    if (total > 1 && this.renderBackend?.name === "threaded") {
+      try {
+        return await this.loadLayerSourcesBatch(layerSources, { title, total });
+      } catch (error) {
+        console.warn("[Parse] Batch source loading failed, falling back to worker pool:", error);
+        this.addDiagnostic(
+          "warning",
+          "Batch loading failed",
+          `${getErrorMessage(error)}. Falling back to standard pipeline.`,
+        );
+      }
+    }
     const parseWorkerPool = this.createParseWorkerPool(total);
 
     if (!parseWorkerPool) {
@@ -4125,6 +4229,122 @@ export class GerberViewer {
       return this.loadLayerSourcesSerially(layerSources, { title, total });
     } finally {
       parseWorkerPool?.dispose();
+    }
+  }
+
+  async loadLayerSourcesBatch(
+    layerSources,
+    { title = "Loading files", total = layerSources.length } = {},
+  ) {
+    this.showLoadingModal({
+      title,
+      stage: "Reading",
+      current: 0,
+      total,
+    });
+    try {
+      const parseOptions = this.getParseOptions();
+      const batchSources = [];
+      for (let i = 0; i < layerSources.length; i++) {
+        const source = layerSources[i];
+        const content = await source.readText();
+        batchSources.push({
+          sequence: i,
+          kind: source.kind === DRILL_LAYER_KIND ? "drill" : "gerber",
+          content,
+          offset: normalizeLayerOffset(source.offset),
+          preserveArcRegions: parseOptions.preserveArcRegions,
+          arcTessellationQuality: parseOptions.arcTessellationQuality,
+          interactionsEnabled: parseOptions.interactionsEnabled,
+        });
+        this.updateLoadingModal({
+          title,
+          stage: "Reading",
+          current: i + 1,
+          total,
+        });
+      }
+
+      this.updateLoadingModal({
+        title,
+        stage: "Parsing & Uploading",
+        current: Math.floor(total / 2),
+        total,
+      });
+
+      const uploadedBatch = await this.renderBackend.loadSourceBatch(batchSources);
+      if (!Array.isArray(uploadedBatch)) {
+        throw new Error("Batch loading did not return expected array result");
+      }
+
+      const results = new Array(total).fill(false);
+      for (const item of uploadedBatch) {
+        const source = layerSources[item.sequence];
+        if (!source) continue;
+        if (item.ok === false) {
+          const errorMsg = item.error || "Failed to parse layer in batch";
+          this.handleLayerLoadError(source.name, new Error(errorMsg));
+          continue;
+        }
+
+        try {
+          if (item.kind === "drill") {
+            const drillType = source.drillType ?? getDrillType(source.name);
+            const outlineStyle = this.getDrillOutlineStyle({ drillType });
+            const rawBounds = item.bounds;
+            const layer = {
+              id: source.id ?? null,
+              kind: DRILL_LAYER_KIND,
+              name: source.name,
+              drillType,
+              visible: source.visible ?? true,
+              color: source.color ? [...source.color] : getDefaultDrillColor(source.name),
+              layerId: item.outlineLayerId,
+              outlineLayerId: item.outlineLayerId,
+              fillLayerId: item.fillLayerId,
+              drillMetadata: normalizeDrillMetadata(item.metadata),
+              sourceContent: batchSources[item.sequence].content,
+              offset: normalizeLayerOffset(source.offset),
+              rawBounds,
+              bounds: rawBounds ? expandBounds(rawBounds, outlineStyle.worldMm) : null,
+            };
+            this.applyDrillLayerOutlineStyle(layer);
+            this.commitLayerMetadata(layer);
+            results[item.sequence] = true;
+          } else {
+            const layer = {
+              id: source.id ?? null,
+              layerId: item.layerId,
+              kind: source.kind ?? GERBER_LAYER_KIND,
+              name: source.name,
+              visible: source.visible ?? true,
+              color: source.color ? [...source.color] : null,
+              alpha: normalizeOptionalLayerAlpha(source.alpha),
+              inverted: source.inverted ?? false,
+              invertedLayerId: null,
+              invertedOutlineLayerId: null,
+              invertedErrorKey: null,
+              invertedSourceKey: null,
+              sourceName: source.name,
+              sourceContent: batchSources[item.sequence].content,
+              offset: normalizeLayerOffset(source.offset),
+              renderBounds: source.renderBounds ?? null,
+              bounds: item.bounds,
+            };
+            this.commitLayerMetadata(layer);
+            results[item.sequence] = true;
+          }
+        } catch (itemError) {
+          this.handleLayerLoadError(source.name, itemError);
+        }
+      }
+
+      this.updateEmptyStateHint();
+      this.renderLayerList();
+      this.requestRender();
+      return results;
+    } finally {
+      this.hideLoadingModal();
     }
   }
 
@@ -5264,11 +5484,14 @@ export class GerberViewer {
     if (layerId === undefined || layerId === null) {
       throw new Error("Failed to get layer ID from WASM processor");
     }
-    if (!processor) {
-      throw new Error("WebGL renderer is not available");
+    let bounds = options.bounds;
+    if (!bounds) {
+      if (!processor) {
+        throw new Error("WebGL renderer is not available");
+      }
+      bounds = processor.get_layer_boundary(layerId);
     }
 
-    const bounds = processor.get_layer_boundary(layerId);
     return {
       id: options.id ?? null,
       layerId: layerId,
@@ -5287,10 +5510,10 @@ export class GerberViewer {
       offset: normalizeLayerOffset(options.offset),
       renderBounds: options.renderBounds ?? null,
       bounds: {
-        minX: bounds.min_x,
-        maxX: bounds.max_x,
-        minY: bounds.min_y,
-        maxY: bounds.max_y,
+        minX: bounds.min_x ?? bounds.minX,
+        maxX: bounds.max_x ?? bounds.maxX,
+        minY: bounds.min_y ?? bounds.minY,
+        maxY: bounds.max_y ?? bounds.maxY,
       },
     };
   }
@@ -5494,27 +5717,47 @@ export class GerberViewer {
   }
 
   async createParsedDrillLayerRecord(name, drillPayload, options = {}) {
-    if (!drillPayload || typeof this.wasmProcessor?.add_drill_render_payload !== "function") {
-      throw new Error("Worker-produced Drill geometry requires an updated WASM module");
+    let outlineLayerId;
+    let fillLayerId;
+    let bounds;
+    if (this.renderBackend?.name === "threaded") {
+      const result = await this.renderBackend.callProcessor(
+        "add_drill_render_payload",
+        [
+          drillPayload.outlineLayer,
+          drillPayload.fillLayer,
+          drillPayload.interactionPayload ?? null,
+        ],
+      );
+      outlineLayerId = Number(result?.outlineLayerId);
+      fillLayerId = Number(result?.fillLayerId);
+      if (!Number.isFinite(outlineLayerId) || !Number.isFinite(fillLayerId)) {
+        throw new Error("Failed to upload worker-produced Drill geometry");
+      }
+      bounds = await this.renderBackend.callProcessor("get_layer_boundary", [outlineLayerId]);
+    } else {
+      if (!drillPayload || typeof this.wasmProcessor?.add_drill_render_payload !== "function") {
+        throw new Error("Worker-produced Drill geometry requires an updated WASM module");
+      }
+      const result = this.wasmProcessor.add_drill_render_payload(
+        drillPayload.outlineLayer,
+        drillPayload.fillLayer,
+        drillPayload.interactionPayload ?? null,
+      );
+      outlineLayerId = Number(result?.outlineLayerId);
+      fillLayerId = Number(result?.fillLayerId);
+      if (!Number.isFinite(outlineLayerId) || !Number.isFinite(fillLayerId)) {
+        throw new Error("Failed to upload worker-produced Drill geometry");
+      }
+      bounds = this.wasmProcessor.get_layer_boundary(outlineLayerId);
     }
-    const result = this.wasmProcessor.add_drill_render_payload(
-      drillPayload.outlineLayer,
-      drillPayload.fillLayer,
-      drillPayload.interactionPayload ?? null,
-    );
-    const outlineLayerId = Number(result?.outlineLayerId);
-    const fillLayerId = Number(result?.fillLayerId);
-    if (!Number.isFinite(outlineLayerId) || !Number.isFinite(fillLayerId)) {
-      throw new Error("Failed to upload worker-produced Drill geometry");
-    }
-    const bounds = this.wasmProcessor.get_layer_boundary(outlineLayerId);
     const drillType = options.drillType ?? getDrillType(name);
     const outlineStyle = this.getDrillOutlineStyle({ drillType });
     const rawBounds = {
-      minX: bounds.min_x,
-      maxX: bounds.max_x,
-      minY: bounds.min_y,
-      maxY: bounds.max_y,
+      minX: bounds.min_x ?? bounds.minX,
+      maxX: bounds.max_x ?? bounds.maxX,
+      minY: bounds.min_y ?? bounds.minY,
+      maxY: bounds.max_y ?? bounds.maxY,
     };
     const layer = {
       id: options.id ?? null,
@@ -5565,6 +5808,16 @@ export class GerberViewer {
         }
       }
       if (useCurrentProcessor) processor = this.wasmProcessor;
+
+      if (this.renderBackend?.name === "threaded") {
+        const layerId = await this.renderBackend.callProcessor("add_render_payload", [parsedLayer]);
+        if (options.interactionPayload) {
+          await this.renderBackend.callProcessor("add_interaction_payload", [layerId, options.interactionPayload]).catch(() => {});
+        }
+        const bounds = await this.renderBackend.callProcessor("get_layer_boundary", [layerId]);
+        return this.createLayerMetadata(name, layerId, { ...options, bounds }, processor);
+      }
+
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
@@ -5693,7 +5946,7 @@ export class GerberViewer {
 
   render() {
     if (
-      !this.wasmProcessor ||
+      (!this.wasmProcessor && this.renderBackend?.name !== "threaded") ||
       this.isWebGlContextLost ||
       this.isRestoringWebGlContext ||
       this.isRecoveringWasmProcessor ||
@@ -6657,7 +6910,7 @@ export class GerberViewer {
   getRenderLayerPayload() {
     const processor = this.wasmProcessor;
     const rendererChangedOrRecovering = () =>
-      processor !== this.wasmProcessor ||
+      (this.renderBackend?.name !== "threaded" && processor !== this.wasmProcessor) ||
       this.pendingFatalWasmRecovery ||
       this.isRecoveringWasmProcessor ||
       this.isWebGlContextLost;
@@ -6686,7 +6939,7 @@ export class GerberViewer {
     });
     if (
       this.renderPayloadCache?.signature === signature &&
-      this.renderPayloadCache?.processor === processor
+      (this.renderPayloadCache?.processor === processor || this.renderBackend?.name === "threaded")
     ) {
       return this.renderPayloadCache.payload;
     }
@@ -9510,7 +9763,7 @@ export class GerberViewer {
   }
 
   removeWasmLayerRecord(layer) {
-    if (!this.wasmProcessor || !layer) return;
+    if (!layer) return;
 
     const layerIds = isDrillLayer(layer)
       ? [layer.outlineLayerId, layer.fillLayerId]
@@ -9520,7 +9773,13 @@ export class GerberViewer {
 
     for (const layerId of layerIds) {
       if (layerId !== undefined && layerId !== null) {
-        this.wasmProcessor.remove_layer(layerId);
+        if (this.renderBackend?.name === "threaded") {
+          this.renderBackend.callProcessor("remove_layer", [layerId]).catch((err) => {
+            console.warn(`[Layer] Failed to remove layer ${layerId}:`, err);
+          });
+        } else if (this.wasmProcessor) {
+          this.wasmProcessor.remove_layer(layerId);
+        }
       }
     }
   }
@@ -9529,7 +9788,11 @@ export class GerberViewer {
     if (this.isRendererBusy()) return;
     try {
       // remove all layers from WASM processor
-      if (this.wasmProcessor) {
+      if (this.renderBackend?.name === "threaded") {
+        this.renderBackend.callProcessor("clear").catch((err) => {
+          console.warn("[Layer] Failed to clear layers in threaded backend:", err);
+        });
+      } else if (this.wasmProcessor) {
         this.wasmProcessor.clear();
       }
       this.disposeInteractionProcessor();

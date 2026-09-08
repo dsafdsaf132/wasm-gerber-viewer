@@ -331,7 +331,6 @@ pub fn parse_source_batch(sources: Array) -> Result<Array, JsValue> {
 
     let output = Array::new();
     for (job, result) in jobs.iter().zip(parsed) {
-        let parsed_source = result.map_err(|error| JsValue::from_str(&error))?;
         let object = Object::new();
         Reflect::set(
             &object,
@@ -343,6 +342,18 @@ pub fn parse_source_batch(sources: Array) -> Result<Array, JsValue> {
             &JsValue::from_str("kind"),
             &JsValue::from_str(&job.kind),
         )?;
+        let parsed_source = match result {
+            Ok(src) => {
+                Reflect::set(&object, &JsValue::from_str("ok"), &JsValue::from_bool(true))?;
+                src
+            }
+            Err(error) => {
+                Reflect::set(&object, &JsValue::from_str("ok"), &JsValue::from_bool(false))?;
+                Reflect::set(&object, &JsValue::from_str("error"), &JsValue::from_str(&error))?;
+                output.push(&object);
+                continue;
+            }
+        };
         match parsed_source {
             ParsedBatchSource::Gerber(payload) => {
                 Reflect::set(
