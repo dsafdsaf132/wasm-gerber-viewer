@@ -1,0 +1,11 @@
+# External third-party libraries (vendored)
+vendor/** linguist-vendored
+
+# Tests and fixtures (exclude from language stats, preserve PR diff)
+tests/** linguist-detectable=false
+packages/*/test/** linguist-detectable=false
+playwright.config.* linguist-detectable=false
+
+# Build, CI, and maintenance scripts
+scripts/** linguist-detectable=false
+packages/*/scripts/** linguist-detectable=false
