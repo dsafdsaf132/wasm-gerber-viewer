@@ -130,10 +130,7 @@ export class SerialRenderBackend {
       options.zoomY,
       options.offsetX,
       options.offsetY,
-      options.backgroundColor[0],
-      options.backgroundColor[1],
-      options.backgroundColor[2],
-      options.backgroundColor[3],
+      this.state.alpha,
     );
   }
   dispose() {}
@@ -167,7 +164,7 @@ export class ThreadedWorkerBackend {
       return;
     }
     if (message?.type === "render-idle") {
-      if (message.renderedSequence !== this.latestCameraSequence) {
+      if (message.renderedSequence !== -1 && message.renderedSequence !== this.latestCameraSequence) {
         this.worker.postMessage({ type: "render-wake", sequence: this.latestCameraSequence });
       } else {
         this.wakePending = false;
@@ -204,7 +201,16 @@ export class ThreadedWorkerBackend {
   readTile(options) { return this.command("read-tile", { options }); }
   loadSourceBatch(sources) { return this.command("load-source-batch", { sources }); }
   async dispose() {
-    try { await this.command("dispose"); } finally { this.worker.terminate(); }
+    try {
+      await this.command("dispose");
+    } finally {
+      this.worker.terminate();
+      for (const { reject, timer } of this.pending.values()) {
+        clearTimeout(timer);
+        reject(new Error("Worker terminated"));
+      }
+      this.pending.clear();
+    }
   }
 }
 

@@ -3217,6 +3217,7 @@ export class GerberViewer {
     this.drillOutlinePixels = pixels;
     this.syncOptionControls();
     this.viewerOptionsStore.set("drillOutlinePixels", this.drillOutlinePixels);
+    this.renderPayloadCache = null;
 
     try {
       this.applyDrillOutlineStyles();
@@ -3227,6 +3228,7 @@ export class GerberViewer {
       this.viewerOptionsStore.set("drillOutlinePixels", this.drillOutlinePixels);
       this.configureWasmProcessorOptions(this.wasmProcessor);
       this.applyDrillOutlineStyles();
+      this.renderPayloadCache = null;
       this.showError(`Failed to apply drill outline: ${getErrorMessage(error)}`);
     } finally {
       this.updateUiState();
@@ -3253,6 +3255,7 @@ export class GerberViewer {
       "pthPlatingMicrometers",
       this.pthPlatingMicrometers,
     );
+    this.renderPayloadCache = null;
 
     try {
       this.applyDrillOutlineStyles();
@@ -3266,6 +3269,7 @@ export class GerberViewer {
       );
       this.configureWasmProcessorOptions(this.wasmProcessor);
       this.applyDrillOutlineStyles();
+      this.renderPayloadCache = null;
       this.showError(`Failed to apply PTH plating: ${getErrorMessage(error)}`);
     } finally {
       this.updateUiState();
@@ -4261,12 +4265,20 @@ export class GerberViewer {
       current: 0,
       total,
     });
+    let completed = false;
     try {
       const parseOptions = this.getParseOptions();
       const batchSources = [];
+      const results = new Array(total).fill(false);
       for (let i = 0; i < layerSources.length; i++) {
         const source = layerSources[i];
-        const content = await source.readText();
+        let content;
+        try {
+          content = await source.readText();
+        } catch (readError) {
+          this.handleLayerLoadError(source.name, readError);
+          continue;
+        }
         batchSources.push({
           sequence: i,
           kind: source.kind === DRILL_LAYER_KIND ? "drill" : "gerber",
@@ -4284,6 +4296,11 @@ export class GerberViewer {
         });
       }
 
+      if (batchSources.length === 0) {
+        completed = true;
+        return results;
+      }
+
       this.updateLoadingModal({
         title,
         stage: "Parsing & Uploading",
@@ -4296,7 +4313,6 @@ export class GerberViewer {
         throw new Error("Batch loading did not return expected array result");
       }
 
-      const results = new Array(total).fill(false);
       for (const item of uploadedBatch) {
         const source = layerSources[item.sequence];
         if (!source) continue;
@@ -4322,7 +4338,7 @@ export class GerberViewer {
               outlineLayerId: item.outlineLayerId,
               fillLayerId: item.fillLayerId,
               drillMetadata: normalizeDrillMetadata(item.metadata),
-              sourceContent: batchSources[item.sequence].content,
+              sourceContent: batchSources.find((s) => s.sequence === item.sequence)?.content,
               offset: normalizeLayerOffset(source.offset),
               rawBounds,
               bounds: rawBounds ? expandBounds(rawBounds, outlineStyle.worldMm) : null,
@@ -4345,7 +4361,7 @@ export class GerberViewer {
               invertedErrorKey: null,
               invertedSourceKey: null,
               sourceName: source.name,
-              sourceContent: batchSources[item.sequence].content,
+              sourceContent: batchSources.find((s) => s.sequence === item.sequence)?.content,
               offset: normalizeLayerOffset(source.offset),
               renderBounds: source.renderBounds ?? null,
               bounds: item.bounds,
@@ -4363,9 +4379,12 @@ export class GerberViewer {
       this.renderLayerList();
       this.updateUiState();
       this.requestRender();
+      completed = true;
       return results;
     } finally {
-      this.hideLoadingModal();
+      if (completed) {
+        this.hideLoadingModal();
+      }
     }
   }
 
@@ -6395,7 +6414,7 @@ export class GerberViewer {
   }
 
   ensureCompositeRendererLayer(layer, selectedLayerIds = null) {
-    if (!isCompositeLayer(layer)) return null;
+    if (!isCompositeLayer(layer) || !this.wasmProcessor) return null;
     const sourceLayers = this.getCompositeSourceLayers(layer);
     if (sourceLayers.length !== layer.slotSourceIds.length) {
       this.setCompositeLayerError(
@@ -6635,10 +6654,11 @@ export class GerberViewer {
   }
 
   refreshCompositeLayerBounds(layer) {
-    if (!isCompositeLayer(layer) || !hasRendererLayerId(layer.layerId)) {
+    if (!isCompositeLayer(layer) || !hasRendererLayerId(layer.layerId) || !this.wasmProcessor) {
       return;
     }
     const bounds = this.wasmProcessor.get_layer_boundary(layer.layerId);
+    if (!bounds) return;
     layer.bounds = {
       minX: bounds.min_x,
       maxX: bounds.max_x,
@@ -6907,13 +6927,16 @@ export class GerberViewer {
     const rawInvertedLayerId = layer?.invertedLayerId;
     const invertedLayerId = Number(rawInvertedLayerId);
     if (
-      this.wasmProcessor &&
       rawInvertedLayerId !== undefined &&
       rawInvertedLayerId !== null &&
       Number.isFinite(invertedLayerId)
     ) {
-      try {
-        this.wasmProcessor.remove_layer(invertedLayerId);
+      if (this.renderBackend?.name === "threaded") {
+        this.renderBackend.callProcessor("remove_layer", [invertedLayerId]).catch((err) => {
+          if (!/Invalid layer_id/i.test(getErrorMessage(err))) {
+            console.warn(`[Inverted] Failed to remove inverted layer ${invertedLayerId}:`, err);
+          }
+        });
         for (const composite of this.layers) {
           if (
             isCompositeLayer(composite) &&
@@ -6923,14 +6946,27 @@ export class GerberViewer {
             composite.rendererDefinitionKey = null;
           }
         }
-      } catch (error) {
-        if (!/Invalid layer_id/i.test(getErrorMessage(error))) {
-          this.scheduleAuthoritativeRendererRecovery(
-            layer,
-            error,
-            `inverted layer ${layer.name} cache removal`,
-          );
-          return false;
+      } else if (this.wasmProcessor) {
+        try {
+          this.wasmProcessor.remove_layer(invertedLayerId);
+          for (const composite of this.layers) {
+            if (
+              isCompositeLayer(composite) &&
+              composite.sourceIds.includes(layer.id)
+            ) {
+              composite.layerId = null;
+              composite.rendererDefinitionKey = null;
+            }
+          }
+        } catch (error) {
+          if (!/Invalid layer_id/i.test(getErrorMessage(error))) {
+            this.scheduleAuthoritativeRendererRecovery(
+              layer,
+              error,
+              `inverted layer ${layer.name} cache removal`,
+            );
+            return false;
+          }
         }
       }
     }
@@ -6964,6 +7000,8 @@ export class GerberViewer {
       stack: this.isStackCompositeMode(),
       alpha: this.getCompositeAlpha(),
       light: this.isCanvasLight,
+      drillOutlinePixels: this.drillOutlinePixels,
+      pthPlatingMicrometers: this.pthPlatingMicrometers,
       layers: this.layers.map((layer) => [
         layer.id,
         layer.visible,

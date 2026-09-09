@@ -21,6 +21,20 @@ use web_sys::WebGl2RenderingContext;
 pub use wasm_bindgen_rayon::init_thread_pool;
 
 #[cfg(feature = "threaded")]
+static THREAD_POOL_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "threaded")]
+#[wasm_bindgen]
+pub fn mark_thread_pool_ready() {
+    THREAD_POOL_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(feature = "threaded")]
+pub fn is_thread_pool_ready() -> bool {
+    THREAD_POOL_READY.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(feature = "threaded")]
 use rayon::prelude::*;
 
 const DRILL_OUTLINE_WIDTH_MM: f32 = 0.0;
@@ -247,10 +261,12 @@ fn source_batch_jobs(sources: &Array) -> Result<Vec<SourceBatchJob>, JsValue> {
                     "Source sequence must be a non-negative integer",
                 ));
             }
-            let offset = source_job_property(&source, "offset")?;
+            let offset = source_job_property(&source, "offset").ok();
             let number = |name: &str| -> f32 {
-                Reflect::get(&offset, &JsValue::from_str(name))
-                    .ok()
+                offset
+                    .as_ref()
+                    .filter(|value| value.is_object())
+                    .and_then(|value| Reflect::get(value, &JsValue::from_str(name)).ok())
                     .and_then(|value| value.as_f64())
                     .unwrap_or(0.0) as f32
             };
@@ -323,11 +339,12 @@ pub fn parse_source_batch(sources: Array) -> Result<Array, JsValue> {
     let mut jobs = source_batch_jobs(&sources)?;
     jobs.sort_by_key(|job| job.sequence);
     #[cfg(feature = "threaded")]
-    let parsed: Vec<Result<ParsedBatchSource, String>> = if jobs.len() > 1 {
-        jobs.par_iter().map(parse_source_job).collect()
-    } else {
-        jobs.iter().map(parse_source_job).collect()
-    };
+    let parsed: Vec<Result<ParsedBatchSource, String>> =
+        if jobs.len() > 1 && is_thread_pool_ready() {
+            jobs.par_iter().map(parse_source_job).collect()
+        } else {
+            jobs.iter().map(parse_source_job).collect()
+        };
     #[cfg(not(feature = "threaded"))]
     let parsed: Vec<Result<ParsedBatchSource, String>> =
         jobs.iter().map(parse_source_job).collect();
@@ -1494,6 +1511,15 @@ impl GerberProcessor {
         fill_payload: JsValue,
         interaction_payload: JsValue,
     ) -> Result<JsValue, JsValue> {
+        let interaction_layer = if self.interaction_enabled
+            && !interaction_payload.is_null()
+            && !interaction_payload.is_undefined()
+        {
+            Some(InteractionLayer::from_compact_js(&interaction_payload)?)
+        } else {
+            None
+        };
+
         let outline_layer_id = self.add_render_payload(outline_payload)?;
         let fill_layer_id = match self.add_render_payload(fill_payload) {
             Ok(layer_id) => layer_id,
@@ -1514,12 +1540,8 @@ impl GerberProcessor {
         self.drill_outline_layer_ids.push(outline_layer_id);
         self.drill_layer_ids.push(outline_layer_id);
         self.drill_layer_ids.push(fill_layer_id);
-        if self.interaction_enabled
-            && !interaction_payload.is_null()
-            && !interaction_payload.is_undefined()
-        {
-            let interaction_layer = InteractionLayer::from_compact_js(&interaction_payload)?;
-            self.set_interaction_layer(outline_layer_id as usize, Some(interaction_layer));
+        if let Some(interaction) = interaction_layer {
+            self.set_interaction_layer(outline_layer_id as usize, Some(interaction));
         }
         self.set_interaction_layer(fill_layer_id as usize, None);
         let object = Object::new();

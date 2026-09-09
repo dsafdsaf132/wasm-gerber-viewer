@@ -34,10 +34,12 @@ const PROCESSOR_COMMANDS = new Set([
   "cancel_composite_area_scan", "end_composite_selection",
 ]);
 
+let lastRenderedSequence = -1;
+
 function serializeProcessorResult(result) {
   if (result && typeof result === "object") {
     if (typeof result.min_x === "number" && typeof result.max_x === "number") {
-      return {
+      const boundary = {
         minX: result.min_x,
         maxX: result.max_x,
         minY: result.min_y,
@@ -47,6 +49,8 @@ function serializeProcessorResult(result) {
         min_y: result.min_y,
         max_y: result.max_y,
       };
+      result.free?.();
+      return boundary;
     }
   }
   return result;
@@ -83,29 +87,26 @@ async function renderLatestCamera() {
     return;
   }
   rendering = true;
-  let renderedSequence = -1;
   try {
-    for (;;) {
-      const camera = readCamera();
-      if (!camera || camera.sequence === renderedSequence) break;
-      if (typeof processor.render_camera === "function") {
-        processor.render_camera(camera.zoomX, camera.zoomY, camera.offsetX, camera.offsetY, true);
-      } else {
-        processor.render_with_clear_and_blend_modes(renderState.activeLayerIds, renderState.colorData,
-          renderState.blendModes, camera.zoomX, camera.zoomY, camera.offsetX, camera.offsetY,
-          renderState.alpha, true);
-      }
-      renderedSequence = camera.sequence;
-      if (Atomics.load(cameraWords, 0) === renderedSequence) break;
-      await Promise.resolve();
+    const camera = readCamera();
+    if (!camera || camera.sequence === lastRenderedSequence) {
+      return;
     }
+    if (typeof processor.render_camera === "function") {
+      processor.render_camera(camera.zoomX, camera.zoomY, camera.offsetX, camera.offsetY, true);
+    } else {
+      processor.render_with_clear_and_blend_modes(renderState.activeLayerIds, renderState.colorData,
+        renderState.blendModes, camera.zoomX, camera.zoomY, camera.offsetX, camera.offsetY,
+        renderState.alpha, true);
+    }
+    lastRenderedSequence = camera.sequence;
   } catch (err) {
     console.error("[RenderWorker] renderLatestCamera error:", err);
     const camera = readCamera();
-    renderedSequence = camera?.sequence ?? renderedSequence;
+    lastRenderedSequence = camera?.sequence ?? lastRenderedSequence;
   } finally {
     rendering = false;
-    self.postMessage({ type: "render-idle", renderedSequence });
+    self.postMessage({ type: "render-idle", renderedSequence: lastRenderedSequence });
   }
 }
 
@@ -117,7 +118,14 @@ async function initialize(message) {
   wasmModule = await import(message.threadedArtifactUrl);
   await wasmModule.default();
   wasmModule.init_panic_hook?.();
-  if (message.helperCount > 0) await wasmModule.initThreadPool?.(message.helperCount);
+  if (message.helperCount > 0 && typeof wasmModule.initThreadPool === "function") {
+    try {
+      await wasmModule.initThreadPool(message.helperCount);
+      wasmModule.mark_thread_pool_ready?.();
+    } catch (poolError) {
+      console.warn("[RenderWorker] initThreadPool failed, falling back to serial:", poolError);
+    }
+  }
   processor = new wasmModule.GerberProcessor();
   if (typeof processor.init_with_size === "function") {
     processor.init_with_size(gl, canvas.width, canvas.height);
