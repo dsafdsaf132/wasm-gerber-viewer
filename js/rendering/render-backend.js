@@ -37,7 +37,9 @@ export function detectThreadedCapabilities(canvas = null, environment = globalTh
     }
     if (result.offscreenCanvas) {
       const probe = new environment.OffscreenCanvas(1, 1);
-      result.offscreenWebGl2 = Boolean(probe.getContext?.("webgl2"));
+      const probeGl = probe.getContext?.("webgl2");
+      result.offscreenWebGl2 = Boolean(probeGl);
+      probeGl?.getExtension?.("WEBGL_lose_context")?.loseContext?.();
     }
   } catch {
     // Capability probing must be safe in headless and restricted environments.
@@ -53,25 +55,26 @@ export function detectThreadedCapabilities(canvas = null, environment = globalTh
 export function createCameraMailbox(environment = globalThis) {
   if (typeof environment.SharedArrayBuffer !== "function") return null;
   const buffer = new environment.SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * CAMERA_WORDS);
-  const words = new Int32Array(buffer);
-  const floats = new Float32Array(buffer);
+  const words = new environment.Int32Array(buffer);
+  const floats = new environment.Float32Array(buffer);
   return {
     buffer,
     write(camera) {
-      const sequence = (environment.Atomics.add(words, 0, 1) + 1) | 0;
-      floats[2] = Number(camera.zoomX ?? camera.zoom ?? 1);
-      floats[3] = Number(camera.zoomY ?? camera.zoom ?? 1);
-      floats[4] = Number(camera.offsetX ?? 0);
-      floats[5] = Number(camera.offsetY ?? 0);
+      const currentSeq = environment.Atomics.load(words, 0);
+      const writingSeq = (currentSeq + 1) | 1;
+      const nextSeq = (currentSeq + 2) | 0;
+      environment.Atomics.store(words, 0, writingSeq);
+      floats[2] = camera.zoomX;
+      floats[3] = camera.zoomY;
+      floats[4] = camera.offsetX;
+      floats[5] = camera.offsetY;
       environment.Atomics.store(words, 6, camera.flipX ? 1 : 0);
       environment.Atomics.store(words, 7, camera.flipY ? 1 : 0);
-      const nextSeq = (sequence + 1) | 0;
       environment.Atomics.store(words, 0, nextSeq);
-      environment.Atomics.notify?.(words, 0, 1);
       return nextSeq;
     },
     read() {
-      for (;;) {
+      for (let spin = 0; spin < 1000; spin++) {
         const before = environment.Atomics.load(words, 0);
         if (before & 1) continue;
         const camera = {
@@ -82,6 +85,7 @@ export function createCameraMailbox(environment = globalThis) {
         };
         if (before === environment.Atomics.load(words, 0)) return camera;
       }
+      return null;
     },
   };
 }
@@ -133,7 +137,9 @@ export class SerialRenderBackend {
       this.state.alpha,
     );
   }
-  dispose() {}
+  dispose() {
+    this.processor?.free?.();
+  }
 }
 
 export class ThreadedWorkerBackend {
@@ -148,6 +154,7 @@ export class ThreadedWorkerBackend {
     this.onWorkerEvent = onWorkerEvent;
     worker.addEventListener("message", (event) => this.#handleMessage(event.data));
     worker.addEventListener("error", (event) => {
+      this.wakePending = false;
       const error = new Error(event.message || "Render worker encountered an error");
       for (const { reject, timer } of this.pending.values()) {
         clearTimeout(timer);

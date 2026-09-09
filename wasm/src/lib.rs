@@ -331,6 +331,17 @@ fn parse_source_job(job: &SourceBatchJob) -> Result<ParsedBatchSource, String> {
     .map_err(error_string)
 }
 
+fn js_error_to_string(error: &JsValue) -> String {
+    error
+        .as_string()
+        .or_else(|| {
+            Reflect::get(error, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|message| message.as_string())
+        })
+        .unwrap_or_else(|| "Failed to serialize parsed layer".to_string())
+}
+
 /// Parse independent source files in the shared Rayon pool. Modal interpretation
 /// remains sequential within each source and JS conversion happens after the pool
 /// boundary in stable source sequence order.
@@ -374,47 +385,36 @@ pub fn parse_source_batch(sources: Array) -> Result<Array, JsValue> {
                 continue;
             }
         };
-        match parsed_source {
+        let conversion_result: Result<(), JsValue> = match parsed_source {
             ParsedBatchSource::Gerber(payload) => {
-                Reflect::set(
-                    &object,
-                    &JsValue::from_str("renderPayload"),
-                    &gerber_data_layers_to_js(&payload.render_layers)?,
-                )?;
-                Reflect::set(
-                    &object,
-                    &JsValue::from_str("interactionPayload"),
-                    &match payload.interaction_layer {
-                        Some(layer) => layer.to_compact_js()?,
-                        None => JsValue::NULL,
-                    },
-                )?;
+                let render_payload = gerber_data_layers_to_js(&payload.render_layers)?;
+                let interaction_payload = match payload.interaction_layer {
+                    Some(layer) => layer.to_compact_js()?,
+                    None => JsValue::NULL,
+                };
+                Reflect::set(&object, &JsValue::from_str("renderPayload"), &render_payload)?;
+                Reflect::set(&object, &JsValue::from_str("interactionPayload"), &interaction_payload)?;
+                Ok(())
             }
             ParsedBatchSource::Drill(drill) => {
-                Reflect::set(
-                    &object,
-                    &JsValue::from_str("outlineLayer"),
-                    &gerber_data_layers_to_js(&[drill.outline_layer])?,
-                )?;
-                Reflect::set(
-                    &object,
-                    &JsValue::from_str("fillLayer"),
-                    &gerber_data_layers_to_js(&[drill.fill_layer])?,
-                )?;
-                Reflect::set(
-                    &object,
-                    &JsValue::from_str("metadata"),
-                    &drill.metadata.to_js()?,
-                )?;
-                Reflect::set(
-                    &object,
-                    &JsValue::from_str("interactionPayload"),
-                    &match drill.interaction_layer {
-                        Some(layer) => layer.to_compact_js()?,
-                        None => JsValue::NULL,
-                    },
-                )?;
+                let outline_layer = gerber_data_layers_to_js(&[drill.outline_layer])?;
+                let fill_layer = gerber_data_layers_to_js(&[drill.fill_layer])?;
+                let metadata = drill.metadata.to_js()?;
+                let interaction_payload = match drill.interaction_layer {
+                    Some(layer) => layer.to_compact_js()?,
+                    None => JsValue::NULL,
+                };
+                Reflect::set(&object, &JsValue::from_str("outlineLayer"), &outline_layer)?;
+                Reflect::set(&object, &JsValue::from_str("fillLayer"), &fill_layer)?;
+                Reflect::set(&object, &JsValue::from_str("metadata"), &metadata)?;
+                Reflect::set(&object, &JsValue::from_str("interactionPayload"), &interaction_payload)?;
+                Ok(())
             }
+        };
+        if let Err(error) = conversion_result {
+            let _ = Reflect::set(&object, &JsValue::from_str("ok"), &JsValue::from_bool(false));
+            let error_msg = js_error_to_string(&error);
+            let _ = Reflect::set(&object, &JsValue::from_str("error"), &JsValue::from_str(&error_msg));
         }
         output.push(&object);
     }
@@ -528,7 +528,10 @@ impl GerberProcessor {
             };
 
             let outline_layer_id = renderer.add_layer(vec![outline_layer])?;
-            renderer.set_layer_inner_outline(outline_layer_id, self.drill_outline_pixels, 0.0)?;
+            if let Err(error) = renderer.set_layer_inner_outline(outline_layer_id, self.drill_outline_pixels, 0.0) {
+                let _ = renderer.remove_layer(outline_layer_id);
+                return Err(error);
+            }
             let fill_layer_id = match renderer.add_layer(vec![fill_layer]) {
                 Ok(layer_id) => layer_id,
                 Err(error) => {
@@ -1520,6 +1523,13 @@ impl GerberProcessor {
             None
         };
 
+        self.drill_outline_layer_ids
+            .try_reserve(1)
+            .map_err(|_| JsValue::from_str("Unable to reserve drill outline layer bookkeeping"))?;
+        self.drill_layer_ids
+            .try_reserve(2)
+            .map_err(|_| JsValue::from_str("Unable to reserve drill layer bookkeeping"))?;
+
         let outline_layer_id = self.add_render_payload(outline_payload)?;
         let fill_layer_id = match self.add_render_payload(fill_payload) {
             Ok(layer_id) => layer_id,
@@ -1645,6 +1655,9 @@ impl GerberProcessor {
             self.drill_outline_layer_ids.clear();
             self.drill_layer_ids.clear();
             self.interaction_layers.clear();
+            self.retained_layer_ids.clear();
+            self.retained_color_data.clear();
+            self.retained_blend_modes.clear();
             Ok("clear_done".to_string())
         } else {
             Err(JsValue::from_str(

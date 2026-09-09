@@ -845,6 +845,8 @@ export class GerberViewer {
     this.pendingRenderFrame = null;
     this.isScreenshotRendererBorrowed = false;
     this.renderRequestedDuringScreenshot = false;
+    this.canvasBackingWidth = null;
+    this.canvasBackingHeight = null;
 
     // Layers
     this.layers = [];
@@ -1861,8 +1863,8 @@ export class GerberViewer {
 
     const nextSize = targetSize ?? this.getCanvasBackingSize();
     const previousSize = {
-      width: this.canvas.width,
-      height: this.canvas.height,
+      width: this.canvasBackingWidth ?? this.canvas.width,
+      height: this.canvasBackingHeight ?? this.canvas.height,
     };
     const sizeChanged =
       previousSize.width !== nextSize.width ||
@@ -1907,6 +1909,8 @@ export class GerberViewer {
     }
 
     if (sizeChanged) {
+      this.canvasBackingWidth = nextSize.width;
+      this.canvasBackingHeight = nextSize.height;
       try {
         this.canvas.width = nextSize.width;
         this.canvas.height = nextSize.height;
@@ -2869,6 +2873,7 @@ export class GerberViewer {
     } else {
       this.boardOutlineSelection = nextValue;
     }
+    this.renderPayloadCache = null;
 
     if (!this.invalidateCompositeRendererDefinitions()) {
       this.syncBoardOutlineSelect();
@@ -3127,6 +3132,7 @@ export class GerberViewer {
       "minimumFeaturePixels",
       this.minimumFeaturePixels,
     );
+    this.renderPayloadCache = null;
 
     try {
       if (this.renderBackend?.name === "threaded") {
@@ -3143,6 +3149,7 @@ export class GerberViewer {
         this.minimumFeaturePixels,
       );
       this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.renderPayloadCache = null;
       this.showError(`Failed to apply minimum line width: ${getErrorMessage(error)}`);
     } finally {
       this.updateUiState();
@@ -4392,23 +4399,27 @@ export class GerberViewer {
     layerSources,
     { title = "Loading files", total = layerSources.length } = {},
   ) {
-    const results = [];
+    try {
+      const results = [];
 
-    for (const [index, source] of layerSources.entries()) {
-      if (this.wasmMemoryExhausted) {
-        results.push(...Array(layerSources.length - index).fill(false));
-        break;
+      for (const [index, source] of layerSources.entries()) {
+        if (this.wasmMemoryExhausted) {
+          results.push(...Array(layerSources.length - index).fill(false));
+          break;
+        }
+        results.push(
+          await this.loadLayerSourceSerially(source, {
+            index,
+            total,
+            title,
+          }),
+        );
       }
-      results.push(
-        await this.loadLayerSourceSerially(source, {
-          index,
-          total,
-          title,
-        }),
-      );
-    }
 
-    return results;
+      return results;
+    } finally {
+      this.hideLoadingModal();
+    }
   }
 
   async collectLayerSources(files) {
@@ -5807,13 +5818,14 @@ export class GerberViewer {
       bounds = this.wasmProcessor.get_layer_boundary(outlineLayerId);
     }
     const drillType = options.drillType ?? getDrillType(name);
-    const outlineStyle = this.getDrillOutlineStyle({ drillType });
-    const rawBounds = {
-      minX: bounds.min_x ?? bounds.minX,
-      maxX: bounds.max_x ?? bounds.maxX,
-      minY: bounds.min_y ?? bounds.minY,
-      maxY: bounds.max_y ?? bounds.maxY,
-    };
+    const rawBounds = bounds
+      ? {
+          minX: bounds.min_x ?? bounds.minX,
+          maxX: bounds.max_x ?? bounds.maxX,
+          minY: bounds.min_y ?? bounds.minY,
+          maxY: bounds.max_y ?? bounds.maxY,
+        }
+      : null;
     const layer = {
       id: options.id ?? null,
       kind: DRILL_LAYER_KIND,
@@ -5828,7 +5840,7 @@ export class GerberViewer {
       sourceContent: options.sourceContent,
       offset: normalizeLayerOffset(options.offset),
       rawBounds,
-      bounds: expandBounds(rawBounds, outlineStyle.worldMm),
+      bounds: rawBounds ? expandBounds(rawBounds, outlineStyle.worldMm) : null,
     };
     this.applyDrillLayerOutlineStyle(layer, this.wasmProcessor);
     return layer;
@@ -6558,7 +6570,7 @@ export class GerberViewer {
       let cleanupError = null;
       if (hasRendererLayerId(createdLayerId) && !isFatalWasmRuntimeError(error)) {
         try {
-          this.wasmProcessor.remove_layer(createdLayerId);
+          this.wasmProcessor?.remove_layer(createdLayerId);
         } catch (nextError) {
           if (!/Invalid layer_id/i.test(getErrorMessage(nextError))) {
             cleanupError = nextError;
@@ -6711,6 +6723,9 @@ export class GerberViewer {
 
   addInvertedLayerToProcessor(layer, fillSource, targetOffset) {
     const processor = this.wasmProcessor;
+    if (!processor) {
+      throw new Error("Processor is unavailable for inverted layer creation.");
+    }
     if (fillSource.type === "outline") {
       if (typeof processor.add_inverted_layer_with_outline !== "function") {
         throw new Error("Inverted outline rendering requires an updated WASM module.");
@@ -7002,6 +7017,8 @@ export class GerberViewer {
       light: this.isCanvasLight,
       drillOutlinePixels: this.drillOutlinePixels,
       pthPlatingMicrometers: this.pthPlatingMicrometers,
+      minimumFeaturePixels: this.minimumFeaturePixels,
+      boardOutlineSelection: this.boardOutlineSelection,
       layers: this.layers.map((layer) => [
         layer.id,
         layer.visible,
@@ -7216,7 +7233,9 @@ export class GerberViewer {
     const centerY = rect.height / 2;
     const ndcX = ((x - centerX) / rect.width) * 2;
     const ndcY = -((y - centerY) / rect.height) * 2;
-    const aspect = this.canvas.width / this.canvas.height;
+    const width = this.canvasBackingWidth ?? this.canvas.width;
+    const height = this.canvasBackingHeight ?? this.canvas.height;
+    const aspect = height > 0 ? width / height : 1.0;
 
     return {
       x: aspect > 1.0 ? ndcX * aspect : ndcX,
@@ -8651,7 +8670,8 @@ export class GerberViewer {
         if (layer.visible) this.ensureCompositeRendererLayer(layer);
       } else if (
         bitsetDirty &&
-        hasRendererLayerId(layer.layerId)
+        hasRendererLayerId(layer.layerId) &&
+        this.wasmProcessor
       ) {
         this.wasmProcessor.set_composite_visible_bits(
           layer.layerId,
@@ -8708,7 +8728,7 @@ export class GerberViewer {
     if (!isCompositeLayer(layer) || this.isRendererBusy()) return;
     this.clearSelectedCompositeAreaForLayer?.(layer);
     this.setCompositePresetState(layer, preset);
-    if (hasRendererLayerId(layer.layerId)) {
+    if (hasRendererLayerId(layer.layerId) && this.wasmProcessor) {
       try {
         this.wasmProcessor.set_composite_visible_bits(
           layer.layerId,
@@ -8848,12 +8868,13 @@ export class GerberViewer {
     const next = preset === "none"
       ? new Uint8Array(selection.draft.byteLength)
       : createCompositeLayerPresetBitset(selection.layer, preset);
-    try {
-      this.wasmProcessor.set_composite_visible_bits(
-        selection.layer.layerId,
-        next,
-      );
-    } catch (error) {
+    if (this.wasmProcessor) {
+      try {
+        this.wasmProcessor.set_composite_visible_bits(
+          selection.layer.layerId,
+          next,
+        );
+      } catch (error) {
       if (
         this.scheduleCompositeFatalRecovery(
           selection.layer,
@@ -8870,6 +8891,7 @@ export class GerberViewer {
       );
       this.requestRender();
       return false;
+      }
     }
 
     selection.draft = next;
@@ -8934,6 +8956,7 @@ export class GerberViewer {
         !selection.createDialogState &&
         !skipRenderer &&
         hasRendererLayerId(selection.layer.layerId) &&
+        this.wasmProcessor &&
         (selection.bulkBitsetChanged || selection.changedByteIndices.size > 0)
       ) {
         if (!selection.bulkBitsetChanged && selection.changedByteIndices.size === 1) {
@@ -8954,14 +8977,14 @@ export class GerberViewer {
         }
         this.refreshCompositeLayerBounds(selection.layer);
       }
-      if (!skipRenderer) this.wasmProcessor.end_composite_selection?.();
+      if (!skipRenderer) this.wasmProcessor?.end_composite_selection?.();
     } catch (error) {
       if (isFatalWasmRuntimeError(error)) {
         fatalCleanupError = error;
       } else {
         rebuildRendererLayer = true;
         try {
-          this.wasmProcessor.end_composite_selection?.();
+          this.wasmProcessor?.end_composite_selection?.();
         } catch (_cleanupError) {
           // Rebuilding the renderer layer below also clears selection ownership.
         }

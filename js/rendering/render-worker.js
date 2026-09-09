@@ -62,7 +62,7 @@ function reply(id, result = null, error = null, transfer = []) {
 
 function readCamera() {
   if (!cameraWords) return null;
-  for (;;) {
+  for (let spin = 0; spin < 1000; spin++) {
     const before = Atomics.load(cameraWords, 0);
     if (before & 1) continue;
     const flipX = Atomics.load(cameraWords, 6) !== 0;
@@ -78,9 +78,10 @@ function readCamera() {
     };
     if (before === Atomics.load(cameraWords, 0)) return result;
   }
+  return null;
 }
 
-async function renderLatestCamera() {
+async function renderLatestCamera(force = false) {
   if (rendering) return;
   if (!processor || !renderState) {
     self.postMessage({ type: "render-idle", renderedSequence: -1 });
@@ -89,7 +90,7 @@ async function renderLatestCamera() {
   rendering = true;
   try {
     const camera = readCamera();
-    if (!camera || camera.sequence === lastRenderedSequence) {
+    if (!camera || (!force && camera.sequence === lastRenderedSequence)) {
       return;
     }
     if (typeof processor.render_camera === "function") {
@@ -170,6 +171,7 @@ async function handleMessage(message) {
         renderState = message.state;
         processor.set_retained_render_state?.(renderState.activeLayerIds, renderState.colorData,
           renderState.blendModes, renderState.alpha);
+        await renderLatestCamera(true);
         reply(message.id, true);
         break;
       case "processor-command":
@@ -234,6 +236,7 @@ async function handleMessage(message) {
                 ...ids,
                 metadata: source.metadata,
                 bounds,
+                interactionPayload: source.interactionPayload ?? null,
               });
             } else {
               const layerId = processor.add_render_payload(source.renderPayload);
@@ -258,6 +261,7 @@ async function handleMessage(message) {
                 ok: true,
                 layerId,
                 bounds,
+                interactionPayload: source.interactionPayload ?? null,
               });
             }
           } catch (uploadError) {
@@ -276,7 +280,6 @@ async function handleMessage(message) {
         processor?.free?.();
         processor = null;
         reply(message.id, true);
-        self.close();
         break;
       default:
         if (message.id) throw new Error(`Unknown render worker command: ${message.type}`);

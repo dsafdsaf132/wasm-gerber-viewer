@@ -1040,9 +1040,13 @@ impl Renderer {
         gl.draw_buffers(&buffers);
     }
 
-    fn bind_read_target(gl: &WebGl2RenderingContext, framebuffer: &WebGlFramebuffer) {
-        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, Some(framebuffer));
-        gl.read_buffer(WebGl2RenderingContext::COLOR_ATTACHMENT0);
+    fn bind_read_target(gl: &WebGl2RenderingContext, framebuffer: Option<&WebGlFramebuffer>) {
+        gl.bind_framebuffer(WebGl2RenderingContext::READ_FRAMEBUFFER, framebuffer);
+        gl.read_buffer(if framebuffer.is_some() {
+            WebGl2RenderingContext::COLOR_ATTACHMENT0
+        } else {
+            WebGl2RenderingContext::BACK
+        });
     }
 
     /// Create a new renderer with WebGL context (no layers initially)
@@ -1605,6 +1609,9 @@ impl Renderer {
             )
         };
         if let Some(texture) = texture {
+            if lookup_width == 0 {
+                return Ok(());
+            }
             let x = (byte_index % lookup_width as usize) as i32;
             let y = (byte_index / lookup_width as usize) as i32;
             self.gl
@@ -2946,6 +2953,7 @@ impl Renderer {
         }
 
         if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+            Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
             return Err(JsValue::from_str("Layer boundary is not finite"));
         }
 
@@ -4580,7 +4588,7 @@ impl Renderer {
             Self::delete_layer_gpu_resources(&self.gl, layer);
         }
 
-        self.layer_count -= 1;
+        self.layer_count = self.layer_count.saturating_sub(1);
         Ok(())
     }
 
@@ -8441,7 +8449,7 @@ impl Renderer {
             let rows_i32 = Self::checked_u32_to_i32("composite scan height", rows)?;
 
             Self::drain_gl_errors(&self.gl);
-            Self::bind_read_target(&self.gl, &scratch_framebuffer);
+            Self::bind_read_target(&self.gl, Some(&scratch_framebuffer));
             let membership_read = self.gl.read_pixels_with_opt_u8_array(
                 0,
                 band_y_i32,
@@ -8457,7 +8465,7 @@ impl Renderer {
             membership_result?;
 
             Self::drain_gl_errors(&self.gl);
-            Self::bind_read_target(&self.gl, &outline_framebuffer);
+            Self::bind_read_target(&self.gl, Some(&outline_framebuffer));
             let outline_read = self.gl.read_pixels_with_opt_u8_array(
                 0,
                 band_y_i32,
@@ -8481,7 +8489,10 @@ impl Renderer {
                     | ((membership[membership_index + 2] as u32) << 16);
                 if code != 0 || outline_pixel[0] >= 128 {
                     let code_index = code as usize;
-                    present[code_index >> 3] |= 1 << (code_index & 7);
+                    let byte_index = code_index >> 3;
+                    if byte_index < present.len() {
+                        present[byte_index] |= 1 << (code_index & 7);
+                    }
                 }
             }
             band_y += rows;
@@ -8656,63 +8667,91 @@ impl Renderer {
             tile_width,
             tile_height,
         )?;
-        self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
-        let transform = Self::tile_transform_matrix(
-            self.camera
-                .get_transform_matrix(export_width, export_height),
-            export_width,
-            export_height,
-            tile_x,
-            tile_y,
-            tile_width,
-            tile_height,
-        );
-        let replace_fbo = self
-            .readback_fbo
-            .as_ref()
-            .is_none_or(|(width, height, _)| *width != tile_width || *height != tile_height);
-        if replace_fbo {
-            if let Some((_, _, old_fbo)) = self.readback_fbo.take() {
-                Self::delete_fbo(&self.gl, old_fbo);
-            }
-            self.readback_fbo = Some((
+
+        let _raster_write_guard = RasterWriteStateGuard::normalize(&self.gl)?;
+        let _pack_alignment = PixelStorePackAlignmentGuard::set_one(&self.gl)?;
+        let previous_camera = self.camera;
+        let (canvas_width, canvas_height) = self.get_canvas_size()?;
+        let did_resize = canvas_width != tile_width || canvas_height != tile_height;
+        if did_resize {
+            self.resize_to(tile_width, tile_height)?;
+        }
+
+        let render_result = (|| -> Result<Vec<u8>, JsValue> {
+            self.update_camera(zoom_x, zoom_y, offset_x, offset_y);
+            let transform = Self::tile_transform_matrix(
+                self.camera
+                    .get_transform_matrix(export_width, export_height),
+                export_width,
+                export_height,
+                tile_x,
+                tile_y,
                 tile_width,
                 tile_height,
-                Self::create_fbo(&self.gl, tile_width, tile_height, false)?,
-            ));
+            );
+            let replace_fbo = self
+                .readback_fbo
+                .as_ref()
+                .is_none_or(|(width, height, _)| *width != tile_width || *height != tile_height);
+            if replace_fbo {
+                if let Some((_, _, old_fbo)) = self.readback_fbo.take() {
+                    Self::delete_fbo(&self.gl, old_fbo);
+                }
+                self.readback_fbo = Some((
+                    tile_width,
+                    tile_height,
+                    Self::create_fbo(&self.gl, tile_width, tile_height, false)?,
+                ));
+            }
+            let framebuffer = self
+                .readback_fbo
+                .as_ref()
+                .map(|(_, _, fbo)| fbo.framebuffer.clone())
+                .ok_or_else(|| JsValue::from_str("Readback framebuffer is unavailable"))?;
+            self.render_layer_fbos(active_layer_ids, transform, tile_width, tile_height)?;
+            self.composite_layers_to_target(
+                active_layer_ids,
+                color_data,
+                alpha,
+                true,
+                Some(blend_modes),
+                Some(&framebuffer),
+                Some((tile_width, tile_height)),
+            )?;
+            let pixel_count = Self::checked_u32_to_usize("tile width", tile_width)?
+                .checked_mul(Self::checked_u32_to_usize("tile height", tile_height)?)
+                .and_then(|value| value.checked_mul(4))
+                .ok_or_else(|| JsValue::from_str("Tile output size exceeds platform limits"))?;
+            let mut pixels = Self::reserved_vec("tile readback pixels", pixel_count)?;
+            pixels.resize(pixel_count, 0);
+            self.gl
+                .read_pixels_with_opt_u8_array(
+                    0,
+                    0,
+                    Self::checked_u32_to_i32("tile width", tile_width)?,
+                    Self::checked_u32_to_i32("tile height", tile_height)?,
+                    WebGl2RenderingContext::RGBA,
+                    WebGl2RenderingContext::UNSIGNED_BYTE,
+                    Some(&mut pixels),
+                )
+                .map_err(|_| JsValue::from_str("Failed to read screenshot tile pixels"))?;
+            Ok(pixels)
+        })();
+
+        if did_resize {
+            let _ = self.resize_to(canvas_width, canvas_height);
         }
-        let framebuffer = self
-            .readback_fbo
-            .as_ref()
-            .map(|(_, _, fbo)| fbo.framebuffer.clone())
-            .ok_or_else(|| JsValue::from_str("Readback framebuffer is unavailable"))?;
-        self.render_layer_fbos(active_layer_ids, transform, tile_width, tile_height)?;
-        self.composite_layers_to_target(
-            active_layer_ids,
-            color_data,
-            alpha,
-            true,
-            Some(blend_modes),
-            Some(&framebuffer),
-        )?;
-        let pixel_count = Self::checked_u32_to_usize("tile width", tile_width)?
-            .checked_mul(Self::checked_u32_to_usize("tile height", tile_height)?)
-            .and_then(|value| value.checked_mul(4))
-            .ok_or_else(|| JsValue::from_str("Tile output size exceeds platform limits"))?;
-        let mut pixels = Self::reserved_vec("tile readback pixels", pixel_count)?;
-        pixels.resize(pixel_count, 0);
-        self.gl
-            .read_pixels_with_opt_u8_array(
-                0,
-                0,
-                Self::checked_u32_to_i32("tile width", tile_width)?,
-                Self::checked_u32_to_i32("tile height", tile_height)?,
-                WebGl2RenderingContext::RGBA,
-                WebGl2RenderingContext::UNSIGNED_BYTE,
-                Some(&mut pixels),
-            )
-            .map_err(|_| JsValue::from_str("Failed to read screenshot tile pixels"))?;
-        Ok(pixels)
+        self.camera = previous_camera;
+        for &layer_id in active_layer_ids {
+            if let Some(layer) = self.layers.get_mut(layer_id as usize).and_then(Option::as_mut) {
+                layer.fbo_dirty = true;
+                layer.fbo_transform = None;
+            }
+        }
+        Self::bind_draw_target(&self.gl, None);
+        Self::bind_read_target(&self.gl, None);
+
+        render_result
     }
 
     /// Render to an offscreen framebuffer and return bottom-up RGBA pixels.
@@ -8771,8 +8810,9 @@ impl Renderer {
                 true,
                 None,
                 Some(&output_fbo.framebuffer),
+                Some((width, height)),
             )?;
-            Self::bind_read_target(&self.gl, &output_fbo.framebuffer);
+            Self::bind_read_target(&self.gl, Some(&output_fbo.framebuffer));
             Self::drain_gl_errors(&self.gl);
             let read_result = self
                 .gl
@@ -8859,8 +8899,9 @@ impl Renderer {
                 true,
                 Some(blend_modes),
                 Some(&output_fbo.framebuffer),
+                Some((width, height)),
             )?;
-            Self::bind_read_target(&self.gl, &output_fbo.framebuffer);
+            Self::bind_read_target(&self.gl, Some(&output_fbo.framebuffer));
             Self::drain_gl_errors(&self.gl);
             let read_result = self
                 .gl
@@ -9441,6 +9482,7 @@ impl Renderer {
             clear_canvas,
             blend_modes,
             None,
+            None,
         )
     }
 
@@ -9452,9 +9494,13 @@ impl Renderer {
         clear_canvas: bool,
         blend_modes: Option<&[u8]>,
         target_framebuffer: Option<&WebGlFramebuffer>,
+        target_dimensions: Option<(u32, u32)>,
     ) -> Result<(), JsValue> {
-        // Get canvas dimensions
-        let (width, height) = self.get_canvas_size()?;
+        // Get target or canvas dimensions
+        let (width, height) = match target_dimensions {
+            Some(dims) => dims,
+            None => self.get_canvas_size()?,
+        };
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
 
@@ -9610,7 +9656,7 @@ impl Renderer {
 
     /// Resize framebuffers when canvas size changes
     pub fn resize(&mut self) -> Result<(), JsValue> {
-        let (width, height) = self.get_canvas_size()?;
+        let (width, height) = Self::get_canvas_size_from_gl(&self.gl)?;
         self.resize_to(width, height)
     }
 

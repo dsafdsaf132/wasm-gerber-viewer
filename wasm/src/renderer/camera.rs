@@ -1,4 +1,5 @@
 /// Camera transformation for viewport control
+#[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub zoom_x: f32,
     pub zoom_y: f32,
