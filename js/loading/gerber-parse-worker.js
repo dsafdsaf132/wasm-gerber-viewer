@@ -142,6 +142,9 @@ self.addEventListener("message", async (event) => {
           interactionsEnabled,
         },
       ]);
+      if (drillPayload?.ok === false) {
+        throw new Error(drillPayload.error || "Failed to parse drill layer");
+      }
       const transferables = collectTransferables(drillPayload);
       self.postMessage(
         {

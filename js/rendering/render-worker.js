@@ -61,14 +61,27 @@ function readCamera() {
   for (;;) {
     const before = Atomics.load(cameraWords, 0);
     if (before & 1) continue;
-    const result = { sequence: before, zoomX: cameraFloats[2], zoomY: cameraFloats[3],
-      offsetX: cameraFloats[4], offsetY: cameraFloats[5] };
+    const flipX = Atomics.load(cameraWords, 6) !== 0;
+    const flipY = Atomics.load(cameraWords, 7) !== 0;
+    const result = {
+      sequence: before,
+      zoomX: cameraFloats[2],
+      zoomY: cameraFloats[3],
+      offsetX: cameraFloats[4],
+      offsetY: cameraFloats[5],
+      flipX,
+      flipY,
+    };
     if (before === Atomics.load(cameraWords, 0)) return result;
   }
 }
 
 async function renderLatestCamera() {
-  if (rendering || !processor || !renderState) return;
+  if (rendering) return;
+  if (!processor || !renderState) {
+    self.postMessage({ type: "render-idle", renderedSequence: -1 });
+    return;
+  }
   rendering = true;
   let renderedSequence = -1;
   try {
@@ -86,6 +99,10 @@ async function renderLatestCamera() {
       if (Atomics.load(cameraWords, 0) === renderedSequence) break;
       await Promise.resolve();
     }
+  } catch (err) {
+    console.error("[RenderWorker] renderLatestCamera error:", err);
+    const camera = readCamera();
+    renderedSequence = camera?.sequence ?? renderedSequence;
   } finally {
     rendering = false;
     self.postMessage({ type: "render-idle", renderedSequence });
@@ -102,7 +119,11 @@ async function initialize(message) {
   wasmModule.init_panic_hook?.();
   if (message.helperCount > 0) await wasmModule.initThreadPool?.(message.helperCount);
   processor = new wasmModule.GerberProcessor();
-  processor.init(gl);
+  if (typeof processor.init_with_size === "function") {
+    processor.init_with_size(gl, canvas.width, canvas.height);
+  } else {
+    processor.init(gl);
+  }
   cameraWords = new Int32Array(message.cameraBuffer);
   cameraFloats = new Float32Array(message.cameraBuffer);
   canvas.addEventListener?.("webglcontextlost", (event) => {
@@ -112,7 +133,11 @@ async function initialize(message) {
   canvas.addEventListener?.("webglcontextrestored", () => {
     enqueueResource(async () => {
       try {
-        processor.restore_context(gl);
+        if (typeof processor.restore_context_with_size === "function") {
+          processor.restore_context_with_size(gl, canvas.width, canvas.height);
+        } else {
+          processor.restore_context(gl);
+        }
         processor.resize();
         self.postMessage({ type: "context-restored" });
       } catch (error) {
@@ -193,6 +218,7 @@ async function handleMessage(message) {
                 min_y: boundary.min_y,
                 max_y: boundary.max_y,
               } : null;
+              boundary?.free?.();
               uploaded.push({
                 sequence: source.sequence,
                 kind: source.kind,
@@ -217,6 +243,7 @@ async function handleMessage(message) {
                 min_y: boundary.min_y,
                 max_y: boundary.max_y,
               } : null;
+              boundary?.free?.();
               uploaded.push({
                 sequence: source.sequence,
                 kind: source.kind,

@@ -1574,7 +1574,20 @@ export class GerberViewer {
   }
 
   createWebGlProcessor() {
-    this.gl = this.createWebGlContext();
+    try {
+      this.gl = this.createWebGlContext();
+    } catch (err) {
+      if (this.canvas?.parentNode && typeof this.canvas.cloneNode === "function") {
+        const replacement = this.canvas.cloneNode(false);
+        replacement.width = this.canvas.width;
+        replacement.height = this.canvas.height;
+        this.canvas.parentNode.replaceChild(replacement, this.canvas);
+        this.canvas = replacement;
+        this.gl = this.createWebGlContext();
+      } else {
+        throw err;
+      }
+    }
     this.wasmProcessor = new this.wasmModule.GerberProcessor();
     this.wasmProcessor.init(this.gl);
     this.configureWasmProcessorOptions(this.wasmProcessor);
@@ -1632,6 +1645,8 @@ export class GerberViewer {
           this.updateUiState();
         } else if (event?.type === "context-restored") {
           this.isWebGlContextLost = false;
+          this.renderPayloadCache = null;
+          this.lastSubmittedRenderPayload = null;
           this.updateUiState();
           this.requestRender();
         } else if (event?.type === "context-restore-failed") {
@@ -3114,7 +3129,9 @@ export class GerberViewer {
     );
 
     try {
-      if (typeof this.wasmProcessor?.set_minimum_feature_pixels === "function") {
+      if (this.renderBackend?.name === "threaded") {
+        this.renderBackend.callProcessor("set_minimum_feature_pixels", [this.minimumFeaturePixels]).catch(() => {});
+      } else if (typeof this.wasmProcessor?.set_minimum_feature_pixels === "function") {
         this.wasmProcessor.set_minimum_feature_pixels(this.minimumFeaturePixels);
       }
       this.requestRender();
@@ -3312,7 +3329,7 @@ export class GerberViewer {
   }
 
   applyDrillOutlineStyles(processor = this.wasmProcessor) {
-    if (!processor) return;
+    if (!processor && this.renderBackend?.name !== "threaded") return;
     for (const layer of this.layers) {
       this.applyDrillLayerOutlineStyle(layer, processor);
     }
@@ -4180,7 +4197,7 @@ export class GerberViewer {
       });
     }
     const total = layerSources.length;
-    if (total > 1 && this.renderBackend?.name === "threaded") {
+    if (total >= 1 && this.renderBackend?.name === "threaded") {
       try {
         return await this.loadLayerSourcesBatch(layerSources, { title, total });
       } catch (error) {
@@ -4332,6 +4349,7 @@ export class GerberViewer {
               offset: normalizeLayerOffset(source.offset),
               renderBounds: source.renderBounds ?? null,
               bounds: item.bounds,
+              interactionPayload: item.interactionPayload ?? null,
             };
             this.commitLayerMetadata(layer, { updateUiState: false });
             results[item.sequence] = true;
@@ -4426,7 +4444,7 @@ export class GerberViewer {
       };
 
       const discardLayerRecord = (layerRecord) => {
-        if (!layerRecord || typeof this.wasmProcessor?.remove_layer !== "function") {
+        if (!layerRecord || (!this.wasmProcessor && this.renderBackend?.name !== "threaded")) {
           return;
         }
 
@@ -5656,6 +5674,21 @@ export class GerberViewer {
         }
       }
       if (useCurrentProcessor) processor = this.wasmProcessor;
+      if (this.renderBackend?.name === "threaded") {
+        const [drillPayload] = this.wasmModule.parse_source_batch([
+          {
+            sequence: 0,
+            kind: "drill",
+            content,
+            offset: normalizeLayerOffset(options.offset),
+            interactionsEnabled: this.interactionsEnabled,
+          },
+        ]);
+        if (drillPayload?.ok === false) {
+          throw new Error(drillPayload.error || "Failed to parse drill layer");
+        }
+        return await this.createParsedDrillLayerRecord(name, drillPayload, options);
+      }
       if (!processor || this.isWebGlContextLost) {
         throw new Error("WebGL renderer is not available");
       }
@@ -6531,20 +6564,28 @@ export class GerberViewer {
     const rawLayerId = layer.layerId;
     const layerId = Number(rawLayerId);
     let removed = true;
-    if (this.wasmProcessor && hasRendererLayerId(rawLayerId)) {
-      try {
-        this.wasmProcessor.remove_layer(layerId);
-      } catch (error) {
-        const message = getErrorMessage(error);
-        if (/Invalid layer_id/i.test(message)) {
-          // A source-side renderer cascade may already have removed it.
-        } else {
-          removed = false;
-          this.scheduleAuthoritativeRendererRecovery(
-            layer,
-            error,
-            `composite ${layer.name} removal`,
-          );
+    if (hasRendererLayerId(rawLayerId)) {
+      if (this.renderBackend?.name === "threaded") {
+        this.renderBackend.callProcessor("remove_layer", [layerId]).catch((err) => {
+          if (!/Invalid layer_id/i.test(getErrorMessage(err))) {
+            console.warn(`[Composite] Failed to remove layer ${layerId}:`, err);
+          }
+        });
+      } else if (this.wasmProcessor) {
+        try {
+          this.wasmProcessor.remove_layer(layerId);
+        } catch (error) {
+          const message = getErrorMessage(error);
+          if (/Invalid layer_id/i.test(message)) {
+            // A source-side renderer cascade may already have removed it.
+          } else {
+            removed = false;
+            this.scheduleAuthoritativeRendererRecovery(
+              layer,
+              error,
+              `composite ${layer.name} removal`,
+            );
+          }
         }
       }
     }
@@ -9711,7 +9752,7 @@ export class GerberViewer {
         for (const dependent of dependents) {
           if (!this.removeCompositeRendererLayer(dependent)) return;
         }
-        if (this.wasmProcessor) {
+        if (this.wasmProcessor || this.renderBackend?.name === "threaded") {
           this.removeWasmLayerRecord(layer);
         }
         for (const dependent of dependents) {
@@ -9802,6 +9843,8 @@ export class GerberViewer {
 
       this.layers = [];
       this.clearSelectedFeature({ refresh: false });
+      this.renderPayloadCache = null;
+      this.lastSubmittedRenderPayload = null;
       this.wasmMemoryExhausted = false;
       this.featurePickingAvailable = this.interactionsEnabled;
       this.nextColorIndex = 0;

@@ -323,8 +323,11 @@ pub fn parse_source_batch(sources: Array) -> Result<Array, JsValue> {
     let mut jobs = source_batch_jobs(&sources)?;
     jobs.sort_by_key(|job| job.sequence);
     #[cfg(feature = "threaded")]
-    let parsed: Vec<Result<ParsedBatchSource, String>> =
-        jobs.par_iter().map(parse_source_job).collect();
+    let parsed: Vec<Result<ParsedBatchSource, String>> = if jobs.len() > 1 {
+        jobs.par_iter().map(parse_source_job).collect()
+    } else {
+        jobs.iter().map(parse_source_job).collect()
+    };
     #[cfg(not(feature = "threaded"))]
     let parsed: Vec<Result<ParsedBatchSource, String>> =
         jobs.iter().map(parse_source_job).collect();
@@ -1501,6 +1504,16 @@ impl GerberProcessor {
                 return Err(error);
             }
         };
+        if let Some(renderer) = &mut self.renderer {
+            let _ = renderer.set_layer_inner_outline(
+                outline_layer_id as usize,
+                self.drill_outline_pixels,
+                0.0,
+            );
+        }
+        self.drill_outline_layer_ids.push(outline_layer_id);
+        self.drill_layer_ids.push(outline_layer_id);
+        self.drill_layer_ids.push(fill_layer_id);
         if self.interaction_enabled
             && !interaction_payload.is_null()
             && !interaction_payload.is_undefined()

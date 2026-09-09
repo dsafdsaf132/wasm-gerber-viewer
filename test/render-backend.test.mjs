@@ -205,3 +205,81 @@ test("ThreadedWorkerBackend handles mixed success and error results in batch loa
   assert.equal(result[1].ok, false);
   assert.equal(result[1].error, "Invalid syntax");
 });
+
+test("ThreadedWorkerBackend rejects pending commands and emits event on worker error", async () => {
+  class ErroringWorker {
+    constructor() {
+      this.listeners = {};
+    }
+    addEventListener(type, listener) {
+      (this.listeners[type] ??= []).push(listener);
+    }
+    postMessage() {
+      setTimeout(() => {
+        for (const listener of this.listeners["error"] ?? []) {
+          listener({ message: "Worker out of memory" });
+        }
+      }, 5);
+    }
+  }
+  let workerEvent = null;
+  const backend = new ThreadedWorkerBackend(new ErroringWorker(), { write: () => 1 }, {
+    onWorkerEvent: (e) => { workerEvent = e; },
+  });
+  await assert.rejects(
+    () => backend.command("test"),
+    /Worker out of memory/,
+  );
+  assert.equal(workerEvent?.type, "worker-error");
+});
+
+test("camera mailbox handles signed 32-bit integer rollover without desync", () => {
+  const mailbox = createCameraMailbox(globalThis);
+  const words = new Int32Array(mailbox.buffer);
+  Atomics.store(words, 0, 0x7ffffff0);
+  const seq1 = mailbox.write({ zoomX: 1, zoomY: 1 });
+  assert.equal(typeof seq1, "number");
+  assert.equal(seq1, 0x7ffffff2);
+
+  // Set sequence to right before 32-bit signed integer rollover
+  Atomics.store(words, 0, 0x7ffffffe);
+  const seqRollover = mailbox.write({ zoomX: 2, zoomY: 2 });
+  assert.equal(seqRollover, (0x7ffffffe + 2) | 0);
+  assert.equal(Atomics.load(words, 0), seqRollover);
+  const readCam = mailbox.read();
+  assert.equal(readCam.sequence, seqRollover);
+});
+
+test("SerialRenderBackend delegates readTile to processor render_tile_pixels_with_blend_modes", () => {
+  let passedArgs = null;
+  const mockProcessor = {
+    render_tile_pixels_with_blend_modes: (...args) => {
+      passedArgs = args;
+      return new Uint8Array([1, 2, 3, 4]);
+    },
+  };
+  const backend = new SerialRenderBackend(mockProcessor);
+  backend.setRenderState({
+    activeLayerIds: new Uint32Array([1]),
+    colorData: new Float32Array([1, 0, 0, 1]),
+    blendModes: new Uint8Array([0]),
+    alpha: 1,
+  });
+  const pixels = backend.readTile({
+    exportWidth: 100,
+    exportHeight: 100,
+    tileX: 0,
+    tileY: 0,
+    tileWidth: 100,
+    tileHeight: 100,
+    zoomX: 1,
+    zoomY: 1,
+    offsetX: 0,
+    offsetY: 0,
+    backgroundColor: [0, 0, 0, 0],
+  });
+  assert.ok(pixels instanceof Uint8Array);
+  assert.equal(passedArgs[3], 100);
+  assert.equal(passedArgs[4], 100);
+});
+

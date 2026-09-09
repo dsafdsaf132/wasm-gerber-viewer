@@ -1131,7 +1131,7 @@ impl Renderer {
     pub fn set_framebuffer_size(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
         Self::validate_framebuffer_size(width, height)?;
         self.explicit_size = Some((width, height));
-        Ok(())
+        self.resize_to(width, height)
     }
     /// Configure a display-space minimum feature size in CSS/device pixels.
     ///
@@ -5399,9 +5399,27 @@ impl Renderer {
     fn get_canvas_size_from_gl(gl: &WebGl2RenderingContext) -> Result<(u32, u32), JsValue> {
         let canvas = gl
             .canvas()
-            .ok_or_else(|| JsValue::from_str("No canvas"))?
-            .dyn_into::<web_sys::HtmlCanvasElement>()?;
-        Ok((canvas.width(), canvas.height()))
+            .ok_or_else(|| JsValue::from_str("No canvas"))?;
+        if let Ok(html_canvas) = canvas.clone().dyn_into::<web_sys::HtmlCanvasElement>() {
+            return Ok((html_canvas.width(), html_canvas.height()));
+        }
+        if let Ok(offscreen_canvas) = canvas.clone().dyn_into::<web_sys::OffscreenCanvas>() {
+            return Ok((offscreen_canvas.width(), offscreen_canvas.height()));
+        }
+        let width = js_sys::Reflect::get(&canvas, &JsValue::from_str("width"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .map(|v| v as u32)
+            .unwrap_or(0);
+        let height = js_sys::Reflect::get(&canvas, &JsValue::from_str("height"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .map(|v| v as u32)
+            .unwrap_or(0);
+        if width > 0 && height > 0 {
+            return Ok((width, height));
+        }
+        Err(JsValue::from_str("Unsupported canvas element type"))
     }
 
     /// Get canvas dimensions

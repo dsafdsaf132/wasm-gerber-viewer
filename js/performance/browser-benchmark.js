@@ -145,8 +145,11 @@ export function installBrowserBenchmark(adapter, target = globalThis) {
         const counters = adapter.getProfilingCounters?.() ?? {};
         for (const [key, field] of [["layerGeometry", "layerGeometryMs"], ["pathStencil", "pathStencilMs"],
           ["composite", "compositeMs"], ["submit", "submitMs"]]) {
-          const delta = Number(counters[field]) - Number(previousCounters[field]);
-          if (Number.isFinite(delta) && delta >= 0) cpuSamples[key].push(delta);
+          if (counters[field] !== null && counters[field] !== undefined &&
+              previousCounters[field] !== null && previousCounters[field] !== undefined) {
+            const delta = Number(counters[field]) - Number(previousCounters[field]);
+            if (Number.isFinite(delta) && delta >= 0) cpuSamples[key].push(delta);
+          }
         }
         previousCounters = counters;
         const memory = adapter.getMemoryHighWater?.() ?? {};

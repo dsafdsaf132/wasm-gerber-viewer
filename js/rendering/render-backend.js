@@ -65,9 +65,10 @@ export function createCameraMailbox(environment = globalThis) {
       floats[5] = Number(camera.offsetY ?? 0);
       environment.Atomics.store(words, 6, camera.flipX ? 1 : 0);
       environment.Atomics.store(words, 7, camera.flipY ? 1 : 0);
-      environment.Atomics.store(words, 0, sequence + 1);
+      const nextSeq = (sequence + 1) | 0;
+      environment.Atomics.store(words, 0, nextSeq);
       environment.Atomics.notify?.(words, 0, 1);
-      return sequence + 1;
+      return nextSeq;
     },
     read() {
       for (;;) {
@@ -111,6 +112,30 @@ export class SerialRenderBackend {
     if (typeof this.processor?.[method] !== "function") throw new Error(`Unknown processor method: ${method}`);
     return this.processor[method](...args);
   }
+  readTile(options) {
+    if (!this.state || typeof this.processor?.render_tile_pixels_with_blend_modes !== "function") {
+      throw new Error("readTile is not supported by processor or state is not set");
+    }
+    return this.processor.render_tile_pixels_with_blend_modes(
+      this.state.activeLayerIds,
+      this.state.colorData,
+      this.state.blendModes,
+      options.exportWidth,
+      options.exportHeight,
+      options.tileX,
+      options.tileY,
+      options.tileWidth,
+      options.tileHeight,
+      options.zoomX,
+      options.zoomY,
+      options.offsetX,
+      options.offsetY,
+      options.backgroundColor[0],
+      options.backgroundColor[1],
+      options.backgroundColor[2],
+      options.backgroundColor[3],
+    );
+  }
   dispose() {}
 }
 
@@ -125,6 +150,15 @@ export class ThreadedWorkerBackend {
     this.latestCameraSequence = 0;
     this.onWorkerEvent = onWorkerEvent;
     worker.addEventListener("message", (event) => this.#handleMessage(event.data));
+    worker.addEventListener("error", (event) => {
+      const error = new Error(event.message || "Render worker encountered an error");
+      for (const { reject, timer } of this.pending.values()) {
+        clearTimeout(timer);
+        reject(error);
+      }
+      this.pending.clear();
+      this.onWorkerEvent?.({ type: "worker-error", error });
+    });
   }
   #handleMessage(message) {
     if (message?.type === "context-lost" || message?.type === "context-restored" ||
