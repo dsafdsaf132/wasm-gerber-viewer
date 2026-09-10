@@ -127,19 +127,34 @@ function focusPickrDialog(pickr) {
 }
 
 function attachColorPickerTouchHandler(button, onToggle) {
+  let activeTouchId = null;
   let touchStartX = 0;
   let touchStartY = 0;
   let touchStartTime = 0;
   let hasMoved = false;
+  let suppressNextClick = false;
+  let clickSuppressTimer = null;
   let lastTouchTapTime = 0;
 
-  const onTouchStart = (event) => {
-    event.stopPropagation();
-    if (event.touches.length !== 1) {
-      hasMoved = true;
-      return;
+  const findTouch = (touchList, id) => {
+    for (let i = 0; i < touchList.length; i++) {
+      if (touchList[i].identifier === id) return touchList[i];
     }
-    const touch = event.touches[0];
+    return null;
+  };
+
+  const isButtonLocked = () =>
+    button.disabled || Boolean(button.closest(".layer-list.is-locked"));
+
+  const onTouchStart = (event) => {
+    if (isButtonLocked()) return;
+    event.stopPropagation();
+    if (activeTouchId !== null) return;
+
+    const touch = event.changedTouches?.[0];
+    if (!touch) return;
+
+    activeTouchId = touch.identifier;
     touchStartX = touch.clientX;
     touchStartY = touch.clientY;
     touchStartTime = Date.now();
@@ -147,43 +162,77 @@ function attachColorPickerTouchHandler(button, onToggle) {
   };
 
   const onTouchMove = (event) => {
-    event.stopPropagation();
-    if (hasMoved || event.touches.length !== 1) return;
-    const touch = event.touches[0];
+    if (activeTouchId === null) return;
+    const touch = findTouch(event.changedTouches, activeTouchId);
+    if (!touch) return;
+
     const dx = touch.clientX - touchStartX;
     const dy = touch.clientY - touchStartY;
-    if (dx * dx + dy * dy > 64) {
+    if (dx * dx + dy * dy > 100) {
       hasMoved = true;
     }
   };
 
   const onTouchEnd = (event) => {
+    if (activeTouchId === null) return;
+    const touch = findTouch(event.changedTouches, activeTouchId);
+    if (!touch) return;
+
     event.stopPropagation();
     const elapsed = touchStartTime > 0 ? Date.now() - touchStartTime : Infinity;
+
+    const rect = button.getBoundingClientRect();
+    const isInside =
+      touch.clientX >= rect.left &&
+      touch.clientX <= rect.right &&
+      touch.clientY >= rect.top &&
+      touch.clientY <= rect.bottom;
+
+    const shouldTrigger =
+      !hasMoved && isInside && elapsed < 500 && !isButtonLocked();
+
+    activeTouchId = null;
     touchStartTime = 0;
-    if (!hasMoved && elapsed < 500) {
+
+    if (shouldTrigger) {
       if (event.cancelable) {
         event.preventDefault();
       }
       lastTouchTapTime = Date.now();
-      if (!button.disabled) {
-        try {
-          onToggle(event);
-        } catch (error) {
-          console.warn("[Layer] Failed to toggle color picker:", error);
-        }
+      suppressNextClick = true;
+      if (clickSuppressTimer) clearTimeout(clickSuppressTimer);
+      clickSuppressTimer = setTimeout(() => {
+        suppressNextClick = false;
+        clickSuppressTimer = null;
+      }, 600);
+
+      try {
+        onToggle(event);
+      } catch (error) {
+        console.warn("[Layer] Failed to toggle color picker:", error);
       }
+    } else if (hasMoved || !isInside) {
+      lastTouchTapTime = Date.now();
     }
   };
 
   const onTouchCancel = (event) => {
-    event.stopPropagation();
+    if (activeTouchId === null) return;
+    const touch = findTouch(event.changedTouches, activeTouchId);
+    if (!touch) return;
+
+    activeTouchId = null;
     hasMoved = true;
     touchStartTime = 0;
   };
 
   const onClickCapture = (event) => {
-    if (Date.now() - lastTouchTapTime < 400) {
+    if (suppressNextClick || Date.now() - lastTouchTapTime < 400) {
+      suppressNextClick = false;
+      if (clickSuppressTimer) {
+        clearTimeout(clickSuppressTimer);
+        clickSuppressTimer = null;
+      }
       event.preventDefault();
       event.stopImmediatePropagation();
     }
@@ -196,6 +245,10 @@ function attachColorPickerTouchHandler(button, onToggle) {
   button.addEventListener("click", onClickCapture, { capture: true });
 
   return () => {
+    if (clickSuppressTimer) {
+      clearTimeout(clickSuppressTimer);
+      clickSuppressTimer = null;
+    }
     button.removeEventListener("touchstart", onTouchStart);
     button.removeEventListener("touchmove", onTouchMove);
     button.removeEventListener("touchend", onTouchEnd);
@@ -228,18 +281,36 @@ function attachNativeColorFallback({
   onColorChange,
 }) {
   button.title = `${button.title} (basic picker)`;
+  button.setAttribute("aria-haspopup", "dialog");
+
   const triggerNativePicker = () => {
-    if (button.disabled) return;
+    if (button.disabled || button.closest(".layer-list.is-locked")) return;
     const input = document.createElement("input");
     input.type = "color";
     input.value = rgbToHex(layer.color);
     input.style.position = "fixed";
     input.style.left = "-9999px";
     input.style.top = "0";
+    input.style.opacity = "0";
+
+    let cleanedUp = false;
+    let windowFocusTimer = null;
 
     const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      if (windowFocusTimer) {
+        clearTimeout(windowFocusTimer);
+        windowFocusTimer = null;
+      }
+      window.removeEventListener("focus", onWindowFocus);
       input.remove();
     };
+
+    const onWindowFocus = () => {
+      windowFocusTimer = setTimeout(cleanup, 500);
+    };
+
     input.addEventListener("change", () => {
       const rgb = hexToRgb(input.value);
       if (!rgb) {
@@ -252,18 +323,17 @@ function attachNativeColorFallback({
       cleanup();
     });
     input.addEventListener("blur", cleanup, { once: true });
+    window.addEventListener("focus", onWindowFocus, { once: true });
 
     document.body.appendChild(input);
     input.click();
   };
 
   button.addEventListener("click", triggerNativePicker);
-  const cleanupTouch = attachColorPickerTouchHandler(button, triggerNativePicker);
 
   return {
     destroyAndRemove() {
       button.removeEventListener("click", triggerNativePicker);
-      cleanupTouch?.();
     },
     syncGlobalAlpha() {
       if (lockOpacity || (layer.alpha !== null && layer.alpha !== undefined)) return;
@@ -304,31 +374,55 @@ function createPickrInstance({
     checkbox: null,
     root: null,
   };
-  const pickr = PickrConstructor.create({
-    el: button,
-    theme: "monolith",
-    useAsButton: true,
-    default: rgbToRgbaString(layer.color, getEffectiveAlpha()),
-    defaultRepresentation: "RGBA",
-    outputPrecision: 3,
-    lockOpacity,
-    comparison: true,
-    padding: 8,
-    position: "bottom-start",
-    appClass: "layer-color-pickr",
-    components: {
-      preview: true,
-      opacity: !lockOpacity,
-      hue: true,
-      interaction: {
-        rgba: false,
-        input: true,
-        cancel: false,
-        clear: false,
-        save: true,
+  let pickr;
+  try {
+    pickr = PickrConstructor.create({
+      el: button,
+      theme: "monolith",
+      useAsButton: true,
+      default: rgbToRgbaString(layer.color, getEffectiveAlpha()),
+      defaultRepresentation: "RGBA",
+      outputPrecision: 3,
+      lockOpacity,
+      disabled: Boolean(button.disabled),
+      comparison: true,
+      padding: 8,
+      position: "bottom-start",
+      appClass: "layer-color-pickr",
+      components: {
+        preview: true,
+        opacity: !lockOpacity,
+        hue: true,
+        interaction: {
+          rgba: false,
+          input: true,
+          cancel: false,
+          clear: false,
+          save: true,
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    console.warn("[Layer] Failed to initialize Pickr, falling back to native:", error);
+    return attachNativeColorFallback({
+      button,
+      layer,
+      getGlobalAlpha,
+      lockOpacity,
+      onColorChange,
+    });
+  }
+
+  if (!pickr) {
+    return attachNativeColorFallback({
+      button,
+      layer,
+      getGlobalAlpha,
+      lockOpacity,
+      onColorChange,
+    });
+  }
+
   let focusFrame = null;
   const cancelPendingFocus = () => {
     if (focusFrame === null) return;
@@ -361,6 +455,10 @@ function createPickrInstance({
   pickr.on("hide", () => {
     cancelPendingFocus();
     button.setAttribute("aria-expanded", "false");
+    const rootEl = getPickrRootElement(pickr);
+    if (document.activeElement && rootEl?.contains(document.activeElement)) {
+      button.focus({ preventScroll: true });
+    }
   });
   pickr.on("change", (color) => {
     if (lockOpacity || !state.useGlobalAlpha) return;

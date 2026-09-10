@@ -1073,6 +1073,18 @@ button {
   outline-offset: 2px;
 }
 
+@media (pointer: coarse) {
+  .layer-color-picker::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    bottom: -6px;
+    left: -6px;
+    right: -6px;
+    z-index: 1;
+  }
+}
+
 .layer-color-picker.has-alpha-override::after {
   content: "";
   position: absolute;
@@ -1099,7 +1111,7 @@ button {
 
 .pcr-app.layer-color-pickr {
   z-index: 60;
-  max-width: calc(100vw - 16px);
+  max-width: min(calc(100vw - 16px), 300px);
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
