@@ -126,6 +126,84 @@ function focusPickrDialog(pickr) {
   target.focus({ preventScroll: true });
 }
 
+function attachColorPickerTouchHandler(button, onToggle) {
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTime = 0;
+  let hasMoved = false;
+  let lastTouchTapTime = 0;
+
+  const onTouchStart = (event) => {
+    event.stopPropagation();
+    if (event.touches.length !== 1) {
+      hasMoved = true;
+      return;
+    }
+    const touch = event.touches[0];
+    touchStartX = touch.clientX;
+    touchStartY = touch.clientY;
+    touchStartTime = Date.now();
+    hasMoved = false;
+  };
+
+  const onTouchMove = (event) => {
+    event.stopPropagation();
+    if (hasMoved || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const dx = touch.clientX - touchStartX;
+    const dy = touch.clientY - touchStartY;
+    if (dx * dx + dy * dy > 64) {
+      hasMoved = true;
+    }
+  };
+
+  const onTouchEnd = (event) => {
+    event.stopPropagation();
+    const elapsed = touchStartTime > 0 ? Date.now() - touchStartTime : Infinity;
+    touchStartTime = 0;
+    if (!hasMoved && elapsed < 500) {
+      if (event.cancelable) {
+        event.preventDefault();
+      }
+      lastTouchTapTime = Date.now();
+      if (!button.disabled) {
+        try {
+          onToggle(event);
+        } catch (error) {
+          console.warn("[Layer] Failed to toggle color picker:", error);
+        }
+      }
+    }
+  };
+
+  const onTouchCancel = (event) => {
+    event.stopPropagation();
+    hasMoved = true;
+    touchStartTime = 0;
+  };
+
+  const onClickCapture = (event) => {
+    if (Date.now() - lastTouchTapTime < 400) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  };
+
+  button.addEventListener("touchstart", onTouchStart, { passive: true });
+  button.addEventListener("touchmove", onTouchMove, { passive: true });
+  button.addEventListener("touchend", onTouchEnd, { passive: false });
+  button.addEventListener("touchcancel", onTouchCancel, { passive: true });
+  button.addEventListener("click", onClickCapture, { capture: true });
+
+  return () => {
+    button.removeEventListener("touchstart", onTouchStart);
+    button.removeEventListener("touchmove", onTouchMove);
+    button.removeEventListener("touchend", onTouchEnd);
+    button.removeEventListener("touchcancel", onTouchCancel);
+    button.removeEventListener("click", onClickCapture, { capture: true });
+  };
+}
+
 function destroyContainerPickrs(container) {
   for (const pickr of container._layerPickrs ?? []) {
     try {
@@ -150,7 +228,8 @@ function attachNativeColorFallback({
   onColorChange,
 }) {
   button.title = `${button.title} (basic picker)`;
-  button.addEventListener("click", () => {
+  const triggerNativePicker = () => {
+    if (button.disabled) return;
     const input = document.createElement("input");
     input.type = "color";
     input.value = rgbToHex(layer.color);
@@ -176,12 +255,18 @@ function attachNativeColorFallback({
 
     document.body.appendChild(input);
     input.click();
-  });
+  };
+
+  button.addEventListener("click", triggerNativePicker);
+  const cleanupTouch = attachColorPickerTouchHandler(button, triggerNativePicker);
 
   return {
-    destroyAndRemove() {},
+    destroyAndRemove() {
+      button.removeEventListener("click", triggerNativePicker);
+      cleanupTouch?.();
+    },
     syncGlobalAlpha() {
-      if (lockOpacity || layer.alpha !== null && layer.alpha !== undefined) return;
+      if (lockOpacity || (layer.alpha !== null && layer.alpha !== undefined)) return;
       updateColorButton(button, layer.color, getGlobalAlpha());
     },
   };
@@ -306,9 +391,18 @@ function createPickrInstance({
     pickr.hide();
   });
 
+  const cleanupTouch = attachColorPickerTouchHandler(button, () => {
+    if (pickr.isOpen?.()) {
+      pickr.hide();
+    } else {
+      pickr.show();
+    }
+  });
+
   return {
     destroyAndRemove: () => {
       cancelPendingFocus();
+      cleanupTouch?.();
       pickr.destroyAndRemove();
     },
     syncGlobalAlpha() {
@@ -446,13 +540,20 @@ function createLayerItem({
       ? "Layer color; custom alpha"
       : "Layer color; uses Global Alpha";
   colorPicker.disabled = locked;
+  colorPicker.draggable = false;
   updateColorButton(colorPicker, layer.color, layer.alpha ?? getGlobalAlpha());
   updateColorButtonAlphaOverride(
     colorPicker,
     layer,
     layer.alpha !== null && layer.alpha !== undefined,
   );
-  for (const eventName of ["click", "mousedown", "pointerdown", "touchstart"]) {
+  for (const eventName of [
+    "click",
+    "mousedown",
+    "pointerdown",
+    "touchstart",
+    "touchend",
+  ]) {
     colorPicker.addEventListener(eventName, stopLayerControlEvent);
   }
   colorPicker.addEventListener("dragstart", (event) => {
@@ -577,8 +678,15 @@ function createDrillItem({
   colorPicker.setAttribute("aria-label", getColorPickerButtonLabel(layer));
   colorPicker.title = "Layer color";
   colorPicker.disabled = locked;
+  colorPicker.draggable = false;
   updateColorButton(colorPicker, layer.color, 1);
-  for (const eventName of ["click", "mousedown", "pointerdown", "touchstart"]) {
+  for (const eventName of [
+    "click",
+    "mousedown",
+    "pointerdown",
+    "touchstart",
+    "touchend",
+  ]) {
     colorPicker.addEventListener(eventName, stopLayerControlEvent);
   }
   colorPicker.addEventListener("dragstart", (event) => {
