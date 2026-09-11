@@ -178,6 +178,7 @@ fn count_commands(data: &str) -> usize {
     count
 }
 
+#[cfg(test)]
 /// Index every command of the file, reserving the index buffer once up front
 /// from the single-pass estimate of `count_commands`.
 fn collect_commands(data: &str) -> Result<Vec<&str>, JsValue> {
@@ -192,6 +193,7 @@ fn collect_commands(data: &str) -> Result<Vec<&str>, JsValue> {
     Ok(commands)
 }
 
+#[cfg(test)]
 fn push_command<'a>(commands: &mut Vec<&'a str>, command: &'a str) -> Result<(), JsValue> {
     // For well-formed input the up-front reservation already holds every
     // command and this never allocates. It only grows for malformed input that
@@ -1022,15 +1024,20 @@ impl GerberParser {
 
     /// Parse Gerber file content and return GerberData batches in object-stream polarity order.
     pub fn parse(&mut self, data: &str) -> Result<Vec<GerberData>, JsValue> {
-        let lines = collect_commands(data)?;
-        let length = lines.len();
-        let mut i = 0;
+        let command_count = count_commands(data);
+        let reservation = command_count.min(crate::parser::state::MAX_GENERATED_ITEMS);
+        try_reserve_exact(
+            &mut self.current_primitives,
+            reservation,
+            "Gerber primitive buffer",
+        )?;
 
-        while i < length {
-            let line_ref = lines[i].trim();
+        let mut commands_iter = split_commands(data);
+
+        while let Some(raw_line) = commands_iter.next() {
+            let line_ref = raw_line.trim();
 
             if line_ref.is_empty() {
-                i += 1;
                 continue;
             }
 
@@ -1041,9 +1048,7 @@ impl GerberParser {
             } else if line_ref.starts_with('%') {
                 parse_command(
                     line_ref,
-                    &mut i,
-                    length,
-                    &lines,
+                    &mut commands_iter,
                     &mut self.current_state,
                     &mut self.apertures,
                     &mut self.macros,
@@ -1081,8 +1086,6 @@ impl GerberParser {
                 )
                 .map_err(|message| JsValue::from_str(&message))?;
             }
-
-            i += 1;
         }
 
         // Save last accumulated primitives by polarity
@@ -1181,9 +1184,7 @@ impl GerberParser {
 
 fn parse_command(
     line_ref: &str,
-    i: &mut usize,
-    length: usize,
-    lines: &[&str],
+    commands_iter: &mut dyn Iterator<Item = &str>,
     state: &mut ParserState,
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
@@ -1199,17 +1200,15 @@ fn parse_command(
         let mut buffer = String::new();
         try_reserve_string(&mut buffer, line_ref.len(), "extended command buffer")?;
         buffer.push_str(line_ref);
-        *i += 1;
 
-        while *i < length {
-            let next_line = lines[*i].trim();
+        while let Some(next_raw) = commands_iter.next() {
+            let next_line = next_raw.trim();
             try_reserve_string(&mut buffer, next_line.len(), "extended command buffer")?;
             buffer.push_str(next_line);
 
             if next_line.ends_with('%') {
                 break;
             }
-            *i += 1;
         }
 
         buffer
@@ -1253,9 +1252,7 @@ fn parse_command(
         // Block Aperture: %ABD##*% ... %AB*%
         parse_aperture_block(
             &line,
-            i,
-            length,
-            lines,
+            commands_iter,
             state,
             apertures,
             macros,
@@ -1334,9 +1331,7 @@ fn is_aperture_block_close(line: &str) -> bool {
 
 fn parse_aperture_block(
     line: &str,
-    i: &mut usize,
-    length: usize,
-    lines: &[&str],
+    commands_iter: &mut dyn Iterator<Item = &str>,
     state: &mut ParserState,
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
@@ -1364,9 +1359,8 @@ fn parse_aperture_block(
     let mut block_layers: Vec<PolarityLayer> = Vec::new();
     let mut block_region_contours: Vec<RegionContour> = Vec::new();
 
-    while *i + 1 < length {
-        *i += 1;
-        let block_line = lines[*i].trim();
+    while let Some(raw_block_line) = commands_iter.next() {
+        let block_line = raw_block_line.trim();
 
         if block_line.is_empty() || block_line.starts_with("G04") {
             continue;
@@ -1380,9 +1374,7 @@ fn parse_aperture_block(
             let nested_block_state = parse_aperture_block_code(block_line).map(|_| state.clone());
             parse_command(
                 block_line,
-                i,
-                length,
-                lines,
+                commands_iter,
                 state,
                 apertures,
                 macros,

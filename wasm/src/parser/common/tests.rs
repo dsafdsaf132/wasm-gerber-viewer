@@ -46,3 +46,67 @@ fn parses_zero_suppressed_coordinates() {
         38.1
     );
 }
+
+#[test]
+fn extracts_command_tokens_accurately() {
+    use super::{extract_command_tokens, CommandTokens};
+
+    let line = "X1000Y-2000D01*";
+    let tokens = extract_command_tokens(line);
+    assert_eq!(
+        tokens,
+        CommandTokens {
+            x: Some("1000"),
+            y: Some("-2000"),
+            i: None,
+            j: None,
+            d: Some("01"),
+        }
+    );
+
+    let line2 = "G02X500Y600I100J-200D01*";
+    let tokens2 = extract_command_tokens(line2);
+    assert_eq!(
+        tokens2,
+        CommandTokens {
+            x: Some("500"),
+            y: Some("600"),
+            i: Some("100"),
+            j: Some("-200"),
+            d: Some("01"),
+        }
+    );
+
+    let line3 = "D02*";
+    let tokens3 = extract_command_tokens(line3);
+    assert_eq!(
+        tokens3,
+        CommandTokens {
+            x: None,
+            y: None,
+            i: None,
+            j: None,
+            d: Some("02"),
+        }
+    );
+}
+
+#[test]
+fn handles_numeric_overflow_gracefully() {
+    let fmt = CoordinateFormat {
+        integer_digits: 4,
+        decimal_digits: 6,
+        zero_suppression: ZeroSuppression::Leading,
+    };
+    // Huge digit string that exceeds i64::MAX
+    let huge = "9999999999999999999999999999999999999999";
+    assert!(super::parse_omitted_decimal_number(huge, fmt, "test").is_err());
+
+    // Format spec with enormous missing digits that would overflow 10^missing
+    let extreme_fmt = CoordinateFormat {
+        integer_digits: 50,
+        decimal_digits: 50,
+        zero_suppression: ZeroSuppression::Trailing,
+    };
+    assert!(super::parse_omitted_decimal_number("123", extreme_fmt, "test").is_err());
+}
