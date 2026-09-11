@@ -48,7 +48,7 @@
     "prepack": "npm run build:wasm && npm run stage:wasm",
     "postpack": "npm run clean:wasm",
     "prepublishOnly": "npm run check",
-    "check": "node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs && node --check scripts/benchmark-composite-4k.mjs && tsc -p test/types/tsconfig.json && node --test test/*.test.mjs",
+    "check": "node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs && node --check scripts/benchmark-composite-4k.mjs && tsc -p test/types/tsconfig.json && node --test --test-concurrency=1 test/*.test.mjs",
     "verify:publish": "npm run check && npm pack --dry-run"
   },
   "license": "MIT",

@@ -7856,10 +7856,7 @@ impl Renderer {
             .as_ref()
             .ok_or_else(|| JsValue::from_str("Composite output framebuffer is unavailable"))?;
         Self::drain_gl_errors(&self.gl);
-        self.gl.bind_framebuffer(
-            WebGl2RenderingContext::READ_FRAMEBUFFER,
-            Some(&output.framebuffer),
-        );
+        Self::bind_read_target(&self.gl, &output.framebuffer);
         // RGBA/UNSIGNED_BYTE is the portable normalized-framebuffer readback
         // pair in WebGL2, including when the attachment itself is R8.
         let mut pixel = [0u8; 4];
@@ -7885,10 +7882,7 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
         let mut pixel = [0u8; 4];
         Self::drain_gl_errors(&self.gl);
-        self.gl.bind_framebuffer(
-            WebGl2RenderingContext::READ_FRAMEBUFFER,
-            Some(&scratch.framebuffer),
-        );
+        Self::bind_read_target(&self.gl, &scratch.framebuffer);
         let read = self.gl.read_pixels_with_opt_u8_array(
             x,
             y,
@@ -8069,10 +8063,7 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
         let mut pixel = [0u8; 4];
         Self::drain_gl_errors(&self.gl);
-        self.gl.bind_framebuffer(
-            WebGl2RenderingContext::READ_FRAMEBUFFER,
-            Some(&scratch.framebuffer),
-        );
+        Self::bind_read_target(&self.gl, &scratch.framebuffer);
         let membership_read = self.gl.read_pixels_with_opt_u8_array(
             x,
             y,
@@ -8093,10 +8084,7 @@ impl Renderer {
         let outline = self.get_layer(composite.outline_mask_id)?;
         let mut outline_pixel = [0u8; 4];
         Self::drain_gl_errors(&self.gl);
-        self.gl.bind_framebuffer(
-            WebGl2RenderingContext::READ_FRAMEBUFFER,
-            Some(&outline.fbo.framebuffer),
-        );
+        Self::bind_read_target(&self.gl, &outline.fbo.framebuffer);
         let outline_read = self.gl.read_pixels_with_opt_u8_array(
             x,
             y,
