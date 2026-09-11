@@ -123,10 +123,8 @@ wasm-gerber-viewer/
 │   ├── core/                          # GerberViewer state and orchestration
 │   ├── loading/                       # File, archive, URL, repeat, and worker loading
 │   ├── layers/                        # Layer list UI, filters, colors, and composite bitsets
-│   │   └── composite-layers.js        # Presets, source slots, and visible-area bitsets
 │   ├── rendering/                     # Viewport math, measurements, and screenshot export
 │   └── ui/                            # Dialogs, DOM lookup, notifications, diagnostics, options
-│       └── composite-layer-dialog.js   # Composite create, edit, and rename dialog
 ├── vendor/                            # Vendored browser libraries
 ├── packages/
 │   └── wasm-gerber-renderer/          # npm package and Node CLI
@@ -142,8 +140,6 @@ wasm-gerber-viewer/
 │       ├── drill/                     # Excellon/NC drill parser and tests
 │       ├── interaction/               # Picking, compact payloads, and highlight data
 │       ├── renderer/                  # Gerber/composite masks, GPU resources, shaders, tests
-│       │   ├── composite.rs           # Membership, lookup, outline, cache, and picking state
-│       │   └── shaders/composite_*.frag.glsl
 │       └── util/                      # Formatting and utility helpers
 ├── demo/                              # Sample and performance Gerbers
 ├── docs/                              # README assets
