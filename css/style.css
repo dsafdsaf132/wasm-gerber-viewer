@@ -858,7 +858,7 @@ button {
 .layer-item {
   position: relative;
   display: grid;
-  grid-template-columns: 28px 24px minmax(0, 1fr) 32px;
+  grid-template-columns: 30px 24px minmax(0, 1fr) 32px;
   align-items: center;
   gap: 8px;
   min-height: 50px;
@@ -1037,11 +1037,12 @@ button {
 
 .layer-color-picker {
   position: relative;
-  width: 24px;
-  height: 24px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 5px;
+  touch-action: manipulation;
   background:
     linear-gradient(
       rgb(var(--layer-color-rgb, 0 255 0) / var(--layer-alpha, 1)),
@@ -1072,6 +1073,18 @@ button {
   outline-offset: 2px;
 }
 
+@media (pointer: coarse) {
+  .layer-color-picker::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    bottom: -6px;
+    left: -6px;
+    right: -6px;
+    z-index: 1;
+  }
+}
+
 .layer-color-picker.has-alpha-override::after {
   content: "";
   position: absolute;
@@ -1098,6 +1111,7 @@ button {
 
 .pcr-app.layer-color-pickr {
   z-index: 60;
+  max-width: min(calc(100vw - 16px), 300px);
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text);
