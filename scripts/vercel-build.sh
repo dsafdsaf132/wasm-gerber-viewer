@@ -90,5 +90,6 @@ if [[ "$(wasm-pack --version)" != "wasm-pack $WASM_PACK_VERSION" ]]; then
 fi
 
 cd "$REPO_ROOT/wasm"
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+simd128"
 wasm-pack build --target web --out-dir pkg --release
 printf '%s\n' "$wasm_hash" > pkg/.source-hash

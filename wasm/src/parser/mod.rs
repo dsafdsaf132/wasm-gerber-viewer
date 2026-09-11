@@ -2,6 +2,7 @@ mod aperture;
 mod aperture_macro;
 pub(crate) mod common;
 pub mod geometry;
+pub(crate) mod simd_scan;
 mod state;
 
 // Export only what's needed externally
@@ -107,7 +108,7 @@ impl<'a> Iterator for CommandSplitter<'a> {
                 });
             }
 
-            return Some(match segment.find('*') {
+            return Some(match simd_scan::find_star_simd(segment.as_bytes()) {
                 Some(star) => {
                     self.rest = &segment[star + 1..];
                     &segment[..=star]
@@ -133,12 +134,28 @@ impl<'a> Iterator for CommandSplitter<'a> {
 /// falls short only for malformed input such as an empty `%%` command or a
 /// macro body line without `*`, which `push_command` absorbs.
 fn count_commands(data: &str) -> usize {
+    let bytes = data.as_bytes();
+    let last_percent = simd_scan::rfind_byte_simd(bytes, b'%');
+
+    let (head, tail) = match last_percent {
+        None => (&bytes[..0], bytes),
+        Some(pos) => {
+            // Find the newline after the last '%', or the end of the file, so any trailing
+            // percent_only_line is resolved before the SIMD chunk scan.
+            let split_at = match bytes[pos + 1..].iter().position(|&b| b == b'\n') {
+                Some(nl) => (pos + 1 + nl + 1).min(bytes.len()),
+                None => bytes.len(),
+            };
+            (&bytes[..split_at], &bytes[split_at..])
+        }
+    };
+
     let mut count = 0usize;
     let mut at_line_start = true;
     let mut percent_only_line = false;
     let mut last_significant = None;
 
-    for byte in data.bytes() {
+    for &byte in head {
         match byte {
             b'*' => {
                 count += 1;
@@ -166,6 +183,13 @@ fn count_commands(data: &str) -> usize {
         // Only `*`, `%` and command text count as significant; line breaks and
         // other whitespace do not decide whether a trailing command is open.
         last_significant = Some(byte);
+    }
+
+    if !tail.is_empty() {
+        count += simd_scan::count_stars_simd(tail);
+        if let Some(&byte) = tail.iter().rev().find(|&&b| !matches!(b, b'\n' | b' ' | b'\t' | b'\r')) {
+            last_significant = Some(byte);
+        }
     }
 
     if percent_only_line {

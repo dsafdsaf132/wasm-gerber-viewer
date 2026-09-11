@@ -120,23 +120,46 @@ pub fn extract_command_tokens(line: &str) -> CommandTokens<'_> {
     tokens
 }
 
+const POW10: [f32; 10] = [
+    1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0, 1000000000.0,
+];
+
 pub fn parse_omitted_decimal_number(
     token: &str,
     format: CoordinateFormat,
     context: &str,
 ) -> Result<f32, String> {
-    let sign = if token.starts_with('-') { -1.0 } else { 1.0 };
-    let digits = token.trim_start_matches(['+', '-']);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    let (sign, digits) = if let Some(stripped) = token.strip_prefix('-') {
+        (-1.0f32, stripped.as_bytes())
+    } else if let Some(stripped) = token.strip_prefix('+') {
+        (1.0f32, stripped.as_bytes())
+    } else {
+        (1.0f32, token.as_bytes())
+    };
+
+    if digits.is_empty() {
         return Err(format!("Invalid {context} number `{token}`"));
     }
 
     let mut value = 0i64;
-    for b in digits.bytes() {
-        value = value
-            .checked_mul(10)
-            .and_then(|v| v.checked_add((b - b'0') as i64))
-            .ok_or_else(|| format!("Invalid {context} number `{token}` (integer overflow)"))?;
+    if digits.len() <= 18 {
+        for &b in digits {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 {
+                return Err(format!("Invalid {context} number `{token}`"));
+            }
+            value = value * 10 + d as i64;
+        }
+    } else {
+        for &b in digits {
+            if !b.is_ascii_digit() {
+                return Err(format!("Invalid {context} number `{token}`"));
+            }
+            value = value
+                .checked_mul(10)
+                .and_then(|v| v.checked_add((b - b'0') as i64))
+                .ok_or_else(|| format!("Invalid {context} number `{token}` (integer overflow)"))?;
+        }
     }
 
     if let ZeroSuppression::Trailing = format.zero_suppression {
@@ -152,7 +175,11 @@ pub fn parse_omitted_decimal_number(
         }
     }
 
-    let divisor = 10.0f32.powi(format.decimal_digits as i32);
+    let divisor = if (format.decimal_digits as usize) < POW10.len() {
+        POW10[format.decimal_digits as usize]
+    } else {
+        10.0f32.powi(format.decimal_digits as i32)
+    };
     Ok(sign * value as f32 / divisor)
 }
 
@@ -162,7 +189,7 @@ pub fn parse_coordinate_number(
     unit_multiplier: f32,
     context: &str,
 ) -> Result<f32, String> {
-    let value = if token.contains('.') {
+    let value = if token.as_bytes().contains(&b'.') {
         parse_decimal_number(token, context)?
     } else {
         parse_omitted_decimal_number(token, format, context)?
