@@ -280,17 +280,33 @@ function readPaxHeaders(data, archiveName, entryCount) {
 }
 
 function validatePath(path, archiveName, entryCount) {
-  if (path.length > MAX_ARCHIVE_PATH_SIZE_BYTES) {
-    throw new RangeError(`${archiveName} TAR entry ${entryCount} has an overlong path`);
-  }
-  if (path.includes("\0")) {
+  if (
+    typeof path !== "string" ||
+    path.length === 0 ||
+    /[\u0000-\u001f\u007f]/u.test(path)
+  ) {
     throw new Error(`${archiveName} TAR entry ${entryCount} has an invalid path`);
+  }
+  if (utf8ByteLength(path) > MAX_ARCHIVE_PATH_SIZE_BYTES) {
+    throw new RangeError(`${archiveName} TAR entry ${entryCount} has an overlong path`);
   }
   const segments = path.replace(/\\/g, "/").split("/");
   if (segments.some((segment) => segment === "..")) {
     throw new Error(`${archiveName} TAR entry ${entryCount} escapes the archive root`);
   }
   return path;
+}
+
+function utf8ByteLength(value) {
+  if (typeof TextEncoder !== "undefined") {
+    return new TextEncoder().encode(value).byteLength;
+  }
+  let length = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    length += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+  }
+  return length;
 }
 
 function decodeText(bytes) {
@@ -301,4 +317,3 @@ function decodeText(bytes) {
   for (const byte of bytes) text += String.fromCharCode(byte);
   return text;
 }
-

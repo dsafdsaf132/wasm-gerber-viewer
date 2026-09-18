@@ -41,6 +41,17 @@ test("parseTar reads regular files, ustar prefixes, and ignores directories", ()
   assert.equal(decoder.decode(entries[0].bytes), "STEP {\nNAME=pcb\n}\n");
 });
 
+test("parseTar rejects empty and control-character paths", () => {
+  assert.throws(
+    () => parseTar(writeTar({ "": "empty" }), { archiveName: "empty-path.tar" }),
+    /invalid path/,
+  );
+  assert.throws(
+    () => parseTar(writeTar({ "job/steps/pcb/\nfeatures": "bad" }), { archiveName: "control-path.tar" }),
+    /invalid path/,
+  );
+});
+
 test("parseTar accepts the thousands of entries a production job ships", () => {
   // A real 4-up panel job holds ~2500 files (symbols, fonts, wheels, 14 steps).
   const files = { "job/matrix/matrix": "STEP {\nNAME=pcb\n}\n" };
