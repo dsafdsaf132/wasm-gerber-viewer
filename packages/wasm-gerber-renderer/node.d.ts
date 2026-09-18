@@ -139,6 +139,14 @@ export type NodeLayerLoadOptions = NodeLayerOptions & {
   renderDrills?: boolean;
 };
 
+export type OdbJobLoadOptions = {
+  /** Step name to load. The importer chooses the board step when omitted. */
+  stepName?: string;
+  onStage?: (jobName: string, stage: string) => void;
+  onWarning?: (jobName: string, warning: string) => void;
+  onInfo?: (jobName: string, info: string) => void;
+};
+
 export type NodeExportOptions = {
   background?: null | string | RGBAColor;
   maxBandBytes?: number;
@@ -185,6 +193,12 @@ export declare function renderGerberToPngStream(
   exportOptions?: NodeExportOptions,
   rendererOptions?: NodeRendererOptions,
 ): Promise<void>;
+
+/** Load one local ODB++ `.zip`, `.tar`, `.tgz`, or `.tar.gz` job into render layers. */
+export declare function loadOdbJobLayers(
+  path: string,
+  options?: OdbJobLoadOptions,
+): Promise<GerberNodeLayer[]>;
 
 export declare function fileLayer(
   path: string,
@@ -238,6 +252,16 @@ export declare class NodeGerberRenderer {
     loadedCount: number;
     failures: NodeLayerFailure[];
   }>;
+
+  /**
+   * Load one local ODB++ `.zip`, `.tar`, `.tgz`, or `.tar.gz` job into ordinary
+   * Gerber/drill layer records. Pass the result to renderLayers() or
+   * loadLayers() in a later frame.
+   */
+  loadOdbJob(
+    path: string,
+    options?: OdbJobLoadOptions,
+  ): Promise<GerberNodeLayer[]>;
 
   exportPng(exportOptions?: NodeExportOptions): Promise<Uint8Array>;
 

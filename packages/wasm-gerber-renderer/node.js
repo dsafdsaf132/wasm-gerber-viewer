@@ -7,7 +7,15 @@ import { basename, dirname, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createDeflate } from "node:zlib";
+import { createDeflate, gunzipSync } from "node:zlib";
+import {
+  collectOdbLayerSourcesFromTree,
+  odbTreeOptions,
+} from "./dst/odb/index.js";
+import { createNodeZipJobTree } from "./dst/odb/archive/zip-node.js";
+import { createTarJobTree } from "./dst/odb/archive/job-tree.js";
+import { isGzipBytes } from "./dst/odb/archive/gzip.js";
+import { parseTar } from "./dst/odb/archive/tar.js";
 import {
   COMPOSITE_MODE_STACK,
   LAYER_KIND_COMPOSITE,
@@ -15,7 +23,9 @@ import {
   FrameState,
   INVERTED_OUTLINE_AUTO,
   INVERTED_OUTLINE_BOUNDS,
+  MAX_ARCHIVE_COMPRESSION_RATIO,
   MAX_SOURCE_FILE_SIZE_BYTES,
+  MAX_TAR_EXPANDED_SIZE_BYTES,
   PNG_SIGNATURE,
   addLayerToProcessor,
   applyProcessorOptions,
@@ -144,6 +154,88 @@ export async function renderGerberToPngStream(
   }
 }
 
+/**
+ * Read one local ODB++ job archive into ordinary renderer layer records. This
+ * helper initializes WASM only when a `.Z` member must be decompressed; use a
+ * renderer's loadOdbJob() method to reuse an already initialized module.
+ */
+export async function loadOdbJobLayers(path, options = {}) {
+  if (typeof path !== "string" || path.trim() === "") {
+    throw new TypeError("ODB++ job path must be a non-empty string.");
+  }
+
+  let wasmModule = options.wasmModule ?? null;
+  let wasmLoadPromise = null;
+  const decompressUnixZ = async (bytes, maxOutputBytes) => {
+    if (!wasmModule) {
+      wasmLoadPromise ??= loadWasmModule(options.rendererOptions ?? {}).then(
+        async ({ wasmModule: loadedModule, wasmModuleUrl }) => {
+          await initializeWasmModule(
+            loadedModule,
+            wasmModuleUrl,
+            options.rendererOptions ?? {},
+          );
+          return loadedModule;
+        },
+      );
+      wasmModule = await wasmLoadPromise;
+    }
+    if (typeof wasmModule.decompress_unix_z !== "function") {
+      throw new Error("The loaded WASM module does not provide decompress_unix_z().");
+    }
+    return wasmModule.decompress_unix_z(bytes, maxOutputBytes);
+  };
+  const archivePath = resolve(path);
+  const archiveBytes = await readStableRegularFile(
+    archivePath,
+    MAX_SOURCE_FILE_SIZE_BYTES,
+    "ODB++ archive",
+  );
+  const treeOptions = odbTreeOptions({ decompressUnixZ });
+  let tree;
+  if (isZipPath(archivePath)) {
+    tree = createNodeZipJobTree(archiveBytes, {
+      archiveName: basename(archivePath),
+      ...treeOptions,
+    });
+  } else {
+    let tarBytes = archiveBytes;
+    if (isGzipBytes(archiveBytes)) {
+      const maxOutputBytes = Math.min(
+        MAX_TAR_EXPANDED_SIZE_BYTES,
+        archiveBytes.byteLength * MAX_ARCHIVE_COMPRESSION_RATIO,
+      );
+      tarBytes = new Uint8Array(gunzipSync(archiveBytes, { maxOutputLength: maxOutputBytes }));
+      if (tarBytes.byteLength / archiveBytes.byteLength > MAX_ARCHIVE_COMPRESSION_RATIO) {
+        throw new RangeError(
+          `${basename(archivePath)} exceeds the supported archive compression ratio of ${MAX_ARCHIVE_COMPRESSION_RATIO}:1`,
+        );
+      }
+    }
+    tree = createTarJobTree(
+      parseTar(tarBytes, { archiveName: basename(archivePath) }),
+      treeOptions,
+    );
+  }
+  if (!tree.isOdbJob) {
+    throw new Error(`${basename(archivePath)} is not an ODB++ job (matrix/matrix not found).`);
+  }
+
+  const sources = await collectOdbLayerSourcesFromTree(tree, basename(archivePath), {
+    odbStepName: options.stepName ?? null,
+    onArchiveStage: options.onStage ?? (() => {}),
+    onArchiveWarning: options.onWarning ?? (() => {}),
+    onArchiveInfo: options.onInfo ?? (() => {}),
+  });
+  return Promise.all(
+    sources.map(async (source) => ({
+      source: await source.readText(),
+      name: source.name,
+      kind: source.kind,
+    })),
+  );
+}
+
 export class NodeGerberRenderer {
   static async create(rendererOptions = {}) {
     const { wasmModule, wasmModuleUrl } = await loadWasmModule(rendererOptions);
@@ -234,6 +326,19 @@ export class NodeGerberRenderer {
       this.frame.options.retainSourceContentForInversion = true;
     }
     return renderLayersBestEffort(this, normalizedLayers, options);
+  }
+
+  /**
+   * Read one local ODB++ job archive and return ordinary renderer layer records.
+   * The records may be passed directly to renderLayers(), loadLayers(), or
+   * individual renderLayer() calls in a later frame.
+   */
+  async loadOdbJob(path, options = {}) {
+    this.assertUsable();
+    if (this.frame) {
+      throw new Error("loadOdbJob must be called outside withFrame().");
+    }
+    return loadOdbJobLayers(path, { ...options, wasmModule: this.wasmModule });
   }
 
   async renderCompositeLayer(sourceLayerIds, options = {}) {
@@ -3366,6 +3471,10 @@ function toUrl(value) {
     return pathToFileURL(resolve(value));
   }
   throw new TypeError("Expected a URL or path string.");
+}
+
+function isZipPath(path) {
+  return String(path).toLowerCase().endsWith(".zip");
 }
 
 export function fileLayer(path, options = {}) {

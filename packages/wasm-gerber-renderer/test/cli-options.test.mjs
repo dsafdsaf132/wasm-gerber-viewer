@@ -14,6 +14,7 @@ import {
   MAX_COMPOSITE_CONFIG_SIZE_BYTES,
   MAX_SOURCE_FILE_SIZE_BYTES,
 } from "../shared.js";
+import { buildSampleJobFiles, writeTgz, writeZip } from "./helpers/odb-fixture.mjs";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -53,7 +54,7 @@ test("CLI help lists Node PNG memory and strategy options", async () => {
   assert.match(stdout, /--composite-config <path>/);
   assert.match(stdout, /--invert-layer <selector>.*exact name, or basename/);
   assert.match(stdout, /--outline-layer <selector>.*exact name, or basename/);
-  assert.match(stdout, /Gerber\/drill or compressed archive: 300 MiB per file/);
+  assert.match(stdout, /Gerber\/drill or ODB\+\+ job archive: 300 MiB per file/);
   assert.match(stdout, /Composite JSON: 16 MiB/);
 });
 
@@ -198,7 +199,7 @@ test("CLI rejects malformed and resource-hostile TAR archives before rendering",
         ]),
       ),
     );
-    cases.push([oversizedEntryPath, /per-entry limit/]);
+    cases.push([oversizedEntryPath, /per-(?:entry|file) limit/]);
 
     const malformedPaxPath = join(directory, "malformed-pax.tgz");
     const malformedPax = Buffer.from("bad", "ascii");
@@ -222,7 +223,7 @@ test("CLI rejects malformed and resource-hostile TAR archives before rendering",
       checksumPath,
       gzipSync(Buffer.concat([badChecksumHeader, Buffer.alloc(1024)])),
     );
-    cases.push([checksumPath, /failed its checksum/]);
+    cases.push([checksumPath, /(?:failed its checksum|checksum mismatch)/]);
 
     const danglingLongNamePath = join(directory, "dangling-long-name.tgz");
     const longName = Buffer.from("unused.gbr\0", "utf8");
@@ -1189,3 +1190,64 @@ test(
   },
 );
 
+test("CLI renders an ODB++ tgz job", { skip: !hasNodeGles }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "gerber-cli-odb-job-"));
+  try {
+    const inputPath = join(directory, "board.tgz");
+    const outputPath = join(directory, "board.png");
+    const { files } = buildSampleJobFiles({
+      compressTopLayer: false,
+      includeDiagnosticCases: true,
+    });
+    await writeFile(inputPath, writeTgz(files));
+
+    const { stdout, stderr } = await execFileAsync(process.execPath, [
+      cliPath,
+      inputPath,
+      "--output",
+      outputPath,
+      "--width",
+      "160",
+      "--height",
+      "120",
+    ]);
+    const png = await readFile(outputPath);
+    assert.deepEqual(
+      png.subarray(0, 8),
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    );
+    assert.match(stdout, /Rendered 10\/10 layer\(s\)/);
+    assert.match(stderr, /ODB\+\+: Skipped 2 non-board layers/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI renders a deflated ODB++ ZIP job", { skip: !hasNodeGles }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "gerber-cli-odb-zip-job-"));
+  try {
+    const inputPath = join(directory, "board.zip");
+    const outputPath = join(directory, "board.png");
+    const { files } = buildSampleJobFiles({ compressTopLayer: false });
+    await writeFile(inputPath, writeZip(files));
+
+    const { stdout } = await execFileAsync(process.execPath, [
+      cliPath,
+      inputPath,
+      "--output",
+      outputPath,
+      "--width",
+      "160",
+      "--height",
+      "120",
+    ]);
+    const png = await readFile(outputPath);
+    assert.deepEqual(
+      png.subarray(0, 8),
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    );
+    assert.match(stdout, /Rendered 10\/10 layer\(s\)/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

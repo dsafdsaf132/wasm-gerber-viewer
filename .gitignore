@@ -35,6 +35,7 @@ packages/gerber-renderer/package-lock.json
 packages/wasm-gerber-renderer/wasm/
 packages/wasm-gerber-renderer/node_modules/
 packages/wasm-gerber-renderer/package-lock.json
+packages/wasm-gerber-renderer/dst/
 
 # Large demo files are stored in Vercel Blob.
 demo/performance-test-arc-region-*.gbr

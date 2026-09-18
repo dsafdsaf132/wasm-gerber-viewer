@@ -27,9 +27,9 @@ import {
   isOdbFileList,
   isOdbZip,
   readTarArchive,
-} from "./odb/index.js";
+} from "../src/odb/index.js";
 
-export { getInitialOdbStepName } from "./odb/index.js";
+export { getInitialOdbStepName } from "../src/odb/index.js";
 
 const UNKNOWN_ZIP_LAYER_SNIFF_LINES = 30;
 

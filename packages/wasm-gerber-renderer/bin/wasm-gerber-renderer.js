@@ -3,16 +3,18 @@ import { constants as fsConstants } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { createNodeGerberRenderer, fileLayer } from "../node.js";
+import {
+  createNodeGerberRenderer,
+  fileLayer,
+  loadOdbJobLayers,
+} from "../node.js";
+import { parseTar } from "../dst/odb/archive/tar.js";
 import {
   createCompositeVisibleBitset,
   isBoardOutlineLayerName,
   isDrillLayerKind,
   MAX_ARCHIVE_COMPRESSION_RATIO,
   MAX_ARCHIVE_ENTRY_COUNT,
-  MAX_ARCHIVE_METADATA_SIZE_BYTES,
-  MAX_ARCHIVE_PATH_SIZE_BYTES,
-  MAX_ARCHIVE_TOTAL_SIZE_BYTES,
   MAX_COMPOSITE_CONFIG_SIZE_BYTES,
   MAX_SOURCE_FILE_SIZE_BYTES,
   MAX_TAR_EXPANDED_SIZE_BYTES,
@@ -22,7 +24,7 @@ import {
 } from "../shared.js";
 
 const USAGE = `Usage:
-  gerber-renderer <input.gbr|input.tar.gz...> [options]
+  gerber-renderer <input.gbr|input.zip|input.tar...> [options]
 
 Options:
   -o, --output <path>              PNG output path (required for multiple inputs)
@@ -52,13 +54,13 @@ Options:
   -h, --help                       Show this help
 
 Input limits:
-  Gerber/drill or compressed archive: 300 MiB per file
+  Gerber/drill or ODB++ job archive: 300 MiB per file
   Composite JSON: 16 MiB; TAR: 1000 headers, 300 MiB source data
 
 AI guide: run \`gerber-renderer --skill\` for usage notes.
 `;
 
-const TAR_GZ_EXTENSIONS = [".tar.gz", ".tgz"];
+const ARCHIVE_EXTENSIONS = [".zip", ".tar.gz", ".tgz", ".tar"];
 const GENERIC_GERBER_EXTENSIONS = [
   ".art",
   ".gbr",
@@ -97,7 +99,6 @@ async function main() {
   }
 
   const outputPath = output || inferOutputPath(inputs);
-
   const layers = await collectInputLayers(inputs);
   if (layers.length === 0) {
     throw new Error("No Gerber layers found in input files.");
@@ -297,7 +298,7 @@ function inferOutputPath(inputs) {
 
   const input = inputs[0];
   const lowerInput = input.toLowerCase();
-  const archiveExtension = TAR_GZ_EXTENSIONS.find((extension) =>
+  const archiveExtension = ARCHIVE_EXTENSIONS.find((extension) =>
     lowerInput.endsWith(extension),
   );
   if (archiveExtension) {
@@ -387,8 +388,23 @@ async function collectInputLayers(inputs) {
   const layers = [];
 
   for (const input of inputs) {
-    if (isTarGzPath(input)) {
-      const archiveLayers = await readTarGzLayers(input);
+    if (isArchivePath(input)) {
+      let odbError = null;
+      try {
+        const odbLayers = await loadOdbJobLayers(input, {
+          onWarning: (_job, message) => process.stderr.write(`ODB++: ${message}\n`),
+        });
+        layers.push(...odbLayers);
+        continue;
+      } catch (error) {
+        odbError = error;
+      }
+      if (isZipArchivePath(input)) throw odbError;
+      const archiveLayers = await readTarLayers(input);
+      if (odbError) {
+        if (looksLikeOdbArchive(archiveLayers)) throw odbError;
+      }
+
       if (archiveLayers.length === 0) {
         process.stderr.write(`Skipped ${input}: no regular files found in archive\n`);
       }
@@ -779,309 +795,71 @@ function portableBasename(value) {
   return normalized.slice(normalized.lastIndexOf("/") + 1);
 }
 
-async function readTarGzLayers(path) {
-  const compressed = await readStableRegularFile(
+async function readTarLayers(path) {
+  const archiveInput = await readStableRegularFile(
     path,
     MAX_SOURCE_FILE_SIZE_BYTES,
     "Compressed archive",
   );
-  if (compressed.length === 0) {
-    throw new Error(`Failed to read archive ${path}: the compressed file is empty.`);
+  if (archiveInput.length === 0) {
+    throw new Error(`Failed to read archive ${path}: the archive is empty.`);
   }
-  const expansionLimit = Math.min(
-    MAX_TAR_EXPANDED_SIZE_BYTES,
-    compressed.length * MAX_ARCHIVE_COMPRESSION_RATIO,
-  );
-  let archive;
-  try {
-    archive = gunzipSync(compressed, { maxOutputLength: expansionLimit });
-  } catch (error) {
-    throw new Error(
-      `Failed to read archive ${path}: invalid gzip data or expanded-size/compression-ratio limit exceeded (${errorMessage(error)}).`,
+
+  let archive = archiveInput;
+  if (isGzipBuffer(archiveInput)) {
+    const expansionLimit = Math.min(
+      MAX_TAR_EXPANDED_SIZE_BYTES,
+      archiveInput.length * MAX_ARCHIVE_COMPRESSION_RATIO,
     );
-  }
-  if (archive.length / compressed.length > MAX_ARCHIVE_COMPRESSION_RATIO) {
-    throw new RangeError(
-      `${path} exceeds the supported archive compression ratio of ${MAX_ARCHIVE_COMPRESSION_RATIO}:1.`,
-    );
-  }
-
-  const layers = [];
-  let offset = 0;
-  let nextLongName = null;
-  let nextPaxHeaders = null;
-  let entryCount = 0;
-  let sourceBytes = 0;
-  let foundEndMarker = false;
-
-  while (offset + 512 <= archive.length) {
-    const header = archive.subarray(offset, offset + 512);
-    if (isZeroBlock(header)) {
-      if (!isZeroBlock(archive.subarray(offset))) {
-        throw new Error(`${path} contains non-zero data after its TAR end marker.`);
-      }
-      foundEndMarker = true;
-      break;
-    }
-
-    entryCount += 1;
-    if (entryCount > MAX_ARCHIVE_ENTRY_COUNT) {
-      throw new RangeError(
-        `${path} contains more than ${MAX_ARCHIVE_ENTRY_COUNT} TAR entries.`,
-      );
-    }
-    validateTarHeaderChecksum(header, path, entryCount);
-
-    const headerSize = readTarSize(header, 124, 12, path, entryCount);
-    const typeFlag = String.fromCharCode(header[156] || 0);
-    const isExtensionHeader = typeFlag === "L" || typeFlag === "x" || typeFlag === "g";
-    const size =
-      !isExtensionHeader && nextPaxHeaders?.size != null
-        ? readPaxSize(nextPaxHeaders.size, path, entryCount)
-        : headerSize;
-    if (isExtensionHeader && size > MAX_ARCHIVE_METADATA_SIZE_BYTES) {
-      throw new RangeError(
-        `${path} TAR entry ${entryCount} metadata exceeds ${MAX_ARCHIVE_METADATA_SIZE_BYTES} bytes.`,
-      );
-    }
-    if (
-      (typeFlag === "0" || typeFlag === "\0") &&
-      size > MAX_SOURCE_FILE_SIZE_BYTES
-    ) {
-      throw new RangeError(
-        `${path} TAR entry ${entryCount} is ${size} bytes; the per-entry limit is ${MAX_SOURCE_FILE_SIZE_BYTES} bytes.`,
-      );
-    }
-    const dataOffset = offset + 512;
-    const paddedSize = Math.ceil(size / 512) * 512;
-    const dataEnd = dataOffset + size;
-    const nextOffset = dataOffset + paddedSize;
-    if (
-      !Number.isSafeInteger(dataEnd) ||
-      !Number.isSafeInteger(nextOffset) ||
-      dataEnd > archive.length ||
-      nextOffset > archive.length
-    ) {
+    try {
+      archive = gunzipSync(archiveInput, { maxOutputLength: expansionLimit });
+    } catch (error) {
       throw new Error(
-        `${path} TAR entry ${entryCount} is truncated (declares ${size} data bytes).`,
+        `Failed to read archive ${path}: invalid gzip data or expanded-size/compression-ratio limit exceeded (${errorMessage(error)}).`,
       );
     }
-    const data = archive.subarray(dataOffset, dataEnd);
-    offset = nextOffset;
-
-    if (typeFlag === "L") {
-      assertTarMetadataSize(data, path, entryCount, "GNU long-name");
-      nextLongName = validateArchivePath(
-        trimNulls(data.toString("utf8")).replace(/\n$/, ""),
-        path,
-        entryCount,
-      );
-      continue;
-    }
-    if (typeFlag === "x") {
-      assertTarMetadataSize(data, path, entryCount, "PAX");
-      nextPaxHeaders = readPaxHeaders(data, path, entryCount);
-      if (nextPaxHeaders.path != null) {
-        nextPaxHeaders.path = validateArchivePath(
-          nextPaxHeaders.path,
-          path,
-          entryCount,
-        );
-      }
-      continue;
-    }
-    if (typeFlag === "g") {
-      assertTarMetadataSize(data, path, entryCount, "global PAX");
-      readPaxHeaders(data, path, entryCount);
-      continue;
-    }
-
-    const name = validateArchivePath(
-      nextPaxHeaders?.path || nextLongName || readTarPath(header),
-      path,
-      entryCount,
-    );
-    nextLongName = null;
-    nextPaxHeaders = null;
-
-    if (typeFlag !== "0" && typeFlag !== "\0") continue;
-    sourceBytes += size;
-    if (
-      !Number.isSafeInteger(sourceBytes) ||
-      sourceBytes > MAX_ARCHIVE_TOTAL_SIZE_BYTES
-    ) {
+    if (archive.length / archiveInput.length > MAX_ARCHIVE_COMPRESSION_RATIO) {
       throw new RangeError(
-        `${path} source data exceeds the ${MAX_ARCHIVE_TOTAL_SIZE_BYTES}-byte archive limit.`,
+        `${path} exceeds the supported archive compression ratio of ${MAX_ARCHIVE_COMPRESSION_RATIO}:1.`,
       );
     }
-
-    const entryPath = normalizeArchivePath(name);
-    if (entryPath && !isArchiveMetadataPath(entryPath)) {
-      layers.push({
-        source: data.toString("utf8"),
-        name: `${basename(path)}:${entryPath}`,
-        __archiveEntryPath: entryPath,
-      });
-    }
   }
 
-  if (!foundEndMarker) {
-    const trailingBytes = archive.length - offset;
-    throw new Error(
-      `${path} is a truncated TAR archive (missing end marker${trailingBytes ? `; ${trailingBytes} trailing bytes` : ""}).`,
-    );
-  }
-  if (nextLongName != null || nextPaxHeaders != null) {
-    throw new Error(`${path} ends with TAR metadata that has no following entry.`);
-  }
-
-  return layers;
+  return parseTar(archive, {
+    archiveName: path,
+    maxEntryCount: MAX_ARCHIVE_ENTRY_COUNT,
+    requireEndMarker: true,
+    rejectTrailingBytes: true,
+  }).map(({ path: entryPath, bytes }) => ({
+    source: Buffer.from(
+      bytes.buffer,
+      bytes.byteOffset,
+      bytes.byteLength,
+    ).toString("utf8"),
+    name: `${basename(path)}:${entryPath}`,
+    __archiveEntryPath: entryPath,
+  }));
 }
 
-function isTarGzPath(path) {
+function isArchivePath(path) {
   const lowerPath = path.toLowerCase();
-  return TAR_GZ_EXTENSIONS.some((extension) => lowerPath.endsWith(extension));
+  return ARCHIVE_EXTENSIONS.some((extension) => lowerPath.endsWith(extension));
 }
 
-function isArchiveMetadataPath(path) {
-  const normalizedPath = normalizeArchivePath(path);
-  const fileName = normalizedPath.split("/").pop() ?? normalizedPath;
-  return normalizedPath.startsWith("__MACOSX/") || fileName.startsWith("._");
+function isZipArchivePath(path) {
+  return String(path).toLowerCase().endsWith(".zip");
 }
 
-function readTarPath(header) {
-  const name = readTarString(header, 0, 100);
-  const prefix = readTarString(header, 345, 155);
-  return prefix ? `${prefix}/${name}` : name;
+function isGzipBuffer(bytes) {
+  return bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 }
 
-function readTarString(buffer, start, length) {
-  return trimNulls(buffer.subarray(start, start + length).toString("utf8"));
-}
-
-function readTarSize(buffer, start, length, archivePath, entryCount) {
-  const field = buffer.subarray(start, start + length);
-  if ((field[0] & 0x80) !== 0) {
-    throw new Error(
-      `${archivePath} TAR entry ${entryCount} uses an unsupported base-256 size.`,
-    );
-  }
-  const value = trimTarNumericField(field);
-  if (!value) return 0;
-  if (!/^[0-7]+$/.test(value)) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} has an invalid size.`);
-  }
-  const size = Number.parseInt(value, 8);
-  if (!Number.isSafeInteger(size) || size < 0) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} has an unsafe size.`);
-  }
-  return size;
-}
-
-function readPaxHeaders(data, archivePath, entryCount) {
-  const headers = Object.create(null);
-  let offset = 0;
-
-  while (offset < data.length) {
-    const spaceIndex = data.indexOf(0x20, offset);
-    if (spaceIndex < 0) {
-      throw new Error(`${archivePath} TAR entry ${entryCount} has malformed PAX data.`);
-    }
-
-    const lengthText = data.subarray(offset, spaceIndex).toString("ascii");
-    if (!/^[1-9][0-9]*$/.test(lengthText)) {
-      throw new Error(`${archivePath} TAR entry ${entryCount} has malformed PAX data.`);
-    }
-    const recordLength = Number.parseInt(lengthText, 10);
-    const recordEnd = offset + recordLength;
-    if (
-      !Number.isSafeInteger(recordLength) ||
-      recordLength <= spaceIndex - offset + 2 ||
-      recordEnd > data.length ||
-      data[recordEnd - 1] !== 0x0a
-    ) {
-      throw new Error(`${archivePath} TAR entry ${entryCount} has malformed PAX data.`);
-    }
-
-    const record = data
-      .subarray(spaceIndex + 1, recordEnd - 1)
-      .toString("utf8");
-    const equalsIndex = record.indexOf("=");
-    if (equalsIndex <= 0) {
-      throw new Error(`${archivePath} TAR entry ${entryCount} has malformed PAX data.`);
-    }
-    headers[record.slice(0, equalsIndex)] = record.slice(equalsIndex + 1);
-    offset = recordEnd;
-  }
-
-  return headers;
-}
-
-function readPaxSize(value, archivePath, entryCount) {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} has an invalid PAX size.`);
-  }
-  const size = Number(value);
-  if (!Number.isSafeInteger(size) || size < 0) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} has an unsafe PAX size.`);
-  }
-  return size;
-}
-
-function validateTarHeaderChecksum(header, archivePath, entryCount) {
-  const expectedText = trimTarNumericField(header.subarray(148, 156));
-  if (!/^[0-7]+$/.test(expectedText)) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} has an invalid checksum.`);
-  }
-  const expected = Number.parseInt(expectedText, 8);
-  let actual = 0;
-  for (let index = 0; index < header.length; index += 1) {
-    actual += index >= 148 && index < 156 ? 0x20 : header[index];
-  }
-  if (actual !== expected) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} failed its checksum.`);
-  }
-}
-
-function trimTarNumericField(field) {
-  return field.toString("ascii").replace(/^[\0 ]+|[\0 ]+$/g, "");
-}
-
-function assertTarMetadataSize(data, archivePath, entryCount, kind) {
-  if (data.length > MAX_ARCHIVE_METADATA_SIZE_BYTES) {
-    throw new RangeError(
-      `${archivePath} TAR entry ${entryCount} ${kind} metadata exceeds ${MAX_ARCHIVE_METADATA_SIZE_BYTES} bytes.`,
-    );
-  }
-}
-
-function validateArchivePath(value, archivePath, entryCount) {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    /[\u0000-\u001f\u007f]/u.test(value)
-  ) {
-    throw new Error(`${archivePath} TAR entry ${entryCount} has an invalid path.`);
-  }
-  if (Buffer.byteLength(value, "utf8") > MAX_ARCHIVE_PATH_SIZE_BYTES) {
-    throw new RangeError(
-      `${archivePath} TAR entry ${entryCount} path exceeds ${MAX_ARCHIVE_PATH_SIZE_BYTES} bytes.`,
-    );
-  }
-  return value;
-}
-
-function normalizeArchivePath(path) {
-  return path.replaceAll("\\", "/").replace(/^\.\//, "");
-}
-
-function trimNulls(value) {
-  const nullIndex = value.indexOf("\0");
-  return nullIndex >= 0 ? value.slice(0, nullIndex) : value;
-}
-
-function isZeroBlock(buffer) {
-  return buffer.every((byte) => byte === 0);
+function looksLikeOdbArchive(layers) {
+  return layers.some((layer) =>
+    /(?:^|\/)matrix\/matrix(?:\.z|\.gz)?$/i.test(
+      String(layer?.__archiveEntryPath ?? ""),
+    ),
+  );
 }
 
 async function readStableRegularFile(path, maxBytes, label) {

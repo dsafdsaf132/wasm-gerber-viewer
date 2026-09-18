@@ -1,6 +1,6 @@
 ---
 name: wasm-gerber-renderer
-description: Use when rendering Gerber/RS-274X PCB files to a browser canvas or PNG with the wasm-gerber-renderer npm package, including CLI, Node.js, and browser usage.
+description: Use when rendering Gerber/RS-274X PCB files and Node/CLI ODB++ job archives to a browser canvas or PNG with the wasm-gerber-renderer npm package.
 ---
 
 # wasm-gerber-renderer
@@ -53,10 +53,10 @@ gerber-renderer top.gbr bottom.gbr mask.gbr \
   --composite-mode blend
 ```
 
-Render an archive:
+Render an ODB++ job (`.zip`, `.tar`, `.tgz`, or `.tar.gz`):
 
 ```bash
-gerber-renderer board-gerbers.tar.gz --width 1600 --height 1000
+gerber-renderer board.tgz --width 1600 --height 1000
 ```
 
 Useful CLI options:
@@ -85,11 +85,12 @@ Useful CLI options:
 - `--no-fit` disables automatic fit-to-view.
 - `--skill` prints package usage notes for AI agents.
 
-CLI Gerber/drill inputs and compressed archive files are capped at 300 MiB;
-composite JSON is capped at 16 MiB. TAR archives are limited to 1,000 headers,
-300 MiB total regular-file data, 300 MiB per entry, a 1,000:1 overall expansion
-ratio, 1 MiB metadata records, and 4 KiB paths. Treat malformed/truncated or
-over-limit archives as fatal input errors; do not retry them.
+CLI Gerber/drill inputs and ODB++ job archives are capped at 300 MiB; composite
+JSON is capped at 16 MiB. Ordinary TAR archives are limited to 1,000 headers;
+ODB++ jobs may contain 20,000 entries for symbol libraries. Both use the same
+300 MiB total regular-file, 300 MiB per-entry, 1,000:1 expansion-ratio, 1 MiB
+metadata-record, and 4 KiB path limits. Treat malformed/truncated or over-limit
+archives as fatal input errors; do not retry them.
 
 The CLI renders valid layers and skips invalid inputs such as non-Gerber files in archives. If every layer fails, it exits with an error.
 
@@ -99,6 +100,25 @@ If a single input omits `--output`, generic Gerber extensions such as `.gbr`, `.
 
 Use the `/node` entrypoint. A plain string source is Gerber file content, not a file path. Use `fileLayer()`, `{ path }`, or a `file:` URL for filesystem input.
 Filesystem sources are capped at 300 MiB and must be regular files.
+
+For a local ODB++ job archive, load the generated Gerber/drill records before a
+frame. `loadOdbJobLayers()` initializes WASM for `.Z` members; the instance
+method reuses an existing renderer's WASM module.
+
+```js
+import { createNodeGerberRenderer } from "wasm-gerber-renderer/node";
+
+const renderer = await createNodeGerberRenderer();
+try {
+  const layers = await renderer.loadOdbJob("board.tgz");
+  await renderer.withFrame({ width: 1600, height: 1000 }, async () => {
+    await renderer.renderLayers(layers);
+  });
+  await renderer.exportPngFile("board.png");
+} finally {
+  renderer.dispose();
+}
+```
 
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";

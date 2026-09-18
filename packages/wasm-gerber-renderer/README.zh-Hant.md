@@ -14,7 +14,7 @@
 
 - 在瀏覽器 canvas 中渲染 Gerber 內容字串、`File`、`Blob`、`ArrayBuffer` 或 `Uint8Array`
 - 透過無介面的 WebGL2 上下文在 Node.js 中渲染 PNG，並支援直接輸出到檔案或串流
-- 將 Gerber 檔案或 `.tar.gz`/`.tgz` 壓縮檔渲染為 PNG 的 `gerber-renderer` CLI
+- 將 Gerber 檔案、TAR 封存檔與 ODB++ `.zip`/`.tar`/`.tgz`/`.tar.gz` 作業渲染為 PNG 的 `gerber-renderer` CLI
 - 打包時產生並內建的 `wasm-bindgen` 輸出
 
 瀏覽器進入點使用呼叫方提供的 WebGL2 canvas。Node.js 進入點使用同一個 WASM/WebGL 渲染器，並預設透過 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2) 建立原生 WebGL2 上下文。
@@ -214,6 +214,10 @@ type CompositeLayerOptions = {
 透過 `fileLayer()`、`{ path }` 或 `file:` URL 傳入的檔案系統來源必須是
 不超過 300 MiB 的一般檔案。
 
+Node ODB++ 作業支援 `.zip`、`.tar`、`.tgz` 與 `.tar.gz` 封存檔。`loadOdbJobLayers()`
+或 `renderer.loadOdbJob()` 會把選取的 board step 轉為一般 Gerber/drill 圖層記錄；
+需要時會使用 WASM `.Z` 解碼器。
+
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";
 
@@ -243,9 +247,11 @@ await renderGerberToPngFile(
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`：一次呼叫即可批次渲染，把 PNG 位元組資料寫入暫存檔，成功後替換 `outputPath`。父目錄必須已存在。
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`：一次呼叫即可批次渲染，把 PNG 資料區塊寫入 Node 可寫串流。
 - `fileLayer(path, options)`：建立基於路徑的 Node 圖層設定。`options` 接受 `name`、`color`、`alpha`、`visible`、`offsetX`、`offsetY`、`inverted`、`kind`。
+- `loadOdbJobLayers(path, options)`：讀取本機 ODB++ `.zip`、`.tar`、`.tgz` 或 `.tar.gz` 作業，並回傳一般 Gerber/drill 圖層記錄。
 - `packageRoot()`：回傳已安裝套件的目錄路徑。
 - `renderer.loadLayer(layer, layerOptions)`：解析一個 Node 圖層，並回傳可跨渲染幀重複使用的預載圖層。僅在使用 `renderDrills: false` 主動略過鑽孔輸入時回傳 `null`。
 - `renderer.loadLayers(layers, options)`：解析多個圖層，並回傳 `{ layers, loadedCount, failures }`。失敗的圖層預設會被跳過。
+- `renderer.loadOdbJob(path, options)`：使用已初始化 renderer 的 WASM 模組讀取本機 ODB++ `.zip`、`.tar`、`.tgz` 或 `.tar.gz` 作業。須在 `withFrame()` 外呼叫，結果可傳給 `renderLayers()` 或 `loadLayers()`。
 - `renderer.withFrame(frameOptions, callback)`：開始無介面渲染幀，並在回呼函式結束後儲存渲染出的像素資料。
 - `renderer.renderLayer(layer, layerOptions)`：向目前渲染幀加入一個圖層，並回傳數值型圖層 ID；使用 `renderDrills: false` 主動略過鑽孔時回傳 `null`。必須在 `withFrame()` 內呼叫；這是嚴格介面，失敗時會以該錯誤 reject。
 - `renderer.renderCompositeLayer(sourceLayerIds, options)`：組合目前幀中的 2–24 個 Gerber ID。必須先加入來源圖層，並在 `withFrame()` 內呼叫。
@@ -463,7 +469,7 @@ gerber-renderer top.gbr bottom.gbr \
 壓縮檔範例：
 
 ```bash
-gerber-renderer board-gerbers.tar.gz \
+gerber-renderer board.tgz \
   --width 1600 \
   --height 1000 \
   --background '#05070c'
@@ -471,7 +477,7 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI 選項：
 
-- `<input...>`：一個或多個 Gerber/drill 檔案，或 `.tar.gz`/`.tgz` 壓縮檔。Gerber 輸入會按參數順序渲染；drill 輸入會作為覆蓋在 Gerber 圖層之上的疊加層渲染。
+- `<input...>`：一個或多個 Gerber/drill 檔案、一般 TAR 封存檔或 ODB++ `.zip`/`.tar`/`.tar.gz`/`.tgz` 作業。Gerber 輸入會按參數順序渲染；drill 輸入會作為覆蓋在 Gerber 圖層之上的疊加層渲染。
 - `-o, --output <path>`：PNG 輸出路徑。多個輸入時必填。父目錄必須已存在。
 - `--width <px>`：輸出寬度。預設 `1200`。
 - `--height <px>`：輸出高度。預設 `800`。
@@ -497,11 +503,11 @@ CLI 選項：
 - `--skill`：列印面向 AI agent 的[套件使用說明](SKILL.md)。
 - `-h, --help`：列印 CLI 用法並結束。
 
-CLI Gerber/drill 輸入與壓縮檔各自限制為 300 MiB，複合 JSON 限制為
-16 MiB。一個 TAR 壓縮檔最多可包含 1,000 個標頭與總計 300 MiB 的一般
-檔案資料；單一項目上限為 300 MiB，整體解壓縮比例上限為 1,000:1。
-每個 TAR metadata 標頭限制為 1 MiB，壓縮檔路徑限制為 4 KiB；格式錯誤
-或遭截斷的壓縮檔會在渲染前失敗。
+CLI Gerber/drill 輸入與 ODB++ 作業封存檔各自限制為 300 MiB，複合 JSON 限制為
+16 MiB。一般 TAR 封存檔最多可包含 1,000 個標頭；ODB++ 作業為 symbol library
+最多可包含 20,000 個項目。兩者都限制為總一般檔案資料 300 MiB、單一項目
+300 MiB 與 1,000:1 整體解壓縮比例。每個 TAR metadata 標頭限制為 1 MiB，
+封存檔路徑限制為 4 KiB；格式錯誤或遭截斷的封存檔會在渲染前失敗。
 
 `--arc-quality` 主要在與 `--approx-region-arcs` 一起使用時有意義。取值 `0`、`1`、`2` 分別對應 low、normal、high。
 

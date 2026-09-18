@@ -14,7 +14,7 @@
 
 - Gerber 소스 문자열, `File`, `Blob`, `ArrayBuffer`, `Uint8Array` 입력을 브라우저 canvas에 렌더링
 - headless WebGL2 context를 통한 Node.js PNG 렌더링과 파일/스트림 직접 출력
-- Gerber 파일 또는 `.tar.gz`/`.tgz` 압축 파일을 PNG로 렌더링하는 `gerber-renderer` CLI
+- Gerber 파일, TAR archive, ODB++ `.zip`/`.tar`/`.tgz`/`.tar.gz` job을 PNG로 렌더링하는 `gerber-renderer` CLI
 - 패키징 과정에서 생성되어 함께 포함되는 `wasm-bindgen` 출력물
 
 브라우저 진입점은 호출자가 제공한 WebGL2 canvas를 사용합니다. Node.js 진입점은 같은 WASM/WebGL 렌더러를 사용하며, 기본 네이티브 WebGL2 context 제공자로 [`node-gles-webgl2`](https://github.com/dsafdsaf132/node-gles-webgl2)를 사용합니다.
@@ -214,6 +214,10 @@ Node.js 진입점을 사용하기 전에 `node-gles-webgl2`를 설치하세요. 
 `fileLayer()`, `{ path }`, `file:` URL로 전달하는 filesystem source는 300 MiB
 이하의 regular file이어야 합니다.
 
+Node ODB++ job은 `.zip`, `.tar`, `.tgz`, `.tar.gz` archive를 지원합니다.
+`loadOdbJobLayers()` 또는 `renderer.loadOdbJob()`이 선택된 board step을 일반
+Gerber/drill layer record로 변환하며, 필요한 경우 WASM `.Z` decoder를 사용합니다.
+
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";
 
@@ -243,9 +247,11 @@ await renderGerberToPngFile(
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG 바이트를 임시 파일에 스트리밍한 뒤 성공하면 `outputPath`를 교체합니다. 상위 directory는 미리 존재해야 합니다.
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: 한 번에 배치 렌더링하고 PNG chunk를 Node writable stream에 씁니다.
 - `fileLayer(path, options)`: path 기반 Node layer config를 만듭니다. `options`는 `name`, `color`, `alpha`, `visible`, `offsetX`, `offsetY`, `inverted`, `kind`를 받습니다.
+- `loadOdbJobLayers(path, options)`: local ODB++ `.zip`, `.tar`, `.tgz`, `.tar.gz` job을 일반 Gerber/drill layer record로 읽습니다.
 - `packageRoot()`: 설치된 패키지 directory 경로를 반환합니다.
 - `renderer.loadLayer(layer, layerOptions)`: Node layer 하나를 한 번 파싱하고 여러 frame에서 재사용할 수 있는 prepared layer를 반환합니다. `renderDrills: false`로 drill을 의도적으로 건너뛸 때만 `null`을 반환합니다.
 - `renderer.loadLayers(layers, options)`: 여러 layer를 파싱하고 `{ layers, loadedCount, failures }`를 반환합니다. 실패한 layer는 기본적으로 건너뜁니다.
+- `renderer.loadOdbJob(path, options)`: 초기화된 renderer의 WASM module로 local ODB++ `.zip`, `.tar`, `.tgz`, `.tar.gz` job을 읽습니다. `withFrame()` 밖에서 호출하고 결과를 `renderLayers()` 또는 `loadLayers()`에 전달합니다.
 - `renderer.withFrame(frameOptions, callback)`: headless render frame을 시작하고 callback이 끝난 뒤 렌더링된 pixel을 저장합니다.
 - `renderer.renderLayer(layer, layerOptions)`: 활성 frame에 layer 하나를 추가하고 숫자 layer ID를 반환합니다. `renderDrills: false`로 drill을 의도적으로 건너뛰면 `null`을 반환합니다. 반드시 `withFrame()` 안에서 호출해야 하며, 이 엄격 API는 실패 시 Promise를 reject합니다.
 - `renderer.renderCompositeLayer(sourceLayerIds, options)`: 현재 frame의 Gerber ID 2–24개를 조합한 composite를 추가합니다. Source를 먼저 추가한 뒤 `withFrame()` 안에서 호출해야 합니다.
@@ -468,7 +474,7 @@ gerber-renderer top.gbr bottom.gbr \
 Archive 예시:
 
 ```bash
-gerber-renderer board-gerbers.tar.gz \
+gerber-renderer board.tgz \
   --width 1600 \
   --height 1000 \
   --background '#05070c'
@@ -476,7 +482,7 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI 옵션:
 
-- `<input...>`: 하나 이상의 Gerber/drill 파일 또는 `.tar.gz`/`.tgz` 압축 파일입니다. Gerber 입력은 argument 순서대로 렌더링되고, drill 입력은 Gerber layer 위의 overlay로 렌더링됩니다.
+- `<input...>`: 하나 이상의 Gerber/drill 파일, 일반 TAR archive 또는 ODB++ `.zip`/`.tar`/`.tar.gz`/`.tgz` job입니다. Gerber 입력은 argument 순서대로 렌더링되고, drill 입력은 Gerber layer 위의 overlay로 렌더링됩니다.
 - `-o, --output <path>`: PNG output path입니다. 여러 input을 사용할 때는 필수입니다. 상위 directory는 미리 존재해야 합니다.
 - `--width <px>`: 출력 너비입니다. 기본값은 `1200`입니다.
 - `--height <px>`: 출력 높이입니다. 기본값은 `800`입니다.
@@ -503,12 +509,12 @@ CLI 옵션:
 - `--skill`: AI agent를 위한 [package usage notes](SKILL.md)를 출력합니다.
 - `-h, --help`: CLI 사용법을 출력하고 종료합니다.
 
-CLI Gerber/drill input과 압축 archive 파일은 각각 300 MiB, composite JSON은
-16 MiB로 제한됩니다. TAR archive는 최대 1,000개 header와 총 300 MiB의
-regular-file data를 포함할 수 있으며, entry별 한도는 300 MiB이고 전체
-압축 해제 비율 한도는 1,000:1입니다. TAR metadata는 header별 1 MiB,
-archive path는 4 KiB로 제한되며 malformed 또는 truncated archive는 렌더링
-전에 오류로 처리됩니다.
+CLI Gerber/drill input과 ODB++ job archive는 각각 300 MiB, composite JSON은
+16 MiB로 제한됩니다. 일반 TAR archive는 최대 1,000개 header, ODB++ job은
+symbol library를 위해 최대 20,000개 entry를 포함할 수 있습니다. 둘 다 총
+regular-file data 300 MiB, entry별 300 MiB, 전체 압축 해제 비율 1,000:1로
+제한됩니다. TAR metadata는 header별 1 MiB, archive path는 4 KiB로 제한되며
+malformed 또는 truncated archive는 렌더링 전에 오류로 처리됩니다.
 
 `--arc-quality`는 `--approx-region-arcs`와 함께 사용할 때 의미가 있습니다. Quality 값은 `0` low, `1` normal, `2` high입니다.
 

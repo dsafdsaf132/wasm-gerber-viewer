@@ -14,7 +14,7 @@ The package provides:
 
 - Browser canvas rendering from Gerber source strings, `File`, `Blob`, `ArrayBuffer`, or `Uint8Array` inputs
 - Node.js PNG rendering through a headless WebGL2 context, including direct file/stream output
-- A `gerber-renderer` CLI for rendering Gerber files or `.tar.gz`/`.tgz` archives to PNG
+- A `gerber-renderer` CLI for rendering Gerber files, TAR archives, and ODB++ `.zip`/`.tar`/`.tgz`/`.tar.gz` jobs to PNG
 - Bundled `wasm-bindgen` output generated during packaging
 
 The browser entrypoint uses the caller's WebGL2 canvas. The Node.js entrypoint
@@ -232,6 +232,11 @@ x64/arm64, macOS arm64/x64, and Windows x64/arm64.
 Filesystem sources passed with `fileLayer()`, `{ path }`, or a `file:` URL are
 limited to 300 MiB and must be regular files.
 
+Node ODB++ job input is available for `.zip`, `.tar`, `.tgz`, and `.tar.gz` archives.
+`loadOdbJobLayers()` creates ordinary Gerber/drill layer records; it reads the
+job matrix and selected board step, keeps ODB++ feature text in its native
+envelope format, and uses the bundled WASM `.Z` decoder when needed.
+
 ```js
 import { fileLayer, renderGerberToPngFile } from "wasm-gerber-renderer/node";
 
@@ -254,6 +259,21 @@ await renderGerberToPngFile(
 );
 ```
 
+```js
+import { createNodeGerberRenderer } from "wasm-gerber-renderer/node";
+
+const renderer = await createNodeGerberRenderer();
+try {
+  const layers = await renderer.loadOdbJob("board.tgz");
+  await renderer.withFrame({ width: 1600, height: 1000, padding: 24 }, async () => {
+    await renderer.renderLayers(layers);
+  });
+  await renderer.exportPngFile("board.png");
+} finally {
+  renderer.dispose();
+}
+```
+
 ## Node.js API
 
 - `createNodeGerberRenderer(rendererOptions)`: creates a reusable headless renderer backed by a native WebGL2/GLES context.
@@ -261,9 +281,11 @@ await renderGerberToPngFile(
 - `renderGerberToPngFile(outputPath, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that streams PNG bytes to a temporary file, then replaces `outputPath` after success. Parent directories must already exist.
 - `renderGerberToPngStream(writable, layers, frameOptions, exportOptions, rendererOptions)`: one-shot batch render that writes PNG chunks to a Node writable stream.
 - `fileLayer(path, options)`: creates a path-backed Node layer config. `options` accepts `name`, `color`, `alpha`, `visible`, `offsetX`, `offsetY`, `inverted`, and `kind`.
+- `loadOdbJobLayers(path, options)`: reads a local ODB++ `.zip`, `.tar`, `.tgz`, or `.tar.gz` job and returns ordinary Gerber/drill layer records.
 - `packageRoot()`: returns the installed package directory path.
 - `renderer.loadLayer(layer, layerOptions)`: parses a Node layer once and returns a prepared layer that can be reused across frames. It returns `null` only when a drill is intentionally skipped with `renderDrills: false`.
 - `renderer.loadLayers(layers, options)`: parses multiple layers and returns `{ layers, loadedCount, failures }`. Failed layers are skipped by default.
+- `renderer.loadOdbJob(path, options)`: reads a local ODB++ `.zip`, `.tar`, `.tgz`, or `.tar.gz` job using this renderer's initialized WASM module. Call it outside `withFrame()`; its result can be passed to `renderLayers()` or `loadLayers()`.
 - `renderer.withFrame(frameOptions, callback)`: starts a headless render frame and stores rendered pixels after the callback resolves.
 - `renderer.renderLayer(layer, layerOptions)`: adds one layer to the active frame and returns its numeric layer ID, or `null` when a drill is intentionally skipped by `renderDrills: false`. Must be called inside `withFrame()`. This strict API rejects on failure.
 - `renderer.renderCompositeLayer(sourceLayerIds, options)`: adds a composite over 2–24 current-frame Gerber IDs. Must be called inside `withFrame()` after its sources.
@@ -504,7 +526,7 @@ gerber-renderer top.gbr bottom.gbr \
 Archive example:
 
 ```bash
-gerber-renderer board-gerbers.tar.gz \
+gerber-renderer board.tgz \
   --width 1600 \
   --height 1000 \
   --background '#05070c'
@@ -512,7 +534,7 @@ gerber-renderer board-gerbers.tar.gz \
 
 CLI options:
 
-- `<input...>`: one or more Gerber/drill files or `.tar.gz`/`.tgz` archives. Gerber inputs render in argument order; drill inputs render as overlays above Gerber layers.
+- `<input...>`: one or more Gerber/drill files, ordinary TAR archives, or ODB++ `.zip`/`.tar`/`.tar.gz`/`.tgz` jobs. Gerber inputs render in argument order; drill inputs render as overlays above Gerber layers.
 - `-o, --output <path>`: PNG output path. Required for multiple inputs. Parent directories must already exist.
 - `--width <px>`: output width. Defaults to `1200`.
 - `--height <px>`: output height. Defaults to `800`.
@@ -539,12 +561,13 @@ CLI options:
 - `--skill`: prints [package usage notes](SKILL.md) for AI agents.
 - `-h, --help`: prints CLI usage and exits.
 
-CLI Gerber/drill inputs and compressed archive files are limited to 300 MiB
-each, and composite JSON is limited to 16 MiB. A TAR archive may contain at
-most 1,000 headers and 300 MiB of regular-file data, with at most 300 MiB per
-entry and a 1,000:1 overall expansion ratio. TAR metadata is limited to 1 MiB
-per header and archive paths to 4 KiB; malformed or truncated archives fail
-before rendering.
+CLI Gerber/drill inputs and ODB++ job archives are limited to 300 MiB each,
+and composite JSON is limited to 16 MiB. Ordinary TAR archives may contain at
+most 1,000 headers; ODB++ jobs may contain 20,000 entries for symbol libraries,
+while both remain limited to 300 MiB of regular-file data, 300 MiB per entry,
+and a 1,000:1 overall expansion ratio. TAR metadata is limited to 1 MiB per
+header and archive paths to 4 KiB; malformed or truncated archives fail before
+rendering.
 
 `--arc-quality` is used only with `--approx-region-arcs`. Quality values are
 `0` for low, `1` for normal, and `2` for high.
