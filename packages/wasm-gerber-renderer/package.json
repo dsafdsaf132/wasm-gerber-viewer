@@ -50,9 +50,10 @@
     "postpack": "npm run clean:wasm && npm run clean:odb",
     "stage:odb": "node scripts/stage-odb.mjs",
     "clean:odb": "node scripts/clean-odb.mjs",
-    "test": "npm run stage:odb && node --test --test-concurrency=1 test/*.test.mjs",
+    "test:unit": "node --test --test-concurrency=1 test/*.test.mjs",
+    "test": "npm run stage:odb && npm run test:unit",
     "prepublishOnly": "npm run check",
-    "check": "npm run stage:odb && node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs && node --check scripts/stage-odb.mjs && node --check scripts/clean-odb.mjs && node --check scripts/benchmark-composite-4k.mjs && tsc -p test/types/tsconfig.json && npm test",
+    "check": "npm run stage:odb && node --check index.js && node --check node.js && node --check shared.js && node --check bin/wasm-gerber-renderer.js && node --check scripts/stage-wasm.mjs && node --check scripts/clean-wasm.mjs && node --check scripts/stage-odb.mjs && node --check scripts/clean-odb.mjs && node --check scripts/benchmark-composite-4k.mjs && tsc -p test/types/tsconfig.json && npm run test:unit",
     "verify:publish": "npm run check && npm pack --dry-run"
   },
   "license": "MIT",
