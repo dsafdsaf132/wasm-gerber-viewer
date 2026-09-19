@@ -1150,7 +1150,7 @@ impl Renderer {
     /// Add a new layer with parsed Gerber data
     /// Returns the layer index (layer_id)
     pub fn add_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
-        self.add_layer_with_mask_format(gerber_data, false)
+        self.add_layer_with_mask_format(gerber_data, true)
     }
 
     fn add_internal_mask_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
@@ -1211,6 +1211,9 @@ impl Renderer {
             Self::create_fbo(&self.gl, width, height, needs_stencil)?
         };
 
+        // R8 allocation may have fallen back to RGBA8. Keep the sampling and
+        // polarity mode coupled to the format that was actually created.
+        let actual_mask_in_red = fbo.color_format == "R8";
         let layer_metadata = LayerMetadata {
             gerber_data,
             fbo,
@@ -1223,7 +1226,7 @@ impl Renderer {
             inner_outline_world: 0.0,
             cpu_geometry_released: false,
             has_path_regions: needs_stencil,
-            mask_in_red,
+            mask_in_red: actual_mask_in_red,
         };
 
         // Find next free slot or extend vec
@@ -2910,13 +2913,14 @@ impl Renderer {
             return Err(JsValue::from_str("Layer boundary is not finite"));
         }
 
-        let fbo = match Self::create_fbo(&self.gl, width, height, needs_stencil) {
+        let fbo = match Self::create_red_mask_fbo(&self.gl, width, height, needs_stencil) {
             Ok(fbo) => fbo,
             Err(error) => {
                 Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
                 return Err(error);
             }
         };
+        let mask_in_red = fbo.color_format == "R8";
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -2930,7 +2934,9 @@ impl Renderer {
             inner_outline_world: 0.0,
             cpu_geometry_released: true,
             has_path_regions: needs_stencil,
-            mask_in_red: false,
+            // `create_red_mask_fbo` falls back to RGBA8 when R8 attachments
+            // are unsupported, so derive this from the actual allocation.
+            mask_in_red,
         };
 
         if let Some(free_slot) = self.layers.iter().enumerate().position(|(index, layer)| {
@@ -5314,8 +5320,17 @@ impl Renderer {
         if error == WebGl2RenderingContext::NO_ERROR {
             Ok(())
         } else {
+            let cause = if gl.is_context_lost() {
+                " (WebGL context lost)"
+            } else if operation == "bufferData"
+                && error == WebGl2RenderingContext::OUT_OF_MEMORY
+            {
+                " (GPU allocation out of memory)"
+            } else {
+                ""
+            };
             Err(JsValue::from_str(&format!(
-                "WebGL {operation} failed with error 0x{error:x}"
+                "WebGL {operation} failed with error 0x{error:x}{cause}"
             )))
         }
     }
@@ -5605,7 +5620,12 @@ impl Renderer {
     }
 
     /// Draw a specific FBO texture to the current framebuffer
-    fn draw_fbo_texture(&self, texture: &WebGlTexture, color: &[f32; 4]) -> Result<(), JsValue> {
+    fn draw_fbo_texture(
+        &self,
+        texture: &WebGlTexture,
+        color: &[f32; 4],
+        mask_is_red: bool,
+    ) -> Result<(), JsValue> {
         let program = &self.programs.texture;
         self.gl.use_program(Some(&program.program));
         self.bind_fullscreen_quad(program)?;
@@ -5616,6 +5636,10 @@ impl Renderer {
         self.gl.uniform1i(program.uniforms.get("u_texture"), 0);
         self.gl
             .uniform4fv_with_f32_array(program.uniforms.get("u_color"), color);
+        self.gl.uniform1i(
+            program.uniforms.get("u_mask_is_red"),
+            i32::from(mask_is_red),
+        );
 
         self.gl.draw_arrays(TRIANGLES, 0, 6);
 
@@ -9331,7 +9355,7 @@ impl Renderer {
                         continue;
                     }
                 } else if let Some(layer) = self.layers.get(layer_idx).and_then(Option::as_ref) {
-                    self.draw_fbo_texture(&layer.fbo.texture, &color)
+                    self.draw_fbo_texture(&layer.fbo.texture, &color, layer.mask_in_red)
                 } else {
                     continue;
                 };
@@ -9427,11 +9451,12 @@ impl Renderer {
 
         for layer in &self.layers {
             let fbo = match layer {
-                Some(layer) => Some(if layer.mask_in_red {
-                    Self::create_red_mask_fbo(&self.gl, width, height, layer.has_path_regions)?
-                } else {
-                    Self::create_fbo(&self.gl, width, height, layer.has_path_regions)?
-                }),
+                Some(layer) => Some(Self::create_red_mask_fbo(
+                    &self.gl,
+                    width,
+                    height,
+                    layer.has_path_regions,
+                )?),
                 None => None,
             };
             pending_fbos.push(fbo);
@@ -9443,6 +9468,7 @@ impl Renderer {
         }
         for (layer, replacement) in self.layers.iter_mut().zip(replacements) {
             if let (Some(layer), Some(replacement)) = (layer, replacement) {
+                layer.mask_in_red = replacement.color_format == "R8";
                 let old_fbo = std::mem::replace(&mut layer.fbo, replacement);
                 Self::delete_fbo(&self.gl, old_fbo);
                 layer.fbo_dirty = true;
@@ -9528,11 +9554,12 @@ impl Renderer {
         for layer in &self.layers {
             if layer.is_some() {
                 let layer = layer.as_ref().unwrap();
-                pending.fbos.push(Some(if layer.mask_in_red {
-                    Self::create_red_mask_fbo(&gl, width, height, layer.has_path_regions)?
-                } else {
-                    Self::create_fbo(&gl, width, height, layer.has_path_regions)?
-                }));
+                pending.fbos.push(Some(Self::create_red_mask_fbo(
+                    &gl,
+                    width,
+                    height,
+                    layer.has_path_regions,
+                )?));
             } else {
                 pending.fbos.push(None);
             }
@@ -9549,6 +9576,7 @@ impl Renderer {
             self.layers.iter_mut().zip(new_fbos).zip(new_buffer_caches)
         {
             if let (Some(layer), Some(new_fbo), Some(new_caches)) = (layer, new_fbo, new_caches) {
+                layer.mask_in_red = new_fbo.color_format == "R8";
                 let old_fbo = std::mem::replace(&mut layer.fbo, new_fbo);
                 Self::delete_fbo(&old_gl, old_fbo);
 
