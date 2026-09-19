@@ -17,8 +17,8 @@ uniform int u_red_source_mask;
 out highp vec4 fragColor;
 
 bool covered(sampler2D source_texture, ivec2 pixel, int local_slot) {
-    vec4 sample = texelFetch(source_texture, pixel, 0);
-    float coverage = (u_red_source_mask & (1 << local_slot)) != 0 ? sample.r : sample.a;
+    vec4 texel_value = texelFetch(source_texture, pixel, 0);
+    float coverage = (u_red_source_mask & (1 << local_slot)) != 0 ? texel_value.r : texel_value.a;
     return coverage >= 0.5;
 }
 
