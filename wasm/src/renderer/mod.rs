@@ -5564,6 +5564,20 @@ impl Renderer {
         }
     }
 
+    fn mask_source_is_red(&self, source: ResolvedMaskSource) -> Result<bool, JsValue> {
+        match source.kind() {
+            MaskSourceKind::Gerber | MaskSourceKind::InternalOutline => {
+                Ok(self.get_layer(source.layer_id())?.mask_in_red)
+            }
+            MaskSourceKind::Composite => self
+                .composites
+                .get(source.layer_id())
+                .and_then(Option::as_ref)
+                .map(|composite| composite.output_is_r8)
+                .ok_or_else(|| JsValue::from_str("Composite mask source is deallocated")),
+        }
+    }
+
     fn shader_attribute(program: &ShaderProgram, attr_name: &str) -> Result<u32, JsValue> {
         program
             .attributes
@@ -9084,8 +9098,10 @@ impl Renderer {
         };
         let mut source_textures: [Option<WebGlTexture>; MAX_COMPOSITE_SOURCES] =
             std::array::from_fn(|_| None);
+        let mut source_is_red = [false; MAX_COMPOSITE_SOURCES];
         for (index, source) in sources[..source_count].iter().copied().enumerate() {
             source_textures[index] = Some(self.mask_source_texture(source)?);
+            source_is_red[index] = self.mask_source_is_red(source)?;
         }
         let scratch = self
             .membership_scratch
@@ -9124,6 +9140,13 @@ impl Renderer {
                 .chunks(batch_size)
                 .enumerate()
             {
+                let batch_start = batch_index * batch_size;
+                let mut red_source_mask = 0i32;
+                for local_slot in 0..batch.len() {
+                    if source_is_red[batch_start + local_slot] {
+                        red_source_mask |= 1 << local_slot;
+                    }
+                }
                 for local_slot in 0..8usize {
                     let unit = if local_slot < batch.len() {
                         local_slot
@@ -9145,10 +9168,10 @@ impl Renderer {
                 }
                 self.gl
                     .uniform1i(program.uniforms.get("u_source_count"), batch.len() as i32);
-                self.gl.uniform1i(
-                    program.uniforms.get("u_base_slot"),
-                    (batch_index * batch_size) as i32,
-                );
+                self.gl
+                    .uniform1i(program.uniforms.get("u_base_slot"), batch_start as i32);
+                self.gl
+                    .uniform1i(program.uniforms.get("u_red_source_mask"), red_source_mask);
                 self.gl.draw_arrays(TRIANGLES, 0, 6);
                 completed_passes += 1;
             }

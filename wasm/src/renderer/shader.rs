@@ -327,6 +327,7 @@ impl ShaderPrograms {
                 "u_source7",
                 "u_source_count",
                 "u_base_slot",
+                "u_red_source_mask",
             ],
         )?;
         pending.track(&composite_membership);

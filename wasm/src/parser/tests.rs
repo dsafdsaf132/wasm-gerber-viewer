@@ -189,13 +189,14 @@ fn rejects_repeated_arc_region_before_interaction_tessellation() {
         .expect("test arc should be valid");
     let mut state = ParserState::default();
     state.sr_x = MAX_STEP_REPEAT_COPIES as u32;
+    let contours = vec![contour; 4];
 
-    let error = match super::geometry::build_path_regions(&[contour], &state, 2, true, false) {
+    let error = match super::geometry::build_path_regions(&contours, &state, 2, true, false) {
         Ok(_) => panic!("repeated arc region must be rejected before expansion"),
         Err(error) => error,
     };
 
-    assert!(error.contains("path region expands"));
+    assert!(error.contains("path region expands"), "{error}");
     assert_eq!(state.generated_items(), 0);
 }
 
