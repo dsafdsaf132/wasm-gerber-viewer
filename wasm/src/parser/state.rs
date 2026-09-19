@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::mem::take;
 
 pub(crate) const MAX_STEP_REPEAT_COPIES: usize = 100_000;
-pub(crate) const MAX_GENERATED_ITEMS: usize = 10_000_000;
+pub(crate) const MAX_GENERATED_ITEMS: usize = 30_000_000;
 
 /// Polarity - Dark (positive) or Clear (negative)
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -289,7 +289,7 @@ impl ShaderPrograms {
             TEXTURE_VERTEX_SHADER,
             TEXTURE_FRAGMENT_SHADER,
             &["position"],
-            &["u_texture", "u_color"],
+            &["u_texture", "u_color", "u_mask_is_red"],
         )?;
         pending.track(&texture);
 
@@ -327,6 +327,7 @@ impl ShaderPrograms {
                 "u_source7",
                 "u_source_count",
                 "u_base_slot",
+                "u_red_source_mask",
             ],
         )?;
         pending.track(&composite_membership);
