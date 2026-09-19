@@ -343,6 +343,7 @@ impl ShaderPrograms {
                 "u_outline",
                 "u_lookup_width",
                 "u_inverted",
+                "u_outline_is_red",
             ],
         )?;
         pending.track(&composite_lookup);
@@ -352,7 +353,13 @@ impl ShaderPrograms {
             TEXTURE_VERTEX_SHADER,
             COMPOSITE_PREVIEW_FRAGMENT_SHADER,
             &["position"],
-            &["u_membership", "u_lookup", "u_outline", "u_lookup_width"],
+            &[
+                "u_membership",
+                "u_lookup",
+                "u_outline",
+                "u_lookup_width",
+                "u_outline_is_red",
+            ],
         )?;
         pending.track(&composite_preview);
 
@@ -366,6 +373,7 @@ impl ShaderPrograms {
                 "u_outline",
                 "u_selected_code",
                 "u_clip_to_outline",
+                "u_outline_is_red",
             ],
         )?;
         pending.track(&composite_highlight);

@@ -7835,10 +7835,10 @@ impl Renderer {
             .membership_scratch
             .as_ref()
             .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
-        let outline = self.mask_source_texture(ResolvedMaskSource::new(
-            composite.outline_mask_id,
-            MaskSourceKind::InternalOutline,
-        ))?;
+        let outline_source =
+            ResolvedMaskSource::new(composite.outline_mask_id, MaskSourceKind::InternalOutline);
+        let outline_is_red = self.mask_source_is_red(outline_source)?;
+        let outline = self.mask_source_texture(outline_source)?;
         Self::drain_gl_errors(&self.gl);
         Self::bind_draw_target(&self.gl, None);
         self.gl.viewport(0, 0, width as i32, height as i32);
@@ -7866,6 +7866,10 @@ impl Renderer {
         self.gl.uniform1i(
             program.uniforms.get("u_lookup_width"),
             composite.lookup_width,
+        );
+        self.gl.uniform1i(
+            program.uniforms.get("u_outline_is_red"),
+            i32::from(outline_is_red),
         );
         self.gl.draw_arrays(TRIANGLES, 0, 6);
         Self::check_gl_stage(&self.gl, "Composite selection preview rendering")?;
@@ -8057,10 +8061,10 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?
             .texture
             .clone();
-        let outline = self.mask_source_texture(ResolvedMaskSource::new(
-            outline_mask_id,
-            MaskSourceKind::InternalOutline,
-        ))?;
+        let outline_source =
+            ResolvedMaskSource::new(outline_mask_id, MaskSourceKind::InternalOutline);
+        let outline_is_red = self.mask_source_is_red(outline_source)?;
+        let outline = self.mask_source_texture(outline_source)?;
         Self::drain_gl_errors(&self.gl);
         Self::bind_draw_target(&self.gl, None);
         self.gl.viewport(0, 0, width_i32, height_i32);
@@ -8091,6 +8095,10 @@ impl Renderer {
         self.gl.uniform1i(
             program.uniforms.get("u_clip_to_outline"),
             i32::from(inverted || selected_code == 0),
+        );
+        self.gl.uniform1i(
+            program.uniforms.get("u_outline_is_red"),
+            i32::from(outline_is_red),
         );
         self.gl.draw_arrays(TRIANGLES, 0, 6);
         Self::check_gl_stage(&self.gl, "Composite area highlight rendering")?;
@@ -8166,7 +8174,13 @@ impl Renderer {
         let outline_gl_result = Self::check_gl_stage(&self.gl, "Composite outline readback");
         outline_read?;
         outline_gl_result?;
-        Ok(if outline_pixel[0] >= 128 { 0 } else { -1 })
+        Ok(
+            if outline_pixel[usize::from(!outline.mask_in_red) * 3] >= 128 {
+                0
+            } else {
+                -1
+            },
+        )
     }
 
     pub fn get_composite_area_codes(&self, composite_id: usize) -> Result<Vec<u32>, JsValue> {
@@ -8387,6 +8401,8 @@ impl Renderer {
             .fbo
             .framebuffer
             .clone();
+        let outline_channel =
+            usize::from(!self.get_layer(composite.outline_mask_id)?.mask_in_red) * 3;
         if row_count == 0 || start_y >= height {
             return Err(JsValue::from_str(
                 "Composite area scan range is outside the canvas",
@@ -8460,7 +8476,7 @@ impl Renderer {
                 let code = membership[membership_index] as u32
                     | ((membership[membership_index + 1] as u32) << 8)
                     | ((membership[membership_index + 2] as u32) << 16);
-                if code != 0 || outline_pixel[0] >= 128 {
+                if code != 0 || outline_pixel[outline_channel] >= 128 {
                     let code_index = code as usize;
                     present[code_index >> 3] |= 1 << (code_index & 7);
                 }
@@ -9211,10 +9227,10 @@ impl Renderer {
             .membership_scratch
             .as_ref()
             .ok_or_else(|| JsValue::from_str("Composite membership scratch is unavailable"))?;
-        let outline = self.mask_source_texture(ResolvedMaskSource::new(
-            composite.outline_mask_id,
-            MaskSourceKind::InternalOutline,
-        ))?;
+        let outline_source =
+            ResolvedMaskSource::new(composite.outline_mask_id, MaskSourceKind::InternalOutline);
+        let outline_is_red = self.mask_source_is_red(outline_source)?;
+        let outline = self.mask_source_texture(outline_source)?;
         Self::drain_gl_errors(&self.gl);
         Self::bind_draw_target(&self.gl, Some(&output.framebuffer));
         self.gl.viewport(0, 0, width as i32, height as i32);
@@ -9247,6 +9263,10 @@ impl Renderer {
         self.gl.uniform1i(
             program.uniforms.get("u_inverted"),
             i32::from(composite.inverted),
+        );
+        self.gl.uniform1i(
+            program.uniforms.get("u_outline_is_red"),
+            i32::from(outline_is_red),
         );
         self.gl.draw_arrays(TRIANGLES, 0, 6);
         Self::check_gl_stage(&self.gl, "Composite lookup rendering")?;
