@@ -16,7 +16,7 @@ use std::mem::size_of;
 use std::mem::take;
 use std::rc::Rc;
 
-const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 10_000_000;
+const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 30_000_000;
 const PATH_WEDGE_VERTEX_FLOATS: usize = 6;
 const PATH_COVER_VERTEX_FLOATS: usize = 12;
 const PATH_SECTOR_QUAD_VERTICES: usize = 6;
