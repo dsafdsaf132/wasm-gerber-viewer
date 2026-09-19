@@ -1913,8 +1913,8 @@ test(
       processor.resize_to(160, 96);
       diagnostics = processor.get_composite_diagnostics(compositeId);
       assert.equal(wasR8FailureForced(), true);
-      assert.equal(diagnostics.outlineFormat, "RGBA8");
-      assert.equal(diagnostics.sharedOutlineBytes, 160 * 96 * 4);
+      assert.equal(diagnostics.outlineFormat, "R8");
+      assert.equal(diagnostics.sharedOutlineBytes, 160 * 96);
       processor.render_composite_selection(compositeId, 0.05, 0.05, 0, 0);
       assert.equal(processor.pick_composite_code(compositeId, 80, 48), 1);
     }, { r8FailureMode: "unsupported" });
