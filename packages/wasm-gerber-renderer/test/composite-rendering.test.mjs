@@ -1871,7 +1871,7 @@ test(
 );
 
 test(
-  "regular masks fall back to RGBA8 when the first R8 allocation is unsupported",
+  "internal outline masks fall back to RGBA8 when the first R8 allocation is unsupported",
   { skip: !canRender && "release WASM and node-gles-webgl2 are required" },
   async () => {
     await withCompositeProcessor(async ({
@@ -1895,11 +1895,11 @@ test(
       assert.equal(wasR8FailureForced(), true);
       assert.ok(
         rgbaAllocationsAfterR8Failure() >= 1,
-        "the regular mask must retry with an RGBA8 fallback",
+        "the internal outline mask must retry with an RGBA8 fallback",
       );
       let diagnostics = processor.get_composite_diagnostics(compositeId);
-      assert.equal(diagnostics.outlineFormat, "R8");
-      assert.equal(diagnostics.sharedOutlineBytes, 256 * 256);
+      assert.equal(diagnostics.outlineFormat, "RGBA8");
+      assert.equal(diagnostics.sharedOutlineBytes, 256 * 256 * 4);
       processor.render_composite_selection(compositeId, 0.05, 0.05, 0, 0);
       assert.equal(processor.pick_composite_code(compositeId, 128, 128), 1);
 
@@ -1913,8 +1913,8 @@ test(
       processor.resize_to(160, 96);
       diagnostics = processor.get_composite_diagnostics(compositeId);
       assert.equal(wasR8FailureForced(), true);
-      assert.equal(diagnostics.outlineFormat, "R8");
-      assert.equal(diagnostics.sharedOutlineBytes, 160 * 96);
+      assert.equal(diagnostics.outlineFormat, "RGBA8");
+      assert.equal(diagnostics.sharedOutlineBytes, 160 * 96 * 4);
       processor.render_composite_selection(compositeId, 0.05, 0.05, 0, 0);
       assert.equal(processor.pick_composite_code(compositeId, 80, 48), 1);
     }, { r8FailureMode: "unsupported" });
