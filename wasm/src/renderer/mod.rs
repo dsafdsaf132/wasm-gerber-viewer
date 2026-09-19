@@ -2934,7 +2934,7 @@ impl Renderer {
             inner_outline_world: 0.0,
             cpu_geometry_released: true,
             has_path_regions: needs_stencil,
-            // `create_red_mask_fbo` falls back to RGBA8 when R8 attachments
+            // `create_layer_mask_fbo` falls back to RGBA8 when R8 attachments
             // are unsupported, so derive this from the actual allocation.
             mask_in_red,
         };
@@ -4960,7 +4960,13 @@ impl Renderer {
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
-        Self::create_red_mask_fbo_with_fallback_filter(gl, width, height, with_stencil, WebGl2RenderingContext::NEAREST)
+        Self::create_red_mask_fbo_with_fallback_filter(
+            gl,
+            width,
+            height,
+            with_stencil,
+            WebGl2RenderingContext::NEAREST,
+        )
     }
 
     /// General Gerber layers retain their historic linear RGBA fallback while
@@ -4971,7 +4977,13 @@ impl Renderer {
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
-        Self::create_red_mask_fbo_with_fallback_filter(gl, width, height, with_stencil, WebGl2RenderingContext::LINEAR)
+        Self::create_red_mask_fbo_with_fallback_filter(
+            gl,
+            width,
+            height,
+            with_stencil,
+            WebGl2RenderingContext::LINEAR,
+        )
     }
 
     fn create_red_mask_fbo_with_fallback_filter(
@@ -5343,9 +5355,7 @@ impl Renderer {
         } else {
             let cause = if gl.is_context_lost() {
                 " (WebGL context lost)"
-            } else if operation == "bufferData"
-                && error == WebGl2RenderingContext::OUT_OF_MEMORY
-            {
+            } else if operation == "bufferData" && error == WebGl2RenderingContext::OUT_OF_MEMORY {
                 " (GPU allocation out of memory)"
             } else {
                 ""
@@ -7485,8 +7495,8 @@ impl Renderer {
             // Set polarity blending mode
             self.gl.enable(BLEND);
             if mask_in_red && is_negative {
-                // Internal outline masks use R8, so polarity is accumulated in
-                // red rather than alpha. Clear coverage erases destination red.
+                // R8 masks accumulate polarity in red rather than alpha.
+                // Clear coverage erases destination red.
                 self.gl.blend_func(ZERO, ONE_MINUS_SRC_ALPHA);
             } else if mask_in_red {
                 self.gl.blend_func(ONE, ONE);
@@ -9574,11 +9584,13 @@ impl Renderer {
         for (layer_id, layer) in self.layers.iter().enumerate() {
             if layer.is_some() {
                 let layer = layer.as_ref().unwrap();
-                pending.fbos.push(Some(if self.internal_layer_ids.contains(&layer_id) {
-                    Self::create_red_mask_fbo(&gl, width, height, layer.has_path_regions)?
-                } else {
-                    Self::create_layer_mask_fbo(&gl, width, height, layer.has_path_regions)?
-                }));
+                pending
+                    .fbos
+                    .push(Some(if self.internal_layer_ids.contains(&layer_id) {
+                        Self::create_red_mask_fbo(&gl, width, height, layer.has_path_regions)?
+                    } else {
+                        Self::create_layer_mask_fbo(&gl, width, height, layer.has_path_regions)?
+                    }));
             } else {
                 pending.fbos.push(None);
             }
