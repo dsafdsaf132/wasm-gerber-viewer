@@ -1150,7 +1150,7 @@ impl Renderer {
     /// Add a new layer with parsed Gerber data
     /// Returns the layer index (layer_id)
     pub fn add_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
-        self.add_layer_with_mask_format(gerber_data, true)
+        self.add_layer_with_mask_format(gerber_data, false)
     }
 
     fn add_internal_mask_layer(&mut self, gerber_data: Vec<GerberData>) -> Result<usize, JsValue> {
@@ -1208,7 +1208,7 @@ impl Renderer {
         let fbo = if mask_in_red {
             Self::create_red_mask_fbo(&self.gl, width, height, needs_stencil)?
         } else {
-            Self::create_fbo(&self.gl, width, height, needs_stencil)?
+            Self::create_layer_mask_fbo(&self.gl, width, height, needs_stencil)?
         };
 
         // R8 allocation may have fallen back to RGBA8. Keep the sampling and
@@ -2913,7 +2913,7 @@ impl Renderer {
             return Err(JsValue::from_str("Layer boundary is not finite"));
         }
 
-        let fbo = match Self::create_red_mask_fbo(&self.gl, width, height, needs_stencil) {
+        let fbo = match Self::create_layer_mask_fbo(&self.gl, width, height, needs_stencil) {
             Ok(fbo) => fbo,
             Err(error) => {
                 Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
@@ -4960,6 +4960,27 @@ impl Renderer {
         height: u32,
         with_stencil: bool,
     ) -> Result<Fbo, JsValue> {
+        Self::create_red_mask_fbo_with_fallback_filter(gl, width, height, with_stencil, WebGl2RenderingContext::NEAREST)
+    }
+
+    /// General Gerber layers retain their historic linear RGBA fallback while
+    /// preferring an R8 coverage attachment whenever the driver supports it.
+    fn create_layer_mask_fbo(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+        with_stencil: bool,
+    ) -> Result<Fbo, JsValue> {
+        Self::create_red_mask_fbo_with_fallback_filter(gl, width, height, with_stencil, WebGl2RenderingContext::LINEAR)
+    }
+
+    fn create_red_mask_fbo_with_fallback_filter(
+        gl: &WebGl2RenderingContext,
+        width: u32,
+        height: u32,
+        with_stencil: bool,
+        fallback_filter: u32,
+    ) -> Result<Fbo, JsValue> {
         match Self::create_r8_mask_fbo_build(gl, width, height, with_stencil) {
             Ok(fbo) => Ok(fbo),
             Err(FboBuildError::UnsupportedFormat(_)) => {
@@ -4971,7 +4992,7 @@ impl Renderer {
                     with_stencil,
                     WebGl2RenderingContext::RGBA8 as i32,
                     WebGl2RenderingContext::RGBA,
-                    WebGl2RenderingContext::NEAREST,
+                    fallback_filter,
                 )
                 .map_err(FboBuildError::into_js_value)
             }
@@ -9449,14 +9470,13 @@ impl Renderer {
         let _object_bindings = GlObjectBindingStateGuard::capture(&self.gl)?;
         let mut pending_fbos = FboListBuildGuard::new(&self.gl, self.layers.len())?;
 
-        for layer in &self.layers {
+        for (layer_id, layer) in self.layers.iter().enumerate() {
             let fbo = match layer {
-                Some(layer) => Some(Self::create_red_mask_fbo(
-                    &self.gl,
-                    width,
-                    height,
-                    layer.has_path_regions,
-                )?),
+                Some(layer) => Some(if self.internal_layer_ids.contains(&layer_id) {
+                    Self::create_red_mask_fbo(&self.gl, width, height, layer.has_path_regions)?
+                } else {
+                    Self::create_layer_mask_fbo(&self.gl, width, height, layer.has_path_regions)?
+                }),
                 None => None,
             };
             pending_fbos.push(fbo);
@@ -9551,15 +9571,14 @@ impl Renderer {
                 .ok_or_else(|| JsValue::from_str("Failed to create fullscreen vertex array"))?,
         );
 
-        for layer in &self.layers {
+        for (layer_id, layer) in self.layers.iter().enumerate() {
             if layer.is_some() {
                 let layer = layer.as_ref().unwrap();
-                pending.fbos.push(Some(Self::create_red_mask_fbo(
-                    &gl,
-                    width,
-                    height,
-                    layer.has_path_regions,
-                )?));
+                pending.fbos.push(Some(if self.internal_layer_ids.contains(&layer_id) {
+                    Self::create_red_mask_fbo(&gl, width, height, layer.has_path_regions)?
+                } else {
+                    Self::create_layer_mask_fbo(&gl, width, height, layer.has_path_regions)?
+                }));
             } else {
                 pending.fbos.push(None);
             }
