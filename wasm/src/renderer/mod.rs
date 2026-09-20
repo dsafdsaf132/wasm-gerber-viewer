@@ -150,6 +150,19 @@ struct FboBuildGuard {
     stencil: Option<WebGlRenderbuffer>,
 }
 
+/// Restores only the bindings temporarily touched by an unsuccessful FBO
+/// allocation. Unlike `GlObjectBindingStateGuard`, this deliberately avoids
+/// walking every texture unit on the normal layer allocation path.
+struct FboBuildBindingGuard {
+    gl: WebGl2RenderingContext,
+    draw_framebuffer: Option<JsValue>,
+    read_framebuffer: Option<JsValue>,
+    renderbuffer: Option<JsValue>,
+    active_texture: u32,
+    texture_2d: Option<JsValue>,
+    restore: bool,
+}
+
 enum FboBuildError {
     UnsupportedFormat(JsValue),
     Fatal(JsValue),
@@ -914,6 +927,78 @@ impl Drop for FboBuildGuard {
         if let Some(texture) = self.texture.take() {
             self.gl.delete_texture(Some(&texture));
         }
+    }
+}
+
+impl FboBuildBindingGuard {
+    fn capture(gl: &WebGl2RenderingContext) -> Result<Self, JsValue> {
+        let draw_framebuffer = GlObjectBindingStateGuard::optional_object(
+            gl,
+            WebGl2RenderingContext::DRAW_FRAMEBUFFER_BINDING,
+        )?;
+        let read_framebuffer = GlObjectBindingStateGuard::optional_object(
+            gl,
+            WebGl2RenderingContext::READ_FRAMEBUFFER_BINDING,
+        )?;
+        let renderbuffer = GlObjectBindingStateGuard::optional_object(
+            gl,
+            WebGl2RenderingContext::RENDERBUFFER_BINDING,
+        )?;
+        let active_texture = GlObjectBindingStateGuard::parameter_u32(
+            gl,
+            WebGl2RenderingContext::ACTIVE_TEXTURE,
+            "ACTIVE_TEXTURE",
+        )?;
+        let texture_2d = GlObjectBindingStateGuard::optional_object(
+            gl,
+            WebGl2RenderingContext::TEXTURE_BINDING_2D,
+        )?;
+        Ok(Self {
+            gl: gl.clone(),
+            draw_framebuffer,
+            read_framebuffer,
+            renderbuffer,
+            active_texture,
+            texture_2d,
+            restore: true,
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.restore = false;
+    }
+}
+
+impl Drop for FboBuildBindingGuard {
+    fn drop(&mut self) {
+        if !self.restore {
+            return;
+        }
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::DRAW_FRAMEBUFFER,
+            self.draw_framebuffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlFramebuffer>),
+        );
+        self.gl.bind_framebuffer(
+            WebGl2RenderingContext::READ_FRAMEBUFFER,
+            self.read_framebuffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlFramebuffer>),
+        );
+        self.gl.bind_renderbuffer(
+            WebGl2RenderingContext::RENDERBUFFER,
+            self.renderbuffer
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlRenderbuffer>),
+        );
+        self.gl.active_texture(self.active_texture);
+        self.gl.bind_texture(
+            WebGl2RenderingContext::TEXTURE_2D,
+            self.texture_2d
+                .as_ref()
+                .map(JsValue::unchecked_ref::<WebGlTexture>),
+        );
     }
 }
 
@@ -5055,11 +5140,10 @@ impl Renderer {
         filter: u32,
     ) -> Result<Fbo, FboBuildError> {
         // FBO allocation is used from normal rendering as well as recovery and
-        // failure-retry paths. Keep its temporary texture/framebuffer bindings
-        // local to this build transaction: a failed create_framebuffer() must
-        // not leave a caller sampling an unintended texture unit or draw target.
-        let _object_bindings =
-            GlObjectBindingStateGuard::capture(gl).map_err(FboBuildError::Fatal)?;
+        // failure-retry paths. On failure restore only the bindings touched by
+        // allocation, without snapshotting every texture unit for successful
+        // layer creation, resize, or context recovery.
+        let mut bindings = FboBuildBindingGuard::capture(gl).map_err(FboBuildError::Fatal)?;
         let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32;
         let fatal = FboBuildError::Fatal;
         if width == 0 || height == 0 {
@@ -5188,10 +5272,14 @@ impl Renderer {
         gl.bind_renderbuffer(WebGl2RenderingContext::RENDERBUFFER, None);
         gl.bind_framebuffer(WebGl2RenderingContext::FRAMEBUFFER, None);
 
-        Ok(pending.commit(
+        let fbo = pending.commit(
             if is_r8 { 1 } else { 4 },
             if is_r8 { "R8" } else { "RGBA8" },
-        ))
+        );
+        // Preserve the historical successful-build state cleanup above; the
+        // binding snapshot is solely failure rollback.
+        bindings.disarm();
+        Ok(fbo)
     }
 
     fn create_composite_lookup_texture(
