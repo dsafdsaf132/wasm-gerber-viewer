@@ -5054,6 +5054,12 @@ impl Renderer {
         format: u32,
         filter: u32,
     ) -> Result<Fbo, FboBuildError> {
+        // FBO allocation is used from normal rendering as well as recovery and
+        // failure-retry paths. Keep its temporary texture/framebuffer bindings
+        // local to this build transaction: a failed create_framebuffer() must
+        // not leave a caller sampling an unintended texture unit or draw target.
+        let _object_bindings =
+            GlObjectBindingStateGuard::capture(gl).map_err(FboBuildError::Fatal)?;
         let is_r8 = internal_format == WebGl2RenderingContext::R8 as i32;
         let fatal = FboBuildError::Fatal;
         if width == 0 || height == 0 {
