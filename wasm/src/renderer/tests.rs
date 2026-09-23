@@ -558,3 +558,33 @@ fn tile_inputs_reject_coordinates_beyond_exact_f32_integer_range() {
     assert!(Renderer::validate_tile_inputs(MAX_EXACT + 1, 1, 0, 0, 1, 1).is_err());
     assert!(Renderer::validate_tile_inputs(1, MAX_EXACT + 1, 0, 0, 1, 1).is_err());
 }
+
+#[test]
+fn msaa_targets_only_sized_mask_formats() {
+    use web_sys::WebGl2RenderingContext;
+    assert_eq!(
+        Renderer::msaa_internal_format("R8"),
+        Some(WebGl2RenderingContext::R8)
+    );
+    assert_eq!(
+        Renderer::msaa_internal_format("RGBA8"),
+        Some(WebGl2RenderingContext::RGBA8)
+    );
+    assert_eq!(Renderer::msaa_internal_format("RGBA"), None);
+}
+
+#[test]
+fn weakest_pixels_per_world_takes_the_smaller_axis() {
+    // 2 world units span the clip range [-1, 1] horizontally on a 400 px
+    // wide viewport (200 px per unit) and 0.5 vertically on 300 px
+    // (75 px per unit): the weaker axis wins.
+    let transform = [1.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0];
+    let ppw = super::weakest_pixels_per_world(&transform, 400, 300);
+    assert!((ppw - 75.0).abs() < 1e-3, "{ppw}");
+    // A rotation keeps the scale; a degenerate view stays positive.
+    let (sin, cos) = 0.3f32.sin_cos();
+    let rotated = [cos, sin, 0.0, -sin, cos, 0.0, 0.0, 0.0, 1.0];
+    let ppw = super::weakest_pixels_per_world(&rotated, 300, 300);
+    assert!((ppw - 150.0).abs() < 1e-2, "{ppw}");
+    assert!(super::weakest_pixels_per_world(&[0.0; 9], 300, 300) > 0.0);
+}

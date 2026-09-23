@@ -100,6 +100,8 @@ export type NodeFrameOptions = {
   preserveArcRegions?: boolean;
   arcTessellationQuality?: 0 | 1 | 2;
   minimumFeaturePixels?: number;
+  /** Anti-aliased layer masks (4x MSAA plus analytic edge coverage). Default `false`. */
+  antiAliasing?: boolean;
   renderDrills?: boolean;
   globalAlpha?: number;
   compositeMode?: CompositeMode;

@@ -229,6 +229,7 @@ pub struct GerberProcessor {
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     minimum_feature_pixels: f32,
+    anti_aliasing: bool,
     drill_outline_pixels: f32,
     drill_outline_layer_ids: Vec<u32>,
     drill_layer_ids: Vec<u32>,
@@ -243,6 +244,7 @@ impl Default for GerberProcessor {
             preserve_arc_regions: true,
             arc_tessellation_quality: 1,
             minimum_feature_pixels: 0.0,
+            anti_aliasing: false,
             drill_outline_pixels: 0.0,
             drill_outline_layer_ids: Vec::new(),
             drill_layer_ids: Vec::new(),
@@ -456,6 +458,7 @@ impl GerberProcessor {
         // Create renderer with WebGL context (initially no layers)
         let mut renderer = Renderer::new(gl)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        renderer.set_anti_aliasing(self.anti_aliasing);
         self.renderer = Some(renderer);
         self.reset_renderer_generation_state();
         Ok("init_done".to_string())
@@ -472,6 +475,7 @@ impl GerberProcessor {
     ) -> Result<String, JsValue> {
         let mut renderer = Renderer::new_headless(gl, width, height)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        renderer.set_anti_aliasing(self.anti_aliasing);
         self.renderer = Some(renderer);
         self.reset_renderer_generation_state();
         Ok("init_done".to_string())
@@ -505,6 +509,16 @@ impl GerberProcessor {
 
         if let Some(renderer) = &mut self.renderer {
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        }
+    }
+
+    /// Turn anti-aliased layer masks on or off (default off). Independent of
+    /// the minimum line width; applies to the viewer, screenshots and the
+    /// renderer API alike because they all go through this processor.
+    pub fn set_anti_aliasing(&mut self, enabled: bool) {
+        self.anti_aliasing = enabled;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_anti_aliasing(enabled);
         }
     }
 
@@ -566,6 +580,7 @@ impl GerberProcessor {
         } else {
             let mut renderer = Renderer::new(gl)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+            renderer.set_anti_aliasing(self.anti_aliasing);
             self.renderer = Some(renderer);
         }
 
@@ -584,6 +599,7 @@ impl GerberProcessor {
         } else {
             let mut renderer = Renderer::new_headless(gl, width, height)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+            renderer.set_anti_aliasing(self.anti_aliasing);
             self.renderer = Some(renderer);
         }
 

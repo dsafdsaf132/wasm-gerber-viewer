@@ -68,6 +68,7 @@ Useful CLI options:
 - `--alpha <0-1>` sets blend-mode Gerber layer opacity; stack mode defaults Gerber layers to full opacity, and drill overlays render at full opacity.
 - `--composite-mode <blend|stack>` sets additive blending or ordered stack compositing.
 - `--minimum-feature-pixels <px>` keeps thin lines/arcs visible.
+- `--anti-aliasing` renders anti-aliased layer masks (off by default).
 - `--max-render-target-bytes <size>` caps per-render target memory, e.g. `512m` or `2g`.
 - `--max-band-bytes <size>` caps streamed PNG row-buffer memory.
 - `--max-full-frame-bytes <size>` caps full-frame PNG export memory.
@@ -416,6 +417,7 @@ best-effort batch handling.
 - `globalAlpha`: opacity for Gerber layers without explicit layer `alpha` in `blend` mode; `stack` defaults Gerber layers to full opacity.
 - `compositeMode`: `"blend"` for additive alpha blending or `"stack"` for ordered source-over Gerber compositing; drill overlays render after Gerber layers.
 - `minimumFeaturePixels`: minimum visible line/arc width.
+- `antiAliasing`: anti-aliased layer masks, default `false`.
 - `renderDrills`: render NC drill files as drill overlays; set `false` to skip them.
 - `preserveArcRegions`: defaults to `true`; set `false` for approximate region arcs.
 - `arcTessellationQuality`: `0` low, `1` normal, `2` high.

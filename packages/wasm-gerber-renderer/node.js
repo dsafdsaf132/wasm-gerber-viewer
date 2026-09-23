@@ -850,6 +850,7 @@ class NodeFrameState extends FrameState {
       preserveArcRegions: this.options.preserveArcRegions,
       arcTessellationQuality: this.options.arcTessellationQuality,
       minimumFeaturePixels: this.options.minimumFeaturePixels,
+      antiAliasing: this.options.antiAliasing,
       compositeMode: this.options.compositeMode,
       invertedOutline: this.options.invertedOutline,
       maxFullFrameBytes: this.options.maxFullFrameBytes,

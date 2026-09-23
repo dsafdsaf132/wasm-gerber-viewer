@@ -925,6 +925,7 @@ export class GerberViewer {
     this.minimumFeaturePixels = Number(
       this.viewerOptionsStore.get("minimumFeaturePixels") ?? 1,
     );
+    this.antiAliasing = this.viewerOptionsStore.get("antiAliasing") === true;
     this.boardOutlineBoundsMarginMm = normalizeBoardOutlineBoundsMarginMm(
       this.viewerOptionsStore.get("boardOutlineBoundsMarginMm"),
     );
@@ -1595,6 +1596,10 @@ export class GerberViewer {
       processor.set_minimum_feature_pixels(this.minimumFeaturePixels);
     }
 
+    if (typeof processor?.set_anti_aliasing === "function") {
+      processor.set_anti_aliasing(this.antiAliasing);
+    }
+
     if (typeof processor?.set_interactions_enabled === "function") {
       processor.set_interactions_enabled(interactionsEnabled);
     }
@@ -1993,6 +1998,14 @@ export class GerberViewer {
       input.addEventListener("change", () => {
         if (input.checked) {
           void this.setArcTessellationQuality(input.value);
+        }
+      });
+    }
+
+    for (const input of this.getAntiAliasingInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setAntiAliasing(input.value === "on");
         }
       });
     }
@@ -2404,6 +2417,7 @@ export class GerberViewer {
   getRenderOptions() {
     return {
       minimumFeaturePixels: this.minimumFeaturePixels,
+      antiAliasing: this.antiAliasing,
       boardOutlineBoundsMarginMm: this.boardOutlineBoundsMarginMm,
       drillOutlinePixels: this.drillOutlinePixels,
       pthPlatingMicrometers: this.pthPlatingMicrometers,
@@ -2429,6 +2443,10 @@ export class GerberViewer {
       this.minimumVisibility1Input,
       this.minimumVisibility2Input,
     ];
+  }
+
+  getAntiAliasingInputs() {
+    return [this.antiAliasingOffInput, this.antiAliasingOnInput];
   }
 
   getBoardOutlineBoundsMarginUnitInputs() {
@@ -2498,6 +2516,11 @@ export class GerberViewer {
 
     for (const input of this.getMinimumVisibilityInputs()) {
       input.checked = Number(input.value) === this.minimumFeaturePixels;
+      input.disabled = this.isRendererBusy();
+    }
+
+    for (const input of this.getAntiAliasingInputs()) {
+      input.checked = (input.value === "on") === this.antiAliasing;
       input.disabled = this.isRendererBusy();
     }
 
@@ -2951,6 +2974,37 @@ export class GerberViewer {
     }
   }
 
+  setAntiAliasing(enabled) {
+    const next = enabled === true;
+    if (next === this.antiAliasing) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previous = this.antiAliasing;
+    this.antiAliasing = next;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+
+    try {
+      if (typeof this.wasmProcessor?.set_anti_aliasing === "function") {
+        this.wasmProcessor.set_anti_aliasing(this.antiAliasing);
+      }
+      this.requestRender();
+    } catch (error) {
+      this.antiAliasing = previous;
+      this.syncOptionControls();
+      this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.showError(`Failed to apply anti-aliasing: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
   setBoardOutlineBoundsMargin(value) {
     const margin = parseBoardOutlineBoundsMarginInputValue(
       value,
@@ -3380,6 +3434,9 @@ export class GerberViewer {
       input.disabled = rendererBusy || this.preserveArcRegions;
     }
     for (const input of this.getMinimumVisibilityInputs()) {
+      input.disabled = rendererBusy;
+    }
+    for (const input of this.getAntiAliasingInputs()) {
       input.disabled = rendererBusy;
     }
     this.syncBoardOutlineBoundsMarginControl(rendererBusy);
