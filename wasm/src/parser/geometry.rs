@@ -3063,7 +3063,13 @@ pub(crate) fn finish_region_contours(
     if preserve_arc_regions
         && (region_contours_have_arcs(region_contours) || region_contours.len() > 1)
     {
-        flush_primitives_to_layer(primitives, path_regions, state.polarity, polarity_layers)?;
+        // Primitives drawn before this region must stay in an earlier
+        // sublayer, but consecutive path regions share one: a stencil layer
+        // with thousands of rounded pads would otherwise render one sublayer
+        // per pad. A polarity change still starts a new sublayer (parse_lp).
+        if !primitives.is_empty() {
+            flush_primitives_to_layer(primitives, path_regions, state.polarity, polarity_layers)?;
+        }
         let region_path_regions = build_path_regions(
             region_contours,
             state,
