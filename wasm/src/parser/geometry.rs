@@ -2605,18 +2605,30 @@ fn push_sector_cap_quad(
     start: [f32; 2],
     end: [f32; 2],
 ) -> Result<(), String> {
-    let mid_angle = start_angle + sweep_angle * 0.5;
-    let outward = [mid_angle.cos(), mid_angle.sin()];
-    let sagitta = radius * (1.0 - (sweep_angle.abs() * 0.5).cos());
-    let cover_distance = sagitta + (radius.abs() * 1.0e-4).max(1.0e-5);
-    let start_outer = [
-        start[0] + outward[0] * cover_distance,
-        start[1] + outward[1] * cover_distance,
+    // Put the outer edge beyond the tangent at the arc midpoint, with the
+    // sides on the endpoint rays. Adjacent caps then share a side rather
+    // than overlap when the shader expands their outer edge for AA.
+    let margin = (radius.abs() * 1.0e-4).max(1.0e-5);
+    let outer_scale = 1.0 / (sweep_angle.abs() * 0.5).cos() + margin / radius.max(1.0e-9);
+    let mut start_outer = [
+        center[0] + (start[0] - center[0]) * outer_scale,
+        center[1] + (start[1] - center[1]) * outer_scale,
     ];
-    let end_outer = [
-        end[0] + outward[0] * cover_distance,
-        end[1] + outward[1] * cover_distance,
+    let mut end_outer = [
+        center[0] + (end[0] - center[0]) * outer_scale,
+        center[1] + (end[1] - center[1]) * outer_scale,
     ];
+    let expected_end = angle_point(center, radius, start_angle + sweep_angle);
+    if (expected_end[0] - end[0]).hypot(expected_end[1] - end[1]) > margin {
+        // Keep the existing point-sampled interpretation of inconsistent
+        // single-quadrant commands whose raw endpoint lies beyond the
+        // clamped sweep. Endpoint rays can be collinear in that case.
+        let mid_angle = start_angle + sweep_angle * 0.5;
+        let distance = radius * (1.0 - (sweep_angle.abs() * 0.5).cos()) + margin;
+        let outward = [mid_angle.cos() * distance, mid_angle.sin() * distance];
+        start_outer = [start[0] + outward[0], start[1] + outward[1]];
+        end_outer = [end[0] + outward[0], end[1] + outward[1]];
+    }
 
     try_reserve_values(
         vertices,

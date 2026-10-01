@@ -303,7 +303,7 @@ impl ShaderPrograms {
             PATH_SOLID_VERTEX_SHADER,
             PATH_SOLID_FRAGMENT_SHADER,
             &["position"],
-            &["transform", "color"],
+            &["transform", "color", "bounds_padding"],
         )?;
         pending.track(&path_solid);
 
@@ -312,7 +312,7 @@ impl ShaderPrograms {
             PATH_SECTOR_VERTEX_SHADER,
             PATH_SECTOR_FRAGMENT_SHADER,
             &["position", "center", "radius"],
-            &["transform"],
+            &["transform", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&path_sector);
 

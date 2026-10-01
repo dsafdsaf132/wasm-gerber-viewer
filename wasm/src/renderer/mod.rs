@@ -6311,6 +6311,7 @@ impl Renderer {
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
                 6,
+                0.0,
             )?;
 
             self.gl.stencil_mask(0x02);
@@ -6332,6 +6333,7 @@ impl Renderer {
                     buffer_cache.path_wedge_vao.as_ref(),
                     wedge_start,
                     wedge_end - wedge_start,
+                    0.0,
                 )?;
             }
 
@@ -6366,6 +6368,7 @@ impl Renderer {
                 buffer_cache.path_cover_vao.as_ref(),
                 quad_start,
                 6,
+                0.0,
             )?;
 
             self.gl.stencil_mask(0x02);
@@ -6377,6 +6380,7 @@ impl Renderer {
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
                 6,
+                0.0,
             )?;
         }
 
@@ -7477,6 +7481,12 @@ impl Renderer {
         let path_regions = &layer.gerber_data[sublayer_idx].path_regions;
         let buffer_cache = &layer.buffer_caches[sublayer_idx];
 
+        let bounds_padding = if self.mask_pass_analytic_edges {
+            let (width, height) = self.get_canvas_size()?;
+            0.5 / weakest_pixels_per_world(transform, width, height)
+        } else {
+            0.0
+        };
         self.gl.enable(STENCIL_TEST);
         self.gl.stencil_mask(0xff);
         self.gl.clear_stencil(0);
@@ -7503,6 +7513,7 @@ impl Renderer {
                         buffer_cache.path_wedge_vao.as_ref(),
                         wedge_start,
                         wedge_end - wedge_start,
+                        0.0,
                     )?;
                 }
 
@@ -7533,6 +7544,7 @@ impl Renderer {
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
+                    bounds_padding,
                 )?;
 
                 self.gl.color_mask(false, false, false, false);
@@ -7544,6 +7556,7 @@ impl Renderer {
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
                     6,
+                    bounds_padding,
                 )?;
             }
 
@@ -7717,6 +7730,7 @@ impl Renderer {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_path_solid_range(
         &self,
         transform: &[f32; 9],
@@ -7724,6 +7738,7 @@ impl Renderer {
         vao: Option<&web_sys::WebGlVertexArrayObject>,
         start: i32,
         count: i32,
+        bounds_padding: f32,
     ) -> Result<(), JsValue> {
         if count <= 0 {
             return Ok(());
@@ -7734,6 +7749,9 @@ impl Renderer {
         let program = &self.programs.path_solid;
         self.gl.use_program(Some(&program.program));
         self.gl.bind_vertex_array(Some(vao));
+        if let Some(loc) = program.uniforms.get("bounds_padding") {
+            self.gl.uniform1f(Some(loc), bounds_padding);
+        }
         if let Some(loc) = program.uniforms.get("transform") {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
@@ -7761,6 +7779,27 @@ impl Renderer {
         let program = &self.programs.path_sector;
         self.gl.use_program(Some(&program.program));
         self.gl.bind_vertex_array(Some(vao));
+        // Selection/highlight masks stay point-sampled. Only the layer-mask
+        // MSAA pass has alpha-to-coverage enabled for stencil writes.
+        if let Some(loc) = program.uniforms.get("anti_aliasing") {
+            self.gl.uniform1f(
+                Some(loc),
+                if self.mask_pass_analytic_edges {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+        }
+        if self.mask_pass_analytic_edges {
+            let (width, height) = self.get_canvas_size()?;
+            if let Some(loc) = program.uniforms.get("pixels_per_world") {
+                self.gl.uniform1f(
+                    Some(loc),
+                    weakest_pixels_per_world(transform, width, height),
+                );
+            }
+        }
         if let Some(loc) = program.uniforms.get("transform") {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);

@@ -1430,6 +1430,40 @@ fn arc_regions_still_split_on_polarity_changes_and_primitives() {
 }
 
 #[test]
+fn arc_region_caps_use_shared_endpoint_rays_without_extra_vertex_attributes() {
+    let layers = parse_gerber(
+        "%FSLAX26Y26*%\n%MOMM*%\nG75*\nG36*\nX1000000Y0D02*\nG03X0Y1000000I-1000000J0D01*\nG01X1000000Y0D01*\nG37*\nM02*",
+    )
+    .expect("quarter-circle region should parse");
+    let sector = &layers[0].path_regions.sector_vertices;
+    assert_eq!(sector.len(), 6 * PATH_SECTOR_VERTEX_FLOATS);
+    let start = &sector[..5];
+    let end = &sector[5..10];
+    let outer_end = &sector[10..15];
+    let outer_start = &sector[25..30];
+    assert_approx_eq(start[0], 1.0);
+    assert_approx_eq(end[1], 1.0);
+    assert_approx_eq(outer_start[1], 0.0);
+    assert_approx_eq(outer_end[0], 0.0);
+    assert!(outer_start[0] > std::f32::consts::SQRT_2);
+    assert!(outer_end[1] > std::f32::consts::SQRT_2);
+}
+
+#[test]
+fn clamped_arc_region_caps_preserve_non_degenerate_legacy_coverage() {
+    let layers = parse_gerber(
+        "%FSLAX24Y24*%\n%MOMM*%\nG36*\nX010000Y000000D02*\nG03*\nX-010000Y000000I-010000J000000D01*\nX010000Y000000I010000J000000D01*\nG37*\nM02*",
+    )
+    .expect("legacy clamped region should still parse");
+    for cap in layers[0].path_regions.sector_vertices.chunks_exact(30) {
+        let outer_end = &cap[10..15];
+        let outer_start = &cap[25..30];
+        assert!(outer_start[1].abs() > 0.2);
+        assert!(outer_end[1].abs() > 0.2);
+    }
+}
+
+#[test]
 fn path_region_translate_moves_analytic_sector_vertices() {
     let mut layers = parse_gerber(
         "\
