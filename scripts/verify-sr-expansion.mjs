@@ -1,5 +1,6 @@
 // Compare release WASM against the parent of the SR optimization.
-// Usage: node scripts/verify-sr-expansion.mjs /absolute/baseline/checkout
+// Usage: SR_SAMPLE=/path/to/memory64-test-pads-24M.gbr node scripts/verify-sr-expansion.mjs /absolute/baseline/checkout
+// Defaults to wasm32. SR_VARIANTS=pkg,pkg64 requires both builds in both checkouts.
 // SR_FULL=1 additionally measures the original 24M-pad file with wasm64.
 // Local-only: do not register this workload in CI or npm test.
 // No browser/Playwright required. Each timing sample runs in a fresh process.
@@ -11,7 +12,9 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const sample = process.env.SR_SAMPLE ?? new URL('../demo/memory64-test-pads-24M.gbr', import.meta.url);
+const sample = process.env.SR_SAMPLE;
+const variants = (process.env.SR_VARIANTS ?? 'pkg').split(',');
+assert.ok(variants.every(variant => variant === 'pkg' || variant === 'pkg64'), 'Invalid SR_VARIANTS');
 async function load(checkout, variant) {
   const pkg = resolve(checkout, 'wasm', variant);
   const api = await import(pathToFileURL(resolve(pkg, 'wasm_gerber_processor.js')));
@@ -20,6 +23,7 @@ async function load(checkout, variant) {
 }
 if (process.argv[2] === '--measure') {
   const [, , , checkout, variant, repeat, picking] = process.argv;
+  assert.ok(sample, 'Set SR_SAMPLE to the 1000-pad, SRX155Y155 input file');
   const { api, exports } = await load(checkout, variant);
   const source = readFileSync(sample, 'utf8').replace('SRX155Y155', `SRX${repeat}Y${repeat}`);
   const parse = picking === 'on' ? api.parse_gerber_layer_payload_with_options : api.parse_gerber_layer_with_options;
@@ -78,7 +82,7 @@ function pixels(api, source, aa) {
     gl.destroy();
   }
 }
-for (const variant of ['pkg', 'pkg64']) {
+for (const variant of variants) {
   const old = await load(baseline, variant);
   const current = await load(root, variant);
   let cases = 0;
@@ -123,7 +127,7 @@ for (const variant of ['pkg', 'pkg64']) {
   console.log(JSON.stringify({ variant, payloadCases: cases, rasterCases, pickComparisons, differingBytes: 0 }));
 }
 const rounds = Number(process.env.SR_ROUNDS ?? 5);
-for (const variant of ['pkg', 'pkg64']) {
+for (const variant of variants) {
   for (const picking of ['off', 'on']) {
     const results = { baseline: [], current: [] };
     for (let round = 0; round < rounds; round++) {

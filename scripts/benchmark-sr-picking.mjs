@@ -1,17 +1,18 @@
 // Local-only large-input benchmark; never register this in CI/npm test.
-// node --expose-gc scripts/benchmark-sr-picking.mjs <checkout> [repeat=155] [pkg64]
+// SR_SAMPLE=/path/to/memory64-test-pads-24M.gbr node --expose-gc scripts/benchmark-sr-picking.mjs <checkout> [repeat=31] [pkg]
 // Owned typed arrays are transferred from a parse worker to a fresh main WASM.
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
-import { getPickingIndexReserveBytes } from '../js/core/wasm-variant.js';
 
 const checkout = isMainThread ? resolve(process.argv[2]) : workerData.checkout;
-const repeat = isMainThread ? Number(process.argv[3] ?? 155) : workerData.repeat;
-const variant = isMainThread ? (process.argv[4] ?? 'pkg64') : workerData.variant;
-const sample = process.env.SR_SAMPLE ?? new URL('../demo/memory64-test-pads-24M.gbr', import.meta.url);
+const repeat = isMainThread ? Number(process.argv[3] ?? 31) : workerData.repeat;
+const variant = isMainThread ? (process.argv[4] ?? 'pkg') : workerData.variant;
+const sample = process.env.SR_SAMPLE;
+assert.ok(sample, 'Set SR_SAMPLE to the 1000-pad, SRX155Y155 input file');
+assert.ok(Number.isInteger(repeat) && repeat > 0 && repeat <= 155, 'repeat must be between 1 and 155');
 function buffers(value, result = new Set()) {
   if (ArrayBuffer.isView(value)) result.add(value.buffer);
   else if (Array.isArray(value)) for (const item of value) buffers(item, result);
@@ -49,8 +50,11 @@ if (!isMainThread) {
   const processor = new api.GerberProcessor();
   try {
     processor.set_interactions_enabled(true);
-    const reserveBytes = getPickingIndexReserveBytes({ addressBits: api.memory_address_bits(),
-      payloadBytes: info.interactionBytes, memoryBytes: exports.memory.buffer.byteLength });
+    // Optional memory64 checkout policy; main has no reserve policy/module.
+    const policyPath = resolve(checkout, 'js/core/wasm-variant.js');
+    const policy = existsSync(policyPath) ? await import(pathToFileURL(policyPath)) : null;
+    const reserveBytes = policy ? policy.getPickingIndexReserveBytes({ addressBits: api.memory_address_bits(),
+      payloadBytes: info.interactionBytes, memoryBytes: exports.memory.buffer.byteLength }) : 0;
     const reserveStart = performance.now();
     if (reserveBytes) api.reserve_input_capacity(reserveBytes);
     const reserveMs = performance.now() - reserveStart;
