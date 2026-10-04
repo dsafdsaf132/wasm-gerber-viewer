@@ -1,5 +1,9 @@
 use super::*;
 
+// Local performance workloads are ignored by the ordinary test pipeline.
+#[path = "local_benchmarks.rs"]
+mod local_benchmarks;
+
 fn sr_circle_aperture() -> Aperture {
     let mut aperture = Aperture::new(0.005);
     aperture.primitives.push(Primitive::Circle {
@@ -12,6 +16,172 @@ fn sr_circle_aperture() -> Aperture {
         hole_radius: 0.001,
     });
     aperture
+}
+
+fn sr_test_primitives() -> Vec<Primitive> {
+    vec![
+        sr_circle_aperture().primitives.remove(0),
+        Primitive::Arc {
+            x: 0.3,
+            y: -0.2,
+            radius: 0.7,
+            start_angle: -0.4,
+            end_angle: 2.1,
+            thickness: 0.15,
+            exposure: 1.0,
+        },
+        Primitive::Thermal {
+            x: 0.3,
+            y: -0.2,
+            outer_diameter: 1.4,
+            inner_diameter: 0.7,
+            gap_thickness: 0.16,
+            rotation: 0.31,
+            exposure: 1.0,
+        },
+        Primitive::Line {
+            start_x: -0.8,
+            start_y: 0.3,
+            end_x: 0.7,
+            end_y: -0.2,
+            width: 0.15,
+            exposure: 1.0,
+        },
+        Primitive::Triangle {
+            vertices: [[-0.3, 0.2], [0.7, -0.4], [0.6, 0.8]],
+            exposure: 1.0,
+            hole_x: 0.3,
+            hole_y: 0.2,
+            hole_radius: 0.03,
+        },
+    ]
+}
+
+#[test]
+fn sr_all_primitives_match_reference_geometry_and_picking() {
+    let shapes = sr_test_primitives();
+    // Separate primitives exercise the stack fast path; mixed apertures exercise
+    // scratch storage. Small/zero steps include overlapping and coincident copies.
+    let mut cases: Vec<Vec<Primitive>> = shapes
+        .iter()
+        .map(|p| vec![p.clone()])
+        .chain(std::iter::once(shapes.clone()))
+        .collect();
+    cases.push(vec![
+        Primitive::Circle {
+            x: 0.3,
+            y: -0.2,
+            radius: 0.7,
+            exposure: 1.0,
+            hole_x: 0.0,
+            hole_y: 0.0,
+            hole_radius: 0.0,
+        },
+        Primitive::Circle {
+            x: 0.4,
+            y: -0.1,
+            radius: 0.2,
+            exposure: 0.0,
+            hole_x: 0.0,
+            hole_y: 0.0,
+            hole_radius: 0.0,
+        },
+    ]);
+    for primitives in cases {
+        let mut aperture = Aperture::new(0.7);
+        aperture.has_negative = primitives.iter().any(|primitive| {
+            matches!(primitive,
+            Primitive::Circle { exposure, .. } if *exposure == 0.0)
+        });
+        aperture.primitives = primitives;
+        for rotation in [
+            0.0,
+            0.37,
+            std::f32::consts::FRAC_PI_2,
+            std::f32::consts::PI,
+            -0.61,
+        ] {
+            for (mirror_x, mirror_y) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                for scale in [0.6, 1.7] {
+                    for (step_x, step_y) in [(2.0, -3.0), (0.1, 0.1), (0.0, 0.0)] {
+                        for polarity in [Polarity::Positive, Polarity::Negative] {
+                            let mut state = ParserState::default();
+                            state.current_aperture = "10".into();
+                            state.sr_x = 3;
+                            state.sr_y = 2;
+                            state.sr_i = step_x;
+                            state.sr_j = step_y;
+                            state.layer_rotation = rotation;
+                            state.mirror_x = mirror_x;
+                            state.mirror_y = mirror_y;
+                            state.layer_scale = scale;
+                            state.polarity = polarity;
+                            let mut expected = Vec::new();
+                            let mut expected_picking = InteractionLayer::new();
+                            let properties = InteractionFeature::gerber_properties_with_transform(
+                                &aperture, scale, mirror_x, mirror_y, rotation,
+                            );
+                            for sy in 0..state.sr_y {
+                                for sx in 0..state.sr_x {
+                                    let start = expected.len();
+                                    flash_aperture_no_sr(
+                                        &aperture,
+                                        &mut expected,
+                                        0.7 + sx as f32 * step_x,
+                                        -0.4 + sy as f32 * step_y,
+                                        scale,
+                                        mirror_x,
+                                        mirror_y,
+                                        rotation,
+                                    )
+                                    .unwrap();
+                                    if let Some(feature) = feature_from_primitive_delta(
+                                        FeatureKind::Flash,
+                                        "10",
+                                        &aperture,
+                                        polarity,
+                                        &expected[start..],
+                                        properties.clone(),
+                                    ) {
+                                        expected_picking.push(feature);
+                                    }
+                                }
+                            }
+                            let apertures = HashMap::from([("10".into(), aperture.clone())]);
+                            let mut actual = Vec::new();
+                            flash_aperture(
+                                &state,
+                                &apertures,
+                                &mut actual,
+                                &mut PathRegions::empty(),
+                                &mut Vec::new(),
+                                0.7,
+                                -0.4,
+                            )
+                            .unwrap();
+                            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                            let mut actual_picking = InteractionLayer::new();
+                            record_flash_interactions(
+                                Some(&mut actual_picking),
+                                "10",
+                                &aperture,
+                                &state,
+                                0.7,
+                                -0.4,
+                                &actual,
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                format!("{:?}", actual_picking.features),
+                                format!("{:?}", expected_picking.features)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -105,59 +275,6 @@ fn sr_flash_matches_per_copy_transform_and_preserves_order() {
                 }
             }
         }
-    }
-}
-
-// Explicit local benchmark; not a CI timing gate. Uses the Downloads sample's
-// 155x155 repeat count, with 100 base flashes to bound temporary memory.
-#[test]
-#[ignore]
-fn benchmark_sr_circle_expansion() {
-    let aperture = sr_circle_aperture();
-    let apertures = HashMap::from([("10".into(), aperture.clone())]);
-    let mut state = ParserState::default();
-    state.current_aperture = "10".into();
-    state.sr_x = 155;
-    state.sr_y = 155;
-    state.sr_i = 1.0;
-    state.sr_j = 1.0;
-    for optimized in [false, true] {
-        let start = std::time::Instant::now();
-        let mut primitives = Vec::new();
-        for index in 0..100 {
-            let x = index as f32 * 0.02;
-            if optimized {
-                flash_aperture(
-                    &state,
-                    &apertures,
-                    &mut primitives,
-                    &mut PathRegions::empty(),
-                    &mut Vec::new(),
-                    x,
-                    0.0,
-                )
-                .unwrap();
-            } else {
-                for sy in 0..155 {
-                    for sx in 0..155 {
-                        flash_aperture_no_sr(
-                            &aperture,
-                            &mut primitives,
-                            x + sx as f32,
-                            sy as f32,
-                            1.0,
-                            false,
-                            false,
-                            0.0,
-                        )
-                        .unwrap();
-                    }
-                }
-            }
-        }
-        assert_eq!(primitives.len(), 2_402_500);
-        eprintln!("optimized={optimized} elapsed={:?}", start.elapsed());
-        std::hint::black_box(&primitives);
     }
 }
 

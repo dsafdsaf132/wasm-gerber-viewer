@@ -196,6 +196,23 @@ impl InteractionLayer {
         self.features.push(feature);
     }
 
+    /// Append another copy of the same flash with its already-interned
+    /// descriptor. Only geometry/bounds vary within one SR flash command.
+    pub(crate) fn push_repeated_flash(&mut self, first_feature: usize, primitives: &[Primitive]) {
+        let Some(bounds) = primitive_bounds(primitives) else {
+            return;
+        };
+        let descriptor = Rc::clone(&self.features[first_feature].descriptor);
+        debug_assert!(matches!(descriptor.kind, FeatureKind::Flash));
+        self.features.push(InteractionFeature {
+            descriptor,
+            primitives: FeaturePrimitives::from_slice(primitives),
+            path_regions: None,
+            path_region_ref: None,
+            bounds,
+        });
+    }
+
     fn intern_feature_descriptor(&mut self, feature: &mut InteractionFeature) {
         let descriptor = &feature.descriptor;
         let mut properties = descriptor.properties.clone();
@@ -543,16 +560,16 @@ impl InteractionLayer {
                     .and_then(Option::take)
                     .map(Box::new)
             };
-            let path_region_ref = path_region_refs[feature_id];
+            let path_region_ref = path_region_refs.get(feature_id).copied().flatten();
 
             features.push(InteractionFeature {
                 descriptor,
-                primitives: FeaturePrimitives::from_vec(compact_primitives_from_parts(
+                primitives: compact_primitives_from_parts(
                     &primitive_types[primitive_start..primitive_end],
                     &primitive_data[primitive_start * COMPACT_PRIMITIVE_STRIDE
                         ..primitive_end * COMPACT_PRIMITIVE_STRIDE],
                     &templates,
-                )?),
+                )?,
                 path_regions,
                 path_region_ref,
                 bounds: Boundary::new(
@@ -1101,69 +1118,91 @@ fn compact_primitives_from_parts(
     primitive_types: &[u32],
     primitive_data: &[f32],
     templates: &[Rc<Vec<f32>>],
-) -> Result<Vec<Primitive>, JsValue> {
-    let mut primitives = Vec::with_capacity(primitive_types.len());
-    for (index, tag) in primitive_types.iter().enumerate() {
-        let data = &primitive_data[index * COMPACT_PRIMITIVE_STRIDE
-            ..index * COMPACT_PRIMITIVE_STRIDE + COMPACT_PRIMITIVE_STRIDE];
-        primitives.push(match *tag {
-            0 => Primitive::Triangle {
-                vertices: [[data[0], data[1]], [data[2], data[3]], [data[4], data[5]]],
-                exposure: data[6],
-                hole_x: data[7],
-                hole_y: data[8],
-                hole_radius: data[9],
-            },
-            1 => Primitive::Circle {
-                x: data[0],
-                y: data[1],
-                radius: data[2],
-                exposure: data[3],
-                hole_x: data[4],
-                hole_y: data[5],
-                hole_radius: data[6],
-            },
-            2 => Primitive::Arc {
-                x: data[0],
-                y: data[1],
-                radius: data[2],
-                start_angle: data[3],
-                end_angle: data[4],
-                thickness: data[5],
-                exposure: data[6],
-            },
-            3 => Primitive::Thermal {
-                x: data[0],
-                y: data[1],
-                outer_diameter: data[2],
-                inner_diameter: data[3],
-                gap_thickness: data[4],
-                rotation: data[5],
-                exposure: data[6],
-            },
-            4 => {
-                let template_id = data[0] as usize;
-                Primitive::TriangleTemplateFlash {
-                    template: templates
-                        .get(template_id)
-                        .cloned()
-                        .ok_or_else(|| JsValue::from_str("Compact template index is invalid"))?,
-                    x: data[1],
-                    y: data[2],
-                }
+) -> Result<FeaturePrimitives, JsValue> {
+    // Most pads contain one primitive. Decode directly into its retained
+    // storage instead of allocating and immediately freeing a temporary Vec.
+    let storage = match primitive_types {
+        [] => FeaturePrimitiveStorage::Empty,
+        [tag] => primitive_to_storage(compact_primitive_from_parts(
+            *tag,
+            primitive_data,
+            templates,
+        )?),
+        _ => {
+            let mut primitives = Vec::with_capacity(primitive_types.len());
+            for (tag, data) in primitive_types
+                .iter()
+                .zip(primitive_data.chunks_exact(COMPACT_PRIMITIVE_STRIDE))
+            {
+                primitives.push(compact_primitive_from_parts(*tag, data, templates)?);
             }
-            5 => Primitive::Line {
-                start_x: data[0],
-                start_y: data[1],
-                end_x: data[2],
-                end_y: data[3],
-                width: data[4],
-                exposure: data[5],
-            },
-            _ => return Err(JsValue::from_str("Invalid compact primitive type")),
-        });
-    }
-    Ok(primitives)
+            FeaturePrimitiveStorage::Multiple(primitives.into_boxed_slice())
+        }
+    };
+    Ok(FeaturePrimitives { storage })
+}
+
+fn compact_primitive_from_parts(
+    tag: u32,
+    data: &[f32],
+    templates: &[Rc<Vec<f32>>],
+) -> Result<Primitive, JsValue> {
+    Ok(match tag {
+        0 => Primitive::Triangle {
+            vertices: [[data[0], data[1]], [data[2], data[3]], [data[4], data[5]]],
+            exposure: data[6],
+            hole_x: data[7],
+            hole_y: data[8],
+            hole_radius: data[9],
+        },
+        1 => Primitive::Circle {
+            x: data[0],
+            y: data[1],
+            radius: data[2],
+            exposure: data[3],
+            hole_x: data[4],
+            hole_y: data[5],
+            hole_radius: data[6],
+        },
+        2 => Primitive::Arc {
+            x: data[0],
+            y: data[1],
+            radius: data[2],
+            start_angle: data[3],
+            end_angle: data[4],
+            thickness: data[5],
+            exposure: data[6],
+        },
+        3 => Primitive::Thermal {
+            x: data[0],
+            y: data[1],
+            outer_diameter: data[2],
+            inner_diameter: data[3],
+            gap_thickness: data[4],
+            rotation: data[5],
+            exposure: data[6],
+        },
+        4 => {
+            let template_id = data[0] as usize;
+            Primitive::TriangleTemplateFlash {
+                template: templates
+                    .get(template_id)
+                    .cloned()
+                    .ok_or_else(|| JsValue::from_str("Compact template index is invalid"))?,
+                x: data[1],
+                y: data[2],
+            }
+        }
+        5 => Primitive::Line {
+            start_x: data[0],
+            start_y: data[1],
+            end_x: data[2],
+            end_y: data[3],
+            width: data[4],
+            exposure: data[5],
+        },
+        _ => return Err(JsValue::from_str("Invalid compact primitive type")),
+    })
 }
 
 fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
@@ -2467,6 +2506,12 @@ fn compact_path_region_refs_from_parts_invariant(
 ) -> Result<Vec<Option<PathRegionRef>>, &'static str> {
     if ref_data.len() != feature_ids.len() * COMPACT_PATH_REGION_REF_STRIDE {
         return Err("Invalid compact path region ref data");
+    }
+
+    // Ordinary pads have no path-region references. An empty table denotes
+    // all-None without allocating a feature_count-sized temporary vector.
+    if feature_ids.is_empty() {
+        return Ok(Vec::new());
     }
 
     let mut refs = vec![None; feature_count];

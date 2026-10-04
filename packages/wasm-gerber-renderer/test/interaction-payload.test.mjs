@@ -17,6 +17,37 @@ G37*
 M02*`;
 
 test(
+  "compact single-primitive import retains validation of types, templates and sparse refs",
+  { skip: hasDevWasm ? false : "wasm/pkg has not been built" },
+  async () => {
+    const api = await import(wasmModuleUrl.href);
+    api.initSync({ module: readFileSync(wasmBinaryUrl) });
+    const payload = api.parse_gerber_layer_payload_with_options(
+      "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,1*%\nD10*\nX0Y0D03*\nM02*", 0, 0, true, 1,
+    ).interactionPayload;
+    const processor = new api.GerberProcessor();
+    try {
+      processor.set_interactions_enabled(true);
+      processor.add_interaction_payload(0, payload);
+      assert.equal(processor.pick_interaction_feature(new Uint32Array([0]), 0, 0, 0).aperture, "D10");
+      assert.throws(() => processor.add_interaction_payload(0, {
+        ...payload, primitiveTypes: Uint32Array.of(99),
+      }), /Invalid compact primitive type/);
+      assert.throws(() => processor.add_interaction_payload(0, {
+        ...payload, primitiveTypes: Uint32Array.of(4), primitiveData: new Float32Array(10),
+      }), /Compact template index is invalid/);
+      assert.throws(() => processor.add_interaction_payload(0, {
+        ...payload, pathRegionRefData: Uint32Array.of(0, 0, 1),
+      }), /Invalid compact path region ref data/);
+      // Failed imports must leave the already-valid layer intact.
+      assert.equal(processor.pick_interaction_feature(new Uint32Array([0]), 0, 0, 0).aperture, "D10");
+    } finally {
+      processor.free();
+    }
+  },
+);
+
+test(
   "compact interaction payload preserves path-region refs across processor import",
   { skip: hasDevWasm ? false : "wasm/pkg has not been built" },
   async () => {

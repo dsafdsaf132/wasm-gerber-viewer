@@ -2947,6 +2947,26 @@ pub(crate) fn record_flash_interactions(
         state.mirror_y,
         state.layer_rotation,
     );
+    // Metadata is constant for one flash command, including its SR copies.
+    // Intern it once; retain separate geometry/bounds for each copy.
+    let mut first_feature = None;
+    let mut record_copy = |copy: &[Primitive]| {
+        if let Some(first_feature) = first_feature {
+            interaction_layer.push_repeated_flash(first_feature, copy);
+            return;
+        }
+        if let Some(feature) = feature_from_primitive_delta(
+            FeatureKind::Flash,
+            aperture_code,
+            aperture,
+            state.polarity,
+            copy,
+            properties.clone(),
+        ) {
+            first_feature = Some(interaction_layer.features.len());
+            interaction_layer.push(feature);
+        }
+    };
     // Plain apertures have a fixed number of primitives per copy. Reuse the
     // render geometry rather than transforming it again for picking. Template
     // and negative apertures keep their existing picking representation.
@@ -2954,16 +2974,7 @@ pub(crate) fn record_flash_interactions(
         let per_copy = aperture.primitives.len();
         if per_copy != 0 {
             for copy in rendered.chunks_exact(per_copy) {
-                if let Some(feature) = feature_from_primitive_delta(
-                    FeatureKind::Flash,
-                    aperture_code,
-                    aperture,
-                    state.polarity,
-                    copy,
-                    properties.clone(),
-                ) {
-                    interaction_layer.push(feature);
-                }
+                record_copy(copy);
             }
         }
         return Ok(());
@@ -2985,16 +2996,7 @@ pub(crate) fn record_flash_interactions(
                 state.layer_rotation,
             )?;
 
-            if let Some(feature) = feature_from_primitive_delta(
-                FeatureKind::Flash,
-                aperture_code,
-                aperture,
-                state.polarity,
-                &primitives,
-                properties.clone(),
-            ) {
-                interaction_layer.push(feature);
-            }
+            record_copy(&primitives);
         }
     }
 
