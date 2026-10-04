@@ -659,6 +659,14 @@ pub fn parse_aperture(
         }
     }
 
+    finalize_aperture(&mut aperture);
+
+    apertures.insert(code, aperture);
+}
+
+/// Derive the cached flags of an aperture from its primitives. Every aperture
+/// built outside `parse_aperture` (ODB++ symbols) must call this before use.
+pub(crate) fn finalize_aperture(aperture: &mut Aperture) {
     // Calculate has_negative based on actual primitives
     aperture.has_negative = aperture.primitives.iter().any(|p| match p {
         Primitive::Circle { exposure, .. } => *exposure < 0.5,
@@ -669,6 +677,9 @@ pub fn parse_aperture(
         Primitive::TriangleTemplateFlash { .. } => false,
     });
     aperture.triangle_template = build_triangle_template(&aperture.primitives);
-
-    apertures.insert(code, aperture);
+    if let Some((min_x, max_x, min_y, max_y)) = primitive_bounds(&aperture.primitives) {
+        if aperture.radius <= 0.0 {
+            aperture.radius = (max_x - min_x).max(max_y - min_y) / 2.0;
+        }
+    }
 }

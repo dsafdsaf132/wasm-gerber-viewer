@@ -189,12 +189,18 @@ self.addEventListener("message", async (event) => {
       parsedLayer,
       interactionPayload,
     });
+    // ODB++ layers report what they skipped or approximated after the parse.
+    const odbDiagnostics =
+      typeof wasmModule.take_last_odb_diagnostics === "function"
+        ? (wasmModule.take_last_odb_diagnostics() ?? null)
+        : null;
     self.postMessage(
       {
         id,
         ok: true,
         parsedLayer,
         interactionPayload,
+        odbDiagnostics,
         workerMemory: {
           beforeBytes,
           afterBytes: getWorkerWasmMemoryBytes(),

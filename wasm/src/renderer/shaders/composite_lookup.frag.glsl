@@ -7,6 +7,7 @@ uniform highp usampler2D u_lookup;
 uniform sampler2D u_outline;
 uniform int u_lookup_width;
 uniform bool u_inverted;
+uniform bool u_outline_is_red;
 
 out highp vec4 fragColor;
 
@@ -19,7 +20,8 @@ void main() {
     int lookup_y = int(byte_index / uint(u_lookup_width));
     uint lookup_byte = texelFetch(u_lookup, ivec2(lookup_x, lookup_y), 0).r;
     bool selected = (lookup_byte & (1u << (code & 7u))) != 0u;
-    bool inside_outline = texelFetch(u_outline, pixel, 0).r >= 0.5;
+    vec4 outline = texelFetch(u_outline, pixel, 0);
+    bool inside_outline = (u_outline_is_red ? outline.r : outline.a) >= 0.5;
     if (code == 0u) selected = selected && inside_outline;
     if (u_inverted) selected = inside_outline && !selected;
     float mask = selected ? 1.0 : 0.0;

@@ -12,6 +12,9 @@ const mimeTypes = new Map([
   [".mjs", "text/javascript; charset=utf-8"],
   [".png", "image/png"],
   [".svg", "image/svg+xml"],
+  [".tar", "application/x-tar"],
+  [".tgz", "application/gzip"],
+  [".gz", "application/gzip"],
   [".wasm", "application/wasm"],
   [".woff2", "font/woff2"],
 ]);

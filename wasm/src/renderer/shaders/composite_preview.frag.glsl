@@ -6,6 +6,7 @@ uniform sampler2D u_membership;
 uniform highp usampler2D u_lookup;
 uniform sampler2D u_outline;
 uniform int u_lookup_width;
+uniform bool u_outline_is_red;
 
 out highp vec4 fragColor;
 
@@ -24,7 +25,8 @@ void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     uvec3 rgb = uvec3(round(texelFetch(u_membership, pixel, 0).rgb * 255.0));
     uint code = rgb.r | (rgb.g << 8u) | (rgb.b << 16u);
-    bool inside_outline = texelFetch(u_outline, pixel, 0).r >= 0.5;
+    vec4 outline = texelFetch(u_outline, pixel, 0);
+    bool inside_outline = (u_outline_is_red ? outline.r : outline.a) >= 0.5;
     if (code == 0u && !inside_outline) discard;
 
     uint byte_index = code >> 3u;

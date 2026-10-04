@@ -170,7 +170,7 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color"],
+            &["transform", "color", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&triangle);
 
@@ -200,6 +200,7 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -220,6 +221,8 @@ impl ShaderPrograms {
                 "transform",
                 "color",
                 "viewport_size",
+                "anti_aliasing",
+                "pixels_per_world",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -239,7 +242,7 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color"],
+            &["transform", "color", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&circle_holed);
 
@@ -261,6 +264,8 @@ impl ShaderPrograms {
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
+                "anti_aliasing",
+                "pixels_per_world",
                 "inner_outline_pixels",
                 "inner_outline_world",
             ],
@@ -289,7 +294,7 @@ impl ShaderPrograms {
             TEXTURE_VERTEX_SHADER,
             TEXTURE_FRAGMENT_SHADER,
             &["position"],
-            &["u_texture", "u_color"],
+            &["u_texture", "u_color", "u_mask_is_red"],
         )?;
         pending.track(&texture);
 
@@ -298,7 +303,7 @@ impl ShaderPrograms {
             PATH_SOLID_VERTEX_SHADER,
             PATH_SOLID_FRAGMENT_SHADER,
             &["position"],
-            &["transform", "color"],
+            &["transform", "color", "bounds_padding"],
         )?;
         pending.track(&path_solid);
 
@@ -307,7 +312,7 @@ impl ShaderPrograms {
             PATH_SECTOR_VERTEX_SHADER,
             PATH_SECTOR_FRAGMENT_SHADER,
             &["position", "center", "radius"],
-            &["transform"],
+            &["transform", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&path_sector);
 
@@ -327,6 +332,7 @@ impl ShaderPrograms {
                 "u_source7",
                 "u_source_count",
                 "u_base_slot",
+                "u_red_source_mask",
             ],
         )?;
         pending.track(&composite_membership);
@@ -342,6 +348,7 @@ impl ShaderPrograms {
                 "u_outline",
                 "u_lookup_width",
                 "u_inverted",
+                "u_outline_is_red",
             ],
         )?;
         pending.track(&composite_lookup);
@@ -351,7 +358,13 @@ impl ShaderPrograms {
             TEXTURE_VERTEX_SHADER,
             COMPOSITE_PREVIEW_FRAGMENT_SHADER,
             &["position"],
-            &["u_membership", "u_lookup", "u_outline", "u_lookup_width"],
+            &[
+                "u_membership",
+                "u_lookup",
+                "u_outline",
+                "u_lookup_width",
+                "u_outline_is_red",
+            ],
         )?;
         pending.track(&composite_preview);
 
@@ -365,6 +378,7 @@ impl ShaderPrograms {
                 "u_outline",
                 "u_selected_code",
                 "u_clip_to_outline",
+                "u_outline_is_red",
             ],
         )?;
         pending.track(&composite_highlight);

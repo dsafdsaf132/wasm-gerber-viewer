@@ -12,11 +12,24 @@ import {
 import {
   MAX_ARCHIVE_COMPRESSION_RATIO,
   MAX_ARCHIVE_ENTRY_COUNT,
+  MAX_ODB_ARCHIVE_ENTRY_COUNT,
   MAX_ARCHIVE_TOTAL_SIZE_BYTES,
   MAX_FILE_SIZE_BYTES,
   MAX_LAYER_COUNT,
   MAX_SOURCE_REPEAT,
 } from "../core/config.js";
+import {
+  collectOdbLayerSourcesFromTree,
+  createOdbTreeFromFiles,
+  createOdbTreeFromZip,
+  odbTreeOptions,
+  isOdbArchiveFile,
+  isOdbFileList,
+  isOdbZip,
+  readTarArchive,
+} from "../src/odb/index.js";
+
+export { getInitialOdbStepName } from "../src/odb/index.js";
 
 const UNKNOWN_ZIP_LAYER_SNIFF_LINES = 30;
 
@@ -126,6 +139,11 @@ export async function fetchRemoteFile(
   });
 }
 
+/**
+ * Turn uploaded files into layer sources. `files` may hold `File` objects or
+ * `{ file, relativePath }` wrappers produced by a folder drop; a set of files
+ * whose relative paths form an ODB++ job is imported as one job.
+ */
 export async function collectLayerSources(files, callbacks = {}) {
   const layerSources = [];
 
@@ -133,14 +151,36 @@ export async function collectLayerSources(files, callbacks = {}) {
     throw new RangeError(`Cannot load more than ${MAX_LAYER_COUNT} files at once`);
   }
 
+  const items = [];
   for (let index = 0; index < files.length; index++) {
-    const file = typeof files.item === "function" ? files.item(index) : files[index];
+    const item = typeof files.item === "function" ? files.item(index) : files[index];
+    if (item) items.push(item);
+  }
+
+  if (isOdbFileList(items)) {
+    const label = getDroppedJobLabel(items);
+    callbacks.onArchiveStart?.(label);
+    return collectOdbSources(
+      createOdbTreeFromFiles(items, odbTreeOptions(callbacks)),
+      label,
+      callbacks,
+    );
+  }
+
+  for (let index = 0; index < items.length; index++) {
+    const file = items[index]?.file ?? items[index];
     if (!file) continue;
 
-    callbacks.onFileStart?.(file.name, index + 1, files.length);
+    callbacks.onFileStart?.(file.name, index + 1, items.length);
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
       throw createFileSizeLimitError(file.name, file.size, MAX_FILE_SIZE_BYTES);
+    }
+
+    if (isOdbArchiveFile(file)) {
+      layerSources.push(...(await collectTarLayerSources(file, callbacks)));
+      assertLayerCount(layerSources.length);
+      continue;
     }
 
     if (isZipFile(file)) {
@@ -263,16 +303,12 @@ function addLayerOffsets(first, second) {
   };
 }
 
-async function collectZipLayerSources(
-  file,
-  {
+async function collectZipLayerSources(file, callbacks = {}) {
+  const {
     jsZip = globalThis.JSZip,
-    onArchiveWarning = () => {},
-    onArchiveInfo = () => {},
     onArchiveError = () => {},
     onArchiveStart = () => {},
-  } = {},
-) {
+  } = callbacks;
   if (!jsZip) {
     onArchiveError(file.name, new Error("ZIP support failed to load"));
     return [];
@@ -282,46 +318,157 @@ async function collectZipLayerSources(
     onArchiveStart(file.name);
     const zip = await jsZip.loadAsync(file);
     const archiveEntries = Object.values(zip.files);
-    validateZipEntries(archiveEntries, file.name);
-    const entries = archiveEntries
-      .filter(
-        (entry) =>
-          !entry.dir &&
-          !isArchiveMetadataPath(entry.name),
-      )
-      .sort((a, b) =>
-        a.name.localeCompare(b.name, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        }),
-      );
+    const odbJob = isOdbZip(zip);
+    validateZipEntries(archiveEntries, file.name, {
+      maxEntries: odbJob ? MAX_ODB_ARCHIVE_ENTRY_COUNT : MAX_ARCHIVE_ENTRY_COUNT,
+    });
 
-    const sources = [];
-    for (const entry of entries) {
-      const source = isSupportedLayerPath(entry.name)
-        ? await createKnownZipLayerSource(entry, file.name, onArchiveWarning)
-        : await createUnknownZipLayerSource(entry, file.name, onArchiveWarning);
-      if (source) {
-        sources.push(source);
-        assertLayerCount(sources.length);
+    if (odbJob) {
+      return await collectOdbSources(
+        createOdbTreeFromZip(zip, odbTreeOptions(callbacks)),
+        file.name,
+        callbacks,
+        { rethrow: true },
+      );
+    }
+
+    // Some CAD exporters wrap an ODB++ TAR/TGZ job with release documents in
+    // an outer ZIP. Prefer the embedded job when there is exactly one archive
+    // candidate, rather than treating the wrapper as a generic ZIP.
+    const nestedOdbArchives = archiveEntries.filter(
+      (entry) => !entry.dir && isOdbArchiveFile({ name: entry.name }),
+    );
+    if (nestedOdbArchives.length === 1) {
+      const nested = nestedOdbArchives[0];
+      const nestedFile = createZipArchiveFile(nested);
+      const { tree } = await readTarArchive(nestedFile, odbTreeOptions(callbacks));
+      if (tree.isOdbJob) {
+        return await collectOdbSources(tree, `${file.name}/${nested.name}`, callbacks, {
+          rethrow: true,
+        });
       }
     }
 
-    if (sources.length === 0) {
-      onArchiveWarning(
-        file.name,
-        "No supported layer files found in archive",
-      );
-      return [];
-    }
-
-    onArchiveInfo(file.name, `${sources.length} layer files found in archive`);
-
-    return sources;
+    return await collectArchiveEntrySources(archiveEntries, file.name, callbacks);
   } catch (error) {
     onArchiveError(file.name, error);
     return [];
   }
+}
+
+/**
+ * `.tgz`/`.tar.gz`/`.tar` uploads: an ODB++ job when the archive holds
+ * `matrix/matrix`, otherwise a plain bundle of layer files handled like a ZIP.
+ */
+async function collectTarLayerSources(file, callbacks = {}) {
+  const { onArchiveError = () => {}, onArchiveStart = () => {} } = callbacks;
+  try {
+    onArchiveStart(file.name);
+    const { entries, tree } = await readTarArchive(file, odbTreeOptions(callbacks));
+    if (tree.isOdbJob) {
+      return await collectOdbSources(tree, file.name, callbacks, { rethrow: true });
+    }
+    // Only ODB++ jobs get the larger entry budget; a plain TAR of Gerber files
+    // is held to the same limit as a ZIP.
+    if (entries.length > MAX_ARCHIVE_ENTRY_COUNT) {
+      throw new RangeError(
+        `${file.name} contains ${entries.length} entries; the limit is ${MAX_ARCHIVE_ENTRY_COUNT}`,
+      );
+    }
+    const pseudoEntries = entries.map((entry) => createTarPseudoZipEntry(entry));
+    return await collectArchiveEntrySources(pseudoEntries, file.name, callbacks);
+  } catch (error) {
+    onArchiveError(file.name, error);
+    return [];
+  }
+}
+
+async function collectOdbSources(tree, label, callbacks = {}, { rethrow = false } = {}) {
+  const { onArchiveError = () => {} } = callbacks;
+  try {
+    const sources = await collectOdbLayerSourcesFromTree(tree, label, callbacks);
+    assertLayerCount(sources.length);
+    return sources;
+  } catch (error) {
+    if (rethrow) throw error;
+    onArchiveError(label, error);
+    return [];
+  }
+}
+
+async function collectArchiveEntrySources(
+  archiveEntries,
+  archiveName,
+  { onArchiveWarning = () => {}, onArchiveInfo = () => {} } = {},
+) {
+  const entries = archiveEntries
+    .filter(
+      (entry) =>
+        !entry.dir &&
+        !isArchiveMetadataPath(entry.name),
+    )
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
+
+  const sources = [];
+  for (const entry of entries) {
+    const source = isSupportedLayerPath(entry.name)
+      ? await createKnownZipLayerSource(entry, archiveName, onArchiveWarning)
+      : await createUnknownZipLayerSource(entry, archiveName, onArchiveWarning);
+    if (source) {
+      sources.push(source);
+      assertLayerCount(sources.length);
+    }
+  }
+
+  if (sources.length === 0) {
+    onArchiveWarning(
+      archiveName,
+      "No supported layer files found in archive",
+    );
+    return [];
+  }
+
+  onArchiveInfo(archiveName, `${sources.length} layer files found in archive`);
+
+  return sources;
+}
+
+/** Present a TAR entry through the small JSZip entry surface the ZIP path uses. */
+function createTarPseudoZipEntry(entry) {
+  return {
+    dir: false,
+    name: entry.path,
+    _data: { uncompressedSize: entry.bytes.byteLength },
+    async async(type, onProgress) {
+      onProgress?.({ percent: 100 });
+      return type === "uint8array" ? entry.bytes : decodeZipEntryText(entry.bytes);
+    },
+  };
+}
+
+/** Expose a ZIP entry through the minimal File surface needed by TAR loading. */
+function createZipArchiveFile(entry) {
+  return {
+    name: getBaseFileName(entry.name),
+    async arrayBuffer() {
+      const bytes = await readZipEntryBytes(entry);
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    },
+  };
+}
+
+function getDroppedJobLabel(items) {
+  for (const item of items) {
+    const relativePath = item?.relativePath ?? item?.webkitRelativePath ?? "";
+    const root = relativePath.split("/")[0];
+    if (root) return root;
+  }
+  return "ODB++ folder";
 }
 
 async function createKnownZipLayerSource(entry, archiveName, onArchiveWarning) {
@@ -446,10 +593,14 @@ function getZipEntryCompressedSizeBytes(entry) {
   return Number.isFinite(size) && size > 0 ? size : null;
 }
 
-function validateZipEntries(entries, archiveName) {
-  if (entries.length > MAX_ARCHIVE_ENTRY_COUNT) {
+function validateZipEntries(
+  entries,
+  archiveName,
+  { maxEntries = MAX_ARCHIVE_ENTRY_COUNT } = {},
+) {
+  if (entries.length > maxEntries) {
     throw new RangeError(
-      `${archiveName} contains ${entries.length} entries; the limit is ${MAX_ARCHIVE_ENTRY_COUNT}`,
+      `${archiveName} contains ${entries.length} entries; the limit is ${maxEntries}`,
     );
   }
 

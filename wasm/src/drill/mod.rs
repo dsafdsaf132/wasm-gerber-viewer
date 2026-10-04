@@ -84,10 +84,10 @@ struct Tool {
 
 #[derive(Debug)]
 pub struct DrillToolMetadata {
-    code: u32,
-    diameter_mm: f32,
-    hit_count: u32,
-    slot_count: u32,
+    pub(crate) code: u32,
+    pub(crate) diameter_mm: f32,
+    pub(crate) hit_count: u32,
+    pub(crate) slot_count: u32,
 }
 
 impl DrillToolMetadata {
@@ -115,9 +115,9 @@ impl DrillToolMetadata {
 
 #[derive(Debug)]
 pub struct DrillMetadata {
-    tools: Vec<DrillToolMetadata>,
-    hit_count: u32,
-    slot_count: u32,
+    pub(crate) tools: Vec<DrillToolMetadata>,
+    pub(crate) hit_count: u32,
+    pub(crate) slot_count: u32,
 }
 
 impl DrillMetadata {
@@ -357,7 +357,7 @@ impl CoordinateWords {
     }
 }
 
-struct DrillParser {
+pub(crate) struct DrillParser {
     unit: Unit,
     coordinate_format: CoordinateFormat,
     coordinate_format_from_comment: bool,
@@ -414,6 +414,11 @@ impl DrillParser {
     }
 
     fn parse(mut self, content: &str) -> Result<DrillParseResult, JsValue> {
+        if crate::odb::is_odb_envelope(content) {
+            crate::odb::drive_drill_parser(&mut self, content)?;
+            return self.finish();
+        }
+
         for raw_line in content.lines() {
             if let Some((integer_digits, decimal_digits)) = parse_file_format_comment(raw_line) {
                 self.coordinate_format.integer_digits = integer_digits;
@@ -428,6 +433,10 @@ impl DrillParser {
             self.parse_line(&line)?;
         }
 
+        self.finish()
+    }
+
+    fn finish(self) -> Result<DrillParseResult, JsValue> {
         if !self.fill.has_geometry {
             return Err(JsValue::from_str(
                 "File does not contain valid drill data (no holes found)",
@@ -459,6 +468,73 @@ impl DrillParser {
             },
             interaction_layer: self.interaction_layer,
         })
+    }
+
+    /// Declare a tool in millimetres (ODB++ `tools` files and `r<d>` symbols).
+    pub(crate) fn declare_tool_mm(&mut self, code: u32, diameter_mm: f32) {
+        self.tools.insert(
+            code,
+            Tool {
+                diameter_mm,
+                hit_count: 0,
+                slot_count: 0,
+            },
+        );
+    }
+
+    pub(crate) fn select_tool(&mut self, code: u32) {
+        self.current_tool = Some(code);
+    }
+
+    /// A drill hit at `(x, y)` in millimetres with the selected tool.
+    pub(crate) fn add_hit(&mut self, x: f32, y: f32) -> Result<(), JsValue> {
+        self.mode = Mode::Drill;
+        self.push_hit(x, y)?;
+        self.current_x = x;
+        self.current_y = y;
+        Ok(())
+    }
+
+    /// A slot or straight rout cut between two points, in millimetres.
+    pub(crate) fn add_slot(
+        &mut self,
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+    ) -> Result<(), JsValue> {
+        self.push_slot_between(start_x, start_y, end_x, end_y)?;
+        self.current_x = end_x;
+        self.current_y = end_y;
+        Ok(())
+    }
+
+    /// An arc rout cut from the start point to the end point around an
+    /// explicit centre, in millimetres.
+    pub(crate) fn add_arc(
+        &mut self,
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        center_x: f32,
+        center_y: f32,
+        counter_clockwise: bool,
+    ) -> Result<(), JsValue> {
+        self.mode = Mode::Rout;
+        self.current_x = start_x;
+        self.current_y = start_y;
+        let words = CoordinateWords {
+            x: Some(end_x),
+            y: Some(end_y),
+            i: Some(center_x - start_x),
+            j: Some(center_y - start_y),
+            a: None,
+        };
+        self.push_arc(end_x, end_y, words, counter_clockwise)?;
+        self.current_x = end_x;
+        self.current_y = end_y;
+        Ok(())
     }
 
     fn parse_line(&mut self, line: &str) -> Result<(), JsValue> {

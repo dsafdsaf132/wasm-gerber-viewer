@@ -14,6 +14,7 @@ wasm/src/
 ├── geometry/          # shared geometry buffers, boundaries, and region contours
 ├── parser/            # Gerber parser, aperture handling, command geometry, tests
 ├── drill/             # Excellon/NC drill parser, metadata, tests
+├── odb/               # ODB++ layer envelopes, features, symbols, and tests
 ├── interaction/       # picking, compact interaction payloads, highlight batches
 ├── renderer/          # WebGL renderer, composite masks, GPU buffers, shaders, tests
 └── util/              # formatting and small utility helpers
@@ -41,6 +42,10 @@ flowchart TD
   DrillResult --> DrillLayers["outline_layer + fill_layer"]
   DrillResult --> DrillMeta["Drill metadata"]
   DrillResult --> DrillInteraction["Optional InteractionLayer"]
+
+  InputKind -->|ODB++ layer envelope| OdbParse["ODB++ layer/drill driver"]
+  OdbParse --> Parser
+  OdbParse --> DrillParse
 
   GerberData --> RenderPayload["JS render payload"]
   InputKind -->|Worker or pre-parse payload| Payload["Render payload / restored GerberData"]
@@ -79,6 +84,10 @@ Key APIs:
   both the render payload and a compact interaction payload.
 - `parse_drill_layer()`: parses Excellon/NC drill input into outline/fill
   payloads.
+- `decompress_unix_z()`: decompresses an ODB++ `.Z` member within the caller's
+  output-size limit.
+- `take_last_odb_diagnostics()`: returns the warning summary from the most
+  recently parsed ODB++ layer envelope, if any.
 - `GerberProcessor::add_layer*()`: parses source directly inside the stateful
   renderer instance.
 - `GerberProcessor::add_render_payload()`: uploads worker/pre-parse render
@@ -142,7 +151,34 @@ interaction layer. `GerberProcessor::add_drill_parse_result()` adds outline and
 fill as separate renderer layers, stores the outline id for later option
 updates, and returns `outlineLayerId`, `fillLayerId`, and metadata to JS.
 
-### 4. Geometry Model
+### 4. ODB++ Layer Parsing
+
+ODB++ job discovery, archive reading, and step/layer selection happen in the
+JavaScript loader. It supports a dropped job folder and ODB++ jobs stored in
+ZIP, `.tgz`, `.tar.gz`, or `.tar` archives. JavaScript reads the original text
+files for one selected layer and passes them to WASM in a line-based *layer
+envelope*; it does not translate the layer into Gerber or Excellon text.
+
+`wasm/src/odb/` parses the envelope and drives the existing Gerber or drill
+builders directly:
+
+- Signal and profile layers use the Gerber geometry path, yielding ordinary
+  `GerberData` polarity sublayers.
+- Drill and rout layers use the drill path and yield the usual outline/fill
+  result.
+- Standard ODB++ symbols, user-defined symbols, pads, lines, arcs, surfaces,
+  and feature polarity are converted into the shared geometry model.
+
+Because the result uses the same geometry and renderer layer types as native
+input, ODB++ layers take part in normal rendering, layer inversion, composites,
+screenshots, and renderer recovery without a separate raster pipeline.
+
+The parser can report records it skipped or approximated (for example,
+unsupported symbols or text) through `take_last_odb_diagnostics()`. Callers
+must read that value immediately after parsing an ODB++ envelope; ordinary
+Gerber and drill input has no ODB++ diagnostic state.
+
+### 5. Geometry Model
 
 The shared geometry model is in `wasm/src/geometry/shape.rs`.
 
@@ -166,7 +202,7 @@ data uses a separate compact interaction payload from `wasm/src/interaction/mod.
 so aperture strings, descriptors, templates, primitives, and path-region data
 can remain table-based across the JS boundary.
 
-### 5. Processor State
+### 6. Processor State
 
 `GerberProcessor` keeps the top-level state:
 
@@ -211,7 +247,7 @@ Layer-add flow:
    renderer layer id so Rust can restore the compact interaction payload into
    `interaction_layers`.
 
-### 6. Interaction Pipeline
+### 7. Interaction Pipeline
 
 Interaction data is implemented in `wasm/src/interaction/mod.rs`.
 

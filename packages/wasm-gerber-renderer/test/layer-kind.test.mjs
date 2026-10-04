@@ -837,6 +837,13 @@ function makeParsedReuseWasmModule() {
   };
 }
 
+test("viewer accepts CircuitCAM .gbx output as Gerber", () => {
+  assert.equal(isSupportedGerberPath("stencil-top.gbx"), true);
+  assert.equal(isSupportedGerberPath("STENCIL-TOP.GBX"), true);
+  assert.equal(isSupportedLayerPath("archive/stencil-top.gbx"), true);
+  assert.equal(getLayerSourceKind("stencil-top.gbx", GERBER_CONTENT), "gerber");
+});
+
 test("viewer accepts Zuken CR-5000 .phd photo data as Gerber", () => {
   assert.equal(isSupportedGerberPath("metal-mask-top.phd"), true);
   assert.equal(isSupportedGerberPath("METAL-MASK-TOP.PHD"), true);

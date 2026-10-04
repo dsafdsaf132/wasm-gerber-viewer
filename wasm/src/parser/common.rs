@@ -121,7 +121,16 @@ pub fn extract_command_tokens(line: &str) -> CommandTokens<'_> {
 }
 
 const POW10: [f32; 10] = [
-    1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0, 1000000000.0,
+    1.0,
+    10.0,
+    100.0,
+    1000.0,
+    10000.0,
+    100000.0,
+    1000000.0,
+    10000000.0,
+    100000000.0,
+    1000000000.0,
 ];
 
 pub fn parse_omitted_decimal_number(
@@ -152,12 +161,12 @@ pub fn parse_omitted_decimal_number(
         let total_digits = (format.integer_digits + format.decimal_digits) as usize;
         if digits.len() < total_digits {
             let missing = (total_digits - digits.len()) as u32;
-            let multiplier = 10_i64
-                .checked_pow(missing)
-                .ok_or_else(|| format!("Invalid {context} format specifier (missing digits too large)"))?;
-            value = value
-                .checked_mul(multiplier)
-                .ok_or_else(|| format!("Invalid {context} number `{token}` (trailing padding overflow)"))?;
+            let multiplier = 10_i64.checked_pow(missing).ok_or_else(|| {
+                format!("Invalid {context} format specifier (missing digits too large)")
+            })?;
+            value = value.checked_mul(multiplier).ok_or_else(|| {
+                format!("Invalid {context} number `{token}` (trailing padding overflow)")
+            })?;
         }
     }
 

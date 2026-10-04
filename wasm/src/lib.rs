@@ -6,6 +6,7 @@
 mod drill;
 mod geometry;
 mod interaction;
+mod odb;
 mod parser;
 mod renderer;
 mod util;
@@ -199,6 +200,23 @@ fn drill_parse_result_to_js(drill: DrillParseResult) -> Result<JsValue, JsValue>
     Ok(object.into())
 }
 
+/// Decompress a UNIX `compress` (`.Z`) stream, the per-file compression many
+/// CAM tools apply to ODB++ `features` files. The output is capped at
+/// `max_output_bytes`; the viewer charges it to the archive byte budget.
+#[wasm_bindgen]
+pub fn decompress_unix_z(bytes: &[u8], max_output_bytes: usize) -> Result<Vec<u8>, JsValue> {
+    crate::odb::decompress_unix_z(bytes, max_output_bytes)
+        .map_err(|message| JsValue::from_str(&message))
+}
+
+/// Diagnostics of the most recent ODB++ layer parsed by this module instance
+/// ("Skipped or approximated: ..."), or `undefined` when there were none.
+/// Read it right after a parse or add call for an ODB++ layer envelope.
+#[wasm_bindgen]
+pub fn take_last_odb_diagnostics() -> Option<String> {
+    crate::odb::take_last_diagnostics()
+}
+
 #[wasm_bindgen]
 pub fn parse_drill_layer(
     content: String,
@@ -216,6 +234,7 @@ pub struct GerberProcessor {
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     minimum_feature_pixels: f32,
+    anti_aliasing: bool,
     drill_outline_pixels: f32,
     drill_outline_layer_ids: Vec<u32>,
     drill_layer_ids: Vec<u32>,
@@ -230,6 +249,7 @@ impl Default for GerberProcessor {
             preserve_arc_regions: true,
             arc_tessellation_quality: 1,
             minimum_feature_pixels: 0.0,
+            anti_aliasing: false,
             drill_outline_pixels: 0.0,
             drill_outline_layer_ids: Vec::new(),
             drill_layer_ids: Vec::new(),
@@ -443,6 +463,7 @@ impl GerberProcessor {
         // Create renderer with WebGL context (initially no layers)
         let mut renderer = Renderer::new(gl)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        renderer.set_anti_aliasing(self.anti_aliasing);
         self.renderer = Some(renderer);
         self.reset_renderer_generation_state();
         Ok("init_done".to_string())
@@ -459,6 +480,7 @@ impl GerberProcessor {
     ) -> Result<String, JsValue> {
         let mut renderer = Renderer::new_headless(gl, width, height)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        renderer.set_anti_aliasing(self.anti_aliasing);
         self.renderer = Some(renderer);
         self.reset_renderer_generation_state();
         Ok("init_done".to_string())
@@ -492,6 +514,16 @@ impl GerberProcessor {
 
         if let Some(renderer) = &mut self.renderer {
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+        }
+    }
+
+    /// Turn anti-aliased layer masks on or off (default off). Independent of
+    /// the minimum line width; applies to the viewer, screenshots and the
+    /// renderer API alike because they all go through this processor.
+    pub fn set_anti_aliasing(&mut self, enabled: bool) {
+        self.anti_aliasing = enabled;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_anti_aliasing(enabled);
         }
     }
 
@@ -553,6 +585,7 @@ impl GerberProcessor {
         } else {
             let mut renderer = Renderer::new(gl)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+            renderer.set_anti_aliasing(self.anti_aliasing);
             self.renderer = Some(renderer);
         }
 
@@ -571,6 +604,7 @@ impl GerberProcessor {
         } else {
             let mut renderer = Renderer::new_headless(gl, width, height)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
+            renderer.set_anti_aliasing(self.anti_aliasing);
             self.renderer = Some(renderer);
         }
 
@@ -1077,6 +1111,50 @@ impl GerberProcessor {
             .as_ref()
             .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
             .get_composite_error(composite_id as usize)
+    }
+
+    /// Anti-aliasing state: `enabled`, `status` (off, pending, ready,
+    /// size-limited, unsupported, unexpected), whether the shared multisample
+    /// target and its stencil are allocated, the size a memory-limited
+    /// allocation failed at, the code of an unexpected GL failure, and `mode`,
+    /// the mode the masks were last drawn in ("multisampled" or
+    /// "point-sampled"), which is uniform across a frame.
+    pub fn get_anti_aliasing_diagnostics(&self) -> Result<JsValue, JsValue> {
+        let diagnostics = self
+            .renderer
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("Renderer not initialized. Call init() first."))?
+            .anti_aliasing_diagnostics();
+        let object = Object::new();
+        let set = |name: &str, value: JsValue| {
+            Reflect::set(&object, &JsValue::from_str(name), &value)
+                .map(|_| ())
+                .map_err(|_| JsValue::from_str("Failed to build anti-aliasing diagnostics"))
+        };
+        set("enabled", JsValue::from_bool(diagnostics.enabled))?;
+        set("status", JsValue::from_str(diagnostics.status))?;
+        set("target", JsValue::from_bool(diagnostics.target_allocated))?;
+        set("stencil", JsValue::from_bool(diagnostics.stencil_allocated))?;
+        set(
+            "failedSize",
+            match diagnostics.failed_size {
+                Some((width, height)) => {
+                    let size = js_sys::Array::new();
+                    size.push(&JsValue::from_f64(width as f64));
+                    size.push(&JsValue::from_f64(height as f64));
+                    size.into()
+                }
+                None => JsValue::NULL,
+            },
+        )?;
+        set(
+            "unexpectedError",
+            diagnostics
+                .unexpected_error
+                .map_or(JsValue::NULL, |code| JsValue::from_f64(code as f64)),
+        )?;
+        set("mode", JsValue::from_str(diagnostics.mode))?;
+        Ok(object.into())
     }
 
     pub fn get_composite_diagnostics(&self, composite_id: u32) -> Result<JsValue, JsValue> {

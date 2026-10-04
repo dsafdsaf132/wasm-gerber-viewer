@@ -278,6 +278,7 @@ export function createBaseFrameOptions(frameOptions = {}) {
       frameOptions.minimumFeaturePixels,
       DEFAULT_MINIMUM_FEATURE_PIXELS,
     ),
+    antiAliasing: frameOptions.antiAliasing === true,
     renderDrills: frameOptions.renderDrills !== false,
     globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
     compositeMode: normalizeCompositeMode(frameOptions.compositeMode),
@@ -441,6 +442,9 @@ export function applyProcessorOptions(processor, frameOptions) {
     frameOptions.minimumFeaturePixels != null
   ) {
     processor.set_minimum_feature_pixels(frameOptions.minimumFeaturePixels);
+  }
+  if (typeof processor.set_anti_aliasing === "function") {
+    processor.set_anti_aliasing(frameOptions.antiAliasing === true);
   }
 }
 

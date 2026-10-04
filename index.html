@@ -37,7 +37,7 @@
             type="file"
             id="file-input"
             multiple
-            accept="text/*,application/zip,application/x-zip-compressed,.zip,.gdo,.gbr,.ger,.art,.gtl,.gbl,.gts,.gbs,.gto,.gbo,.gtp,.gbp,.cmp,.drd,.gko,.phd,.plc,.sol,.stc,.sts,.outline,.drl,.nc,.xnc,.xln"
+            accept="text/*,application/zip,application/x-zip-compressed,application/gzip,application/x-tar,.zip,.tgz,.tar,.gz,.gdo,.gbr,.gbx,.ger,.art,.gtl,.gbl,.gts,.gbs,.gto,.gbo,.gtp,.gbp,.cmp,.drd,.gko,.phd,.plc,.sol,.stc,.sts,.outline,.drl,.nc,.xnc,.xln"
           />
           <button
             type="button"
@@ -393,6 +393,31 @@
                             value="high"
                           />
                           <span>High</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="option-outline">
+                    <div class="option-row">
+                      <span>Anti-aliasing</span>
+                      <div class="segmented-control" role="radiogroup" aria-label="Anti-aliasing">
+                        <label>
+                          <input
+                            type="radio"
+                            id="anti-aliasing-off"
+                            name="anti-aliasing"
+                            value="off"
+                          />
+                          <span>Off</span>
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            id="anti-aliasing-on"
+                            name="anti-aliasing"
+                            value="on"
+                          />
+                          <span>4x MSAA</span>
                         </label>
                       </div>
                     </div>

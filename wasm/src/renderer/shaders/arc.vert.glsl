@@ -10,11 +10,17 @@ in float thickness_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
+// Pixels per world unit along the view's weaker axis, computed once per
+// view on the CPU and only read when anti-aliasing is on.
+uniform float pixels_per_world;
+uniform float anti_aliasing;
 uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp vec2 vPosition;
 out highp float vRadius;
 out highp float vStartAngle;
+// World units per pixel for the anti-aliased edges.
+out highp float vWorldPerPixel;
 out highp float vSweepAngle;
 out highp float vThickness;
 out highp float vOutlineThickness;
@@ -40,10 +46,18 @@ void main() {
     float effectiveThickness = max(thickness_instance, minimumWorldThickness)
         + outlineWorldThickness * 2.0;
     float maxRadius = max(radius_instance + effectiveThickness * 0.5, 0.0);
-    vec2 scaledPos = position * maxRadius + vec2(center_x_instance, center_y_instance);
+    float drawnRadius = maxRadius;
+    vWorldPerPixel = 0.0;
+    if (anti_aliasing > 0.5) {
+        // Half-pixel fringe so the soft edge has room; vPosition stays in
+        // world units so the fragment tests are unchanged.
+        vWorldPerPixel = 1.0 / pixels_per_world;
+        drawnRadius = maxRadius + 0.5 * vWorldPerPixel;
+    }
+    vec2 scaledPos = position * drawnRadius + vec2(center_x_instance, center_y_instance);
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
-    vPosition = position * maxRadius;
+    vPosition = position * drawnRadius;
     vRadius = radius_instance;
     vStartAngle = startAngle_instance;
     vSweepAngle = sweepAngle_instance;

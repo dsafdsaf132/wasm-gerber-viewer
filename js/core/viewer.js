@@ -23,11 +23,16 @@ import { NotificationCenter } from "../ui/notifications.js";
 import {
   collectLayerSources,
   fetchRemoteFile,
+  getInitialOdbStepName,
   getInitialSourceRepeat,
   getInitialSourceRepeatOffset,
   getInitialSourceUrl,
   repeatLayerSources,
 } from "../loading/source-loader.js";
+import {
+  collectDroppedEntries,
+  getDroppedEntries,
+} from "../loading/dropped-entries.js";
 import { ScreenshotExporter } from "../rendering/screenshot-exporter.js";
 import {
   calculateFitView as calculateViewportFit,
@@ -694,6 +699,7 @@ class GerberParseWorkerPool {
       task.resolve({
         renderPayload: event.data.parsedLayer,
         interactionPayload: event.data.interactionPayload ?? null,
+        odbDiagnostics: event.data.odbDiagnostics ?? null,
       });
     } else {
       const errorMessage = event.data.error || "Failed to parse Gerber layer";
@@ -919,6 +925,7 @@ export class GerberViewer {
     this.minimumFeaturePixels = Number(
       this.viewerOptionsStore.get("minimumFeaturePixels") ?? 1,
     );
+    this.antiAliasing = this.viewerOptionsStore.get("antiAliasing") === true;
     this.boardOutlineBoundsMarginMm = normalizeBoardOutlineBoundsMarginMm(
       this.viewerOptionsStore.get("boardOutlineBoundsMarginMm"),
     );
@@ -1589,6 +1596,10 @@ export class GerberViewer {
       processor.set_minimum_feature_pixels(this.minimumFeaturePixels);
     }
 
+    if (typeof processor?.set_anti_aliasing === "function") {
+      processor.set_anti_aliasing(this.antiAliasing);
+    }
+
     if (typeof processor?.set_interactions_enabled === "function") {
       processor.set_interactions_enabled(interactionsEnabled);
     }
@@ -1987,6 +1998,14 @@ export class GerberViewer {
       input.addEventListener("change", () => {
         if (input.checked) {
           void this.setArcTessellationQuality(input.value);
+        }
+      });
+    }
+
+    for (const input of this.getAntiAliasingInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setAntiAliasing(input.value === "on");
         }
       });
     }
@@ -2398,6 +2417,7 @@ export class GerberViewer {
   getRenderOptions() {
     return {
       minimumFeaturePixels: this.minimumFeaturePixels,
+      antiAliasing: this.antiAliasing,
       boardOutlineBoundsMarginMm: this.boardOutlineBoundsMarginMm,
       drillOutlinePixels: this.drillOutlinePixels,
       pthPlatingMicrometers: this.pthPlatingMicrometers,
@@ -2423,6 +2443,10 @@ export class GerberViewer {
       this.minimumVisibility1Input,
       this.minimumVisibility2Input,
     ];
+  }
+
+  getAntiAliasingInputs() {
+    return [this.antiAliasingOffInput, this.antiAliasingOnInput];
   }
 
   getBoardOutlineBoundsMarginUnitInputs() {
@@ -2492,6 +2516,11 @@ export class GerberViewer {
 
     for (const input of this.getMinimumVisibilityInputs()) {
       input.checked = Number(input.value) === this.minimumFeaturePixels;
+      input.disabled = this.isRendererBusy();
+    }
+
+    for (const input of this.getAntiAliasingInputs()) {
+      input.checked = (input.value === "on") === this.antiAliasing;
       input.disabled = this.isRendererBusy();
     }
 
@@ -2945,6 +2974,37 @@ export class GerberViewer {
     }
   }
 
+  setAntiAliasing(enabled) {
+    const next = enabled === true;
+    if (next === this.antiAliasing) {
+      return;
+    }
+    if (this.isRendererBusy()) {
+      this.syncOptionControls();
+      return;
+    }
+
+    const previous = this.antiAliasing;
+    this.antiAliasing = next;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+
+    try {
+      if (typeof this.wasmProcessor?.set_anti_aliasing === "function") {
+        this.wasmProcessor.set_anti_aliasing(this.antiAliasing);
+      }
+      this.requestRender();
+    } catch (error) {
+      this.antiAliasing = previous;
+      this.syncOptionControls();
+      this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+      this.configureWasmProcessorOptions(this.wasmProcessor);
+      this.showError(`Failed to apply anti-aliasing: ${getErrorMessage(error)}`);
+    } finally {
+      this.updateUiState();
+    }
+  }
+
   setBoardOutlineBoundsMargin(value) {
     const margin = parseBoardOutlineBoundsMarginInputValue(
       value,
@@ -3374,6 +3434,9 @@ export class GerberViewer {
       input.disabled = rendererBusy || this.preserveArcRegions;
     }
     for (const input of this.getMinimumVisibilityInputs()) {
+      input.disabled = rendererBusy;
+    }
+    for (const input of this.getAntiAliasingInputs()) {
       input.disabled = rendererBusy;
     }
     this.syncBoardOutlineBoundsMarginControl(rendererBusy);
@@ -4062,6 +4125,22 @@ export class GerberViewer {
           indeterminate: true,
         });
       },
+      onArchiveStage: (name, stage) => {
+        this.updateLoadingModal({
+          stage,
+          fileName: name,
+          indeterminate: true,
+        });
+      },
+      odbStepName: getInitialOdbStepName(),
+      // ODB++ files compressed with UNIX compress (.Z) are decoded in WASM.
+      decompressUnixZ: (bytes, maxOutputBytes) => {
+        const decompress = this.wasmModule?.decompress_unix_z;
+        if (typeof decompress !== "function") {
+          throw new Error("UNIX compress (.Z) files require an updated WASM module");
+        }
+        return decompress(bytes, maxOutputBytes);
+      },
       onFileStart: (name, current, total) => {
         this.updateLoadingModal({
           stage: "Preparing",
@@ -4336,6 +4415,7 @@ export class GerberViewer {
       return {
         renderPayload: payload.renderPayload,
         interactionPayload: payload.interactionPayload ?? null,
+        odbDiagnostics: this.takeOdbDiagnostics(),
       };
     }
     if (parseOptions.interactionsEnabled) {
@@ -4363,6 +4443,7 @@ export class GerberViewer {
           parseOptions.arcTessellationQuality,
         ),
         interactionPayload: null,
+        odbDiagnostics: this.takeOdbDiagnostics(),
       };
     }
 
@@ -4381,7 +4462,24 @@ export class GerberViewer {
         normalizedOffset.y,
       ),
       interactionPayload: null,
+      odbDiagnostics: this.takeOdbDiagnostics(),
     };
+  }
+
+  /**
+   * ODB++ layers are parsed in WASM straight from their ODB++ files; the
+   * module records what it skipped or approximated for the layer it parsed
+   * last. Returns that note (or null) and clears it.
+   */
+  takeOdbDiagnostics(wasmModule = this.wasmModule) {
+    const take = wasmModule?.take_last_odb_diagnostics;
+    if (typeof take !== "function") return null;
+    const note = take();
+    return typeof note === "string" && note !== "" ? note : null;
+  }
+
+  reportOdbDiagnostics(name, note) {
+    if (note) this.addDiagnostic("warning", name, note);
   }
 
   async readAndParseLayerSource(
@@ -4426,11 +4524,12 @@ export class GerberViewer {
         current: progress.completedLayers,
         total,
       });
-      const { renderPayload, interactionPayload = null } = await this.parseLayerContent(
-        content,
-        source.offset,
-        parseWorkerPool,
-      );
+      const {
+        renderPayload,
+        interactionPayload = null,
+        odbDiagnostics = null,
+      } = await this.parseLayerContent(content, source.offset, parseWorkerPool);
+      this.reportOdbDiagnostics(name, odbDiagnostics);
       this.updateLoadingModal({
         stage: "Parsing",
         fileName: name,
@@ -4514,6 +4613,7 @@ export class GerberViewer {
             source.offset,
             null,
           );
+          this.reportOdbDiagnostics(name, parseResult.odbDiagnostics ?? null);
           renderPayload = parseResult.renderPayload;
           interactionPayload = parseResult.interactionPayload ?? null;
           layerRecord = await this.addParsedLayer(name, renderPayload, {
@@ -5294,6 +5394,7 @@ export class GerberViewer {
 
   async addDrillLayer(name, content, options = {}) {
     const layer = await this.createDrillLayerRecord(name, content, options);
+    this.reportOdbDiagnostics(name, this.takeOdbDiagnostics());
     return this.commitLayerMetadata(layer);
   }
 
@@ -10020,13 +10121,28 @@ export class GerberViewer {
     }
   }
 
-  handleDrop(e) {
+  async handleDrop(e) {
     if (this.draggedLayerId) return;
 
     e.preventDefault();
     e.stopPropagation();
     this.dropZone.classList.remove("drag-active");
     if (this.isRendererBusy()) return;
+
+    // Folder drops (for example an unpacked ODB++ job) arrive as directory
+    // entries; they must be resolved before the event finishes.
+    const entries = getDroppedEntries(e.dataTransfer);
+    if (entries.some((entry) => entry?.isDirectory)) {
+      try {
+        const items = await collectDroppedEntries(entries);
+        if (items.length > 0) {
+          this.startFileUpload(items);
+        }
+      } catch (error) {
+        this.handleLayerLoadError("Dropped folder", error);
+      }
+      return;
+    }
 
     const files = e.dataTransfer?.files;
     if (files?.length > 0) {

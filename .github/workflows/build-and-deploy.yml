@@ -79,7 +79,42 @@ jobs:
           find js -type f -name '*.js' -print0 | sort -z | xargs -0 -n1 node --check
 
       - name: Check renderer package and viewer helpers
+        # Run only the flaky lifecycle test separately below; all other failures stay blocking.
+        # https://github.com/dsafdsaf132/wasm-gerber-viewer/issues/110
+        env:
+          SKIP_COMPOSITE_LIFECYCLE_STRESS: "1"
         run: xvfb-run -a npm run check --prefix packages/wasm-gerber-renderer
+
+      # Temporary quarantine for stale readback potentially related to Mesa llvmpipe:
+      # https://gitlab.freedesktop.org/mesa/mesa/-/work_items/16477
+      # Restore this test to the required suite once the driver fix is verified in CI.
+      - name: Check composite lifecycle stress (warning only)
+        id: composite_lifecycle
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        working-directory: packages/wasm-gerber-renderer
+        shell: bash
+        run: |
+          {
+            dpkg-query -W libgl1-mesa-dri libegl-mesa0 libglx-mesa0 || true
+            xvfb-run -a node --test \
+              --test-name-pattern='^bounded composite lifecycle stress balances every WebGL resource across recovery$' \
+              test/composite-rendering.test.mjs
+          } 2>&1 | tee "$RUNNER_TEMP/composite-lifecycle-stress.log"
+
+      - name: Report composite lifecycle warning
+        if: ${{ !cancelled() && steps.composite_lifecycle.outcome == 'failure' }}
+        run: |
+          echo "::warning title=Composite lifecycle stress failed::This test is temporarily non-blocking. See issue #110 and the composite-lifecycle-stress log artifact."
+
+      - name: Upload composite lifecycle diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: composite-lifecycle-stress
+          path: ${{ runner.temp }}/composite-lifecycle-stress.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Install Rust toolchain for tests
         run: |

@@ -7,7 +7,15 @@ import { basename, dirname, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createDeflate } from "node:zlib";
+import { createDeflate, gunzipSync } from "node:zlib";
+import {
+  collectOdbLayerSourcesFromTree,
+  odbTreeOptions,
+} from "./dst/odb/index.js";
+import { createNodeZipJobTree } from "./dst/odb/archive/zip-node.js";
+import { createTarJobTree } from "./dst/odb/archive/job-tree.js";
+import { isGzipBytes } from "./dst/odb/archive/gzip.js";
+import { parseTar } from "./dst/odb/archive/tar.js";
 import {
   COMPOSITE_MODE_STACK,
   LAYER_KIND_COMPOSITE,
@@ -15,7 +23,9 @@ import {
   FrameState,
   INVERTED_OUTLINE_AUTO,
   INVERTED_OUTLINE_BOUNDS,
+  MAX_ARCHIVE_COMPRESSION_RATIO,
   MAX_SOURCE_FILE_SIZE_BYTES,
+  MAX_TAR_EXPANDED_SIZE_BYTES,
   PNG_SIGNATURE,
   addLayerToProcessor,
   applyProcessorOptions,
@@ -144,6 +154,88 @@ export async function renderGerberToPngStream(
   }
 }
 
+/**
+ * Read one local ODB++ job archive into ordinary renderer layer records. This
+ * helper initializes WASM only when a `.Z` member must be decompressed; use a
+ * renderer's loadOdbJob() method to reuse an already initialized module.
+ */
+export async function loadOdbJobLayers(path, options = {}) {
+  if (typeof path !== "string" || path.trim() === "") {
+    throw new TypeError("ODB++ job path must be a non-empty string.");
+  }
+
+  let wasmModule = options.wasmModule ?? null;
+  let wasmLoadPromise = null;
+  const decompressUnixZ = async (bytes, maxOutputBytes) => {
+    if (!wasmModule) {
+      wasmLoadPromise ??= loadWasmModule(options.rendererOptions ?? {}).then(
+        async ({ wasmModule: loadedModule, wasmModuleUrl }) => {
+          await initializeWasmModule(
+            loadedModule,
+            wasmModuleUrl,
+            options.rendererOptions ?? {},
+          );
+          return loadedModule;
+        },
+      );
+      wasmModule = await wasmLoadPromise;
+    }
+    if (typeof wasmModule.decompress_unix_z !== "function") {
+      throw new Error("The loaded WASM module does not provide decompress_unix_z().");
+    }
+    return wasmModule.decompress_unix_z(bytes, maxOutputBytes);
+  };
+  const archivePath = resolve(path);
+  const archiveBytes = await readStableRegularFile(
+    archivePath,
+    MAX_SOURCE_FILE_SIZE_BYTES,
+    "ODB++ archive",
+  );
+  const treeOptions = odbTreeOptions({ decompressUnixZ });
+  let tree;
+  if (isZipPath(archivePath)) {
+    tree = createNodeZipJobTree(archiveBytes, {
+      archiveName: basename(archivePath),
+      ...treeOptions,
+    });
+  } else {
+    let tarBytes = archiveBytes;
+    if (isGzipBytes(archiveBytes)) {
+      const maxOutputBytes = Math.min(
+        MAX_TAR_EXPANDED_SIZE_BYTES,
+        archiveBytes.byteLength * MAX_ARCHIVE_COMPRESSION_RATIO,
+      );
+      tarBytes = new Uint8Array(gunzipSync(archiveBytes, { maxOutputLength: maxOutputBytes }));
+      if (tarBytes.byteLength / archiveBytes.byteLength > MAX_ARCHIVE_COMPRESSION_RATIO) {
+        throw new RangeError(
+          `${basename(archivePath)} exceeds the supported archive compression ratio of ${MAX_ARCHIVE_COMPRESSION_RATIO}:1`,
+        );
+      }
+    }
+    tree = createTarJobTree(
+      parseTar(tarBytes, { archiveName: basename(archivePath) }),
+      treeOptions,
+    );
+  }
+  if (!tree.isOdbJob) {
+    throw new Error(`${basename(archivePath)} is not an ODB++ job (matrix/matrix not found).`);
+  }
+
+  const sources = await collectOdbLayerSourcesFromTree(tree, basename(archivePath), {
+    odbStepName: options.stepName ?? null,
+    onArchiveStage: options.onStage ?? (() => {}),
+    onArchiveWarning: options.onWarning ?? (() => {}),
+    onArchiveInfo: options.onInfo ?? (() => {}),
+  });
+  return Promise.all(
+    sources.map(async (source) => ({
+      source: await source.readText(),
+      name: source.name,
+      kind: source.kind,
+    })),
+  );
+}
+
 export class NodeGerberRenderer {
   static async create(rendererOptions = {}) {
     const { wasmModule, wasmModuleUrl } = await loadWasmModule(rendererOptions);
@@ -234,6 +326,19 @@ export class NodeGerberRenderer {
       this.frame.options.retainSourceContentForInversion = true;
     }
     return renderLayersBestEffort(this, normalizedLayers, options);
+  }
+
+  /**
+   * Read one local ODB++ job archive and return ordinary renderer layer records.
+   * The records may be passed directly to renderLayers(), loadLayers(), or
+   * individual renderLayer() calls in a later frame.
+   */
+  async loadOdbJob(path, options = {}) {
+    this.assertUsable();
+    if (this.frame) {
+      throw new Error("loadOdbJob must be called outside withFrame().");
+    }
+    return loadOdbJobLayers(path, { ...options, wasmModule: this.wasmModule });
   }
 
   async renderCompositeLayer(sourceLayerIds, options = {}) {
@@ -745,6 +850,7 @@ class NodeFrameState extends FrameState {
       preserveArcRegions: this.options.preserveArcRegions,
       arcTessellationQuality: this.options.arcTessellationQuality,
       minimumFeaturePixels: this.options.minimumFeaturePixels,
+      antiAliasing: this.options.antiAliasing,
       compositeMode: this.options.compositeMode,
       invertedOutline: this.options.invertedOutline,
       maxFullFrameBytes: this.options.maxFullFrameBytes,
@@ -1275,7 +1381,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
   const fullFrameRenderTargetEstimate = estimateRenderTargetBytes(
     width,
     height,
-    getFullFrameRenderTargetCount(layerCount),
+    getFullFrameRenderTargetCount(layerCount, plan.antiAliasing === true),
   );
   if (renderPlan.layers.length === 0 || !renderPlan.view) {
     const blankTileHeight = getBlankStreamTileHeight(
@@ -1387,6 +1493,9 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
     await writePngDocument(outputSink, width, height, pngColorType, async (writeRow) => {
       let streamState = preflightStreamState;
       preflightStreamState = null;
+      // The preflight bands were not written; the PNG's mode is that of its
+      // own first band.
+      if (streamState) streamState.antiAliasingMode = null;
       const bandRowBytes = width * 4;
       try {
         let tileY = 0;
@@ -1418,15 +1527,23 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
               ) {
                 throw error;
               }
-              if (!canReduceStreamTileWidth(streamState.tileWidth)) {
+              // A smaller tile helps a render target that is too large, not a
+              // renderer whose anti-aliasing mode changed mid-export: a fresh
+              // processor could finish the remaining bands in the other mode
+              // and the PNG would mix them, so that error ends the export.
+              if (
+                isAntiAliasingModeChangeError(error) ||
+                !canReduceStreamTileWidth(streamState.tileWidth)
+              ) {
                 throw error;
               }
               const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
+              const antiAliasingMode = streamState.antiAliasingMode;
               disposeStreamRenderState(renderer, streamState, true);
               streamState = null;
               streamState = createStreamRenderStateWithFallback(
                 renderer,
-                renderPlan,
+                planForReplacementProcessor(renderPlan, antiAliasingMode),
                 nextTileWidth,
                 width,
                 height,
@@ -1436,6 +1553,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
                 layerCount,
                 pngChannels,
               );
+              streamState.antiAliasingMode = antiAliasingMode;
             }
           }
 
@@ -1500,12 +1618,19 @@ function preflightStreamCompositeFailures(
           );
           break;
         } catch (error) {
-          if (!canReduceStreamTileWidth(streamState.tileWidth)) throw error;
+          // Smaller tiles help a render target that is too large, not a
+          // renderer whose anti-aliasing mode changed mid-export: a fresh
+          // processor could finish the remaining bands in the other mode and
+          // the PNG would mix them, so that error ends the export.
+          if (isAntiAliasingModeChangeError(error) || !canReduceStreamTileWidth(streamState.tileWidth)) {
+            throw error;
+          }
           const nextTileWidth = reduceStreamTileWidth(streamState.tileWidth);
+          const antiAliasingMode = streamState.antiAliasingMode;
           disposeStreamRenderState(renderer, streamState, true);
           streamState = createStreamRenderStateWithFallback(
             renderer,
-            plan,
+            planForReplacementProcessor(plan, antiAliasingMode),
             nextTileWidth,
             width,
             height,
@@ -1515,6 +1640,7 @@ function preflightStreamCompositeFailures(
             layerCount,
             pngChannels,
           );
+          streamState.antiAliasingMode = antiAliasingMode;
         }
       }
       tileY += currentTileHeight;
@@ -1583,6 +1709,7 @@ function createStreamRenderState(
     maxDimension,
     layerCount,
     pngChannels,
+    plan.antiAliasing === true,
   );
   const renderGl = renderer.createExportContext(tileWidth, tileHeight);
   let renderContext = null;
@@ -1601,6 +1728,9 @@ function createStreamRenderState(
       renderContext,
       tilePixels: new Uint8Array(tileWidth * tileHeight * 4),
       bandPixels: new Uint8Array(width * tileHeight * 4),
+      // Anti-aliasing mode of the bands written so far, set by the first
+      // band and carried to a replacement processor.
+      antiAliasingMode: null,
     };
   } catch (error) {
     if (renderContext) {
@@ -1725,8 +1855,58 @@ function renderStreamBand(state, width, height, tileY, plan, bandRowBytes) {
         );
       }
     }
-    if (!retryBand) return currentTileHeight;
+    if (!retryBand) {
+      assertStreamAntiAliasingMode(state);
+      return currentTileHeight;
+    }
   }
+}
+
+const ANTI_ALIASING_MODE_CHANGED_MESSAGE =
+  "Anti-aliasing mode changed during a tiled render; the export was stopped so the PNG does not mix anti-aliased and point-sampled bands.";
+
+/**
+ * The mode the processor drew its last masks in, uniform across a frame:
+ * "multisampled" or "point-sampled" (option off, multisampling unavailable,
+ * or a layer whose mask cannot multisample). Null for a WASM build without
+ * the diagnostics.
+ */
+function streamAntiAliasingMode(processor) {
+  if (typeof processor?.get_anti_aliasing_diagnostics !== "function") return null;
+  const diagnostics = processor.get_anti_aliasing_diagnostics();
+  return diagnostics.mode ?? (diagnostics.status === "ready" ? "multisampled" : "point-sampled");
+}
+
+/**
+ * Every band of one PNG must come out in the mode of the first band. The
+ * renderer keeps one render_tile call consistent and fails a tile that would
+ * change mode, but a band re-rendered on a fresh processor (after a tile
+ * error made the tiles smaller) has no such history, so the mode is pinned
+ * here and checked before a band's rows are written.
+ */
+function assertStreamAntiAliasingMode(state) {
+  const mode = streamAntiAliasingMode(state.renderContext.processor);
+  if (mode == null) return;
+  if (state.antiAliasingMode == null) {
+    state.antiAliasingMode = mode;
+    return;
+  }
+  if (state.antiAliasingMode !== mode) {
+    throw new Error(ANTI_ALIASING_MODE_CHANGED_MESSAGE);
+  }
+}
+
+/**
+ * The plan for a processor that replaces one whose bands were already
+ * written: point-sampled bands are continued with the option off (the same
+ * pixels, without asking the new context for a multisample target);
+ * multisampled bands keep the option on and the band check above catches a
+ * processor that cannot keep it.
+ */
+function planForReplacementProcessor(plan, antiAliasingMode) {
+  return antiAliasingMode === "point-sampled" && plan.antiAliasing === true
+    ? { ...plan, antiAliasing: false }
+    : plan;
 }
 
 function disposeStreamRenderState(renderer, state, releaseContext) {
@@ -3238,12 +3418,27 @@ function estimateRenderTargetBytes(width, height, targetCount) {
   return width * height * RGBA_BYTES_PER_PIXEL * Math.max(1, targetCount);
 }
 
-function getFullFrameRenderTargetCount(layerCount) {
-  return Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) + 2;
+// With anti-aliasing the renderer keeps one shared 4x multisample target:
+// R8 colour (4 bytes per pixel) plus STENCIL_INDEX8 (4 bytes per pixel),
+// the size of two RGBA render targets. That is the only multisample
+// allocation it makes; a context that refuses either format renders the
+// masks point-sampled instead of taking a larger one.
+const MSAA_RENDER_TARGET_EQUIVALENTS = 2;
+
+function getFullFrameRenderTargetCount(layerCount, antiAliasing = false) {
+  return (
+    Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) +
+    2 +
+    (antiAliasing ? MSAA_RENDER_TARGET_EQUIVALENTS : 0)
+  );
 }
 
-function getStreamRenderTargetCount(layerCount) {
-  return Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) + 1;
+function getStreamRenderTargetCount(layerCount, antiAliasing = false) {
+  return (
+    Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) +
+    1 +
+    (antiAliasing ? MSAA_RENDER_TARGET_EQUIVALENTS : 0)
+  );
 }
 
 function assertRenderTargetBudget(estimatedBytes, maxRenderTargetBytes, width, height) {
@@ -3259,6 +3454,19 @@ function getStreamTileWidth(width, maxDimension = Number.POSITIVE_INFINITY) {
     throw new Error("PNG export tile width is outside this renderer's limits.");
   }
   return Math.max(1, Math.floor(tileWidth));
+}
+
+/**
+ * The renderer refuses to finish a tile when its anti-aliasing mode changed
+ * during a tiled render, so a finished export never mixes multisampled and
+ * point-sampled tiles. This is the only tile error that must not be retried.
+ */
+function isAntiAliasingModeChangeError(error) {
+  const message = typeof error === "string" ? error : String(error?.message ?? "");
+  return (
+    message.includes("Anti-aliasing became unavailable during a tiled render") ||
+    message.includes("Anti-aliasing mode changed during a tiled render")
+  );
 }
 
 function canReduceStreamTileWidth(tileWidth) {
@@ -3281,6 +3489,7 @@ function getStreamTileHeight(
   maxDimension = Number.POSITIVE_INFINITY,
   layerCount = 1,
   pngChannels = RGBA_BYTES_PER_PIXEL,
+  antiAliasing = false,
 ) {
   const rowStride = getPngRowStride(width, pngChannels);
   // These three CPU buffers coexist while an encoded band is awaiting the
@@ -3296,7 +3505,7 @@ function getStreamTileHeight(
       `PNG export rows exceed the ${formatByteCount(maxBandBytes)} stream band limit at ${width}px wide.`,
     );
   }
-  const targetCount = getStreamRenderTargetCount(layerCount);
+  const targetCount = getStreamRenderTargetCount(layerCount, antiAliasing);
   const byRenderTargetBytes = Math.floor(
     maxRenderTargetBytes / (tileWidth * RGBA_BYTES_PER_PIXEL * targetCount),
   );
@@ -3366,6 +3575,10 @@ function toUrl(value) {
     return pathToFileURL(resolve(value));
   }
   throw new TypeError("Expected a URL or path string.");
+}
+
+function isZipPath(path) {
+  return String(path).toLowerCase().endsWith(".zip");
 }
 
 export function fileLayer(path, options = {}) {

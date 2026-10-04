@@ -2,6 +2,7 @@ const DEFAULT_VIEWER_OPTIONS = {
   preserveArcRegions: true,
   arcTessellationQuality: "normal",
   minimumFeaturePixels: 1,
+  antiAliasing: false,
   boardOutlineBoundsMarginMm: 10,
   boardOutlineBoundsMarginUnit: "mm",
   drillOutlinePixels: 0,
@@ -88,6 +89,10 @@ export class ViewerOptionsStore {
         )
           ? stored.minimumFeaturePixels
           : DEFAULT_VIEWER_OPTIONS.minimumFeaturePixels,
+        antiAliasing:
+          typeof stored.antiAliasing === "boolean"
+            ? stored.antiAliasing
+            : DEFAULT_VIEWER_OPTIONS.antiAliasing,
         boardOutlineBoundsMarginMm: normalizeNonNegativeNumber(
           stored.boardOutlineBoundsMarginMm,
           DEFAULT_VIEWER_OPTIONS.boardOutlineBoundsMarginMm,

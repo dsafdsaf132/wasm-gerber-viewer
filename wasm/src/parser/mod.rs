@@ -7,6 +7,7 @@ mod state;
 
 // Export only what's needed externally
 pub use aperture::Aperture;
+pub(crate) use aperture::{finalize_aperture, ApertureKind};
 pub use state::{FormatSpec, ParserState, Polarity};
 
 // Internal use only
@@ -188,7 +189,11 @@ fn count_commands(data: &str) -> usize {
 
     if !tail.is_empty() {
         count += simd_scan::count_stars_simd(tail);
-        if let Some(&byte) = tail.iter().rev().find(|&&b| !matches!(b, b'\n' | b' ' | b'\t' | b'\r')) {
+        if let Some(&byte) = tail
+            .iter()
+            .rev()
+            .find(|&&b| !matches!(b, b'\n' | b' ' | b'\t' | b'\r'))
+        {
             last_significant = Some(byte);
         }
     }
@@ -1048,7 +1053,16 @@ impl GerberParser {
     }
 
     /// Parse Gerber file content and return GerberData batches in object-stream polarity order.
+    ///
+    /// An ODB++ layer envelope (see `crate::odb`) is recognised here so every
+    /// entry point that accepts layer text also accepts ODB++ layers; the ODB++
+    /// driver fills the same aperture, primitive and region buffers.
     pub fn parse(&mut self, data: &str) -> Result<Vec<GerberData>, JsValue> {
+        if crate::odb::is_odb_envelope(data) {
+            crate::odb::drive_gerber_parser(self, data)?;
+            return self.finish_layers();
+        }
+
         let mut commands_iter = split_commands(data);
 
         while let Some(raw_line) = commands_iter.next() {
@@ -1105,6 +1119,12 @@ impl GerberParser {
             }
         }
 
+        self.finish_layers()
+    }
+
+    /// Flush the accumulated primitives and convert every polarity layer into
+    /// render buffers.
+    pub(crate) fn finish_layers(&mut self) -> Result<Vec<GerberData>, JsValue> {
         // Save last accumulated primitives by polarity
         if !self.current_primitives.is_empty()
             || self.current_path_regions.has_geometry_or_source_contours()

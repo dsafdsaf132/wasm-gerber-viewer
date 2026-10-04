@@ -16,7 +16,7 @@ use std::mem::size_of;
 use std::mem::take;
 use std::rc::Rc;
 
-const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 5_000_000;
+const MAX_GENERATED_ITEMS_PER_COMMAND: usize = 90_000_000;
 const PATH_WEDGE_VERTEX_FLOATS: usize = 6;
 const PATH_COVER_VERTEX_FLOATS: usize = 12;
 const PATH_SECTOR_QUAD_VERTICES: usize = 6;
@@ -1305,7 +1305,7 @@ fn combine_interaction_bounds(
     }
 }
 
-fn flush_primitives_to_layer(
+pub(crate) fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
     path_regions: &mut PathRegions,
     polarity: Polarity,
@@ -1323,7 +1323,7 @@ fn flush_primitives_to_layer(
     Ok(())
 }
 
-fn flush_path_regions_to_layer(
+pub(crate) fn flush_path_regions_to_layer(
     path_regions: &mut PathRegions,
     polarity: Polarity,
     polarity_layers: &mut Vec<PolarityLayer>,
@@ -1876,12 +1876,8 @@ fn calculate_arc_parameters(
 
     let start_angle = (start_y - center_y).atan2(start_x - center_x);
     let end_angle = (end_y - center_y).atan2(end_x - center_x);
-    let mut sweep_angle = normalize_arc_sweep(
-        start_angle,
-        end_angle,
-        is_clockwise,
-        points_coincide(start_x, start_y, end_x, end_y),
-    );
+    let is_full_circle = state.quadrant_mode != "single" && start_x == end_x && start_y == end_y;
+    let mut sweep_angle = normalize_arc_sweep(start_angle, end_angle, is_clockwise, is_full_circle);
 
     // Single-quadrant arcs cannot exceed 90 degrees. Keep legacy tolerance behavior.
     if state.quadrant_mode == "single"
@@ -2602,18 +2598,30 @@ fn push_sector_cap_quad(
     start: [f32; 2],
     end: [f32; 2],
 ) -> Result<(), String> {
-    let mid_angle = start_angle + sweep_angle * 0.5;
-    let outward = [mid_angle.cos(), mid_angle.sin()];
-    let sagitta = radius * (1.0 - (sweep_angle.abs() * 0.5).cos());
-    let cover_distance = sagitta + (radius.abs() * 1.0e-4).max(1.0e-5);
-    let start_outer = [
-        start[0] + outward[0] * cover_distance,
-        start[1] + outward[1] * cover_distance,
+    // Put the outer edge beyond the tangent at the arc midpoint, with the
+    // sides on the endpoint rays. Adjacent caps then share a side rather
+    // than overlap when the shader expands their outer edge for AA.
+    let margin = (radius.abs() * 1.0e-4).max(1.0e-5);
+    let outer_scale = 1.0 / (sweep_angle.abs() * 0.5).cos() + margin / radius.max(1.0e-9);
+    let mut start_outer = [
+        center[0] + (start[0] - center[0]) * outer_scale,
+        center[1] + (start[1] - center[1]) * outer_scale,
     ];
-    let end_outer = [
-        end[0] + outward[0] * cover_distance,
-        end[1] + outward[1] * cover_distance,
+    let mut end_outer = [
+        center[0] + (end[0] - center[0]) * outer_scale,
+        center[1] + (end[1] - center[1]) * outer_scale,
     ];
+    let expected_end = angle_point(center, radius, start_angle + sweep_angle);
+    if (expected_end[0] - end[0]).hypot(expected_end[1] - end[1]) > margin {
+        // Keep the existing point-sampled interpretation of inconsistent
+        // single-quadrant commands whose raw endpoint lies beyond the
+        // clamped sweep. Endpoint rays can be collinear in that case.
+        let mid_angle = start_angle + sweep_angle * 0.5;
+        let distance = radius * (1.0 - (sweep_angle.abs() * 0.5).cos()) + margin;
+        let outward = [mid_angle.cos() * distance, mid_angle.sin() * distance];
+        start_outer = [start[0] + outward[0], start[1] + outward[1]];
+        end_outer = [end[0] + outward[0], end[1] + outward[1]];
+    }
 
     try_reserve_values(
         vertices,
@@ -2773,7 +2781,7 @@ fn normalize_angle(angle: f32) -> f32 {
     angle
 }
 
-fn append_region_segment(
+pub(crate) fn append_region_segment(
     contour: &mut RegionContour,
     state: &ParserState,
     end_x: f32,
@@ -2811,7 +2819,7 @@ fn append_region_segment(
     Ok(())
 }
 
-fn record_primitive_delta(
+pub(crate) fn record_primitive_delta(
     interaction_layer: Option<&mut InteractionLayer>,
     kind: FeatureKind,
     aperture_code: &str,
@@ -2864,7 +2872,7 @@ fn record_primitive_delta(
     }
 }
 
-fn record_flash_interactions(
+pub(crate) fn record_flash_interactions(
     interaction_layer: Option<&mut InteractionLayer>,
     aperture_code: &str,
     aperture: &Aperture,
@@ -2915,7 +2923,7 @@ fn record_flash_interactions(
     Ok(())
 }
 
-fn record_interpolation_interactions(
+pub(crate) fn record_interpolation_interactions(
     interaction_layer: Option<&mut InteractionLayer>,
     kind: FeatureKind,
     aperture_code: &str,
@@ -2996,7 +3004,7 @@ fn record_interpolation_interactions(
     Ok(())
 }
 
-fn interpolation_feature_kind(
+pub(crate) fn interpolation_feature_kind(
     state: &ParserState,
     end_x: f32,
     end_y: f32,
@@ -3031,6 +3039,196 @@ fn arc_command_for_interpolation(interpolation_mode: &str) -> Option<&'static st
 
 /// Parse graphic commands - process G/D/XY codes
 /// Example: G01X1000Y2000D01* (draw line), X1000Y2000D03* (flash), etc.
+/// Finish a region: the Gerber `G37` handler and ODB++ surfaces share it.
+///
+/// Multiple contours form one region. Rendering each contour as an independent
+/// triangle mesh fills clockwise inner contours instead of treating them as
+/// holes, so the complete contour group stays in the exact path renderer
+/// whenever it contains arcs or more than one contour. When that renderer is
+/// disabled, `contours_are_hole_aware` lets a caller that knows the first
+/// contour is the island and the rest are holes (ODB++ surfaces) triangulate
+/// them together; Gerber regions keep the per-contour behaviour.
+pub(crate) fn finish_region_contours(
+    region_contours: &[RegionContour],
+    state: &ParserState,
+    primitives: &mut Vec<Primitive>,
+    path_regions: &mut PathRegions,
+    polarity_layers: &mut Vec<PolarityLayer>,
+    mut interaction_layer: Option<&mut InteractionLayer>,
+    preserve_arc_regions: bool,
+    arc_tessellation_quality: u32,
+    collect_interactions: bool,
+    collect_region_source_contours: bool,
+    contours_are_hole_aware: bool,
+) -> Result<(), String> {
+    // Multiple contours form one Gerber region. Rendering each contour as an
+    // independent triangle mesh fills clockwise inner contours instead of
+    // treating them as holes. Keep the complete contour group in the exact
+    // path renderer whenever it contains arcs or more than one contour.
+    if preserve_arc_regions
+        && (region_contours_have_arcs(region_contours) || region_contours.len() > 1)
+    {
+        // Primitives drawn before this region must stay in an earlier
+        // sublayer, but consecutive path regions share one: a stencil layer
+        // with thousands of rounded pads would otherwise render one sublayer
+        // per pad. A polarity change still starts a new sublayer (parse_lp).
+        if !primitives.is_empty() {
+            flush_primitives_to_layer(primitives, path_regions, state.polarity, polarity_layers)?;
+        }
+        let region_path_regions = build_path_regions(
+            region_contours,
+            state,
+            arc_tessellation_quality,
+            collect_interactions,
+            collect_region_source_contours,
+        )?;
+        if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
+            let path_region_ref = PathRegionRef {
+                sublayer_idx: polarity_layers.len(),
+                region_start: path_regions.region_count(),
+                region_count: region_path_regions.region_count(),
+            };
+            let interaction_bounds =
+                InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
+            let interaction_path_regions = region_path_regions.clone_for_interaction_pick();
+            path_regions.append(region_path_regions)?;
+            if let Some(bounds) = interaction_bounds {
+                let feature = InteractionFeature::from_geometry_with_bounds(
+                    FeatureKind::Region,
+                    None,
+                    None,
+                    None,
+                    state.polarity,
+                    Vec::new(),
+                    interaction_path_regions,
+                    Some(path_region_ref),
+                    bounds,
+                    FeatureProperties::default(),
+                );
+                interaction_layer.push(feature);
+            }
+        } else {
+            path_regions.append(region_path_regions)?;
+        }
+    } else {
+        flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
+        let primitive_start = primitives.len();
+        // Triangulate region and add to primitives with Step and Repeat
+        // Regions are always positive (add material)
+        if contours_are_hole_aware && region_contours.len() > 1 {
+            append_region_with_holes(region_contours, state, primitives, arc_tessellation_quality)?;
+        } else {
+            let flattened_contours;
+            let mut contour_iter: Box<dyn Iterator<Item = &[[f32; 2]]> + '_> =
+                if region_contours_have_arcs(region_contours) {
+                    flattened_contours =
+                        flatten_region_contours(region_contours, arc_tessellation_quality)?;
+                    Box::new(flattened_contours.iter().map(Vec::as_slice))
+                } else {
+                    Box::new(region_contours_to_point_slices(region_contours))
+                };
+
+            for contour in contour_iter.by_ref() {
+                if contour.len() >= 3 {
+                    match triangulate_outline(contour, 1.0) {
+                        Ok(triangles) => {
+                            // Apply Step and Repeat to region triangles
+                            let repeat_count = checked_primitive_count(
+                                state.sr_x as usize,
+                                state.sr_y as usize,
+                                "region step repeat",
+                            )?;
+                            let additional =
+                                checked_primitive_count(triangles.len(), repeat_count, "region")?;
+                            consume_expansion(state, additional, 1, "region")?;
+                            try_reserve_primitives(primitives, additional, "region")?;
+
+                            for sy in 0..state.sr_y {
+                                for sx in 0..state.sr_x {
+                                    let offset_x = sx as f32 * state.sr_i;
+                                    let offset_y = sy as f32 * state.sr_j;
+
+                                    for triangle in &triangles {
+                                        let offset_triangle =
+                                            offset_primitive_by(triangle, offset_x, offset_y);
+                                        primitives.push(offset_triangle);
+                                    }
+                                }
+                            }
+                        }
+                        Err(_e) => {
+                            // Triangulation failed, skip this contour
+                        }
+                    }
+                }
+            }
+        }
+        if collect_region_source_contours && primitives.len() > primitive_start {
+            append_region_source_contours(path_regions, region_contours, state)?;
+        }
+        record_primitive_delta(
+            interaction_layer,
+            FeatureKind::Region,
+            "",
+            None,
+            state.polarity,
+            primitives,
+            primitive_start,
+            state.layer_scale,
+            state.mirror_x,
+            state.mirror_y,
+            state.layer_rotation,
+            None,
+        );
+    }
+    Ok(())
+}
+
+/// Triangulate an island contour together with its hole contours.
+fn append_region_with_holes(
+    region_contours: &[RegionContour],
+    state: &ParserState,
+    primitives: &mut Vec<Primitive>,
+    arc_tessellation_quality: u32,
+) -> Result<(), String> {
+    let contour_points: Vec<Vec<[f32; 2]>> = if region_contours_have_arcs(region_contours) {
+        flatten_region_contours(region_contours, arc_tessellation_quality)?
+    } else {
+        region_contours_to_point_slices(region_contours)
+            .map(<[[f32; 2]]>::to_vec)
+            .collect()
+    };
+    let contour_points: Vec<Vec<[f32; 2]>> = contour_points
+        .into_iter()
+        .filter(|contour| contour.len() >= 3)
+        .collect();
+    if contour_points.is_empty() {
+        return Ok(());
+    }
+
+    let Ok(triangles) = triangulate_shape_with_holes(&contour_points, 1.0) else {
+        return Ok(());
+    };
+    let repeat_count = checked_primitive_count(
+        state.sr_x as usize,
+        state.sr_y as usize,
+        "region step repeat",
+    )?;
+    let additional = checked_primitive_count(triangles.len(), repeat_count, "region")?;
+    consume_expansion(state, additional, 1, "region")?;
+    try_reserve_primitives(primitives, additional, "region")?;
+    for sy in 0..state.sr_y {
+        for sx in 0..state.sr_x {
+            let offset_x = sx as f32 * state.sr_i;
+            let offset_y = sy as f32 * state.sr_j;
+            for triangle in &triangles {
+                primitives.push(offset_primitive_by(triangle, offset_x, offset_y));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_graphic_command(
     line: &str,
     state: &mut ParserState,
@@ -3089,128 +3287,19 @@ pub fn parse_graphic_command(
                     // G37: End region fill mode
                     state.region_mode = false;
 
-                    // Multiple contours form one Gerber region. Rendering each contour as an
-                    // independent triangle mesh fills clockwise inner contours instead of
-                    // treating them as holes. Keep the complete contour group in the exact
-                    // path renderer whenever it contains arcs or more than one contour.
-                    if preserve_arc_regions
-                        && (region_contours_have_arcs(region_contours) || region_contours.len() > 1)
-                    {
-                        flush_primitives_to_layer(
-                            primitives,
-                            path_regions,
-                            state.polarity,
-                            polarity_layers,
-                        )?;
-                        let region_path_regions = build_path_regions(
-                            region_contours,
-                            state,
-                            arc_tessellation_quality,
-                            collect_interactions,
-                            collect_region_source_contours,
-                        )?;
-                        if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
-                            let path_region_ref = PathRegionRef {
-                                sublayer_idx: polarity_layers.len(),
-                                region_start: path_regions.region_count(),
-                                region_count: region_path_regions.region_count(),
-                            };
-                            let interaction_bounds =
-                                InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
-                            let interaction_path_regions =
-                                region_path_regions.clone_for_interaction_pick();
-                            path_regions.append(region_path_regions);
-                            if let Some(bounds) = interaction_bounds {
-                                let feature = InteractionFeature::from_geometry_with_bounds(
-                                    FeatureKind::Region,
-                                    None,
-                                    None,
-                                    None,
-                                    state.polarity,
-                                    Vec::new(),
-                                    interaction_path_regions,
-                                    Some(path_region_ref),
-                                    bounds,
-                                    FeatureProperties::default(),
-                                );
-                                interaction_layer.push(feature);
-                            }
-                        } else {
-                            path_regions.append(region_path_regions);
-                        }
-                    } else {
-                        flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
-                        let primitive_start = primitives.len();
-                        // Triangulate region and add to primitives with Step and Repeat
-                        // Regions are always positive (add material)
-                        let flattened_contours;
-                        let mut contour_iter: Box<dyn Iterator<Item = &[[f32; 2]]> + '_> =
-                            if region_contours_have_arcs(region_contours) {
-                                flattened_contours = flatten_region_contours(
-                                    region_contours,
-                                    arc_tessellation_quality,
-                                )?;
-                                Box::new(flattened_contours.iter().map(Vec::as_slice))
-                            } else {
-                                Box::new(region_contours_to_point_slices(region_contours))
-                            };
-
-                        for contour in contour_iter.by_ref() {
-                            if contour.len() >= 3 {
-                                match triangulate_outline(contour, 1.0) {
-                                    Ok(triangles) => {
-                                        // Apply Step and Repeat to region triangles
-                                        let repeat_count = checked_primitive_count(
-                                            state.sr_x as usize,
-                                            state.sr_y as usize,
-                                            "region step repeat",
-                                        )?;
-                                        let additional = checked_primitive_count(
-                                            triangles.len(),
-                                            repeat_count,
-                                            "region",
-                                        )?;
-                                        consume_expansion(state, additional, 1, "region")?;
-                                        try_reserve_primitives(primitives, additional, "region")?;
-
-                                        for sy in 0..state.sr_y {
-                                            for sx in 0..state.sr_x {
-                                                let offset_x = sx as f32 * state.sr_i;
-                                                let offset_y = sy as f32 * state.sr_j;
-
-                                                for triangle in &triangles {
-                                                    let offset_triangle = offset_primitive_by(
-                                                        triangle, offset_x, offset_y,
-                                                    );
-                                                    primitives.push(offset_triangle);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(_e) => {
-                                        // Triangulation failed, skip this contour
-                                    }
-                                }
-                            }
-                        }
-                        if collect_region_source_contours && primitives.len() > primitive_start {
-                            append_region_source_contours(path_regions, region_contours, state)?;
-                        }
-                        record_primitive_delta(
-                            interaction_layer.as_deref_mut(),
-                            FeatureKind::Region,
-                            "",
-                            None,
-                            state.polarity,
-                            primitives,
-                            primitive_start,
-                            state.layer_scale,
-                            state.mirror_x,
-                            state.mirror_y,
-                            state.layer_rotation,
-                            None,
-                        );
-                    }
+                    finish_region_contours(
+                        region_contours,
+                        state,
+                        primitives,
+                        path_regions,
+                        polarity_layers,
+                        interaction_layer.as_deref_mut(),
+                        preserve_arc_regions,
+                        arc_tessellation_quality,
+                        collect_interactions,
+                        collect_region_source_contours,
+                        false,
+                    )?;
 
                     region_contours.clear();
                 }

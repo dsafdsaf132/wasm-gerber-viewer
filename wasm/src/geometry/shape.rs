@@ -466,6 +466,30 @@ pub struct PathRegions {
 
 pub(crate) const PATH_SECTOR_VERTEX_FLOATS: usize = 5;
 
+fn try_reserve_path_values<T>(
+    values: &mut Vec<T>,
+    additional: usize,
+    context: &str,
+) -> Result<(), String> {
+    values.try_reserve(additional).map_err(|_| {
+        format!(
+            "Gerber region is too large to parse: not enough memory for {context} ({additional} values)"
+        )
+    })
+}
+
+/// Vertex count already in a buffer as the `u32` base for appended offsets,
+/// checked so that the base plus the largest appended offset still fits.
+fn rebase_start(existing_vertices: usize, offsets: &[u32], kind: &str) -> Result<u32, String> {
+    let too_many = || {
+        format!("Gerber region is too large to parse: path region {kind} vertex offsets exceed the u32 range")
+    };
+    let base = u32::try_from(existing_vertices).map_err(|_| too_many())?;
+    let largest = offsets.iter().copied().max().unwrap_or(0);
+    base.checked_add(largest).ok_or_else(too_many)?;
+    Ok(base)
+}
+
 impl PathRegions {
     pub fn new(
         wedge_vertices: Vec<f32>,
@@ -534,13 +558,72 @@ impl PathRegions {
                 || !self.clear_vertices.is_empty())
     }
 
-    pub(crate) fn append(&mut self, other: PathRegions) {
+    /// Appends `other` and rebases its vertex offsets onto this buffer.
+    ///
+    /// Consecutive path regions of one polarity accumulate here, so the
+    /// buffers can grow large. Every buffer's extra capacity is reserved and
+    /// every rebased offset is checked before anything is copied: a failed
+    /// allocation or an offset beyond `u32` returns an error and leaves the
+    /// contents unchanged. `try_reserve` grows capacity geometrically, like
+    /// `extend`, so repeated appends stay amortised.
+    pub(crate) fn append(&mut self, other: PathRegions) -> Result<(), String> {
         if !other.has_geometry() && !other.has_source_contours() {
-            return;
+            return Ok(());
         }
 
-        let wedge_base = (self.wedge_vertices.len() / 2) as u32;
-        let sector_base = (self.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS) as u32;
+        let wedge_base = rebase_start(
+            self.wedge_vertices.len() / 2,
+            &other.wedge_vertex_offsets,
+            "wedge",
+        )?;
+        let sector_base = rebase_start(
+            self.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+            &other.sector_vertex_offsets,
+            "sector",
+        )?;
+        let new_wedge_offsets = other.wedge_vertex_offsets.len().saturating_sub(1);
+        let new_sector_offsets = other.sector_vertex_offsets.len().saturating_sub(1);
+        try_reserve_path_values(
+            &mut self.wedge_vertices,
+            other.wedge_vertices.len(),
+            "path region wedge vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.sector_vertices,
+            other.sector_vertices.len(),
+            "path region sector vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.cover_vertices,
+            other.cover_vertices.len(),
+            "path region cover vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.clear_vertices,
+            other.clear_vertices.len(),
+            "path region clear vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.pick_contours,
+            other.pick_contours.len(),
+            "path region pick contours",
+        )?;
+        try_reserve_path_values(
+            &mut self.source_contours,
+            other.source_contours.len(),
+            "path region source contours",
+        )?;
+        try_reserve_path_values(
+            &mut self.wedge_vertex_offsets,
+            new_wedge_offsets,
+            "path region wedge offsets",
+        )?;
+        try_reserve_path_values(
+            &mut self.sector_vertex_offsets,
+            new_sector_offsets,
+            "path region sector offsets",
+        )?;
+
         self.wedge_vertices.extend(other.wedge_vertices);
         self.sector_vertices.extend(other.sector_vertices);
         self.cover_vertices.extend(other.cover_vertices);
@@ -554,6 +637,7 @@ impl PathRegions {
         for offset in other.sector_vertex_offsets.iter().skip(1) {
             self.sector_vertex_offsets.push(sector_base + offset);
         }
+        Ok(())
     }
 
     pub(crate) fn clone_for_interaction_pick(&self) -> PathRegions {
@@ -1138,4 +1222,51 @@ pub(crate) fn gerber_data_layers_from_js(value: &JsValue) -> Result<Vec<GerberDa
     }
 
     Ok(layers)
+}
+
+#[cfg(test)]
+mod path_region_append_tests {
+    use super::{rebase_start, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
+
+    fn one_region(sector_quads: usize) -> PathRegions {
+        PathRegions::new(
+            vec![0.0; 6],
+            vec![0, 3],
+            vec![0.0; sector_quads * 6 * PATH_SECTOR_VERTEX_FLOATS],
+            vec![0, (sector_quads * 6) as u32],
+            vec![0.0; 12],
+            vec![0.0; 12],
+        )
+    }
+
+    #[test]
+    fn append_rebases_offsets_onto_the_accumulated_buffers() {
+        let mut regions = PathRegions::empty();
+        regions.append(one_region(0)).unwrap();
+        regions.append(one_region(1)).unwrap();
+        regions.append(one_region(2)).unwrap();
+
+        assert_eq!(regions.region_count(), 3);
+        assert_eq!(regions.wedge_vertex_offsets, vec![0, 3, 6, 9]);
+        assert_eq!(regions.sector_vertex_offsets, vec![0, 0, 6, 18]);
+        assert_eq!(regions.wedge_vertices.len(), 18);
+        assert_eq!(
+            regions.sector_vertices.len(),
+            18 * PATH_SECTOR_VERTEX_FLOATS
+        );
+        assert_eq!(regions.cover_vertices.len(), 36);
+
+        // An empty region set is a no-op.
+        regions.append(PathRegions::empty()).unwrap();
+        assert_eq!(regions.region_count(), 3);
+    }
+
+    #[test]
+    fn offsets_past_u32_are_an_error_not_a_wrap() {
+        assert_eq!(rebase_start(10, &[0, 3], "wedge"), Ok(10));
+        assert!(rebase_start(u32::MAX as usize, &[0, 3], "wedge").is_err());
+        assert!(rebase_start(u32::MAX as usize + 1, &[0], "sector").is_err());
+        let message = rebase_start(u32::MAX as usize - 1, &[0, 2], "wedge").unwrap_err();
+        assert!(message.contains("too large to parse"), "{message}");
+    }
 }

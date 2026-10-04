@@ -684,6 +684,9 @@ export class ScreenshotExporter {
         Number(renderOptions.minimumFeaturePixels ?? 1),
       );
     }
+    if (typeof processor.set_anti_aliasing === "function") {
+      processor.set_anti_aliasing(renderOptions.antiAliasing === true);
+    }
 
     const activeLayerIds = [];
     const colorData = [];
