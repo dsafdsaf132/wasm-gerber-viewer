@@ -11,6 +11,7 @@ use core::arch::x86_64::*;
 
 /// Count occurrences of `b'*'` in `data` using 16-byte SIMD chunk scanning.
 #[inline]
+#[cfg(test)]
 pub fn count_stars_simd(data: &[u8]) -> usize {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
@@ -51,6 +52,7 @@ pub fn find_star_simd(data: &[u8]) -> Option<usize> {
 
 /// Find index of the last occurrence of `target` byte in `data` scanning backwards using SIMD.
 #[inline]
+#[cfg(test)]
 pub fn rfind_byte_simd(data: &[u8], target: u8) -> Option<usize> {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
@@ -70,6 +72,7 @@ pub fn rfind_byte_simd(data: &[u8], target: u8) -> Option<usize> {
 }
 
 #[inline]
+#[cfg(test)]
 fn count_stars_scalar(data: &[u8]) -> usize {
     data.iter().filter(|&&b| b == b'*').count()
 }
@@ -80,6 +83,7 @@ fn find_star_scalar(data: &[u8]) -> Option<usize> {
 }
 
 #[inline]
+#[cfg(test)]
 fn rfind_byte_scalar(data: &[u8], target: u8) -> Option<usize> {
     data.iter().rposition(|&b| b == target)
 }
@@ -190,6 +194,7 @@ fn parse_decimal_digits_wasm(data: &[u8]) -> Option<u64> {
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
+#[cfg(test)]
 fn count_stars_wasm(data: &[u8]) -> usize {
     let chunks = data.len() / 16;
     let mut count = 0usize;
@@ -237,6 +242,7 @@ fn find_star_wasm(data: &[u8]) -> Option<usize> {
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
+#[cfg(test)]
 fn rfind_byte_wasm(data: &[u8], target: u8) -> Option<usize> {
     let chunks = data.len() / 16;
     let target_v = u8x16_splat(target);
@@ -266,6 +272,7 @@ fn rfind_byte_wasm(data: &[u8], target: u8) -> Option<usize> {
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
+#[cfg(test)]
 fn count_stars_x86(data: &[u8]) -> usize {
     let chunks = data.len() / 16;
     let mut count = 0usize;
@@ -313,6 +320,7 @@ fn find_star_x86(data: &[u8]) -> Option<usize> {
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
+#[cfg(test)]
 fn rfind_byte_x86(data: &[u8], target: u8) -> Option<usize> {
     let chunks = data.len() / 16;
     let ptr = data.as_ptr();

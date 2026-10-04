@@ -133,6 +133,7 @@ impl<'a> Iterator for CommandSplitter<'a> {
 /// an extended command holds several `*` (harmless over-reservation), and it
 /// falls short only for malformed input such as an empty `%%` command or a
 /// macro body line without `*`, which `push_command` absorbs.
+#[cfg(test)]
 fn count_commands(data: &str) -> usize {
     let bytes = data.as_bytes();
     let last_percent = simd_scan::rfind_byte_simd(bytes, b'%');
@@ -1048,14 +1049,6 @@ impl GerberParser {
 
     /// Parse Gerber file content and return GerberData batches in object-stream polarity order.
     pub fn parse(&mut self, data: &str) -> Result<Vec<GerberData>, JsValue> {
-        let command_count = count_commands(data);
-        let reservation = command_count.min(crate::parser::state::MAX_GENERATED_ITEMS);
-        try_reserve_exact(
-            &mut self.current_primitives,
-            reservation,
-            "Gerber primitive buffer",
-        )?;
-
         let mut commands_iter = split_commands(data);
 
         while let Some(raw_line) = commands_iter.next() {
@@ -1225,7 +1218,7 @@ fn parse_command(
         try_reserve_string(&mut buffer, line_ref.len(), "extended command buffer")?;
         buffer.push_str(line_ref);
 
-        while let Some(next_raw) = commands_iter.next() {
+        for next_raw in &mut *commands_iter {
             let next_line = next_raw.trim();
             try_reserve_string(&mut buffer, next_line.len(), "extended command buffer")?;
             buffer.push_str(next_line);

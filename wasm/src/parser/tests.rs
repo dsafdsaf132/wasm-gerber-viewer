@@ -16,6 +16,19 @@ fn assert_approx_eq(actual: f32, expected: f32) {
 }
 
 #[test]
+fn movement_and_comment_commands_do_not_reserve_primitive_storage() {
+    let mut source = String::from("%FSLAX84Y84*%\n%MOMM*%\n");
+    for _ in 0..100_000 {
+        source.push_str("G04 move only*\nX000000010000Y000000020000D02*\n");
+    }
+    source.push_str("M02*");
+    let mut parser = GerberParser::with_options(true, 1);
+    assert!(parser.parse(&source).unwrap().is_empty());
+    assert_eq!(parser.current_primitives.capacity(), 0);
+    assert!(parser.polarity_layers.is_empty());
+}
+
+#[test]
 fn large_gerber_preserves_simd_coordinate_values_and_modal_axes() {
     use std::fmt::Write;
     const COUNT: usize = 20_000;

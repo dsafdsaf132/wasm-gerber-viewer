@@ -75,7 +75,7 @@ fn coordinate_matrix() -> u32 {
                     } else {
                         Some(value)
                     };
-                    for sign in [b' ', b'+', b'-'] {
+                    for &sign in b" +-" {
                         token[0] = sign;
                         let input =
                             std::str::from_utf8(&token[usize::from(sign == b' ')..=len]).unwrap();
