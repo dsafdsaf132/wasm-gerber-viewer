@@ -1,7 +1,43 @@
-// Large differential cases use stack buffers and a fixed seed.
+// Large differential cases use stack buffers and a replayable random seed.
+// Each run prints SIMD_TEST_SEED before generating the randomized inputs.
+// Replay a run by substituting its printed seed in this command:
+// SIMD_TEST_SEED=0x123456789abcdef0 cargo test --manifest-path wasm/Cargo.toml
+// Decimal seeds are also accepted; the seed must be a nonzero u64.
 use super::super::simd_scan::{
     count_stars_simd, find_star_simd, parse_decimal_digits, rfind_byte_simd,
 };
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+use std::io::Write;
+use std::sync::OnceLock;
+
+fn test_seed() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        let seed = match std::env::var("SIMD_TEST_SEED") {
+            Ok(value) => {
+                let parsed = if let Some(hex) = value.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16)
+                } else {
+                    value.parse::<u64>()
+                };
+                let seed = parsed.expect("SIMD_TEST_SEED must be a decimal or 0x-prefixed u64");
+                assert_ne!(seed, 0, "SIMD_TEST_SEED must be nonzero for xorshift");
+                seed
+            }
+            Err(std::env::VarError::NotPresent) => {
+                // RandomState obtains randomized keys from std without an
+                // additional RNG dependency. This seed is not security-sensitive.
+                RandomState::new().build_hasher().finish().max(1)
+            }
+            Err(error) => panic!("Invalid SIMD_TEST_SEED: {error}"),
+        };
+        // Write directly so successful tests print their seed even when the
+        // Rust test harness captures println!/eprintln! output.
+        writeln!(std::io::stderr().lock(), "SIMD_TEST_SEED=0x{seed:016x}").unwrap();
+        seed
+    })
+}
 
 fn next(seed: &mut u64) -> u64 {
     *seed ^= *seed << 13;
@@ -52,7 +88,7 @@ fn digit_edges() -> u32 {
 }
 
 fn coordinate_matrix() -> u32 {
-    let mut seed = 0x1234_5678_9abc_def0;
+    let mut seed = test_seed();
     let mut cases = 0;
     for len in 1..=18 {
         for _ in 0..2048 {
@@ -176,7 +212,7 @@ fn coordinate_edges() -> u32 {
 
 fn large_delimiter_input() -> u32 {
     let mut input = [0u8; 65_536];
-    let mut seed = 0xdead_beef_1234_5678;
+    let mut seed = test_seed();
     for byte in &mut input {
         *byte = next(&mut seed) as u8;
     }
