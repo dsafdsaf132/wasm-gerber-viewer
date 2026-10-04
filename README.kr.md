@@ -154,9 +154,10 @@ wasm-gerber-viewer/
 
 ## 브라우저 요구 사항
 
-WebGL2를 지원하는 최신 브라우저가 필요합니다.
+WebGL2와 WebAssembly SIMD를 지원하는 최신 브라우저가 필요합니다.
 
-- Chrome 96+, Firefox 114+, Safari 15.4+, Edge 96+
+- Chrome 96+, Firefox 114+, Safari 16.4+, Edge 96+
+- iOS Chrome: iOS 16.4+ (WebKit을 사용하므로 iOS 버전에 따라 지원 여부가 결정됩니다.)
 
 ## 출처
 

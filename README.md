@@ -151,12 +151,13 @@ wasm-gerber-viewer/
 
 ## Browser Requirements
 
-Modern browsers with WebGL2 support:
+Modern browsers with WebGL2 and WebAssembly SIMD support:
 
 - Chrome 96+
 - Firefox 114+
-- Safari 15.4+
+- Safari 16.4+
 - Edge 96+
+- Chrome for iOS: iOS 16.4+ (WebKit; support depends on the iOS version)
 
 ## Source
 

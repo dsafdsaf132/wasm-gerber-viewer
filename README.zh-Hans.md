@@ -154,9 +154,10 @@ wasm-gerber-viewer/
 
 ## 浏览器要求
 
-需要支持 WebGL2 的现代浏览器。
+需要支持 WebGL2 和 WebAssembly SIMD 的现代浏览器。
 
-- Chrome 96+, Firefox 114+, Safari 15.4+, Edge 96+
+- Chrome 96+, Firefox 114+, Safari 16.4+, Edge 96+
+- iOS Chrome：iOS 16.4+（使用 WebKit，支持情况取决于 iOS 版本）
 
 ## 示例来源
 
