@@ -951,6 +951,33 @@ M02*",
 }
 
 #[test]
+fn step_repeat_flash_preserves_clear_polarity_and_picking_order() {
+    let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
+    let payload = parser.parse_payload(
+        "%FSLAX24Y24*%\n%MOMM*%\n%ADD10C,0.5*%\n%SRX2Y2I2J3*%\nD10*\nX0Y0D03*\n%LPC*%\nX0Y0D03*\n%SR*%\nM02*"
+    ).unwrap();
+    assert_eq!(payload.render_layers.len(), 2);
+    assert!(!payload.render_layers[0].is_negative);
+    assert!(payload.render_layers[1].is_negative);
+    for layer in &payload.render_layers {
+        assert_eq!(layer.circles.x, vec![0.0, 2.0, 0.0, 2.0]);
+        assert_eq!(layer.circles.y, vec![0.0, 0.0, 3.0, 3.0]);
+    }
+    let interactions = payload.interaction_layer.unwrap();
+    assert_eq!(interactions.features.len(), 8);
+    for (index, feature) in interactions.features.iter().enumerate() {
+        assert_eq!(
+            feature.descriptor.polarity,
+            if index < 4 {
+                Polarity::Positive
+            } else {
+                Polarity::Negative
+            }
+        );
+    }
+}
+
+#[test]
 fn step_repeat_d01_interactions_are_split_per_copy() {
     let mut parser = GerberParser::with_options_and_interactions(true, 1, true);
     let payload = parser
