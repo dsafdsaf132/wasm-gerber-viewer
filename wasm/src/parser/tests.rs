@@ -15,6 +15,38 @@ fn assert_approx_eq(actual: f32, expected: f32) {
     );
 }
 
+#[test]
+fn large_gerber_preserves_simd_coordinate_values_and_modal_axes() {
+    use std::fmt::Write;
+    const COUNT: usize = 20_000;
+    let mut source = String::with_capacity(COUNT * 40);
+    source.push_str("%FSLAX84Y84*%\n%MOMM*%\n%ADD10C,0.01*%\nD10*\n");
+    for index in 0..COUNT {
+        let x = (index as i64 * 7919) % 100_000_000;
+        let y = (index as i64 * 104729) % 100_000_000;
+        if index % 2 == 0 {
+            writeln!(source, "X+{x:012}Y-{y:012}D03*").unwrap();
+        } else {
+            // Omitted Y retains the preceding coordinate.
+            writeln!(source, "X-{x:012}D03*").unwrap();
+        }
+    }
+    source.push_str("M02*");
+    let layers = parse_gerber(&source).unwrap();
+    assert_eq!(layers.len(), 1);
+    let circles = &layers[0].circles;
+    assert_eq!(circles.x.len(), COUNT);
+    for index in 0..COUNT {
+        let x = ((index as i64 * 7919) % 100_000_000) as f32 / 10000.0;
+        let y_index = index - index % 2;
+        let y = -(((y_index as i64 * 104729) % 100_000_000) as f32) / 10000.0;
+        let x = if index % 2 == 0 { x } else { -x };
+        // Geometry transforms may normalize signed zero; compare values here.
+        assert_eq!(circles.x[index], x, "X at {index}");
+        assert_eq!(circles.y[index], y, "Y at {index}");
+    }
+}
+
 fn triangle_bounds(vertices: &[f32]) -> (f32, f32, f32, f32) {
     let mut min_x = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;

@@ -141,26 +141,12 @@ pub fn parse_omitted_decimal_number(
         return Err(format!("Invalid {context} number `{token}`"));
     }
 
-    let mut value = 0i64;
-    if digits.len() <= 18 {
-        for &b in digits {
-            let d = b.wrapping_sub(b'0');
-            if d > 9 {
-                return Err(format!("Invalid {context} number `{token}`"));
-            }
-            value = value * 10 + d as i64;
-        }
-    } else {
-        for &b in digits {
-            if !b.is_ascii_digit() {
-                return Err(format!("Invalid {context} number `{token}`"));
-            }
-            value = value
-                .checked_mul(10)
-                .and_then(|v| v.checked_add((b - b'0') as i64))
-                .ok_or_else(|| format!("Invalid {context} number `{token}` (integer overflow)"))?;
-        }
-    }
+    let parsed = super::simd_scan::parse_decimal_digits(digits)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| {
+            format!("Invalid {context} number `{token}` (integer overflow or invalid digit)")
+        })?;
+    let mut value = parsed;
 
     if let ZeroSuppression::Trailing = format.zero_suppression {
         let total_digits = (format.integer_digits + format.decimal_digits) as usize;

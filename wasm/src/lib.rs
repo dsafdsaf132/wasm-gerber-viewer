@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(target_arch = "wasm64", target_feature = "simd128"),
+    feature(simd_wasm64)
+)]
+
 mod drill;
 mod geometry;
 mod interaction;

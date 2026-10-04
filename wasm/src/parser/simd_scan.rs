@@ -3,6 +3,9 @@
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use core::arch::wasm32::*;
 
+#[cfg(all(target_arch = "wasm64", target_feature = "simd128"))]
+use core::arch::wasm64::*;
+
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 use core::arch::x86_64::*;
 
@@ -79,6 +82,110 @@ fn find_star_scalar(data: &[u8]) -> Option<usize> {
 #[inline]
 fn rfind_byte_scalar(data: &[u8], target: u8) -> Option<usize> {
     data.iter().rposition(|&b| b == target)
+}
+
+/// Parse up to 16 ASCII decimal digits. On wasm SIMD targets validation and
+/// decimal-pair formation are vectorized; the final small reduction stays
+/// scalar. The padded load is always exactly 16 readable stack bytes, on both
+/// wasm32 and wasm64.
+#[inline]
+pub(crate) fn parse_decimal_digits(data: &[u8]) -> Option<u64> {
+    // Gerber coordinates are commonly only 5–7 digits. For those, the SIMD
+    // setup and stack padding cost more than the small scalar fold.
+    if data.len() < 8 || data.len() > 16 {
+        return parse_decimal_digits_scalar(data);
+    }
+
+    #[cfg(all(
+        any(target_arch = "wasm32", target_arch = "wasm64"),
+        target_feature = "simd128"
+    ))]
+    {
+        parse_decimal_digits_wasm(data)
+    }
+
+    #[cfg(not(all(
+        any(target_arch = "wasm32", target_arch = "wasm64"),
+        target_feature = "simd128"
+    )))]
+    {
+        parse_decimal_digits_scalar(data)
+    }
+}
+
+#[inline]
+fn parse_decimal_digits_scalar(data: &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    // At most 18 decimal digits fit in u64; avoid overflow checks on the
+    // common short-coordinate path.
+    if data.len() <= 18 {
+        for &byte in data {
+            let digit = byte.wrapping_sub(b'0');
+            if digit > 9 {
+                return None;
+            }
+            value = value * 10 + digit as u64;
+        }
+        return Some(value);
+    }
+    for &byte in data {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as u64)?;
+    }
+    Some(value)
+}
+
+#[cfg(all(
+    any(target_arch = "wasm32", target_arch = "wasm64"),
+    target_feature = "simd128"
+))]
+#[inline]
+fn parse_decimal_digits_wasm(data: &[u8]) -> Option<u64> {
+    let bytes = if data.len() == 8 {
+        unsafe {
+            v128_or(
+                v128_load64_zero(data.as_ptr().cast::<u64>()),
+                u64x2(0, 0x3030_3030_3030_3030),
+            )
+        }
+    } else {
+        let mut padded = [b'0'; 16];
+        padded[16 - data.len()..].copy_from_slice(data);
+        unsafe { v128_load(padded.as_ptr().cast::<v128>()) }
+    };
+
+    let digits = u8x16_sub(bytes, u8x16_splat(b'0'));
+    if u8x16_bitmask(u8x16_gt(digits, u8x16_splat(9))) != 0 {
+        return None;
+    }
+
+    // Widen the low eight digits and form 2-digit groups in parallel:
+    // 10*a + b. The vector width and grouping are identical for wasm32/64.
+    let factors = u16x8(10, 1, 10, 1, 10, 1, 10, 1);
+    let high_digits = u16x8_extend_low_u8x16(digits);
+    let high_pairs = u32x4_extadd_pairwise_u16x8(u16x8_mul(high_digits, factors));
+    let high_weighted = u32x4_mul(high_pairs, u32x4(1_000_000, 10_000, 100, 1));
+    let high = u32x4_extract_lane::<0>(high_weighted)
+        + u32x4_extract_lane::<1>(high_weighted)
+        + u32x4_extract_lane::<2>(high_weighted)
+        + u32x4_extract_lane::<3>(high_weighted);
+
+    if data.len() <= 8 {
+        return Some(high as u64);
+    }
+
+    // Memory64 still uses the same 128-bit lanes; only the address and
+    // slice indices above are pointer-width-sized (usize).
+    let low_digits = u16x8_extend_high_u8x16(digits);
+    let low_pairs = u32x4_extadd_pairwise_u16x8(u16x8_mul(low_digits, factors));
+    let low_weighted = u32x4_mul(low_pairs, u32x4(1_000_000, 10_000, 100, 1));
+    let low = u32x4_extract_lane::<0>(low_weighted)
+        + u32x4_extract_lane::<1>(low_weighted)
+        + u32x4_extract_lane::<2>(low_weighted)
+        + u32x4_extract_lane::<3>(low_weighted);
+    Some(high as u64 * 100_000_000 + low as u64)
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -236,6 +343,39 @@ fn rfind_byte_x86(data: &[u8], target: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_decimal_digits() {
+        let digits = b"1234567890123456";
+        for len in 1..=digits.len() {
+            assert_eq!(
+                parse_decimal_digits(&digits[..len]),
+                parse_decimal_digits_scalar(&digits[..len]),
+                "digit width {len}"
+            );
+        }
+        assert_eq!(parse_decimal_digits(b"0"), Some(0));
+        assert_eq!(parse_decimal_digits(b"000123"), Some(123));
+        assert_eq!(
+            parse_decimal_digits(b"12345678901234567"),
+            Some(12_345_678_901_234_567)
+        );
+        assert_eq!(parse_decimal_digits(b"12x4"), None);
+        assert_eq!(parse_decimal_digits(b""), Some(0));
+    }
+
+    #[test]
+    fn test_parse_decimal_digits_rejects_invalid_byte_at_every_simd_lane() {
+        for len in 8..=16 {
+            for index in 0..len {
+                for invalid in [b'/', b':', 0, 255] {
+                    let mut input = *b"1234567890123456";
+                    input[index] = invalid;
+                    assert_eq!(parse_decimal_digits(&input[..len]), None);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_count_stars_simd() {
