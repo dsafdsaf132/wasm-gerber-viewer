@@ -13,9 +13,9 @@ pub(crate) const MAX_STEP_REPEAT_COPIES: usize = 100_000;
 // memory64 build can grow to 16 GiB instead of 4 GiB, so it allows four times
 // as many items.
 #[cfg(not(target_arch = "wasm64"))]
-pub(crate) const MAX_GENERATED_ITEMS: usize = 60_000_000;
+pub(crate) const MAX_GENERATED_ITEMS: u32 = 60_000_000;
 #[cfg(target_arch = "wasm64")]
-pub(crate) const MAX_GENERATED_ITEMS: usize = 240_000_000;
+pub(crate) const MAX_GENERATED_ITEMS: u32 = 240_000_000;
 
 /// Polarity - Dark (positive) or Clear (negative)
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,7 +108,7 @@ pub struct ParserState {
     pub mirror_y: bool,
     // Layer Rotation
     pub layer_rotation: f32,
-    generated_items: Cell<usize>,
+    generated_items: Cell<u32>,
 }
 
 impl Default for ParserState {
@@ -159,6 +159,8 @@ impl ParserState {
         additional: usize,
         context: &str,
     ) -> Result<(), String> {
+        let additional = u32::try_from(additional)
+            .map_err(|_| format!("Gerber {context} generated geometry count overflow"))?;
         let next = self
             .generated_items
             .get()
@@ -173,11 +175,11 @@ impl ParserState {
         Ok(())
     }
 
-    pub(crate) fn generated_items(&self) -> usize {
+    pub(crate) fn generated_items(&self) -> u32 {
         self.generated_items.get()
     }
 
-    pub(crate) fn set_generated_items(&self, value: usize) {
+    pub(crate) fn set_generated_items(&self, value: u32) {
         self.generated_items.set(value);
     }
 }

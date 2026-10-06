@@ -40,10 +40,12 @@ fn sr_template_fallback_accounts_for_every_raw_primitive() {
         )
         .unwrap();
         assert_eq!(primitives.len(), expected_count);
-        assert_eq!(state.generated_items(), expected_count);
+        assert_eq!(state.generated_items(), expected_count as u32);
 
         // Reject against the real expanded count before appending any copies.
-        state.set_generated_items(crate::parser::state::MAX_GENERATED_ITEMS - expected_count + 1);
+        state.set_generated_items(
+            crate::parser::state::MAX_GENERATED_ITEMS - expected_count as u32 + 1,
+        );
         let mut rejected = Vec::new();
         let error = flash_aperture(
             &state,

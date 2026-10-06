@@ -156,7 +156,7 @@ fn generated_geometry_budget_is_cumulative() {
     let state = ParserState::default();
 
     state
-        .consume_generated_items(MAX_GENERATED_ITEMS, "test")
+        .consume_generated_items(MAX_GENERATED_ITEMS as usize, "test")
         .expect("budget boundary should be accepted");
     let error = state
         .consume_generated_items(1, "test")
