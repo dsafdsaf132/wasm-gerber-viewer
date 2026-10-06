@@ -43,9 +43,28 @@ pub struct InteractionFeature {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathRegionRef {
-    pub sublayer_idx: usize,
-    pub region_start: usize,
-    pub region_count: usize,
+    pub sublayer_idx: u32,
+    pub region_start: u32,
+    pub region_count: u32,
+}
+
+impl PathRegionRef {
+    /// References use the same 32-bit indices as the compact interaction payload.
+    pub(crate) fn new(
+        sublayer_idx: usize,
+        region_start: usize,
+        region_count: usize,
+    ) -> Result<Self, String> {
+        fn index(value: usize, label: &str) -> Result<u32, String> {
+            u32::try_from(value)
+                .map_err(|_| format!("Interaction path region {label} exceeds the u32 range"))
+        }
+        Ok(Self {
+            sublayer_idx: index(sublayer_idx, "sublayer")?,
+            region_start: index(region_start, "start")?,
+            region_count: index(region_count, "count")?,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -273,9 +292,14 @@ impl InteractionLayer {
             let Some(path_region_ref) = &mut feature.path_region_ref else {
                 continue;
             };
-            path_region_ref.sublayer_idx = *sublayer_map
-                .get(path_region_ref.sublayer_idx)
-                .ok_or_else(|| JsValue::from_str("Interaction path region sublayer is invalid"))?;
+            path_region_ref.sublayer_idx = compact_usize(
+                *sublayer_map
+                    .get(path_region_ref.sublayer_idx as usize)
+                    .ok_or_else(|| {
+                        JsValue::from_str("Interaction path region sublayer is invalid")
+                    })?,
+                "path region sublayer",
+            )?;
         }
         Ok(())
     }
@@ -392,18 +416,9 @@ impl InteractionLayer {
                     feature_descriptors.len().saturating_sub(1),
                     "path region ref feature",
                 )?);
-                path_region_ref_data.push(compact_usize(
-                    path_region_ref.sublayer_idx,
-                    "path region sublayer",
-                )?);
-                path_region_ref_data.push(compact_usize(
-                    path_region_ref.region_start,
-                    "path region start",
-                )?);
-                path_region_ref_data.push(compact_usize(
-                    path_region_ref.region_count,
-                    "path region count",
-                )?);
+                path_region_ref_data.push(path_region_ref.sublayer_idx);
+                path_region_ref_data.push(path_region_ref.region_start);
+                path_region_ref_data.push(path_region_ref.region_count);
             }
         }
 
@@ -2543,9 +2558,9 @@ fn compact_path_region_ref_from_parts(parts: &[u32]) -> Result<PathRegionRef, &'
     }
 
     Ok(PathRegionRef {
-        sublayer_idx: *sublayer_idx as usize,
-        region_start: *region_start as usize,
-        region_count: *region_count as usize,
+        sublayer_idx: *sublayer_idx,
+        region_start: *region_start,
+        region_count: *region_count,
     })
 }
 

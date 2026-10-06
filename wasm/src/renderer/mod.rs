@@ -6257,15 +6257,15 @@ impl Renderer {
         transform: &[f32; 9],
         set_mask: bool,
     ) -> Result<(), JsValue> {
-        self.ensure_layer_path_region_gpu_cache(layer_id, path_region_ref.sublayer_idx)?;
+        self.ensure_layer_path_region_gpu_cache(layer_id, path_region_ref.sublayer_idx as usize)?;
         let layer = self.get_layer(layer_id)?;
-        let path_regions = &layer.gerber_data[path_region_ref.sublayer_idx].path_regions;
-        let buffer_cache = &layer.buffer_caches[path_region_ref.sublayer_idx];
+        let path_regions = &layer.gerber_data[path_region_ref.sublayer_idx as usize].path_regions;
+        let buffer_cache = &layer.buffer_caches[path_region_ref.sublayer_idx as usize];
         self.apply_path_region_range_to_highlight_mask(
             path_regions,
             buffer_cache,
-            path_region_ref.region_start,
-            path_region_ref.region_count,
+            path_region_ref.region_start as usize,
+            path_region_ref.region_count as usize,
             transform,
             set_mask,
         )

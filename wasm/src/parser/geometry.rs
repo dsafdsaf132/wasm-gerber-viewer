@@ -1492,11 +1492,11 @@ fn record_block_flash_interaction(
                     continue;
                 };
                 let path_region_count = block_layer.path_regions.region_count();
-                let path_region_ref = has_path_regions.then_some(PathRegionRef {
-                    sublayer_idx,
-                    region_start: 0,
-                    region_count: path_region_count,
-                });
+                let path_region_ref = if has_path_regions {
+                    Some(PathRegionRef::new(sublayer_idx, 0, path_region_count)?)
+                } else {
+                    None
+                };
                 let mut interaction_path_regions = if has_path_regions {
                     block_layer.path_regions.clone_for_interaction_pick()
                 } else {
@@ -3172,11 +3172,11 @@ pub(crate) fn finish_region_contours(
             collect_region_source_contours,
         )?;
         if let Some(interaction_layer) = interaction_layer.as_deref_mut() {
-            let path_region_ref = PathRegionRef {
-                sublayer_idx: polarity_layers.len(),
-                region_start: path_regions.region_count(),
-                region_count: region_path_regions.region_count(),
-            };
+            let path_region_ref = PathRegionRef::new(
+                polarity_layers.len(),
+                path_regions.region_count(),
+                region_path_regions.region_count(),
+            )?;
             let interaction_bounds =
                 InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
             let interaction_path_regions = region_path_regions.clone_for_interaction_pick();

@@ -388,3 +388,21 @@ fn compact_path_region_refs_are_sparse_and_reject_duplicates() {
     assert!(compact_path_region_refs_from_parts_invariant(&[4], &[4, 5, 6], 4).is_err());
     assert!(compact_path_region_refs_from_parts_invariant(&[1], &[4, 5], 4).is_err());
 }
+
+#[test]
+fn path_region_ref_checked_indices_preserve_u32_boundaries() {
+    let max = u32::MAX as usize;
+    let reference = PathRegionRef::new(max, max, max).unwrap();
+    assert_eq!(reference.sublayer_idx, u32::MAX);
+    assert_eq!(reference.region_start, u32::MAX);
+    assert_eq!(reference.region_count, u32::MAX);
+    assert_eq!(std::mem::size_of::<PathRegionRef>(), 12);
+    assert_eq!(std::mem::size_of::<Option<PathRegionRef>>(), 16);
+    #[cfg(target_pointer_width = "64")]
+    {
+        let overflow = max + 1;
+        assert!(PathRegionRef::new(overflow, 0, 1).is_err());
+        assert!(PathRegionRef::new(0, overflow, 1).is_err());
+        assert!(PathRegionRef::new(0, 0, overflow).is_err());
+    }
+}
