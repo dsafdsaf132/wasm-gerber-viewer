@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["console_error_panic_hook"]
 
-[target.'cfg(target_arch = "wasm64")'.dependencies]
+[target.'cfg(any(target_arch = "wasm32", target_arch = "wasm64"))'.dependencies]
 dlmalloc = "=0.2.14"
 
 [dependencies]

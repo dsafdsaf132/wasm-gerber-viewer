@@ -3,7 +3,7 @@
     feature(simd_wasm64)
 )]
 
-#[cfg(any(target_arch = "wasm64", test))]
+#[cfg(any(target_arch = "wasm32", target_arch = "wasm64", test))]
 mod allocator;
 mod drill;
 mod geometry;

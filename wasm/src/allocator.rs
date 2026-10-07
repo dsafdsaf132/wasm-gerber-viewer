@@ -1,4 +1,4 @@
-//! Geometric memory64 heap growth; allocation ownership stays in dlmalloc.
+//! Geometric WASM heap growth; allocation ownership stays in dlmalloc.
 
 const PAGE_BYTES: usize = 64 * 1024;
 const MAX_GROWTH_BYTES: usize = 512 * 1024 * 1024;
@@ -35,16 +35,20 @@ fn grow_with_fallback(
     ))
 }
 
-#[cfg(target_arch = "wasm64")]
+#[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
 mod global {
     use super::*;
+    #[cfg(target_arch = "wasm32")]
+    use core::arch::wasm32 as wasm;
+    #[cfg(target_arch = "wasm64")]
+    use core::arch::wasm64 as wasm;
     use dlmalloc::{Allocator, Dlmalloc};
     use std::alloc::{GlobalAlloc, Layout};
     use std::cell::{Cell, UnsafeCell};
     use std::ptr;
 
     #[cfg(target_feature = "atomics")]
-    compile_error!("The memory64 growth allocator requires a non-threaded WASM build");
+    compile_error!("The growth allocator requires a non-threaded WASM build");
 
     extern "C" {
         static __heap_base: u8;
@@ -67,13 +71,12 @@ mod global {
                     return (base as *mut u8, end - base, 0);
                 }
             }
-            let Some(current_bytes) = core::arch::wasm64::memory_size(0).checked_mul(PAGE_BYTES)
-            else {
+            let Some(current_bytes) = wasm::memory_size(0).checked_mul(PAGE_BYTES) else {
                 return (ptr::null_mut(), 0, 0);
             };
-            let Some((base, mut bytes)) = grow_with_fallback(current_bytes, size, |pages| {
-                core::arch::wasm64::memory_grow(0, pages)
-            }) else {
+            let Some((base, mut bytes)) =
+                grow_with_fallback(current_bytes, size, wasm::memory_grow::<0>)
+            else {
                 return (ptr::null_mut(), 0, 0);
             };
             // Match the default backend's pointer-wrap handling.
@@ -104,7 +107,7 @@ mod global {
 
     struct GrowthAllocator(UnsafeCell<Dlmalloc<MemorySystem>>);
 
-    // SAFETY: Restricted to non-threaded wasm64. Workers have separate heaps;
+    // SAFETY: Restricted to non-threaded WASM. Workers have separate heaps;
     // the backend never calls JS or reenters the allocator.
     unsafe impl Sync for GrowthAllocator {}
 
