@@ -1129,8 +1129,15 @@ fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, 
     let c_index = line
         .find('C')
         .ok_or_else(|| JsValue::from_str("Invalid drill tool declaration"))?;
-    let code = parse_tool_code(&line[1..c_index])
+    // Altium writes feed/speed words before the diameter (`T1F00S00C0.200`).
+    let code_and_suffix = &line[1..c_index];
+    let digits_end = code_and_suffix
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(code_and_suffix.len());
+    let code = parse_tool_code(&code_and_suffix[..digits_end])
         .ok_or_else(|| JsValue::from_str("Invalid drill tool number"))?;
+    parse_tool_selection_suffix(&code_and_suffix[digits_end..])
+        .map_err(|_| JsValue::from_str("Invalid drill tool number"))?;
     let diameter_token = read_number(&line[c_index + 1..], true)
         .ok_or_else(|| JsValue::from_str("Invalid drill tool diameter"))?;
     let diameter = parse_decimal_number(diameter_token)? * unit.multiplier();

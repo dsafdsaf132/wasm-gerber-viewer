@@ -254,6 +254,57 @@ M30",
 }
 
 #[test]
+fn parses_tool_declaration_with_feed_and_speed_before_diameter() {
+    // Altium NC Drill output declares tools as `T<n>F<feed>S<speed>C<diameter>`.
+    let parsed = parse_drill_with_offset(
+        "\
+M48
+;FILE_FORMAT=4:3
+METRIC,LZ
+T1F00S00C0.200
+T10F00S00C3.300
+%
+T01
+X0025025Y001075
+T10
+X0026Y0012107
+M30",
+        0.05,
+        0.0,
+        0.0,
+    )
+    .expect("Tool declaration with feed and speed before diameter should parse");
+
+    assert_eq!(parsed.metadata.hit_count, 2);
+    assert_eq!(parsed.metadata.tools.len(), 2);
+    assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.1);
+    assert_approx_eq(parsed.fill_layer.circles.radius[1], 1.65);
+    assert_approx_eq(parsed.fill_layer.circles.x[0], 25.025);
+    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.75);
+}
+
+#[test]
+fn parses_tool_declaration_with_feed_and_speed_after_diameter() {
+    let parsed = parse_drill_with_offset(
+        "\
+M48
+METRIC
+T1C0.6F200S65
+%
+T1
+X9.0Y3.0
+M30",
+        0.05,
+        0.0,
+        0.0,
+    )
+    .expect("Tool declaration with feed and speed after diameter should parse");
+
+    assert_eq!(parsed.metadata.hit_count, 1);
+    assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.3);
+}
+
+#[test]
 fn rejects_malformed_tool_selection_suffixes() {
     for selection in ["T02F", "T02Q1", "G54T02F", "T02F+", "T02S."] {
         assert!(
