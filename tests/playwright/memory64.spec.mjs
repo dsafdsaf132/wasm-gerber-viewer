@@ -83,6 +83,15 @@ async function loadFiles(page, files, layerCount = files.length) {
   await expect(page.locator(".gerber-layer-item, .drill-layer-item")).toHaveCount(layerCount);
 }
 
+async function batchWorkerCount(page, layerCount) {
+  if (layerCount <= 1) return 0;
+  return page.evaluate((count) => {
+    const cores = Number(navigator.hardwareConcurrency);
+    const available = Number.isFinite(cores) ? Math.max(1, cores - 1) : 2;
+    return Math.min(count, available, 4);
+  }, layerCount);
+}
+
 async function layerSummary(page) {
   const texts = await page.locator(".gerber-layer-item, .drill-layer-item").allInnerTexts();
   return texts.map((text) => text.replace(/\s+/g, " ").trim());
@@ -172,7 +181,7 @@ test("wasm32, memory64 and the mixed setup draw the same pixels", async ({ brows
   expect(mixed.pixels.equals(wasm32.pixels)).toBe(true);
 });
 
-test("a single file and a drill job still parse Gerber layers in a wasm32 worker", async ({ browser }) => {
+test("single-file and mixed Gerber/drill uploads use the selected parsing builds", async ({ browser }) => {
   for (const files of [
     [demoFile("performance-test-stars-10K.gbr")],
     [demoFile("gerber-feature-test.gbr"), demoFile("smoke-test.drl")],
@@ -180,14 +189,23 @@ test("a single file and a drill job still parse Gerber layers in a wasm32 worker
     const mixedPage = await browser.newPage();
     const mixed = await loadAndCapture(mixedPage, "", files);
     await expectBuilds(mixedPage, "wasm64", "wasm32");
-    // The main instance never parses these layers itself: one worker does.
-    expect(mixed.watched.binaries).toEqual([WASM64_BINARY, WASM32_BINARY]);
+    // The mixed setup also uses one worker for a single file. Larger batches,
+    // including drill layers, use a pool sized for the available CPU cores.
+    const mixedWorkers = Math.max(1, await batchWorkerCount(mixedPage, files.length));
+    expect(mixed.watched.binaries).toEqual([
+      WASM64_BINARY,
+      ...Array(mixedWorkers).fill(WASM32_BINARY),
+    ]);
     expect(mixed.watched.errors).toEqual([]);
 
     const wasm32Page = await browser.newPage();
     const wasm32 = await loadAndCapture(wasm32Page, "?wasm=32", files);
-    // wasm32 keeps parsing them on the main instance, without a worker.
-    expect(wasm32.watched.binaries).toEqual([WASM32_BINARY]);
+    // Pinned wasm32 parses a single file on the main instance, while mixed
+    // Gerber/drill batches use the same parallel pool as other batches.
+    const wasm32Workers = await batchWorkerCount(wasm32Page, files.length);
+    expect(wasm32.watched.binaries).toEqual(
+      Array(1 + wasm32Workers).fill(WASM32_BINARY),
+    );
     expect(mixed.layers).toEqual(wasm32.layers);
     expect(mixed.pixels.equals(wasm32.pixels)).toBe(true);
     await mixedPage.close();
@@ -756,7 +774,7 @@ test("re-parsing for a parser option shows how far the parse has got", async ({ 
   }
 });
 
-test("the memory64 retry also covers the single-worker path that drill files force", async ({ page }) => {
+test("the memory64 retry also covers a mixed Gerber/drill worker pool", async ({ page }) => {
   await failWasm32Parser(page);
   const { watched } = await loadAndCapture(page, "", [
     gerber("exhausted.gtl", padSource("WASM32-OUT-OF-MEMORY")),
@@ -766,7 +784,12 @@ test("the memory64 retry also covers the single-worker path that drill files for
       buffer: readFileSync(demoFile("smoke-test.drl")),
     },
   ]);
-  expect(watched.binaries).toEqual([WASM64_BINARY, WASM32_BINARY, WASM64_BINARY]);
+  const workerCount = await batchWorkerCount(page, 2);
+  expect(watched.binaries[0]).toBe(WASM64_BINARY);
+  // Other workers may request their binary before or after the retry starts.
+  expect(watched.binaries.filter((path) => path === WASM32_BINARY)).toHaveLength(workerCount);
+  expect(watched.binaries.filter((path) => path === WASM64_BINARY)).toHaveLength(2);
+  expect(watched.binaries).toHaveLength(workerCount + 2);
   expect(await diagnosticsText(page)).toContain("Parsed with the memory64 build");
 });
 
