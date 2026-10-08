@@ -148,6 +148,7 @@ self.addEventListener("message", async (event) => {
   const {
     id,
     offset = {},
+    kind = "gerber",
     preserveArcRegions = true,
     arcTessellationQuality = 1,
     interactionsEnabled = false,
@@ -183,8 +184,20 @@ self.addEventListener("message", async (event) => {
     const supportsArcQuality =
       typeof wasmModule.parse_gerber_layer_with_options === "function" &&
       wasmModule.parse_gerber_layer_with_options.length >= 5;
-    const returnsPayload = supportsProgress || supportsInteractionPayload;
+    const returnsPayload =
+      kind !== "drill" && (supportsProgress || supportsInteractionPayload);
     const parseLayer = () => {
+      if (kind === "drill") {
+        if (typeof wasmModule.parse_drill_layer_payload !== "function") {
+          throw new Error("Parse worker API unavailable: parse_drill_layer_payload is missing");
+        }
+        return wasmModule.parse_drill_layer_payload(
+          content,
+          offsetX,
+          offsetY,
+          Boolean(interactionsEnabled),
+        );
+      }
       if (supportsProgress) {
         return wasmModule.parse_gerber_layer_payload_with_progress(
           content,
@@ -234,9 +247,11 @@ self.addEventListener("message", async (event) => {
     const parsedLayer = returnsPayload
       ? parsedResult.renderPayload
       : parsedResult;
-    const interactionPayload = returnsPayload
-      ? (parsedResult.interactionPayload ?? null)
-      : null;
+    const interactionPayload =
+      returnsPayload || kind === "drill"
+        ? (parsedResult.interactionPayload ?? null)
+        : null;
+    if (kind === "drill") delete parsedLayer.interactionPayload;
     const transferables = collectTransferables({
       parsedLayer,
       interactionPayload,

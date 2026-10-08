@@ -281,6 +281,14 @@ fn drill_parse_result_to_js(drill: DrillParseResult) -> Result<JsValue, JsValue>
         &JsValue::from_str("metadata"),
         &drill.metadata.to_js()?,
     )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("interactionPayload"),
+        &match drill.interaction_layer {
+            Some(layer) => layer.to_compact_js()?,
+            None => JsValue::NULL,
+        },
+    )?;
     Ok(object.into())
 }
 
@@ -308,6 +316,27 @@ pub fn parse_drill_layer(
     offset_y: f32,
 ) -> Result<JsValue, JsValue> {
     let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?;
+    drill_parse_result_to_js(drill)
+}
+
+/// Parse a drill layer in a worker, optionally including feature picking data.
+#[wasm_bindgen]
+pub fn parse_drill_layer_payload(
+    content: String,
+    offset_x: f32,
+    offset_y: f32,
+    collect_interactions: bool,
+) -> Result<JsValue, JsValue> {
+    let drill = if collect_interactions {
+        parse_drill_with_offset_and_interactions(
+            &content,
+            DRILL_OUTLINE_WIDTH_MM,
+            offset_x,
+            offset_y,
+        )?
+    } else {
+        parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?
+    };
     drill_parse_result_to_js(drill)
 }
 
@@ -391,7 +420,17 @@ impl GerberProcessor {
             metadata,
             interaction_layer,
         } = drill;
+        let result = self.add_drill_geometry(outline_layer, fill_layer, interaction_layer)?;
+        Reflect::set(&result, &JsValue::from_str("metadata"), &metadata.to_js()?)?;
+        Ok(result)
+    }
 
+    fn add_drill_geometry(
+        &mut self,
+        outline_layer: GerberData,
+        fill_layer: GerberData,
+        interaction_layer: Option<InteractionLayer>,
+    ) -> Result<JsValue, JsValue> {
         if !fill_layer.has_geometry() {
             return Err(JsValue::from_str(
                 "File does not contain valid drill data (no holes found)",
@@ -440,8 +479,6 @@ impl GerberProcessor {
             &JsValue::from_str("fillLayerId"),
             &JsValue::from_f64(fill_layer_id as f64),
         )?;
-        Reflect::set(&object, &JsValue::from_str("metadata"), &metadata.to_js()?)?;
-
         Ok(object.into())
     }
 
@@ -925,6 +962,23 @@ impl GerberProcessor {
             parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?
         };
         self.add_drill_parse_result(drill)
+    }
+
+    /// Register worker-produced drill geometry using the same bookkeeping as a local parse.
+    pub fn add_drill_render_payload(&mut self, payload: JsValue) -> Result<JsValue, JsValue> {
+        let read_layer = |name: &str| -> Result<GerberData, JsValue> {
+            let value = Reflect::get(&payload, &JsValue::from_str(name))?;
+            let mut layers = gerber_data_layers_from_js(&value)?;
+            if layers.len() != 1 {
+                return Err(JsValue::from_str(
+                    "Drill payload must contain one outline and one fill layer",
+                ));
+            }
+            Ok(layers.pop().unwrap())
+        };
+        let outline = read_layer("outlineLayer")?;
+        let fill = read_layer("fillLayer")?;
+        self.add_drill_geometry(outline, fill, None)
     }
 
     /// Add a layer from geometry parsed in a worker or another WASM instance.

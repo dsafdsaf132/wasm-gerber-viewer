@@ -748,6 +748,7 @@ class GerberParseWorkerPool {
       id: task.id,
       content: task.content,
       offset: task.offset,
+      kind: task.options.kind,
       preserveArcRegions: task.options.preserveArcRegions,
       arcTessellationQuality: task.options.arcTessellationQuality,
       interactionsEnabled: task.options.interactionsEnabled,
@@ -4390,10 +4391,6 @@ export class GerberViewer {
       });
     }
     const total = layerSources.length;
-    if (layerSources.some(isDrillSource)) {
-      return this.loadLayerSourcesSerially(layerSources, { title, total });
-    }
-
     const parseWorkerPool = this.createParseWorkerPool(total);
 
     if (!parseWorkerPool) {
@@ -4479,8 +4476,8 @@ export class GerberViewer {
 
   /**
    * Whether Gerber layers parse in a worker even where the viewer otherwise
-   * parses on the main instance: a single file, the serial path that drill
-   * files force, and re-parsing for a parser option. Only the mixed setup
+   * parses on the main instance: a single file, a serial fallback, and
+   * re-parsing for a parser option. Only the mixed setup
    * needs it, because its memory64 main instance parses up to a third slower
    * than a wasm32 worker.
    */
@@ -4884,7 +4881,7 @@ export class GerberViewer {
       return parseWorkerPool.parse(
         content,
         normalizedOffset,
-        parseOptions,
+        { ...parseOptions, kind: parseOptionOverrides.kind },
         onProgress,
       );
     }
@@ -5020,7 +5017,7 @@ export class GerberViewer {
         content,
         source.offset,
         parseWorkerPool,
-        {},
+        { kind: source.kind },
         this.createLayerParseProgressHandler(progress, { index, name }),
       );
       const {
@@ -5040,6 +5037,7 @@ export class GerberViewer {
         ok: true,
         index,
         name,
+        kind: source.kind,
         parsedLayer: renderPayload,
         interactionPayload,
         sourceContent: content,
@@ -5204,15 +5202,20 @@ export class GerberViewer {
       });
       await this.waitForPaintBeforeAddingLayer(parseResult.parsedLayer);
 
-      const layerRecord = await this.createParsedLayerRecord(
-        name,
-        parseResult.parsedLayer,
-        {
-          offset: parseResult.offset,
-          sourceContent: parseResult.sourceContent,
-          interactionPayload: parseResult.interactionPayload,
-        },
-      );
+      const layerRecord = isDrillSource(parseResult)
+        ? await this.createDrillLayerRecord(name, parseResult.sourceContent, {
+            offset: parseResult.offset,
+            parsedDrill: parseResult.parsedLayer,
+          })
+        : await this.createParsedLayerRecord(
+            name,
+            parseResult.parsedLayer,
+            {
+              offset: parseResult.offset,
+              sourceContent: parseResult.sourceContent,
+              interactionPayload: parseResult.interactionPayload,
+            },
+          );
       layerRecord.interactionPayload = parseResult.interactionPayload ?? null;
       this.markLayerLoadComplete(progress, index);
       this.updateLayerLoadModal(progress, {
@@ -5247,7 +5250,6 @@ export class GerberViewer {
     const candidates = layerRecords.filter(
       (layer) =>
         layer &&
-        !isDrillLayer(layer) &&
         layer.interactionPayload &&
         hasRendererLayerId(layer.layerId),
     );
@@ -6074,10 +6076,17 @@ export class GerberViewer {
         throw new Error("Drill rendering requires an updated WASM module");
       }
 
-      this.reserveWasmInputCapacity(content);
+      if (options.parsedDrill) this.ensureRenderPayloadMemoryHeadroom();
+      else this.reserveWasmInputCapacity(content);
       const offset = normalizeLayerOffset(options.offset);
       let result;
-      if (offset.x !== 0 || offset.y !== 0) {
+      if (options.parsedDrill) {
+        if (typeof processor.add_drill_render_payload !== "function") {
+          throw new Error("Parallel drill rendering requires an updated WASM module");
+        }
+        result = processor.add_drill_render_payload(options.parsedDrill);
+        result.metadata = options.parsedDrill.metadata;
+      } else if (offset.x !== 0 || offset.y !== 0) {
         if (typeof processor.add_drill_layer_with_offset !== "function") {
           throw new Error("Drill layer offsets require an updated WASM module");
         }
