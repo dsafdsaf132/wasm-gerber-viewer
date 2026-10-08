@@ -40,6 +40,7 @@ async function countLivePayloadsPerImport(page) {
     const build = GerberViewer.prototype.buildInteractionLayersForRecords;
     const processor = wasm.GerberProcessor.prototype;
     const addRender = processor.add_render_payload;
+    const addDrillRender = processor.add_drill_render_payload;
     const addInteraction = processor.add_interaction_payload;
     const alive = (references) =>
       references.filter((reference) => reference.deref() !== undefined).length;
@@ -53,6 +54,11 @@ async function countLivePayloadsPerImport(page) {
     };
     processor.add_render_payload = function (payload) {
       const result = addRender.call(this, payload);
+      rendered.push(new WeakRef(payload));
+      return result;
+    };
+    processor.add_drill_render_payload = function (payload) {
+      const result = addDrillRender.call(this, payload);
       rendered.push(new WeakRef(payload));
       return result;
     };
@@ -97,11 +103,11 @@ test("each layer's payloads are released once the main instance has them", async
   ]);
 });
 
-test("the one-layer-at-a-time path that drill files force releases them too", async ({ page }) => {
+test("mixed Gerber and drill uploads release both worker payloads", async ({ page }) => {
   await openViewer(page);
   await page.locator("#file-input").setInputFiles([padLayer("a.gtl", "000000"), drillFile]);
   await expect(page.locator("#loading-modal")).toBeHidden({ timeout: 60_000 });
   await expect(page.locator(".gerber-layer-item")).toHaveCount(1);
 
-  expect(await page.evaluate(() => window.__live)).toEqual([[nothingAlive]]);
+  expect(await page.evaluate(() => window.__live)).toEqual([[nothingAlive, nothingAlive]]);
 });
