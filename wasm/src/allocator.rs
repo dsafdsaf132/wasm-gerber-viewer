@@ -2,11 +2,18 @@
 
 const PAGE_BYTES: usize = 64 * 1024;
 const MAX_GROWTH_BYTES: usize = 512 * 1024 * 1024;
+const INITIAL_GROWTH_FLOOR_BYTES: usize = 16 * 1024 * 1024;
+const INITIAL_GROWTH_PHASE_BYTES: usize = 64 * 1024 * 1024;
 
 fn growth_pages(current_bytes: usize, required_bytes: usize) -> Option<(usize, usize)> {
     // Ceil(current * 0.30) without floating point or overflowing multiplication.
     let proportional = current_bytes / 10 * 3 + (current_bytes % 10 * 3).div_ceil(10);
-    let preferred = required_bytes.max(proportional.min(MAX_GROWTH_BYTES));
+    let initial_floor = if current_bytes > 0 && current_bytes < INITIAL_GROWTH_PHASE_BYTES {
+        INITIAL_GROWTH_FLOOR_BYTES
+    } else {
+        0
+    };
+    let preferred = required_bytes.max(proportional.max(initial_floor).min(MAX_GROWTH_BYTES));
     let required_pages = required_bytes.max(1).checked_add(PAGE_BYTES - 1)? / PAGE_BYTES;
     let preferred_pages = preferred.max(1).checked_add(PAGE_BYTES - 1)? / PAGE_BYTES;
     Some((preferred_pages, required_pages))
@@ -142,8 +149,10 @@ mod tests {
 
     #[test]
     fn proportional_growth_is_page_aligned_and_capped() {
-        assert_eq!(growth_pages(10 * PAGE_BYTES, PAGE_BYTES), Some((3, 1)));
-        assert_eq!(growth_pages(11 * PAGE_BYTES, PAGE_BYTES), Some((4, 1)));
+        assert_eq!(
+            growth_pages(INITIAL_GROWTH_PHASE_BYTES * 4, PAGE_BYTES),
+            Some((1229, 1))
+        );
         assert_eq!(
             growth_pages(4 * MAX_GROWTH_BYTES, PAGE_BYTES),
             Some((MAX_GROWTH_BYTES / PAGE_BYTES, 1))
@@ -167,11 +176,25 @@ mod tests {
     }
 
     #[test]
+    fn small_initial_heap_growth_uses_a_16_mib_floor() {
+        assert_eq!(
+            growth_pages(24 * PAGE_BYTES, PAGE_BYTES),
+            Some((INITIAL_GROWTH_FLOOR_BYTES / PAGE_BYTES, 1))
+        );
+        assert_eq!(
+            growth_pages(INITIAL_GROWTH_PHASE_BYTES, PAGE_BYTES),
+            Some((308, 1))
+        );
+    }
+
+    #[test]
     fn failed_spare_growth_retries_only_required_size() {
+        let current_bytes = INITIAL_GROWTH_PHASE_BYTES * 4;
+        let preferred_pages = growth_pages(current_bytes, PAGE_BYTES).unwrap().0;
         let mut calls = 0;
-        let result = grow_with_fallback(10 * PAGE_BYTES, PAGE_BYTES, |pages| {
+        let result = grow_with_fallback(current_bytes, PAGE_BYTES, |pages| {
             calls += 1;
-            assert_eq!(pages, if calls == 1 { 3 } else { 1 });
+            assert_eq!(pages, if calls == 1 { preferred_pages } else { 1 });
             if calls == 1 {
                 usize::MAX
             } else {
@@ -184,14 +207,16 @@ mod tests {
 
     #[test]
     fn successful_growth_has_no_retry() {
+        let current_bytes = INITIAL_GROWTH_PHASE_BYTES * 4;
+        let preferred_pages = growth_pages(current_bytes, PAGE_BYTES).unwrap().0;
         let mut calls = 0;
         assert_eq!(
-            grow_with_fallback(10 * PAGE_BYTES, PAGE_BYTES, |pages| {
+            grow_with_fallback(current_bytes, PAGE_BYTES, |pages| {
                 calls += 1;
-                assert_eq!(pages, 3);
-                10
+                assert_eq!(pages, preferred_pages);
+                current_bytes / PAGE_BYTES
             }),
-            Some((10 * PAGE_BYTES, 3 * PAGE_BYTES))
+            Some((current_bytes, preferred_pages * PAGE_BYTES))
         );
         assert_eq!(calls, 1);
     }
@@ -200,7 +225,7 @@ mod tests {
     fn exhaustion_and_overflow_fail_without_looping() {
         let mut calls = 0;
         assert_eq!(
-            grow_with_fallback(10 * PAGE_BYTES, PAGE_BYTES, |_| {
+            grow_with_fallback(INITIAL_GROWTH_PHASE_BYTES * 4, PAGE_BYTES, |_| {
                 calls += 1;
                 usize::MAX
             }),
