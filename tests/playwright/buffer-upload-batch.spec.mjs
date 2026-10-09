@@ -80,7 +80,7 @@ for (const variant of ["32", "64"]) {
       const leaks = [];
       const survivingReference = [];
       try {
-        // Final partial batch, full 16-buffer checkpoint, and later batch.
+        // Errors at early and later buffers must survive until the final check.
         for (const name of ["bufferData", "bufferSubData", "vertexAttribPointer"]) {
           for (const occurrence of [1, 16, 17]) {
             reset(); operation = name; remaining = occurrence;
@@ -115,7 +115,7 @@ for (const variant of ["32", "64"]) {
 
         // Polarity boundaries retain separate resources, not separate error
         // queries. This also exercises rollback across multiple sublayers and
-        // attribute setup after an exact 16-buffer checkpoint at layer end.
+        // the final attribute setup must still be checked at layer end.
         const alternatingSource = "%FSLAX24Y24*%%MOMM*%%ADD10C,1*%D10*" +
           Array.from({ length: 64 }, (_, i) =>
             `%LP${i % 2 ? "C" : "D"}*%X${i * 1000}Y0D03*`).join("") + "M02*";
@@ -149,14 +149,15 @@ for (const variant of ["32", "64"]) {
         armed = false;
         const actual = pixels(imported);
 
-        // One attribute larger than 8MiB must be checked immediately, even
-        // though the 16-buffer limit has not been reached.
+        // Check only when cumulative bytes reach 16MiB, plus the final check.
+        // A single attribute at or above the threshold is checked immediately.
         const circle = wasm.parse_gerber_layer_payload_with_options(
           "%FSLAX24Y24*%%MOMM*%%ADD10C,1*%D10*X0Y0D03*M02*", 0, 0, true, 1,
         ).renderPayload;
         const circles = circle.sublayers[0].circles;
         const byteChecks = [];
-        for (const length of [3 * 1024 * 1024 / 4, 8 * 1024 * 1024 / 4 + 1]) {
+        for (const length of [3 * 1024 * 1024 / 4, 8 * 1024 * 1024 / 4,
+          16 * 1024 * 1024 / 4, 16 * 1024 * 1024 / 4 + 1]) {
           circles.x = new Float32Array(length);
           circles.y = new Float32Array(length);
           circles.radius = new Float32Array(length).fill(0.5);
@@ -166,7 +167,22 @@ for (const variant of ["32", "64"]) {
           armed = false;
           processor.remove_layer(large);
         }
+        // Threshold checks precede attribute setup. Errors on both the first
+        // and final attribute must be caught by the next or final checkpoint.
+        const thresholdErrors = [];
+        const thresholdLeaks = [];
+        for (const name of ["bufferData", "bufferSubData", "vertexAttribPointer"]) {
+          for (const occurrence of [1, 3]) {
+            reset(); operation = name; remaining = occurrence;
+            attributeFailure = name === "vertexAttribPointer";
+            try { processor.add_render_payload(circle); thresholdErrors.push("missing error"); }
+            catch (error) { thresholdErrors.push(String(error)); }
+            thresholdLeaks.push([...created.values()].reduce((sum, resources) => sum + resources.size, 0));
+            armed = false;
+          }
+        }
         return { errors, leaks, survivingReference, checks, bufferCount, byteChecks,
+          thresholdErrors, thresholdLeaks,
           crossLayerErrors, crossLayerLeaks, alternatingChecks, alternatingBufferCount,
           alternatingPixelsEqual, alternatingSublayerCount: alternating.sublayers.length,
           hasGeometryPixels: expected.some((value, index) => index % 4 === 0 &&
@@ -189,17 +205,21 @@ for (const variant of ["32", "64"]) {
     expect(result.leaks).toEqual(Array(12).fill(0));
     expect(result.survivingReference.every(Boolean)).toBe(true);
     expect(result.bufferCount).toBeGreaterThan(16);
-    expect(Math.max(...result.checks)).toBeLessThanOrEqual(16);
-    expect(result.checks).toContain(16);
-    expect(result.byteChecks[0].filter((count) => count > 0)).toEqual([2, 1]);
-    expect(result.byteChecks[1].filter((count) => count > 0)).toEqual([1, 1, 1]);
+    expect(result.checks.filter((count) => count > 0)).toEqual([result.bufferCount]);
+    expect(result.byteChecks[0].filter((count) => count > 0)).toEqual([3]);
+    expect(result.byteChecks[1].filter((count) => count > 0)).toEqual([2, 1]);
+    expect(result.byteChecks[2].filter((count) => count > 0)).toEqual([1, 1, 1]);
+    expect(result.byteChecks[3].filter((count) => count > 0)).toEqual([1, 1, 1]);
+    expect(result.thresholdErrors).toHaveLength(6);
+    for (const error of result.thresholdErrors) expect(error).toMatch(/WebGL buffer upload batch failed/);
+    for (const error of result.thresholdErrors.slice(0, 4)) expect(error).toContain("GPU allocation out of memory");
+    expect(result.thresholdLeaks).toEqual(Array(6).fill(0));
     expect(result.pixelsEqual).toBe(true);
     expect(result.hasGeometryPixels).toBe(true);
     expect(result.finalError).toBe(0);
     expect(result.alternatingSublayerCount).toBe(64);
     expect(result.alternatingBufferCount).toBe(192);
-    expect(result.alternatingChecks.length).toBeLessThanOrEqual(20);
-    expect(Math.max(...result.alternatingChecks)).toBeLessThanOrEqual(16);
+    expect(result.alternatingChecks.filter((count) => count > 0)).toEqual([192]);
     expect(result.alternatingPixelsEqual).toBe(true);
     expect(result.crossLayerErrors[0]).toContain("GPU allocation out of memory");
     expect(result.crossLayerErrors[1]).toMatch(/WebGL buffer upload batch failed/);

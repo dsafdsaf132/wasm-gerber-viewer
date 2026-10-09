@@ -186,21 +186,15 @@ const MSAA_SAMPLES: i32 = 4;
 /// Other upload paths keep their existing immediate error checks.
 struct BufferUploadBatch<'a> {
     gl: &'a WebGl2RenderingContext,
-    buffers: u32,
     bytes: usize,
 }
 
 impl<'a> BufferUploadBatch<'a> {
-    const MAX_BUFFERS: u32 = 16;
-    const MAX_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
 
     fn new(gl: &'a WebGl2RenderingContext) -> Self {
         Renderer::drain_gl_errors(gl);
-        Self {
-            gl,
-            buffers: 0,
-            bytes: 0,
-        }
+        Self { gl, bytes: 0 }
     }
 
     fn checkpoint(&mut self) -> Result<(), JsValue> {
@@ -234,25 +228,21 @@ impl<'a> BufferUploadBatch<'a> {
                 "WebGL buffer upload batch failed with error 0x{error:x}{cause}"
             )));
         }
-        self.buffers = 0;
         self.bytes = 0;
         Ok(())
     }
 
     fn upload(&mut self, data: &Float32Array) -> Result<(), JsValue> {
         let bytes = data.byte_length() as usize;
-        if self.buffers > 0 && bytes > Self::MAX_BYTES.saturating_sub(self.bytes) {
-            self.checkpoint()?;
-        }
         self.gl
             .buffer_data_with_f64(ARRAY_BUFFER, bytes as f64, STATIC_DRAW);
         self.gl
             .buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
-        self.buffers += 1;
         self.bytes = self.bytes.saturating_add(bytes);
-        // A single large attribute cannot be split without changing its buffer
-        // layout. Check it immediately rather than extending the batch further.
-        if self.buffers >= Self::MAX_BUFFERS || self.bytes >= Self::MAX_BYTES {
+        // Whole attributes keep their existing buffer layout. A crossing or
+        // oversized attribute is checked immediately after its upload; the
+        // threshold is not a hard cap on the size of an individual buffer.
+        if self.bytes >= Self::MAX_BYTES {
             self.checkpoint()?;
         }
         Ok(())
