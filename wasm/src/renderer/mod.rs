@@ -232,6 +232,13 @@ impl<'a> BufferUploadBatch<'a> {
         Ok(())
     }
 
+    fn finish_with_error(&mut self, error: JsValue) -> JsValue {
+        match self.checkpoint() {
+            Ok(()) => error,
+            Err(upload_error) => upload_error,
+        }
+    }
+
     fn upload(&mut self, data: &Float32Array) -> Result<(), JsValue> {
         let bytes = data.byte_length() as usize;
         self.gl
@@ -3180,6 +3187,7 @@ impl Renderer {
             let path_regions = match Self::decode_path_region_metadata(&sublayer) {
                 Ok(path_regions) => path_regions,
                 Err(error) => {
+                    let error = batch.finish_with_error(error);
                     Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
                     return Err(error);
                 }
@@ -3188,6 +3196,7 @@ impl Renderer {
             let boundary = match Self::decode_render_payload_boundary(&sublayer) {
                 Ok(boundary) => boundary,
                 Err(error) => {
+                    let error = batch.finish_with_error(error);
                     Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
                     return Err(error);
                 }
@@ -3207,6 +3216,7 @@ impl Renderer {
             let template_count = match populate_result {
                 Ok(template_count) => template_count,
                 Err(error) => {
+                    let error = batch.finish_with_error(error);
                     Self::delete_buffer_cache(&self.gl, buffer_cache);
                     Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
                     return Err(error);
@@ -3222,8 +3232,9 @@ impl Renderer {
         }
 
         if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+            let error = batch.finish_with_error(JsValue::from_str("Layer boundary is not finite"));
             Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
-            return Err(JsValue::from_str("Layer boundary is not finite"));
+            return Err(error);
         }
 
         // Check the final partial batch and attribute setup after the last

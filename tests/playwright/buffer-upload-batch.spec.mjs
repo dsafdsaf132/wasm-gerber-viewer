@@ -113,6 +113,38 @@ for (const variant of ["32", "64"]) {
         }
         forcedErrors = null;
 
+        const tiny = wasm.parse_gerber_layer_payload_with_options(
+          "%FSLAX24Y24*%%MOMM*%%ADD10C,1*%D10*X0Y0D03*M02*", 0, 0, true, 1,
+        ).renderPayload;
+        const first = tiny.sublayers[0];
+        const invalidCircles = { ...first, circles: { ...first.circles, y: new Float32Array(0) } };
+        const earlyReturnPayloads = [
+          { ...tiny, sublayers: [first, { pathRegions: {} }] },
+          { ...tiny, sublayers: [first, { ...first, boundary: { ...first.boundary, minX: NaN } }] },
+          { ...tiny, sublayers: [first, invalidCircles] },
+          { ...tiny, sublayers: [{ ...invalidCircles, triangles: {
+            ...first.triangles, vertices: new Float32Array([0, 0, 1, 0, 0, 1]),
+          } }] },
+        ];
+        const earlyReturns = [];
+        for (const malformed of earlyReturnPayloads) {
+          for (const flags of [null, [gl.INVALID_OPERATION, gl.OUT_OF_MEMORY],
+            [gl.OUT_OF_MEMORY, gl.CONTEXT_LOST_WEBGL]]) {
+            reset(); operation = flags ? "bufferData" : null; remaining = 1; forcedErrors = flags;
+            let failure;
+            try { processor.add_render_payload(malformed); failure = "missing error"; }
+            catch (error) { failure = String(error); }
+            const pendingError = gl.getError();
+            earlyReturns.push({ failure, pendingError,
+              resources: [...created.values()].reduce((sum, resources) => sum + resources.size, 0),
+            });
+            // Keep deliberately failing pre-fix runs from contaminating later cases.
+            while (queuedErrors.length) gl.getError();
+            armed = false;
+          }
+        }
+        forcedErrors = null;
+
         // Polarity boundaries retain separate resources, not separate error
         // queries. This also exercises rollback across multiple sublayers and
         // the final attribute setup must still be checked at layer end.
@@ -182,6 +214,7 @@ for (const variant of ["32", "64"]) {
           }
         }
         return { errors, leaks, survivingReference, checks, bufferCount, byteChecks,
+          earlyReturns,
           thresholdErrors, thresholdLeaks,
           crossLayerErrors, crossLayerLeaks, alternatingChecks, alternatingBufferCount,
           alternatingPixelsEqual, alternatingSublayerCount: alternating.sublayers.length,
@@ -203,6 +236,18 @@ for (const variant of ["32", "64"]) {
     expect(result.errors[10]).toContain("GPU allocation out of memory");
     expect(result.errors[11]).toContain("WebGL context lost");
     expect(result.leaks).toEqual(Array(12).fill(0));
+    expect(result.earlyReturns).toHaveLength(12);
+    for (let i = 0; i < result.earlyReturns.length; i++) {
+      const failure = result.earlyReturns[i];
+      expect(failure.pendingError).toBe(0);
+      expect(failure.resources).toBe(0);
+      if (i % 3 === 0) {
+        expect(failure.failure).not.toContain("missing error");
+        expect(failure.failure).not.toContain("WebGL buffer upload batch failed");
+      } else {
+        expect(failure.failure).toContain(i % 3 === 1 ? "GPU allocation out of memory" : "WebGL context lost");
+      }
+    }
     expect(result.survivingReference.every(Boolean)).toBe(true);
     expect(result.bufferCount).toBeGreaterThan(16);
     expect(result.checks.filter((count) => count > 0)).toEqual([result.bufferCount]);
