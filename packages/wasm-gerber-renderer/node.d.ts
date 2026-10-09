@@ -71,6 +71,8 @@ export type PngRenderStrategy = "auto" | "full-frame" | "stream";
 export type InvertedOutlineSelection = "auto" | "bounds" | string | number;
 
 export type NodeRendererOptions = {
+  /** Defaults to wasm32. wasm64 requires a runtime with memory64 support. */
+  wasmVariant?: "wasm32" | "wasm64";
   wasmModule?: unknown;
   wasmModuleUrl?: string | URL;
   wasmBinaryUrl?: string | URL;

@@ -36,6 +36,8 @@ export type CompositeLayerOptions = {
 };
 
 export type RendererOptions = {
+  /** Defaults to wasm32. wasm64 requires a runtime with memory64 support. */
+  wasmVariant?: "wasm32" | "wasm64";
   wasmModule?: unknown;
   wasmModuleUrl?: string | URL;
   wasmInitInput?: unknown;

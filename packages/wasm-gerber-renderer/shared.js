@@ -5,6 +5,11 @@ export const DEFAULT_WASM_MODULE_URLS = [
   new URL(getDevWasmModulePath(), import.meta.url),
 ];
 
+export const WASM64_MODULE_URLS = [
+  new URL("./wasm/pkg64/wasm_gerber_processor.js", import.meta.url),
+  new URL("../../wasm/pkg64/wasm_gerber_processor.js", import.meta.url),
+];
+
 export const DEFAULT_COLORS = [
   [1.0, 0.0, 0.0],
   [0.0, 1.0, 0.0],
@@ -390,6 +395,10 @@ export function normalizeInvertedOutline(value) {
 }
 
 export async function loadWasmJsModule(rendererOptions, options = {}) {
+  const variant = rendererOptions.wasmVariant ?? "wasm32";
+  if (variant !== "wasm32" && variant !== "wasm64") {
+    throw new TypeError("wasmVariant must be 'wasm32' or 'wasm64'.");
+  }
   const {
     normalizeUrl = (value) => value,
     hint = "Run npm run build:wasm before using the package.",
@@ -406,7 +415,7 @@ export async function loadWasmJsModule(rendererOptions, options = {}) {
 
   const wasmModuleUrls = rendererOptions.wasmModuleUrl
     ? [normalizeUrl(rendererOptions.wasmModuleUrl)]
-    : DEFAULT_WASM_MODULE_URLS;
+    : variant === "wasm64" ? WASM64_MODULE_URLS : DEFAULT_WASM_MODULE_URLS;
   const errors = [];
 
   for (const wasmModuleUrl of wasmModuleUrls) {

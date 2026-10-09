@@ -9,6 +9,8 @@ Use `wasm-gerber-renderer` when the user wants to render Gerber/RS-274X PCB laye
 
 ## Install
 
+Browser and Node renderer options accept `wasmVariant: "wasm64"` to select the bundled memory64 build. The default remains `"wasm32"`. Use a memory64-capable runtime; initialization failures are not automatically retried on wasm32. Explicit `wasmModule`/`wasmModuleUrl` takes precedence.
+
 Browser:
 
 ```bash

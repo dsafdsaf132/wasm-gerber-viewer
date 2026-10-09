@@ -439,6 +439,7 @@ source의 dependent composite만 건너뛰고 다른 정상 layer/composite는 �
 `rendererOptions`는 renderer 생성을 제어합니다.
 
 - `wasmModule`: 미리 load된 WASM JS module입니다. 대부분의 사용자는 필요하지 않습니다.
+- `wasmVariant`: Browser/Node 모두 `"wasm32"`(기본값) 또는 `"wasm64"`를 선택합니다. 두 빌드를 패키지에 포함합니다. wasm64는 memory64 지원 런타임이 필요하며 초기화 실패 시 wasm32로 자동 전환하지 않습니다. `wasmModule`/`wasmModuleUrl`을 직접 지정하면 해당 모듈을 사용합니다.
 - `wasmModuleUrl`: WASM JS module을 import할 때 사용할 URL입니다.
 - `wasmBinaryUrl`: Node 전용 `.wasm` binary URL입니다.
 - `wasmInitInput`: WASM module initializer에 전달할 사용자 지정 값입니다.

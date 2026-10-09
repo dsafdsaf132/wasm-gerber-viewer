@@ -16,6 +16,9 @@ declare const firstGerber: string;
 declare const secondGerber: string;
 declare const outputPath: string;
 
+void createGerberRenderer(canvas, { wasmVariant: "wasm64" });
+void createNodeGerberRenderer({ wasmVariant: "wasm64" });
+
 const nativeWritable: NodePngWritable = createWriteStream(outputPath);
 const structuralWritable: NodePngWritable = {
   async write(_chunk: Uint8Array): Promise<void> {},

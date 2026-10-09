@@ -146,6 +146,19 @@ jobs:
       - name: Build WASM package
         run: npm run build:wasm --prefix "$PACKAGE_DIR"
 
+      - name: Build memory64 WASM package
+        id: memory64
+        shell: bash
+        run: |
+          set -euo pipefail
+          if node -e 'process.exit(typeof JSON.parse(require("fs").readFileSync("package.json", "utf8")).scripts?.["build:wasm64"] === "string" ? 0 : 1)'; then
+            npm run build:wasm64
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "This release predates memory64 support; packaging wasm32 only."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check package JavaScript
         run: xvfb-run -a npm run check --prefix "$PACKAGE_DIR"
 
@@ -206,11 +219,25 @@ jobs:
           artifact_dir="${RUNNER_TEMP}/wasm-package"
           artifact_name="wasm-pkg-${{ steps.release.outputs.tag }}.tar.gz"
           artifact_path="${artifact_dir}/${artifact_name}"
+          package_dir="${artifact_dir}/package"
           mkdir -p "$artifact_dir"
 
           test -f wasm/pkg/wasm_gerber_processor.js
           test -f wasm/pkg/wasm_gerber_processor_bg.wasm
-          tar -czf "$artifact_path" -C wasm/pkg .
+          mkdir -p "$package_dir"
+          cp -R wasm/pkg/. "$package_dir/"
+          if [[ "${{ steps.memory64.outputs.built }}" == "true" ]]; then
+            test -f wasm/pkg64/wasm_gerber_processor.js
+            test -f wasm/pkg64/wasm_gerber_processor_bg.wasm
+            mkdir -p "${package_dir}/pkg64"
+            cp -R wasm/pkg64/. "${package_dir}/pkg64/"
+          fi
+          tar -czf "$artifact_path" -C "$package_dir" .
+
+          tar -tzf "$artifact_path" | grep -Fx './wasm_gerber_processor_bg.wasm' >/dev/null
+          if [[ "${{ steps.memory64.outputs.built }}" == "true" ]]; then
+            tar -tzf "$artifact_path" | grep -Fx './pkg64/wasm_gerber_processor_bg.wasm' >/dev/null
+          fi
 
           echo "path=${artifact_path}" >> "$GITHUB_OUTPUT"
           echo "name=${artifact_name}" >> "$GITHUB_OUTPUT"
@@ -232,6 +259,9 @@ jobs:
           cp index.html LICENSE "${package_root}/"
           cp -R css js vendor "${package_root}/"
           cp -R wasm/pkg "${package_root}/wasm/pkg"
+          if [[ "${{ steps.memory64.outputs.built }}" == "true" ]]; then
+            cp -R wasm/pkg64 "${package_root}/wasm/pkg64"
+          fi
           tar -czf "$artifact_path" -C "$artifact_dir" "wasm-gerber-viewer-${{ steps.release.outputs.tag }}"
 
           echo "path=${artifact_path}" >> "$GITHUB_OUTPUT"

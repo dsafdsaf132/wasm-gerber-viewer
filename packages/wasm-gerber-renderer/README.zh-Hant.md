@@ -434,6 +434,7 @@ Selector 可以是 1-based 輸入序號、完整名稱或 basename。JSON number
 `rendererOptions` 控制渲染器建立：
 
 - `wasmModule`：預先載入的 WASM JS 模組。大多數使用者不需要。
+- `wasmVariant`：Browser/Node 均支援 `"wasm32"`（預設）或 `"wasm64"`，套件包含兩種建置。wasm64 需要支援 memory64 的執行環境；初始化失敗時不會自動回退。明確指定 `wasmModule`/`wasmModuleUrl` 時優先使用指定模組。
 - `wasmModuleUrl`：用於 import WASM JS 模組的 URL。
 - `wasmBinaryUrl`：僅 Node.js 使用的 `.wasm` 二進位檔 URL。
 - `wasmInitInput`：傳給 WASM 模組初始化函式的自訂值。

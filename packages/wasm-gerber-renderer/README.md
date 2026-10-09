@@ -491,6 +491,7 @@ other valid layers/composites continue.
 
 `rendererOptions` control renderer creation:
 
+- `wasmVariant`: `"wasm32"` (default) or `"wasm64"`, in both browser and Node APIs. Both builds are bundled. `wasm64` requires a memory64-capable runtime; initialization errors are returned, not silently retried on wasm32. Explicit `wasmModule` or `wasmModuleUrl` overrides build selection.
 - `wasmModule`: preloaded WASM JS module. Most users do not need this.
 - `wasmModuleUrl`: URL used to import the WASM JS module.
 - `wasmBinaryUrl`: Node-only `.wasm` binary URL.
