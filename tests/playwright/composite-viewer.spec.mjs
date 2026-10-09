@@ -5001,8 +5001,9 @@ test("selection maps CSS pixels, clips code zero, throttles hover, and toggles d
 
   await page.keyboard.press("Enter");
   await page.waitForTimeout(60);
-  const committedLeft = await readCanvasPixel(page, leftRatio, 0.5);
+  const committedLeft = await sampleAreaColors(leftRatio);
   expect(committedLeft).not.toEqual(leftBefore);
+  expect(committedLeft).not.toEqual(leftAfter);
 
   const islands = page.locator(".gerber-layer-item:not(.composite-layer-item)").filter({
     has: page.getByText("islands.gtl", { exact: true }),
