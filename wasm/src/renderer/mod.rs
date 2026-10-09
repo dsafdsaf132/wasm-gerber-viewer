@@ -180,6 +180,85 @@ struct MaskNeeds {
 /// shader, which multisampling cannot do for a `discard`-shaped edge.
 const MSAA_SAMPLES: i32 = 4;
 
+/// Bounded, allocation-free error checkpoints for worker payload uploads.
+/// Keep polarity sublayer resources separate, but share error checkpoints
+/// across the whole layer without synchronizing for every attribute buffer.
+/// Other upload paths keep their existing immediate error checks.
+struct BufferUploadBatch<'a> {
+    gl: &'a WebGl2RenderingContext,
+    buffers: u32,
+    bytes: usize,
+}
+
+impl<'a> BufferUploadBatch<'a> {
+    const MAX_BUFFERS: u32 = 16;
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+
+    fn new(gl: &'a WebGl2RenderingContext) -> Self {
+        Renderer::drain_gl_errors(gl);
+        Self {
+            gl,
+            buffers: 0,
+            bytes: 0,
+        }
+    }
+
+    fn checkpoint(&mut self) -> Result<(), JsValue> {
+        let mut error = self.gl.get_error();
+        if error != WebGl2RenderingContext::NO_ERROR {
+            // Failed allocation can also make subsequent bufferSubData or
+            // attribute setup invalid. Error flags have no guaranteed order;
+            // preserve OOM/context loss rather than reporting only a symptom.
+            for _ in 1..Renderer::MAX_GL_ERROR_DRAIN {
+                let next = self.gl.get_error();
+                if next == WebGl2RenderingContext::NO_ERROR {
+                    break;
+                }
+                if next == WebGl2RenderingContext::CONTEXT_LOST_WEBGL
+                    || (next == WebGl2RenderingContext::OUT_OF_MEMORY
+                        && error != WebGl2RenderingContext::CONTEXT_LOST_WEBGL)
+                {
+                    error = next;
+                }
+            }
+            let cause = if error == WebGl2RenderingContext::CONTEXT_LOST_WEBGL
+                || self.gl.is_context_lost()
+            {
+                " (WebGL context lost)"
+            } else if error == WebGl2RenderingContext::OUT_OF_MEMORY {
+                " (GPU allocation out of memory)"
+            } else {
+                ""
+            };
+            return Err(JsValue::from_str(&format!(
+                "WebGL buffer upload batch failed with error 0x{error:x}{cause}"
+            )));
+        }
+        self.buffers = 0;
+        self.bytes = 0;
+        Ok(())
+    }
+
+    fn upload(&mut self, data: &Float32Array) -> Result<(), JsValue> {
+        let bytes = data.byte_length() as usize;
+        if self.buffers > 0 && bytes > Self::MAX_BYTES.saturating_sub(self.bytes) {
+            self.checkpoint()?;
+        }
+        self.gl
+            .buffer_data_with_f64(ARRAY_BUFFER, bytes as f64, STATIC_DRAW);
+        self.gl
+            .buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
+        self.buffers += 1;
+        self.bytes = self.bytes.saturating_add(bytes);
+        // A single large attribute cannot be split without changing its buffer
+        // layout. Check it immediately rather than extending the batch further.
+        if self.buffers >= Self::MAX_BUFFERS || self.bytes >= Self::MAX_BYTES {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+}
+
 pub struct Renderer {
     gl: WebGl2RenderingContext,
     explicit_size: Option<(u32, u32)>,
@@ -3105,9 +3184,16 @@ impl Renderer {
         let mut gerber_data = Self::reserved_vec("render payload sublayers", sublayer_count)?;
         let mut buffer_caches = Self::reserved_vec("render payload buffer caches", sublayer_count)?;
         let mut needs_stencil = false;
+        let mut batch = BufferUploadBatch::new(&self.gl);
 
         for sublayer in sublayers.iter() {
-            let path_regions = Self::decode_path_region_metadata(&sublayer)?;
+            let path_regions = match Self::decode_path_region_metadata(&sublayer) {
+                Ok(path_regions) => path_regions,
+                Err(error) => {
+                    Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
+                    return Err(error);
+                }
+            };
             needs_stencil |= path_regions.region_count() > 0;
             let boundary = match Self::decode_render_payload_boundary(&sublayer) {
                 Ok(boundary) => boundary,
@@ -3123,9 +3209,12 @@ impl Renderer {
             max_y = max_y.max(boundary.max_y);
 
             let mut buffer_cache = BufferCache::default();
-            let template_count = match self
-                .populate_buffer_cache_from_render_payload(&mut buffer_cache, &sublayer)
-            {
+            let populate_result = self.populate_buffer_cache_from_render_payload(
+                &mut buffer_cache,
+                &sublayer,
+                &mut batch,
+            );
+            let template_count = match populate_result {
                 Ok(template_count) => template_count,
                 Err(error) => {
                     Self::delete_buffer_cache(&self.gl, buffer_cache);
@@ -3143,7 +3232,15 @@ impl Renderer {
         }
 
         if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+            Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
             return Err(JsValue::from_str("Layer boundary is not finite"));
+        }
+
+        // Check the final partial batch and attribute setup after the last
+        // threshold checkpoint before FBO creation can drain the GL errors.
+        if let Err(error) = batch.checkpoint() {
+            Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
+            return Err(error);
         }
 
         let fbo = match Self::create_layer_mask_fbo(&self.gl, width, height, needs_stencil) {
@@ -3154,6 +3251,11 @@ impl Renderer {
             }
         };
         let mask_in_red = fbo.color_format == "R8";
+        if let Err(error) = Self::check_gl_stage(&self.gl, "Render payload registration") {
+            Self::delete_fbo(&self.gl, fbo);
+            Self::delete_buffer_caches(&self.gl, &mut buffer_caches);
+            return Err(error);
+        }
 
         let layer_metadata = LayerMetadata {
             gerber_data,
@@ -3247,15 +3349,16 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<usize, JsValue> {
-        self.populate_triangle_cache_from_payload(buffer_cache, sublayer)?;
+        self.populate_triangle_cache_from_payload(buffer_cache, sublayer, batch)?;
         let template_count =
-            self.populate_triangle_template_cache_from_payload(buffer_cache, sublayer)?;
-        self.populate_line_cache_from_payload(buffer_cache, sublayer)?;
-        self.populate_circle_cache_from_payload(buffer_cache, sublayer)?;
-        self.populate_arc_cache_from_payload(buffer_cache, sublayer)?;
-        self.populate_thermal_cache_from_payload(buffer_cache, sublayer)?;
-        self.populate_path_region_cache_from_payload(buffer_cache, sublayer)?;
+            self.populate_triangle_template_cache_from_payload(buffer_cache, sublayer, batch)?;
+        self.populate_line_cache_from_payload(buffer_cache, sublayer, batch)?;
+        self.populate_circle_cache_from_payload(buffer_cache, sublayer, batch)?;
+        self.populate_arc_cache_from_payload(buffer_cache, sublayer, batch)?;
+        self.populate_thermal_cache_from_payload(buffer_cache, sublayer, batch)?;
+        self.populate_path_region_cache_from_payload(buffer_cache, sublayer, batch)?;
         Ok(template_count)
     }
 
@@ -3263,6 +3366,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let triangles = Self::js_property(sublayer, "triangles")?;
         let vertices = Self::js_f32_array(&triangles, "vertices")?;
@@ -3280,6 +3384,7 @@ impl Renderer {
         buffer_cache.triangle_vao = Some(vao);
         buffer_cache.triangle_vertex_count = vertex_count;
         let vertex_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &vertices,
             &self.programs.triangle,
@@ -3319,6 +3424,7 @@ impl Renderer {
             Self::validate_js_finite_array("triangle hole_y", &hole_y)?;
             Self::validate_js_non_negative_array("triangle hole_radius", &hole_radius)?;
             buffer_cache.triangle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &hole_x,
                 &self.programs.triangle,
@@ -3327,6 +3433,7 @@ impl Renderer {
                 0,
             )?);
             buffer_cache.triangle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &hole_y,
                 &self.programs.triangle,
@@ -3336,6 +3443,7 @@ impl Renderer {
             )?);
             buffer_cache.triangle_hole_radius_buffer =
                 Some(Self::create_attrib_buffer_from_js_array(
+                    batch,
                     &self.gl,
                     &hole_radius,
                     &self.programs.triangle,
@@ -3353,6 +3461,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<usize, JsValue> {
         let templates = Array::from(&Self::js_property(sublayer, "triangleTemplates")?);
         let template_count = templates.length() as usize;
@@ -3391,6 +3500,7 @@ impl Renderer {
             template_cache.vertex_count = vertex_count;
             template_cache.instance_count = instance_count;
             let vertex_buffer = Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &vertices,
                 &self.programs.triangle_template,
@@ -3400,6 +3510,7 @@ impl Renderer {
             )?;
             template_cache.vertex_buffer = Some(vertex_buffer);
             let instance_x_buffer = Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &instance_x,
                 &self.programs.triangle_template,
@@ -3409,6 +3520,7 @@ impl Renderer {
             )?;
             template_cache.instance_x_buffer = Some(instance_x_buffer);
             let instance_y_buffer = Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &instance_y,
                 &self.programs.triangle_template,
@@ -3427,6 +3539,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let lines = Self::js_property(sublayer, "lines")?;
         let start_x = Self::js_f32_array(&lines, "startX")?;
@@ -3458,6 +3571,7 @@ impl Renderer {
         buffer_cache.line_instance_count = instance_count;
         self.bind_quad_position(&self.programs.line)?;
         buffer_cache.line_start_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &start_x,
             &self.programs.line,
@@ -3466,6 +3580,7 @@ impl Renderer {
             1,
         )?);
         buffer_cache.line_start_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &start_y,
             &self.programs.line,
@@ -3474,6 +3589,7 @@ impl Renderer {
             1,
         )?);
         buffer_cache.line_end_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &end_x,
             &self.programs.line,
@@ -3482,6 +3598,7 @@ impl Renderer {
             1,
         )?);
         buffer_cache.line_end_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &end_y,
             &self.programs.line,
@@ -3490,6 +3607,7 @@ impl Renderer {
             1,
         )?);
         buffer_cache.line_width_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &width,
             &self.programs.line,
@@ -3506,6 +3624,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let circles = Self::js_property(sublayer, "circles")?;
         let x = Self::js_f32_array(&circles, "x")?;
@@ -3538,6 +3657,7 @@ impl Renderer {
         buffer_cache.circle_instance_count = instance_count;
         self.bind_quad_position(program)?;
         let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &x,
             program,
@@ -3547,6 +3667,7 @@ impl Renderer {
         )?;
         buffer_cache.circle_center_x_buffer = Some(center_x_buffer);
         let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &y,
             program,
@@ -3556,6 +3677,7 @@ impl Renderer {
         )?;
         buffer_cache.circle_center_y_buffer = Some(center_y_buffer);
         let radius_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &radius,
             program,
@@ -3575,6 +3697,7 @@ impl Renderer {
             Self::validate_js_finite_array("circle hole_y", &hole_y)?;
             Self::validate_js_non_negative_array("circle hole_radius", &hole_radius)?;
             buffer_cache.circle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &hole_x,
                 program,
@@ -3583,6 +3706,7 @@ impl Renderer {
                 1,
             )?);
             buffer_cache.circle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &hole_y,
                 program,
@@ -3592,6 +3716,7 @@ impl Renderer {
             )?);
             buffer_cache.circle_hole_radius_buffer =
                 Some(Self::create_attrib_buffer_from_js_array(
+                    batch,
                     &self.gl,
                     &hole_radius,
                     program,
@@ -3609,6 +3734,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let arcs = Self::js_property(sublayer, "arcs")?;
         let x = Self::js_f32_array(&arcs, "x")?;
@@ -3643,6 +3769,7 @@ impl Renderer {
         buffer_cache.arc_instance_count = instance_count;
         self.bind_quad_position(&self.programs.arc)?;
         let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &x,
             &self.programs.arc,
@@ -3652,6 +3779,7 @@ impl Renderer {
         )?;
         buffer_cache.arc_center_x_buffer = Some(center_x_buffer);
         let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &y,
             &self.programs.arc,
@@ -3661,6 +3789,7 @@ impl Renderer {
         )?;
         buffer_cache.arc_center_y_buffer = Some(center_y_buffer);
         let radius_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &radius,
             &self.programs.arc,
@@ -3670,6 +3799,7 @@ impl Renderer {
         )?;
         buffer_cache.arc_radius_buffer = Some(radius_buffer);
         let start_angle_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &start_angle,
             &self.programs.arc,
@@ -3679,6 +3809,7 @@ impl Renderer {
         )?;
         buffer_cache.arc_start_angle_buffer = Some(start_angle_buffer);
         let sweep_angle_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &sweep_angle,
             &self.programs.arc,
@@ -3688,6 +3819,7 @@ impl Renderer {
         )?;
         buffer_cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
         let thickness_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &thickness,
             &self.programs.arc,
@@ -3705,6 +3837,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let thermals = Self::js_property(sublayer, "thermals")?;
         let x = Self::js_f32_array(&thermals, "x")?;
@@ -3751,6 +3884,7 @@ impl Renderer {
         buffer_cache.thermal_instance_count = instance_count;
         self.bind_quad_position(&self.programs.thermal)?;
         let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &x,
             &self.programs.thermal,
@@ -3760,6 +3894,7 @@ impl Renderer {
         )?;
         buffer_cache.thermal_center_x_buffer = Some(center_x_buffer);
         let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &y,
             &self.programs.thermal,
@@ -3769,6 +3904,7 @@ impl Renderer {
         )?;
         buffer_cache.thermal_center_y_buffer = Some(center_y_buffer);
         let outer_diameter_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &outer_diameter,
             &self.programs.thermal,
@@ -3778,6 +3914,7 @@ impl Renderer {
         )?;
         buffer_cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
         let inner_diameter_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &inner_diameter,
             &self.programs.thermal,
@@ -3787,6 +3924,7 @@ impl Renderer {
         )?;
         buffer_cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
         let gap_thickness_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &gap_thickness,
             &self.programs.thermal,
@@ -3796,6 +3934,7 @@ impl Renderer {
         )?;
         buffer_cache.thermal_gap_thickness_buffer = Some(gap_thickness_buffer);
         let rotation_buffer = Self::create_attrib_buffer_from_js_array(
+            batch,
             &self.gl,
             &rotation,
             &self.programs.thermal,
@@ -3879,6 +4018,7 @@ impl Renderer {
         &self,
         buffer_cache: &mut BufferCache,
         sublayer: &JsValue,
+        batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let path_regions = Self::js_property(sublayer, "pathRegions")?;
         Self::validate_path_sector_stride_marker(&path_regions)?;
@@ -3898,8 +4038,11 @@ impl Renderer {
                 .gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path wedge VAO"))?;
-            self.gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_wedge_vao = Some(vao);
+            self.gl
+                .bind_vertex_array(buffer_cache.path_wedge_vao.as_ref());
             let buffer = Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &wedge_vertices,
                 &self.programs.path_solid,
@@ -3907,7 +4050,6 @@ impl Renderer {
                 2,
                 0,
             )?;
-            buffer_cache.path_wedge_vao = Some(vao);
             buffer_cache.path_wedge_vertex_count = Self::checked_u32_to_i32(
                 "path region wedge vertex count",
                 wedge_vertices.length() / 2,
@@ -3928,9 +4070,10 @@ impl Renderer {
                 .gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path sector VAO"))?;
-            self.gl.bind_vertex_array(Some(&vao));
-            let buffer = self.create_path_sector_buffer(&sector_vertices)?;
             buffer_cache.path_sector_vao = Some(vao);
+            self.gl
+                .bind_vertex_array(buffer_cache.path_sector_vao.as_ref());
+            let buffer = self.create_path_sector_buffer(&sector_vertices, batch)?;
             buffer_cache.path_sector_vertex_count = Self::checked_u32_to_i32(
                 "path region sector vertex count",
                 sector_vertices.length() / PATH_SECTOR_VERTEX_FLOATS_U32,
@@ -3950,8 +4093,11 @@ impl Renderer {
                 .gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path cover VAO"))?;
-            self.gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_cover_vao = Some(vao);
+            self.gl
+                .bind_vertex_array(buffer_cache.path_cover_vao.as_ref());
             let buffer = Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &cover_vertices,
                 &self.programs.path_solid,
@@ -3959,7 +4105,6 @@ impl Renderer {
                 2,
                 0,
             )?;
-            buffer_cache.path_cover_vao = Some(vao);
             buffer_cache.path_cover_vertex_count = Self::checked_u32_to_i32(
                 "path region cover vertex count",
                 cover_vertices.length() / 2,
@@ -3979,8 +4124,11 @@ impl Renderer {
                 .gl
                 .create_vertex_array()
                 .ok_or_else(|| JsValue::from_str("Failed to create path clear VAO"))?;
-            self.gl.bind_vertex_array(Some(&vao));
+            buffer_cache.path_clear_vao = Some(vao);
+            self.gl
+                .bind_vertex_array(buffer_cache.path_clear_vao.as_ref());
             let buffer = Self::create_attrib_buffer_from_js_array(
+                batch,
                 &self.gl,
                 &clear_vertices,
                 &self.programs.path_solid,
@@ -3988,7 +4136,6 @@ impl Renderer {
                 2,
                 0,
             )?;
-            buffer_cache.path_clear_vao = Some(vao);
             buffer_cache.path_clear_vertex_count = Self::checked_u32_to_i32(
                 "path region clear vertex count",
                 clear_vertices.length() / 2,
@@ -4000,14 +4147,18 @@ impl Renderer {
         Ok(())
     }
 
-    fn create_path_sector_buffer(&self, data: &Float32Array) -> Result<WebGlBuffer, JsValue> {
+    fn create_path_sector_buffer(
+        &self,
+        data: &Float32Array,
+        batch: &mut BufferUploadBatch<'_>,
+    ) -> Result<WebGlBuffer, JsValue> {
         let buffer = self
             .gl
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create path sector buffer"))?;
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
         let setup_result = (|| {
-            Self::upload_float_array_to_bound_buffer(&self.gl, data)?;
+            batch.upload(data)?;
             let stride = (PATH_SECTOR_VERTEX_FLOATS * 4) as i32;
             self.enable_path_sector_attribute("position", 2, stride, 0)?;
             self.enable_path_sector_attribute("center", 2, stride, 2 * 4)?;
@@ -4036,6 +4187,7 @@ impl Renderer {
     }
 
     fn create_attrib_buffer_from_js_array(
+        batch: &mut BufferUploadBatch<'_>,
         gl: &WebGl2RenderingContext,
         data: &Float32Array,
         program: &ShaderProgram,
@@ -4047,7 +4199,7 @@ impl Renderer {
             .create_buffer()
             .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
         gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
-        if let Err(error) = Self::upload_float_array_to_bound_buffer(gl, data) {
+        if let Err(error) = batch.upload(data) {
             gl.delete_buffer(Some(&buffer));
             return Err(error);
         }
