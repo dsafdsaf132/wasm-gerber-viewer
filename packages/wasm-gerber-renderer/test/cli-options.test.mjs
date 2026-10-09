@@ -51,11 +51,19 @@ test("CLI help lists Node PNG memory and strategy options", async () => {
   assert.match(stdout, /--max-full-frame-bytes <size>/);
   assert.match(stdout, /--framebuffer-memory-safety-factor <n>/);
   assert.match(stdout, /--render-strategy <strategy>/);
+  assert.match(stdout, /--msaa-samples <4\|8\|16>/);
   assert.match(stdout, /--composite-config <path>/);
   assert.match(stdout, /--invert-layer <selector>.*exact name, or basename/);
   assert.match(stdout, /--outline-layer <selector>.*exact name, or basename/);
   assert.match(stdout, /Gerber\/drill or ODB\+\+ job archive: 300 MiB per file/);
   assert.match(stdout, /Composite JSON: 16 MiB/);
+});
+
+test("CLI rejects unsupported MSAA sample counts before reading sources", async () => {
+  for (const samples of ["2", "12", "32", "0", "-8", "eight"]) {
+    await assert.rejects(execFileAsync(process.execPath, [cliPath, "missing.gbr", "--msaa-samples", samples]),
+      /--msaa-samples/);
+  }
 });
 
 test("CLI rejects malformed composite JSON before rendering", async () => {

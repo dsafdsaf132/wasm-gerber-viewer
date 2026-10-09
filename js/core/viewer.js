@@ -1168,6 +1168,7 @@ export class GerberViewer {
       this.viewerOptionsStore.get("minimumFeaturePixels") ?? 1,
     );
     this.antiAliasing = this.viewerOptionsStore.get("antiAliasing") === true;
+    this.msaaSamples = this.viewerOptionsStore.get("msaaSamples") ?? 4;
     this.boardOutlineBoundsMarginMm = normalizeBoardOutlineBoundsMarginMm(
       this.viewerOptionsStore.get("boardOutlineBoundsMarginMm"),
     );
@@ -1906,6 +1907,11 @@ export class GerberViewer {
     if (typeof processor?.set_anti_aliasing === "function") {
       processor.set_anti_aliasing(this.antiAliasing);
     }
+    if (typeof processor?.set_msaa_samples === "function") {
+      processor.set_msaa_samples(this.msaaSamples ?? 4);
+    } else if (this.antiAliasing && (this.msaaSamples ?? 4) !== 4) {
+      throw new Error("MSAA sample selection requires an updated WASM module.");
+    }
 
     if (typeof processor?.set_interactions_enabled === "function") {
       processor.set_interactions_enabled(interactionsEnabled);
@@ -2312,7 +2318,10 @@ export class GerberViewer {
     for (const input of this.getAntiAliasingInputs()) {
       input.addEventListener("change", () => {
         if (input.checked) {
-          this.setAntiAliasing(input.value === "on");
+          this.setAntiAliasing(
+            input.value !== "off",
+            input.value === "on" ? 4 : Number(input.value),
+          );
         }
       });
     }
@@ -2725,6 +2734,7 @@ export class GerberViewer {
     return {
       minimumFeaturePixels: this.minimumFeaturePixels,
       antiAliasing: this.antiAliasing,
+      msaaSamples: this.msaaSamples,
       boardOutlineBoundsMarginMm: this.boardOutlineBoundsMarginMm,
       drillOutlinePixels: this.drillOutlinePixels,
       pthPlatingMicrometers: this.pthPlatingMicrometers,
@@ -2753,7 +2763,12 @@ export class GerberViewer {
   }
 
   getAntiAliasingInputs() {
-    return [this.antiAliasingOffInput, this.antiAliasingOnInput];
+    return [
+      this.antiAliasingOffInput,
+      this.antiAliasingOnInput,
+      this.antiAliasing8Input,
+      this.antiAliasing16Input,
+    ];
   }
 
   getBoardOutlineBoundsMarginUnitInputs() {
@@ -2827,7 +2842,11 @@ export class GerberViewer {
     }
 
     for (const input of this.getAntiAliasingInputs()) {
-      input.checked = (input.value === "on") === this.antiAliasing;
+      input.checked =
+        input.value === "off"
+          ? !this.antiAliasing
+          : this.antiAliasing &&
+            (input.value === "on" ? 4 : Number(input.value)) === this.msaaSamples;
       input.disabled = this.isRendererBusy();
     }
 
@@ -3281,9 +3300,13 @@ export class GerberViewer {
     }
   }
 
-  setAntiAliasing(enabled) {
+  setAntiAliasing(enabled, samples = this.msaaSamples) {
     const next = enabled === true;
-    if (next === this.antiAliasing) {
+    const nextSamples = next ? samples : this.msaaSamples;
+    if (![4, 8, 16].includes(nextSamples)) {
+      throw new TypeError("MSAA samples must be 4, 8 or 16");
+    }
+    if (next === this.antiAliasing && nextSamples === this.msaaSamples) {
       return;
     }
     if (this.isRendererBusy()) {
@@ -3292,19 +3315,29 @@ export class GerberViewer {
     }
 
     const previous = this.antiAliasing;
+    const previousSamples = this.msaaSamples;
     this.antiAliasing = next;
+    this.msaaSamples = nextSamples;
     this.syncOptionControls();
     this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+    this.viewerOptionsStore.set("msaaSamples", this.msaaSamples);
 
     try {
       if (typeof this.wasmProcessor?.set_anti_aliasing === "function") {
         this.wasmProcessor.set_anti_aliasing(this.antiAliasing);
       }
+      if (typeof this.wasmProcessor?.set_msaa_samples === "function") {
+        this.wasmProcessor.set_msaa_samples(this.msaaSamples);
+      } else if (this.antiAliasing && this.msaaSamples !== 4) {
+        throw new Error("MSAA sample selection requires an updated WASM module.");
+      }
       this.requestRender();
     } catch (error) {
       this.antiAliasing = previous;
+      this.msaaSamples = previousSamples;
       this.syncOptionControls();
       this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+      this.viewerOptionsStore.set("msaaSamples", this.msaaSamples);
       this.configureWasmProcessorOptions(this.wasmProcessor);
       this.showError(`Failed to apply anti-aliasing: ${getErrorMessage(error)}`);
     } finally {

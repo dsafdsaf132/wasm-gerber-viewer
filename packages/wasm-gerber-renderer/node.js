@@ -851,6 +851,7 @@ class NodeFrameState extends FrameState {
       arcTessellationQuality: this.options.arcTessellationQuality,
       minimumFeaturePixels: this.options.minimumFeaturePixels,
       antiAliasing: this.options.antiAliasing,
+      msaaSamples: this.options.msaaSamples,
       compositeMode: this.options.compositeMode,
       invertedOutline: this.options.invertedOutline,
       maxFullFrameBytes: this.options.maxFullFrameBytes,
@@ -1381,7 +1382,7 @@ async function renderPlanToPngSink(renderer, plan, exportOptions, sink) {
   const fullFrameRenderTargetEstimate = estimateRenderTargetBytes(
     width,
     height,
-    getFullFrameRenderTargetCount(layerCount, plan.antiAliasing === true),
+    getFullFrameRenderTargetCount(layerCount, plan.antiAliasing === true, plan.msaaSamples),
   );
   if (renderPlan.layers.length === 0 || !renderPlan.view) {
     const blankTileHeight = getBlankStreamTileHeight(
@@ -1710,6 +1711,7 @@ function createStreamRenderState(
     layerCount,
     pngChannels,
     plan.antiAliasing === true,
+    plan.msaaSamples,
   );
   const renderGl = renderer.createExportContext(tileWidth, tileHeight);
   let renderContext = null;
@@ -1863,7 +1865,7 @@ function renderStreamBand(state, width, height, tileY, plan, bandRowBytes) {
 }
 
 const ANTI_ALIASING_MODE_CHANGED_MESSAGE =
-  "Anti-aliasing mode changed during a tiled render; the export was stopped so the PNG does not mix anti-aliased and point-sampled bands.";
+  "Anti-aliasing mode changed during a tiled render; the export was stopped so the PNG does not mix sample counts or anti-aliased and point-sampled bands.";
 
 /**
  * The mode the processor drew its last masks in, uniform across a frame:
@@ -1874,7 +1876,10 @@ const ANTI_ALIASING_MODE_CHANGED_MESSAGE =
 function streamAntiAliasingMode(processor) {
   if (typeof processor?.get_anti_aliasing_diagnostics !== "function") return null;
   const diagnostics = processor.get_anti_aliasing_diagnostics();
-  return diagnostics.mode ?? (diagnostics.status === "ready" ? "multisampled" : "point-sampled");
+  const mode = diagnostics.mode ?? (diagnostics.status === "ready" ? "multisampled" : "point-sampled");
+  return mode === "multisampled" && diagnostics.samples != null
+    ? `multisampled:${diagnostics.samples}`
+    : mode;
 }
 
 /**
@@ -1904,9 +1909,12 @@ function assertStreamAntiAliasingMode(state) {
  * processor that cannot keep it.
  */
 function planForReplacementProcessor(plan, antiAliasingMode) {
-  return antiAliasingMode === "point-sampled" && plan.antiAliasing === true
-    ? { ...plan, antiAliasing: false }
-    : plan;
+  if (antiAliasingMode === "point-sampled" && plan.antiAliasing === true) {
+    return { ...plan, antiAliasing: false };
+  }
+  // A replacement must not upgrade a stream that fell back on the first context.
+  const samples = Number(antiAliasingMode?.split(":")[1]);
+  return [4, 8, 16].includes(samples) ? { ...plan, msaaSamples: samples } : plan;
 }
 
 function disposeStreamRenderState(renderer, state, releaseContext) {
@@ -3418,26 +3426,24 @@ function estimateRenderTargetBytes(width, height, targetCount) {
   return width * height * RGBA_BYTES_PER_PIXEL * Math.max(1, targetCount);
 }
 
-// With anti-aliasing the renderer keeps one shared 4x multisample target:
-// R8 colour (4 bytes per pixel) plus STENCIL_INDEX8 (4 bytes per pixel),
-// the size of two RGBA render targets. That is the only multisample
+// With anti-aliasing the renderer keeps one shared multisample target:
+// R8 colour plus STENCIL_INDEX8, two bytes per sample per pixel.
+// Budget the requested count even when the GPU falls back. This is the only multisample
 // allocation it makes; a context that refuses either format renders the
 // masks point-sampled instead of taking a larger one.
-const MSAA_RENDER_TARGET_EQUIVALENTS = 2;
-
-function getFullFrameRenderTargetCount(layerCount, antiAliasing = false) {
+function getFullFrameRenderTargetCount(layerCount, antiAliasing = false, msaaSamples = 4) {
   return (
     Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) +
     2 +
-    (antiAliasing ? MSAA_RENDER_TARGET_EQUIVALENTS : 0)
+    (antiAliasing ? msaaSamples / 2 : 0)
   );
 }
 
-function getStreamRenderTargetCount(layerCount, antiAliasing = false) {
+function getStreamRenderTargetCount(layerCount, antiAliasing = false, msaaSamples = 4) {
   return (
     Math.max(1, Math.floor(numberOrDefault(layerCount, 1))) +
     1 +
-    (antiAliasing ? MSAA_RENDER_TARGET_EQUIVALENTS : 0)
+    (antiAliasing ? msaaSamples / 2 : 0)
   );
 }
 
@@ -3490,6 +3496,7 @@ function getStreamTileHeight(
   layerCount = 1,
   pngChannels = RGBA_BYTES_PER_PIXEL,
   antiAliasing = false,
+  msaaSamples = 4,
 ) {
   const rowStride = getPngRowStride(width, pngChannels);
   // These three CPU buffers coexist while an encoded band is awaiting the
@@ -3505,7 +3512,7 @@ function getStreamTileHeight(
       `PNG export rows exceed the ${formatByteCount(maxBandBytes)} stream band limit at ${width}px wide.`,
     );
   }
-  const targetCount = getStreamRenderTargetCount(layerCount, antiAliasing);
+  const targetCount = getStreamRenderTargetCount(layerCount, antiAliasing, msaaSamples);
   const byRenderTargetBytes = Math.floor(
     maxRenderTargetBytes / (tileWidth * RGBA_BYTES_PER_PIXEL * targetCount),
   );

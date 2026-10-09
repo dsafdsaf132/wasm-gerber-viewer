@@ -687,6 +687,11 @@ export class ScreenshotExporter {
     if (typeof processor.set_anti_aliasing === "function") {
       processor.set_anti_aliasing(renderOptions.antiAliasing === true);
     }
+    if (typeof processor.set_msaa_samples === "function") {
+      processor.set_msaa_samples(renderOptions.msaaSamples ?? 4);
+    } else if (renderOptions.antiAliasing === true && (renderOptions.msaaSamples ?? 4) !== 4) {
+      throw new Error("MSAA sample selection requires an updated WASM module.");
+    }
 
     const activeLayerIds = [];
     const colorData = [];
@@ -1381,7 +1386,13 @@ export class ScreenshotExporter {
       Math.min(exportWidth, maxDimension, preferredTileWidth),
     );
 
-    const layerTargetCount = Math.max(1, Math.floor(Number(layerCount) || 1)) + 1;
+    const renderOptions = this.getRenderOptions?.() ?? {};
+    const msaaTargetCount =
+      renderOptions.antiAliasing === true
+        ? (renderOptions.msaaSamples ?? 4) / 2
+        : 0;
+    const layerTargetCount =
+      Math.max(1, Math.floor(Number(layerCount) || 1)) + 1 + msaaTargetCount;
     const rowStride = this.getPngRowStride(exportWidth);
     const heightByBandMemory = Math.floor(
       MAX_SCREENSHOT_STREAM_BAND_BYTES / rowStride,

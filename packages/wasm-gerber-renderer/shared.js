@@ -265,6 +265,13 @@ export class FrameState {
   }
 }
 
+export function normalizeMsaaSamples(value = 4) {
+  if (value !== 4 && value !== 8 && value !== 16) {
+    throw new TypeError("msaaSamples must be 4, 8 or 16.");
+  }
+  return value;
+}
+
 export function createBaseFrameOptions(frameOptions = {}) {
   return {
     background:
@@ -284,6 +291,7 @@ export function createBaseFrameOptions(frameOptions = {}) {
       DEFAULT_MINIMUM_FEATURE_PIXELS,
     ),
     antiAliasing: frameOptions.antiAliasing === true,
+    msaaSamples: normalizeMsaaSamples(frameOptions.msaaSamples),
     renderDrills: frameOptions.renderDrills !== false,
     globalAlpha: numberOrDefault(frameOptions.globalAlpha, DEFAULT_GLOBAL_ALPHA),
     compositeMode: normalizeCompositeMode(frameOptions.compositeMode),
@@ -454,6 +462,12 @@ export function applyProcessorOptions(processor, frameOptions) {
   }
   if (typeof processor.set_anti_aliasing === "function") {
     processor.set_anti_aliasing(frameOptions.antiAliasing === true);
+  }
+  const samples = normalizeMsaaSamples(frameOptions.msaaSamples);
+  if (typeof processor.set_msaa_samples === "function") {
+    processor.set_msaa_samples(samples);
+  } else if (frameOptions.antiAliasing === true && samples !== 4) {
+    throw new Error("MSAA sample selection requires an updated WASM module.");
   }
 }
 

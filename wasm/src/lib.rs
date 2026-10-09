@@ -358,6 +358,7 @@ pub struct GerberProcessor {
     arc_tessellation_quality: u32,
     minimum_feature_pixels: f32,
     anti_aliasing: bool,
+    msaa_samples: u32,
     drill_outline_pixels: f32,
     drill_outline_layer_ids: Vec<u32>,
     drill_layer_ids: Vec<u32>,
@@ -373,6 +374,7 @@ impl Default for GerberProcessor {
             arc_tessellation_quality: 1,
             minimum_feature_pixels: 0.0,
             anti_aliasing: false,
+            msaa_samples: 4,
             drill_outline_pixels: 0.0,
             drill_outline_layer_ids: Vec::new(),
             drill_layer_ids: Vec::new(),
@@ -595,6 +597,7 @@ impl GerberProcessor {
         let mut renderer = Renderer::new(gl)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         renderer.set_anti_aliasing(self.anti_aliasing);
+        renderer.set_msaa_samples(self.msaa_samples)?;
         self.renderer = Some(renderer);
         self.reset_renderer_generation_state();
         Ok("init_done".to_string())
@@ -612,6 +615,7 @@ impl GerberProcessor {
         let mut renderer = Renderer::new_headless(gl, width, height)?;
         renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
         renderer.set_anti_aliasing(self.anti_aliasing);
+        renderer.set_msaa_samples(self.msaa_samples)?;
         self.renderer = Some(renderer);
         self.reset_renderer_generation_state();
         Ok("init_done".to_string())
@@ -656,6 +660,19 @@ impl GerberProcessor {
         if let Some(renderer) = &mut self.renderer {
             renderer.set_anti_aliasing(enabled);
         }
+    }
+
+    /// Requested mask sample count. Unsupported counts fall back to a lower
+    /// supported count shared by the mask and stencil formats.
+    pub fn set_msaa_samples(&mut self, samples: u32) -> Result<(), JsValue> {
+        if !matches!(samples, 4 | 8 | 16) {
+            return Err(JsValue::from_str("MSAA samples must be 4, 8 or 16"));
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_msaa_samples(samples)?;
+        }
+        self.msaa_samples = samples;
+        Ok(())
     }
 
     pub fn set_drill_outline_pixels(&mut self, pixels: f32) {
@@ -717,6 +734,7 @@ impl GerberProcessor {
             let mut renderer = Renderer::new(gl)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
             renderer.set_anti_aliasing(self.anti_aliasing);
+            renderer.set_msaa_samples(self.msaa_samples)?;
             self.renderer = Some(renderer);
         }
 
@@ -736,6 +754,7 @@ impl GerberProcessor {
             let mut renderer = Renderer::new_headless(gl, width, height)?;
             renderer.set_minimum_feature_pixels(self.minimum_feature_pixels);
             renderer.set_anti_aliasing(self.anti_aliasing);
+            renderer.set_msaa_samples(self.msaa_samples)?;
             self.renderer = Some(renderer);
         }
 
@@ -1284,6 +1303,11 @@ impl GerberProcessor {
                 .map_err(|_| JsValue::from_str("Failed to build anti-aliasing diagnostics"))
         };
         set("enabled", JsValue::from_bool(diagnostics.enabled))?;
+        set(
+            "requestedSamples",
+            JsValue::from_f64(diagnostics.requested_samples as f64),
+        )?;
+        set("samples", JsValue::from_f64(diagnostics.samples as f64))?;
         set("status", JsValue::from_str(diagnostics.status))?;
         set("target", JsValue::from_bool(diagnostics.target_allocated))?;
         set("stencil", JsValue::from_bool(diagnostics.stencil_allocated))?;

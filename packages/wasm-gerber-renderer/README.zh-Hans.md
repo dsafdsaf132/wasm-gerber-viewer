@@ -388,6 +388,8 @@ Selector 可以是 1-based 输入序号、完整名称或 basename。JSON number
 - `preserveArcRegions`：保留精确的 region 圆弧。默认 `true`；设为 `false` 时会把 region 圆弧近似为线段。
 - `arcTessellationQuality`：圆弧近似质量，`0` 为低、`1` 为标准、`2` 为高。默认 `1`。
 - `minimumFeaturePixels`：线段/圆弧的最小渲染宽度，单位为屏幕像素。默认 `1`。
+- `antiAliasing`：启用 MSAA 和 analytic edge coverage，默认 `false`。
+- `msaaSamples`：启用 `antiAliasing` 时请求的采样数（`4`、`8`、`16`），默认 `4`。示例：`{ antiAliasing: true, msaaSamples: 8 }`。不支持时回退到 mask 和所需 stencil 格式共同支持的较低采样数；没有可用采样数时，整个帧不使用 MSAA。Node export 按每个请求采样每像素 2 字节计算内存预算。
 - `renderDrills`：把 NC drill 文件（`.drl`、`.nc`、`.xnc`、`.xln`）渲染为钻孔叠加层。默认 `true`。
 - `globalAlpha`：`blend` 模式下没有显式图层 `alpha` 的 Gerber 图层透明度。默认 `0.7`。
 - `compositeMode`：图层合成模式，取 `"blend"` 或 `"stack"`。默认 `"blend"`。`blend` 使用 alpha additive blending；`stack` 对 Gerber 图层按输入顺序使用 source-over 合成，因此后面的 Gerber 图层覆盖前面的 Gerber 图层，默认透明度为 `1`。钻孔叠加层会在 Gerber 图层之后渲染。
@@ -489,6 +491,8 @@ CLI 选项：
 - `--alpha <0-1>`：`blend` 模式下的 Gerber 图层透明度。默认 `0.7`；`stack` 模式下 Gerber 图层和钻孔叠加层都会以不透明方式渲染。
 - `--composite-mode <blend|stack>`：图层合成模式。默认 `blend`。
 - `--minimum-feature-pixels <px>`：线段/圆弧的最小渲染宽度。默认 `1`。
+- `--anti-aliasing`：启用默认 x4 anti-aliasing，默认关闭。
+- `--msaa-samples <4|8|16>`：启用指定采样数的 anti-aliasing，实际采样数受 GPU 支持限制。
 - `--max-render-target-bytes <size>`：每个渲染目标的内存上限。接受字节数或 `512m`、`2g` 这样的后缀。
 - `--max-band-bytes <size>`：streamed PNG row-buffer cap。接受字节数或 `512m`、`2g` 这样的后缀。
 - `--max-full-frame-bytes <size>`：full-frame PNG memory cap。接受字节数或 `512m`、`2g` 这样的后缀。

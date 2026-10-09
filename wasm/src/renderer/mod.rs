@@ -104,7 +104,7 @@ struct MsaaTarget {
     /// Allocated the first time a layer that needs it (one with path
     /// regions, the same test as the layer's own FBO) is drawn, then kept
     /// for every later layer. Always `STENCIL_INDEX8`: with the R8 colour
-    /// that is 8 bytes per pixel at 4 samples, the figure the export budget
+    /// that is two bytes per pixel per sample, which the export budget
     /// counts, and a context that cannot multisample it renders the masks
     /// point-sampled rather than taking a larger format.
     stencil: Option<web_sys::WebGlRenderbuffer>,
@@ -151,6 +151,8 @@ enum MaskRenderMode {
 /// Anti-aliasing state for diagnostics and tests.
 pub struct AntiAliasingDiagnostics {
     pub enabled: bool,
+    pub requested_samples: i32,
+    pub samples: i32,
     pub status: &'static str,
     pub target_allocated: bool,
     pub stencil_allocated: bool,
@@ -178,7 +180,7 @@ struct MaskNeeds {
 /// flashes, path regions) are anti-aliased by the multisampling; discs and
 /// line bodies compute their edge coverage analytically in the fragment
 /// shader, which multisampling cannot do for a `discard`-shaped edge.
-const MSAA_SAMPLES: i32 = 4;
+const DEFAULT_MSAA_SAMPLES: i32 = 4;
 
 /// Bounded, allocation-free error checkpoints for worker payload uploads.
 /// Keep polarity sublayer resources separate, but share error checkpoints
@@ -282,6 +284,7 @@ pub struct Renderer {
     /// first mask of a batch by `preflight_msaa`, which invalidates the
     /// caches when the mode changes.
     batch_multisampled: bool,
+    batch_samples: i32,
     /// True while a layer mask is drawn into the multisample target with
     /// per-sample coverage: the shaders compute analytic edge alpha,
     /// SAMPLE_ALPHA_TO_COVERAGE turns it into a sample mask, and the blend
@@ -304,6 +307,8 @@ pub struct Renderer {
     /// edge coverage in the disc, line, arc and hole shaders. Off by default;
     /// costs one canvas-sized multisample target and a resolve per layer.
     anti_aliasing: bool,
+    msaa_samples: i32,
+    msaa_supported_samples: Option<(u32, u32)>,
     highlight_program: Option<ShaderProgram>,
     highlight_stencil_program: Option<ShaderProgram>,
     highlight_buffer: Option<WebGlBuffer>,
@@ -1356,6 +1361,7 @@ impl Renderer {
             msaa_unexpected_error: None,
             msaa_fell_back: false,
             batch_multisampled: false,
+            batch_samples: 0,
             mask_pass_analytic_edges: false,
             layers: Vec::new(),
             composites: Vec::new(),
@@ -1369,6 +1375,8 @@ impl Renderer {
             fullscreen_vertex_array,
             minimum_feature_pixels: 0.0,
             anti_aliasing: false,
+            msaa_samples: DEFAULT_MSAA_SAMPLES,
+            msaa_supported_samples: None,
             highlight_program: None,
             highlight_stencil_program: None,
             highlight_buffer: None,
@@ -1418,6 +1426,21 @@ impl Renderer {
         self.msaa_failed_size = None;
         self.msaa_unexpected_error = None;
         self.mark_all_layers_dirty();
+    }
+
+    pub fn set_msaa_samples(&mut self, samples: u32) -> Result<(), JsValue> {
+        if !matches!(samples, 4 | 8 | 16) {
+            return Err(JsValue::from_str("MSAA samples must be 4, 8 or 16"));
+        }
+        if self.msaa_samples != samples as i32 {
+            self.msaa_samples = samples as i32;
+            self.release_msaa_target();
+            self.msaa_unsupported = false;
+            self.msaa_failed_size = None;
+            self.msaa_unexpected_error = None;
+            self.mark_all_layers_dirty();
+        }
+        Ok(())
     }
 
     pub fn set_layer_inner_outline(
@@ -9552,6 +9575,8 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<bool, JsValue> {
+        let previous_multisampled = self.batch_multisampled;
+        let previous_samples = self.batch_samples;
         let multisampled = if !self.anti_aliasing {
             // The option-off path decides nothing and walks nothing.
             false
@@ -9568,7 +9593,7 @@ impl Renderer {
                 // Errors left by earlier work are not this allocation's; the
                 // mask pass drains them the same way before drawing.
                 Self::drain_gl_errors(&self.gl);
-                self.ensure_msaa_target(width, height, needs_stencil);
+                self.ensure_msaa_target(width, height, needs_stencil, None);
                 if self.msaa_target.is_none() && self.gl.is_context_lost() {
                     // Not a fallback: nothing is recorded and the batch is
                     // abandoned until the context is restored.
@@ -9579,12 +9604,23 @@ impl Renderer {
                 self.msaa_target.is_some()
             }
         };
-        let lost = self.batch_multisampled && !multisampled;
-        if self.msaa_fell_back || self.batch_multisampled != multisampled {
+        let samples = if multisampled {
+            self.msaa_target
+                .as_ref()
+                .map_or(self.batch_samples, |target| target.samples)
+        } else {
+            0
+        };
+        let changed = previous_multisampled && previous_samples != samples;
+        if self.msaa_fell_back
+            || previous_multisampled != multisampled
+            || previous_samples != samples
+        {
             self.mark_all_layers_dirty();
         }
         self.batch_multisampled = multisampled;
-        Ok(lost)
+        self.batch_samples = samples;
+        Ok(changed)
     }
 
     /// The masks this batch draws: whether any is R8 (can multisample),
@@ -9640,6 +9676,12 @@ impl Renderer {
         };
         AntiAliasingDiagnostics {
             enabled: self.anti_aliasing,
+            requested_samples: self.msaa_samples,
+            samples: if self.batch_multisampled {
+                self.msaa_target.as_ref().map_or(0, |target| target.samples)
+            } else {
+                0
+            },
             status,
             target_allocated: self.msaa_target.is_some(),
             stencil_allocated: self
@@ -9685,11 +9727,11 @@ impl Renderer {
         // The batch mode was decided by preflight_msaa: multisampled only
         // when every mask it draws is R8 (an RGBA8 fallback mask keeps its
         // coverage in alpha, which alpha-to-coverage would consume, and a
-        // multisampled RGBA8 target would exceed the 8 bytes per pixel the
+        // multisampled RGBA8 target would exceed the two bytes per sample the
         // export budget counts). A point-sampled batch renders exactly as
         // with the option off.
         let msaa_framebuffer = if self.batch_multisampled && Self::mask_multisamples(color_format) {
-            self.ensure_msaa_target(width, height, needs_stencil)
+            self.ensure_msaa_target(width, height, needs_stencil, Some(self.batch_samples))
                 .map(|target| target.framebuffer.clone())
         } else {
             None
@@ -9797,6 +9839,7 @@ impl Renderer {
         width: u32,
         height: u32,
         needs_stencil: bool,
+        pinned_samples: Option<i32>,
     ) -> Option<&MsaaTarget> {
         if !self.anti_aliasing
             || self.msaa_unsupported
@@ -9805,15 +9848,33 @@ impl Renderer {
         {
             return None;
         }
-        let matches = self
-            .msaa_target
-            .as_ref()
-            .is_some_and(|target| target.width == width && target.height == height);
+        let (color_samples, stencil_samples) =
+            *self.msaa_supported_samples.get_or_insert_with(|| {
+                (
+                    Self::format_sample_mask(&self.gl, WebGl2RenderingContext::R8),
+                    Self::format_sample_mask(&self.gl, WebGl2RenderingContext::STENCIL_INDEX8),
+                )
+            });
+        let supported = if needs_stencil {
+            color_samples & stencil_samples
+        } else {
+            color_samples
+        };
+        let samples = pinned_samples
+            .unwrap_or_else(|| Self::select_msaa_samples(supported, self.msaa_samples));
+        if samples < 2 {
+            self.release_msaa_target();
+            self.note_msaa_failure(MsaaFailure::Unsupported, width, height);
+            return None;
+        }
+        let matches = self.msaa_target.as_ref().is_some_and(|target| {
+            target.width == width && target.height == height && target.samples == samples
+        });
         if !matches {
             if let Some(old) = self.msaa_target.take() {
                 Self::delete_msaa_target(&self.gl, old);
             }
-            match Self::create_msaa_target(&self.gl, width, height) {
+            match Self::create_msaa_target(&self.gl, width, height, samples) {
                 Ok(target) => {
                     self.msaa_failed_size = None;
                     self.msaa_target = Some(target);
@@ -9913,24 +9974,57 @@ impl Renderer {
         }
     }
 
+    fn format_sample_mask(gl: &WebGl2RenderingContext, format: u32) -> u32 {
+        let Ok(values) = gl.get_internalformat_parameter(
+            WebGl2RenderingContext::RENDERBUFFER,
+            format,
+            WebGl2RenderingContext::SAMPLES,
+        ) else {
+            return 0;
+        };
+        let mut mask = 0;
+        if let Some(values) = values.dyn_ref::<js_sys::Int32Array>() {
+            for index in 0..values.length() {
+                let samples = values.get_index(index);
+                if (2..=16).contains(&samples) {
+                    mask |= 1 << samples;
+                }
+            }
+        } else if Array::is_array(&values) {
+            // Native WebGL bindings may return an ordinary array. Read it
+            // directly instead of allocating a converted typed array.
+            let values: &Array = values.unchecked_ref();
+            for index in 0..values.length() {
+                if let Some(samples) = values.get(index).as_f64() {
+                    if samples.fract() == 0.0 && (2.0..=16.0).contains(&samples) {
+                        mask |= 1 << samples as u32;
+                    }
+                }
+            }
+        }
+        mask
+    }
+
+    fn select_msaa_samples(supported: u32, requested: i32) -> i32 {
+        (2..=requested)
+            .rev()
+            .find(|samples| supported & (1 << samples) != 0)
+            .unwrap_or(0)
+    }
+
     /// A colour-only R8 multisample target. The stencil is added later by
     /// `attach_msaa_stencil`, only for layers that need it.
     fn create_msaa_target(
         gl: &WebGl2RenderingContext,
         width: u32,
         height: u32,
+        samples: i32,
     ) -> Result<MsaaTarget, MsaaFailure> {
         // Start from a clean error state so a failure below is this
         // allocation's; an error already pending is reported, not dropped.
         if let Some(failure) = Self::msaa_gl_failure(gl) {
             return Err(failure);
         }
-        let max_samples = gl
-            .get_parameter(WebGl2RenderingContext::MAX_SAMPLES)
-            .ok()
-            .and_then(|value| value.as_f64())
-            .unwrap_or(0.0) as i32;
-        let samples = MSAA_SAMPLES.min(max_samples);
         if samples < 2 {
             return Err(MsaaFailure::Unsupported);
         }
@@ -9991,7 +10085,7 @@ impl Renderer {
 
     /// Adds a `STENCIL_INDEX8` renderbuffer at the target's size and sample
     /// count. There is no larger fallback format: the export budget counts
-    /// 8 bytes per pixel for the whole target, so a context that cannot
+    /// two bytes per sample per pixel for the whole target, so a context that cannot
     /// multisample this stencil gives up multisampling and the masks render
     /// point-sampled. The caller drops the target on any error.
     fn attach_msaa_stencil(
@@ -10773,6 +10867,7 @@ impl Renderer {
         self.msaa_unsupported = false;
         self.msaa_failed_size = None;
         self.msaa_unexpected_error = None;
+        self.msaa_supported_samples = None;
         self.batch_multisampled = false;
         let old_programs = std::mem::replace(&mut self.programs, programs);
         let old_quad_buffer = std::mem::replace(&mut self.quad_buffer, quad_buffer);

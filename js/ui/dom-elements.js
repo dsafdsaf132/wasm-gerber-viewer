@@ -121,6 +121,8 @@ export function getViewerElements(documentRef = document) {
     arcQualityHighInput: requireElement(documentRef, "arc-quality-high"),
     antiAliasingOffInput: requireElement(documentRef, "anti-aliasing-off"),
     antiAliasingOnInput: requireElement(documentRef, "anti-aliasing-on"),
+    antiAliasing8Input: requireElement(documentRef, "anti-aliasing-8"),
+    antiAliasing16Input: requireElement(documentRef, "anti-aliasing-16"),
     minimumVisibilityOffInput: requireElement(
       documentRef,
       "minimum-visibility-off",

@@ -3,6 +3,7 @@ const DEFAULT_VIEWER_OPTIONS = {
   arcTessellationQuality: "normal",
   minimumFeaturePixels: 1,
   antiAliasing: false,
+  msaaSamples: 4,
   boardOutlineBoundsMarginMm: 10,
   boardOutlineBoundsMarginUnit: "mm",
   drillOutlinePixels: 0,
@@ -14,6 +15,7 @@ const DEFAULT_VIEWER_OPTIONS = {
 
 const ARC_TESSELLATION_QUALITIES = new Set(["low", "normal", "high"]);
 const MINIMUM_FEATURE_PIXELS = new Set([0, 1, 2]);
+const MSAA_SAMPLES = new Set([4, 8, 16]);
 const DRILL_OUTLINE_PIXELS = new Set([0, 1, 2, 3]);
 const PTH_PLATING_MICROMETERS = new Set([10, 20, 30, 40, 50]);
 const RENDERING_MODES = new Set(["lazy", "realtime"]);
@@ -97,6 +99,9 @@ export class ViewerOptionsStore {
           stored.boardOutlineBoundsMarginMm,
           DEFAULT_VIEWER_OPTIONS.boardOutlineBoundsMarginMm,
         ),
+        msaaSamples: MSAA_SAMPLES.has(stored.msaaSamples)
+          ? stored.msaaSamples
+          : DEFAULT_VIEWER_OPTIONS.msaaSamples,
         boardOutlineBoundsMarginUnit: BOARD_OUTLINE_BOUNDS_MARGIN_UNITS.has(
           stored.boardOutlineBoundsMarginUnit,
         )

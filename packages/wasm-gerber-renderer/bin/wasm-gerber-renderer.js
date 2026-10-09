@@ -36,6 +36,7 @@ Options:
   --composite-mode <blend|stack>   blend=additive, stack=ordered source-over
   --minimum-feature-pixels <px>    Minimum line/arc display width (default: 1)
   --anti-aliasing                  Anti-aliased layer masks (4x MSAA + analytic edges; default: off)
+  --msaa-samples <4|8|16>          Enable anti-aliasing with the requested sample count
   --max-render-target-bytes <size> Per-render target memory cap, e.g. 2g, 512m
   --max-band-bytes <size>          Streamed PNG row-buffer cap, e.g. 512m
   --max-full-frame-bytes <size>    Full-frame PNG memory cap, e.g. 512m
@@ -239,6 +240,13 @@ function parseArgs(args) {
     } else if (arg === "--minimum-feature-pixels") {
       frameOptions.minimumFeaturePixels = readNumber(args, ++index, arg);
     } else if (arg === "--anti-aliasing") {
+      frameOptions.antiAliasing = true;
+    } else if (arg === "--msaa-samples") {
+      const samples = readPositiveInteger(args, ++index, arg);
+      if (![4, 8, 16].includes(samples)) {
+        throw new Error("--msaa-samples must be 4, 8 or 16.");
+      }
+      frameOptions.msaaSamples = samples;
       frameOptions.antiAliasing = true;
     } else if (arg === "--max-render-target-bytes") {
       frameOptions.maxRenderTargetBytes = readByteSize(args, ++index, arg);

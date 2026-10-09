@@ -414,6 +414,16 @@ Most paths converge to:
 
 ### 4. Layer FBO Rendering
 
+Anti-aliasing is off by default. `set_anti_aliasing(true)` enables MSAA and
+analytic edge coverage; `set_msaa_samples(4 | 8 | 16)` selects the requested
+count (default 4). Format-specific sample support is cached per context.
+The renderer selects a supported count no higher than requested, common to
+R8 and `STENCIL_INDEX8` when a path region needs a stencil. All masks in a
+frame use the same count; tiled exports reject a count change after output
+has begun. The shared target uses two bytes per sample per pixel with its
+stencil. Changing the requested count releases the target and invalidates
+layer masks. Context restoration re-queries support.
+
 `render_layer_fbos(active_layer_ids, transform, width, height)` prepares each
 active layer's FBO.
 

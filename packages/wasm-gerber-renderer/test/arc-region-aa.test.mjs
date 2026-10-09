@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { NodeGerberRenderer } from "../node.js";
 
 const require = createRequire(import.meta.url);
 const wasmUrl = new URL("../../../wasm/pkg/wasm_gerber_processor.js", import.meta.url);
@@ -44,12 +45,13 @@ const region = (radius, clockwise = false, rotation = 0, hole = 0, segments = 4)
 ];
 const gerber = (...body) => ["%FSLAX46Y46*%", "%MOMM*%", "%ADD10C,6.6*%", "D10*", "G75*", "%LPD*%", ...body, "M02*"].join("\n");
 
-function render(content, antiAliasing = true, tileHeight = size) {
+function render(content, antiAliasing = true, tileHeight = size, msaaSamples = 4) {
   const gl = createWebGLRenderingContext({ width: size, height: tileHeight, majorVersion: 3, minorVersion: 0, webGLCompatibility: true });
   const processor = new wasm.GerberProcessor();
   try {
     processor.init_with_size(gl, size, tileHeight);
     processor.set_anti_aliasing(antiAliasing);
+    processor.set_msaa_samples(msaaSamples);
     const id = processor.add_layer(content);
     const ids = new Uint32Array([id]);
     const colors = new Float32Array([1, 1, 1, 1]);
@@ -69,7 +71,18 @@ function render(content, antiAliasing = true, tileHeight = size) {
         pixels.set(tile.subarray(sourceY * size * 4, (sourceY + height) * size * 4), (size - top - height) * size * 4);
       }
     }
-    assert.equal(processor.get_anti_aliasing_diagnostics().mode, antiAliasing ? "multisampled" : "point-sampled");
+    const diagnostics = processor.get_anti_aliasing_diagnostics();
+    assert.equal(diagnostics.mode, antiAliasing ? "multisampled" : "point-sampled");
+    assert.equal(diagnostics.requestedSamples, msaaSamples);
+    if (antiAliasing) {
+      const color = Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER, gl.R8, gl.SAMPLES));
+      const stencil = Array.from(gl.getInternalformatParameter(gl.RENDERBUFFER, gl.STENCIL_INDEX8, gl.SAMPLES));
+      const expected = Math.max(0, ...color.filter((count) => count >= 2 && count <= msaaSamples
+        && (!diagnostics.stencil || stencil.includes(count))));
+      assert.equal(diagnostics.samples, expected);
+    } else {
+      assert.equal(diagnostics.samples, 0);
+    }
     return pixels;
   } finally {
     processor.free();
@@ -98,6 +111,126 @@ renderTest("exact circular arc-region boundaries have partial coverage", () => {
     const on = render(content);
     assert.equal(partial(off), 0);
     assert.ok(partial(on) > 100, "curves, not only sector triangle seams, must be anti-aliased");
+  }
+});
+
+renderTest("requested x4/x8/x16 MSAA preserves arc holes, polarity and tile coverage", () => {
+  const shape = region(3.3, false, Math.PI / 12, 1.65);
+  const content = gerber(...shape);
+  for (const msaaSamples of [4, 8, 16]) {
+    const full = render(content, true, size, msaaSamples);
+    const tiled = render(content, true, 17, msaaSamples);
+    assert.ok(partial(full) > 150);
+    assert.equal(full[((size >> 1) * size + (size >> 1)) * 4 + 3], 0);
+    assert.ok(differences(full, tiled).maximum <= 64);
+    const cancelled = render(gerber(...shape, "%LPC*%", ...shape), true, size, msaaSamples);
+    assert.equal(cancelled.some((value) => value !== 0), false);
+    render(gerber(`${point(5, 5)}D03*`), true, size, msaaSamples);
+  }
+});
+
+renderTest("sample changes invalidate masks without re-querying cached format support", () => {
+  const raw = createWebGLRenderingContext({ width: 64, height: 64, majorVersion: 3, minorVersion: 0, webGLCompatibility: true });
+  let queries = 0;
+  const gl = new Proxy(raw, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (property === "getInternalformatParameter") {
+        return (...args) => { queries++; return value.apply(target, args); };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const processor = new wasm.GerberProcessor();
+  try {
+    processor.set_msaa_samples(16);
+    processor.set_anti_aliasing(true);
+    processor.init_with_size(gl, 64, 64);
+    const id = processor.add_layer(gerber(...region(3.3)));
+    const ids = new Uint32Array([id]);
+    const colors = new Float32Array([1, 1, 1, 1]);
+    for (const samples of [16, 8, 4]) {
+      processor.set_msaa_samples(samples);
+      assert.equal(processor.get_anti_aliasing_diagnostics().target, false);
+      processor.render(ids, colors, 1 / 6, 1 / 6, -5 / 6, -5 / 6, 1);
+      const state = processor.get_anti_aliasing_diagnostics();
+      assert.equal(state.requestedSamples, samples);
+      assert.equal(state.mode, "multisampled");
+      assert.equal(queries, 2, "support queries must not run per layer or per sample change");
+    }
+    assert.throws(() => processor.set_msaa_samples(12), /MSAA samples/);
+    assert.equal(processor.get_anti_aliasing_diagnostics().requestedSamples, 4);
+    assert.equal(raw.getError(), raw.NO_ERROR);
+  } finally {
+    processor.free();
+    raw.destroy();
+  }
+});
+
+renderTest("a missing common stencil sample count rejects an already multisampled tile sequence", () => {
+  const raw = createWebGLRenderingContext({ width: 64, height: 32, majorVersion: 3, minorVersion: 0, webGLCompatibility: true });
+  const gl = new Proxy(raw, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (property === "getInternalformatParameter") {
+        return (type, format, parameter) => format === target.STENCIL_INDEX8
+          ? []
+          : value.call(target, type, format, parameter);
+      }
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const processor = new wasm.GerberProcessor();
+  try {
+    processor.init_with_size(gl, 64, 32);
+    processor.set_anti_aliasing(true);
+    processor.set_msaa_samples(16);
+    const flash = processor.add_layer(gerber(`${point(5, 5)}D03*`));
+    const arc = processor.add_layer(gerber(...region(3.3)));
+    const colors = new Float32Array([1, 1, 1, 1]);
+    processor.render_tile(new Uint32Array([flash]), colors,
+      64, 64, 0, 0, 64, 32, 1 / 6, 1 / 6, -5 / 6, -5 / 6, 1);
+    assert.equal(processor.get_anti_aliasing_diagnostics().mode, "multisampled");
+    assert.throws(() => processor.render_tile(new Uint32Array([arc]), colors,
+      64, 64, 0, 32, 64, 32, 1 / 6, 1 / 6, -5 / 6, -5 / 6, 1),
+    /Anti-aliasing became unavailable/);
+    assert.equal(processor.get_anti_aliasing_diagnostics().mode, "point-sampled");
+    // Whole-frame rendering may still recover with every mask drawn directly.
+    processor.render(new Uint32Array([arc]), colors, 1 / 6, 1 / 6, -5 / 6, -5 / 6, 1);
+    assert.equal(raw.getError(), raw.NO_ERROR);
+  } finally {
+    processor.free();
+    raw.destroy();
+  }
+});
+
+renderTest("Node full-frame and streamed exports retain the requested MSAA count", async () => {
+  const gl = createWebGLRenderingContext({ width: 64, height: 64, majorVersion: 3, minorVersion: 0, webGLCompatibility: true });
+  const requests = [];
+  class CountingProcessor extends wasm.GerberProcessor {
+    set_msaa_samples(value) {
+      requests.push(value);
+      return super.set_msaa_samples(value);
+    }
+  }
+  const renderer = new NodeGerberRenderer(
+    { gl, releaseContext: false }, { ...wasm, GerberProcessor: CountingProcessor },
+  );
+  try {
+    for (const strategy of ["full-frame", "stream"]) {
+      const start = requests.length;
+      await renderer.withFrame({ width: 64, height: 64, antiAliasing: true, msaaSamples: 16, strategy }, async () => {
+        await renderer.renderLayer(gerber(...region(3.3, false, 0, 1.65)));
+      });
+      const png = await renderer.exportPng();
+      assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+      const currentRequests = requests.slice(start);
+      assert.ok(currentRequests.length > 0);
+      assert.ok(currentRequests.every((value) => value === 16));
+    }
+  } finally {
+    renderer.dispose();
+    gl.destroy();
   }
 });
 

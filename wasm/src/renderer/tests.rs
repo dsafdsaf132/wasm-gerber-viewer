@@ -1,6 +1,20 @@
 use super::*;
 use crate::parser::GerberParser;
 
+#[test]
+fn msaa_sample_selection_respects_request_and_common_formats() {
+    let color = (1 << 2) | (1 << 4) | (1 << 8) | (1 << 16);
+    let stencil = (1 << 2) | (1 << 4) | (1 << 8);
+    for requested in [4, 8, 16] {
+        assert_eq!(Renderer::select_msaa_samples(color, requested), requested);
+    }
+    assert_eq!(Renderer::select_msaa_samples(color & stencil, 16), 8);
+    assert_eq!(Renderer::select_msaa_samples(1 << 4, 16), 4);
+    assert_eq!(Renderer::select_msaa_samples(1 << 2, 4), 2);
+    assert_eq!(Renderer::select_msaa_samples(1 << 8, 4), 0);
+    assert_eq!(Renderer::select_msaa_samples(color & (1 << 1), 16), 0);
+}
+
 fn outline_line(start: [f32; 2], end: [f32; 2]) -> OutlineSegment {
     OutlineSegment {
         start,

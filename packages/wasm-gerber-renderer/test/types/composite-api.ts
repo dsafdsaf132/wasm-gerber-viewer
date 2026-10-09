@@ -38,7 +38,7 @@ const explicitAreas: CompositeLayerOptions = {
 };
 
 async function renderBrowser(renderer: GerberRenderer): Promise<void> {
-  await renderer.withFrame({ compositeMode: "stack" }, async () => {
+  await renderer.withFrame({ compositeMode: "stack", antiAliasing: true, msaaSamples: 16 }, async () => {
     const first = requireLayerId(
       await renderer.renderLayer(firstGerber, { visible: false }),
     );
@@ -66,7 +66,7 @@ async function renderNode(renderer: NodeGerberRenderer): Promise<void> {
   );
   void prepared;
   void skippedDrill;
-  await renderer.withFrame({ compositeMode: "blend" }, async () => {
+  await renderer.withFrame({ compositeMode: "blend", antiAliasing: true, msaaSamples: 8 }, async () => {
     const first = requireLayerId(
       await renderer.renderLayer(firstGerber, { visible: false }),
     );

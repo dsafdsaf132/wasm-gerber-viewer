@@ -393,6 +393,8 @@ source의 dependent composite만 건너뛰고 다른 정상 layer/composite는 �
 - `preserveArcRegions`: region arc를 정확하게 유지합니다. 기본값은 `true`이며, `false`로 설정하면 region arc를 근사합니다.
 - `arcTessellationQuality`: arc 근사 품질입니다. `0` low, `1` normal, `2` high이며 기본값은 `1`입니다.
 - `minimumFeaturePixels`: line/arc의 최소 렌더링 폭(px)입니다. 기본값은 `1`입니다.
+- `antiAliasing`: MSAA와 analytic edge coverage를 활성화합니다. 기본값은 `false`입니다.
+- `msaaSamples`: `antiAliasing` 활성화 시 요청 배율(`4`, `8`, `16`)입니다. 기본값은 `4`이며 `{ antiAliasing: true, msaaSamples: 8 }`처럼 사용합니다. GPU가 지원하지 않으면 mask와 필요한 stencil format이 공통으로 지원하는 낮은 배율을 사용하고, 지원 배율이 없으면 프레임 전체에서 MSAA를 끕니다. Node export 메모리 예산에는 요청 sample당 픽셀당 2바이트를 반영합니다.
 - `renderDrills`: NC drill 파일(`.drl`, `.nc`, `.xnc`, `.xln`)을 drill overlay로 렌더링합니다. 기본값은 `true`입니다.
 - `globalAlpha`: `blend` 모드에서 명시적인 layer `alpha`가 없는 Gerber layer에 적용되는 opacity입니다. 기본값은 `0.7`입니다.
 - `compositeMode`: layer 합성 모드입니다. `"blend"` 또는 `"stack"`을 받으며 기본값은 `"blend"`입니다. `blend`는 alpha additive blending을 사용하고, `stack`은 Gerber layer를 입력 순서대로 source-over 합성하므로 뒤 Gerber layer가 앞 Gerber layer를 덮으며 기본 opacity는 `1`입니다. Drill overlay는 Gerber layer 이후에 렌더링됩니다.
@@ -494,6 +496,8 @@ CLI 옵션:
 - `--alpha <0-1>`: `blend` 모드의 Gerber layer opacity입니다. 기본값은 `0.7`입니다. `stack` 모드에서는 Gerber layer와 drill overlay를 불투명하게 렌더링합니다.
 - `--composite-mode <blend|stack>`: layer 합성 모드입니다. 기본값은 `blend`입니다.
 - `--minimum-feature-pixels <px>`: line/arc의 최소 렌더링 폭입니다. 기본값은 `1`입니다.
+- `--anti-aliasing`: 기본 x4 anti-aliasing을 활성화합니다. 기본값은 Off입니다.
+- `--msaa-samples <4|8|16>`: 지정 배율로 anti-aliasing을 활성화합니다. 실제 배율은 GPU 지원 여부에 따라 낮아질 수 있습니다.
 - `--max-render-target-bytes <size>`: render target별 memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
 - `--max-band-bytes <size>`: streamed PNG row-buffer cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
 - `--max-full-frame-bytes <size>`: full-frame PNG memory cap입니다. byte 또는 `512m`, `2g` 같은 suffix를 받습니다.
