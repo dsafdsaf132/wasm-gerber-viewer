@@ -1,5 +1,10 @@
 import { MAX_FILE_SIZE_BYTES, NOTIFICATION_DURATION_MS } from "./config.js";
 import {
+  createLayerLoadProgress,
+  markLayerLoadComplete,
+  getLayerLoadModalFields,
+} from "../loading/layer-load-progress.js";
+import {
   MEMORY64_BROWSERS,
   WASM32_REASON_PINNED,
   WASM32_REASON_UNAVAILABLE,
@@ -3513,6 +3518,7 @@ export class GerberViewer {
       try {
         for (const [index, layer] of layerSnapshot.entries()) {
           this.updateLayerLoadModal(parseProgress, {
+            index,
             title: "Applying options",
             stage: "Parsing",
             fileName: layer.name,
@@ -4733,6 +4739,7 @@ export class GerberViewer {
               this.markLayerLoadComplete(progress, index);
               this.handleLayerLoadError(source.name, error);
               this.updateLayerLoadModal(progress, {
+                index,
                 title,
                 stage: "Skipped",
                 fileName: source.name,
@@ -4769,25 +4776,11 @@ export class GerberViewer {
   }
 
   createLayerLoadProgress(total) {
-    return {
-      total,
-      completedLayers: 0,
-      // Layer index -> how much of that layer is loaded, from 0 to 1.
-      partialLayers: new Map(),
-    };
+    return createLayerLoadProgress(total);
   }
 
   markLayerLoadComplete(progress, index = null) {
-    if (!progress) {
-      return 0;
-    }
-
-    progress.partialLayers?.delete(index);
-    progress.completedLayers = Math.min(
-      progress.total,
-      (progress.completedLayers ?? 0) + 1,
-    );
-    return progress.completedLayers;
+    return markLayerLoadComplete(progress, index);
   }
 
   /**
@@ -4806,17 +4799,7 @@ export class GerberViewer {
    * as a count of layers and a percentage that includes layers under way.
    */
   updateLayerLoadModal(progress, fields) {
-    let partial = 0;
-    for (const fraction of progress.partialLayers?.values() ?? []) {
-      partial += fraction;
-    }
-    this.updateLoadingModal({
-      ...fields,
-      current: progress.completedLayers,
-      total: progress.total,
-      partial,
-      showPercent: true,
-    });
+    this.updateLoadingModal(getLayerLoadModalFields(progress, fields));
   }
 
   /**
@@ -4829,11 +4812,13 @@ export class GerberViewer {
     { index, name, share = LAYER_PARSE_SHARE },
   ) {
     return (report) => {
+      if (progress.completedIndices.has(index)) return;
       progress.partialLayers.set(
         index,
         share * getParseProgressFraction(report),
       );
       this.updateLayerLoadModal(progress, {
+        index,
         stage: getParseStageLabel(report.retry),
         fileName: name,
       });
@@ -4996,6 +4981,7 @@ export class GerberViewer {
 
     try {
       this.updateLayerLoadModal(progress, {
+        index,
         title,
         stage: "Reading",
         fileName: name,
@@ -5003,16 +4989,19 @@ export class GerberViewer {
 
       const content = await readText(() => {
         this.updateLayerLoadModal(progress, {
+          index,
           stage: "Reading",
           fileName: name,
         });
       });
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Reading",
         fileName: name,
       });
 
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Parsing",
         fileName: name,
       });
@@ -5032,6 +5021,7 @@ export class GerberViewer {
       this.reportMemory64Reparse(name, parseResult);
       progress.partialLayers.set(index, LAYER_PARSE_SHARE);
       this.updateLayerLoadModal(progress, {
+        index,
         stage: getParseStageLabel(Boolean(parseResult.fallbackReason)),
         fileName: name,
       });
@@ -5053,6 +5043,7 @@ export class GerberViewer {
       this.handleLayerLoadError(name, error);
       progress.partialLayers.delete(index);
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Skipped",
         fileName: name,
       });
@@ -5075,6 +5066,7 @@ export class GerberViewer {
 
     try {
       this.updateLayerLoadModal(progress, {
+        index,
         title,
         stage: "Reading",
         fileName: name,
@@ -5082,12 +5074,14 @@ export class GerberViewer {
 
       const content = await readText(() => {
         this.updateLayerLoadModal(progress, {
+          index,
           stage: "Reading",
           fileName: name,
         });
       });
 
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Parsing",
         fileName: name,
       });
@@ -5120,6 +5114,7 @@ export class GerberViewer {
           parseResult.interactionPayload = null;
           progress.partialLayers.set(index, LAYER_PARSE_SHARE);
           this.updateLayerLoadModal(progress, {
+            index,
             stage: "Rendering",
             fileName: name,
           });
@@ -5149,6 +5144,7 @@ export class GerberViewer {
       }
       this.markLayerLoadComplete(progress, index);
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Loaded",
         fileName: name,
       });
@@ -5157,6 +5153,7 @@ export class GerberViewer {
       this.handleLayerLoadError(name, error);
       this.markLayerLoadComplete(progress, index);
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Skipped",
         fileName: name,
       });
@@ -5177,6 +5174,7 @@ export class GerberViewer {
     if (!parseResult.ok) {
       this.markLayerLoadComplete(progress, index);
       this.updateLayerLoadModal(progress, {
+        index,
         title,
         stage: "Skipped",
         fileName: name,
@@ -5187,6 +5185,7 @@ export class GerberViewer {
     if (this.wasmMemoryExhausted) {
       this.markLayerLoadComplete(progress, index);
       this.updateLayerLoadModal(progress, {
+        index,
         title,
         stage: "Skipped",
         fileName: name,
@@ -5199,6 +5198,7 @@ export class GerberViewer {
 
     try {
       this.updateLayerLoadModal(progress, {
+        index,
         title,
         stage: "Rendering",
         fileName: name,
@@ -5222,6 +5222,7 @@ export class GerberViewer {
       layerRecord.interactionPayload = parseResult.interactionPayload ?? null;
       this.markLayerLoadComplete(progress, index);
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Loaded",
         fileName: name,
       });
@@ -5230,6 +5231,7 @@ export class GerberViewer {
       this.markLayerLoadComplete(progress, index);
       this.handleLayerLoadError(name, error);
       this.updateLayerLoadModal(progress, {
+        index,
         stage: "Skipped",
         fileName: name,
       });
