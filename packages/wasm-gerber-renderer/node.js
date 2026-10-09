@@ -898,7 +898,7 @@ class NodeFrameState extends FrameState {
 async function loadWasmModule(rendererOptions) {
   return loadWasmJsModule(rendererOptions, {
     normalizeUrl: toUrl,
-    hint: "Run npm run build:wasm before using the Node renderer.",
+    hint: `Run npm run ${rendererOptions.wasmVariant === "wasm64" ? "build:wasm64" : "build:wasm"} before using the Node renderer.`,
   });
 }
 

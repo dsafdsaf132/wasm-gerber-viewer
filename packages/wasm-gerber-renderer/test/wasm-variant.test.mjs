@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { supportsMemory64 } from "../../../js/core/wasm-variant.js";
 import { DEFAULT_WASM_MODULE_URLS, WASM64_MODULE_URLS, loadWasmJsModule } from "../shared.js";
 
 test("renderer variants use separate packaged and development paths", () => {
@@ -18,12 +19,26 @@ test("invalid variant rejects, custom module still takes precedence", async () =
   assert.equal((await loadWasmJsModule({ wasmVariant: "wasm64", wasmModuleUrl: url })).wasmModule.custom, true);
 });
 
+test("module load errors recommend the selected variant's build command", async () => {
+  const { createNodeGerberRenderer } = await import("../node.js");
+  const wasmModuleUrl = "data:text/javascript,throw new Error('forced module load failure')";
+  for (const [wasmVariant, command] of [["wasm32", "build:wasm"], ["wasm64", "build:wasm64"]]) {
+    for (const load of [loadWasmJsModule, createNodeGerberRenderer]) {
+      await assert.rejects(load({ wasmVariant, wasmModuleUrl }), (error) => {
+        assert.ok(error.message.includes(`npm run ${command} before`));
+        return true;
+      });
+    }
+  }
+});
+
 for (const [variant, urls, bits] of [["wasm32", DEFAULT_WASM_MODULE_URLS, 32], ["wasm64", WASM64_MODULE_URLS, 64]]) {
   test(`${variant} initializes the selected real binary`, async (t) => {
     if (!urls.some(url => existsSync(url))) return t.skip("WASM build required");
+    if (bits === 64 && !supportsMemory64()) return t.skip("Runtime lacks memory64 support");
     const { wasmModule, wasmModuleUrl } = await loadWasmJsModule({ wasmVariant: variant });
     const bytes = await readFile(new URL("wasm_gerber_processor_bg.wasm", wasmModuleUrl));
-    if (bits === 64 && !WebAssembly.validate(bytes)) return t.skip("Runtime lacks memory64 support");
+    assert.ok(WebAssembly.validate(bytes), `${variant} binary must be valid on a supported runtime`);
     await wasmModule.default({ module_or_path: bytes });
     assert.equal(wasmModule.memory_address_bits(), bits);
     const defaultModule = bits === 32 ? await loadWasmJsModule({}) : null;

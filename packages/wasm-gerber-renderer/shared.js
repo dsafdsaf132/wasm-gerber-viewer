@@ -401,7 +401,7 @@ export async function loadWasmJsModule(rendererOptions, options = {}) {
   }
   const {
     normalizeUrl = (value) => value,
-    hint = "Run npm run build:wasm before using the package.",
+    hint = `Run npm run ${variant === "wasm64" ? "build:wasm64" : "build:wasm"} before using the package.`,
   } = options;
 
   if (rendererOptions.wasmModule) {
