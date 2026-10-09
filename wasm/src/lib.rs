@@ -65,6 +65,14 @@ pub fn memory_address_bits() -> u32 {
     usize::BITS
 }
 
+/// Bound allocator spare capacity to the viewer's active linear-memory limit.
+/// Required allocations may still grow beyond it; this is not a hard limit.
+#[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+#[wasm_bindgen]
+pub fn set_speculative_growth_limit_pages(page_count: u32) {
+    allocator::set_speculative_growth_limit_pages(page_count);
+}
+
 #[cfg(test)]
 mod tests;
 

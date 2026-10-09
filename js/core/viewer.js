@@ -1352,6 +1352,9 @@ export class GerberViewer {
     this.wasmExports = loaded.wasmExports;
     this.wasmVariantPlan = plan;
     this.wasmAddressBits = getWasmAddressBits(this.wasmModule);
+    this.wasmModule.set_speculative_growth_limit_pages?.(
+      Math.floor(this.getWasmLinearMemoryLimitBytes() / (64 * 1024)),
+    );
     this.wasm32Reason = wasm32Reason;
     document.documentElement.dataset.wasmMain = plan.main;
     document.documentElement.dataset.wasmWorker = plan.worker;

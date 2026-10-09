@@ -7,10 +7,31 @@ const INITIAL_GROWTH_PHASE_BYTES: usize = 64 * 1024 * 1024;
 // Keep wasm32 speculative growth within the viewer's picking-reserve cutoff.
 const WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
+const DEFAULT_SPECULATIVE_GROWTH_LIMIT_BYTES: usize = if usize::BITS == 32 {
+    WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES
+} else {
+    usize::MAX
+};
+static SPECULATIVE_GROWTH_LIMIT_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(DEFAULT_SPECULATIVE_GROWTH_LIMIT_BYTES);
+
+fn speculative_growth_limit() -> usize {
+    SPECULATIVE_GROWTH_LIMIT_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+pub(crate) fn set_speculative_growth_limit_pages(pages: u32) {
+    let bytes = (pages as usize).saturating_mul(PAGE_BYTES);
+    SPECULATIVE_GROWTH_LIMIT_BYTES.store(
+        bytes.min(DEFAULT_SPECULATIVE_GROWTH_LIMIT_BYTES),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 fn growth_pages(
     current_bytes: usize,
     required_bytes: usize,
-    address_bits: u32,
+    speculative_limit_bytes: usize,
 ) -> Option<(usize, usize)> {
     // Ceil(current * 0.30) without floating point or overflowing multiplication.
     let proportional = current_bytes / 10 * 3 + (current_bytes % 10 * 3).div_ceil(10);
@@ -22,13 +43,10 @@ fn growth_pages(
     let preferred = required_bytes.max(proportional.max(initial_floor).min(MAX_GROWTH_BYTES));
     let required_pages = required_bytes.max(1).checked_add(PAGE_BYTES - 1)? / PAGE_BYTES;
     let mut preferred_pages = preferred.max(1).checked_add(PAGE_BYTES - 1)? / PAGE_BYTES;
-    if address_bits == 32
-        && preferred_pages
-            > WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES.saturating_sub(current_bytes) / PAGE_BYTES
-    {
-        // The viewer counts the whole buffer, including unused allocator space.
-        // Beyond the cutoff, grow only for the request, even if it crosses it.
-        preferred_pages = required_pages;
+    // Bound spare capacity, but never truncate the allocation requirement.
+    if speculative_limit_bytes != usize::MAX {
+        let remaining_pages = speculative_limit_bytes.saturating_sub(current_bytes) / PAGE_BYTES;
+        preferred_pages = preferred_pages.min(remaining_pages).max(required_pages);
     }
     Some((preferred_pages, required_pages))
 }
@@ -39,7 +57,8 @@ fn grow_with_fallback(
     required_bytes: usize,
     mut grow: impl FnMut(usize) -> usize,
 ) -> Option<(usize, usize)> {
-    let (preferred, required) = growth_pages(current_bytes, required_bytes, usize::BITS)?;
+    let (preferred, required) =
+        growth_pages(current_bytes, required_bytes, speculative_growth_limit())?;
     let mut pages = preferred;
     let mut previous = grow(pages);
     if previous == usize::MAX && preferred != required {
@@ -164,39 +183,39 @@ mod tests {
     #[test]
     fn proportional_growth_is_page_aligned_and_capped() {
         assert_eq!(
-            growth_pages(INITIAL_GROWTH_PHASE_BYTES * 4, PAGE_BYTES, 64),
+            growth_pages(INITIAL_GROWTH_PHASE_BYTES * 4, PAGE_BYTES, usize::MAX),
             Some((1229, 1))
         );
         assert_eq!(
-            growth_pages(4 * MAX_GROWTH_BYTES, PAGE_BYTES, 64),
+            growth_pages(4 * MAX_GROWTH_BYTES, PAGE_BYTES, usize::MAX),
             Some((MAX_GROWTH_BYTES / PAGE_BYTES, 1))
         );
         assert_eq!(
-            growth_pages(usize::MAX, PAGE_BYTES, 64),
+            growth_pages(usize::MAX, PAGE_BYTES, usize::MAX),
             Some((MAX_GROWTH_BYTES / PAGE_BYTES, 1))
         );
-        assert_eq!(growth_pages(0, 0, 64), Some((1, 1)));
-        assert_eq!(growth_pages(0, PAGE_BYTES + 1, 64), Some((2, 2)));
+        assert_eq!(growth_pages(0, 0, usize::MAX), Some((1, 1)));
+        assert_eq!(growth_pages(0, PAGE_BYTES + 1, usize::MAX), Some((2, 2)));
     }
 
     #[test]
     fn large_allocations_are_not_limited_by_spare_capacity_cap() {
         let pages = MAX_GROWTH_BYTES / PAGE_BYTES + 1;
         assert_eq!(
-            growth_pages(MAX_GROWTH_BYTES, MAX_GROWTH_BYTES + 1, 64),
+            growth_pages(MAX_GROWTH_BYTES, MAX_GROWTH_BYTES + 1, usize::MAX),
             Some((pages, pages))
         );
-        assert_eq!(growth_pages(0, usize::MAX, 64), None);
+        assert_eq!(growth_pages(0, usize::MAX, usize::MAX), None);
     }
 
     #[test]
     fn small_initial_heap_growth_uses_a_16_mib_floor() {
         assert_eq!(
-            growth_pages(24 * PAGE_BYTES, PAGE_BYTES, 64),
+            growth_pages(24 * PAGE_BYTES, PAGE_BYTES, usize::MAX),
             Some((INITIAL_GROWTH_FLOOR_BYTES / PAGE_BYTES, 1))
         );
         assert_eq!(
-            growth_pages(INITIAL_GROWTH_PHASE_BYTES, PAGE_BYTES, 64),
+            growth_pages(INITIAL_GROWTH_PHASE_BYTES, PAGE_BYTES, usize::MAX),
             Some((308, 1))
         );
     }
@@ -205,18 +224,35 @@ mod tests {
     fn wasm32_speculative_growth_stays_within_the_cutoff() {
         let current = 25_206 * PAGE_BYTES;
         // A speculative increase ending exactly at the cutoff is allowed.
-        assert_eq!(growth_pages(current, PAGE_BYTES, 32), Some((7_562, 1)));
+        assert_eq!(
+            growth_pages(current, PAGE_BYTES, WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES),
+            Some((7_562, 1))
+        );
+        assert_eq!(
+            growth_pages(
+                current + PAGE_BYTES,
+                PAGE_BYTES,
+                WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES
+            ),
+            Some((7_561, 1))
+        );
         for bytes in [
-            current + PAGE_BYTES,
             WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES - PAGE_BYTES,
             WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES,
             WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES + PAGE_BYTES,
             usize::MAX,
         ] {
-            assert_eq!(growth_pages(bytes, PAGE_BYTES, 32), Some((1, 1)));
+            assert_eq!(
+                growth_pages(bytes, PAGE_BYTES, WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES),
+                Some((1, 1))
+            );
         }
         assert_eq!(
-            growth_pages(24 * PAGE_BYTES, PAGE_BYTES, 32),
+            growth_pages(
+                24 * PAGE_BYTES,
+                PAGE_BYTES,
+                WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES
+            ),
             Some((INITIAL_GROWTH_FLOOR_BYTES / PAGE_BYTES, 1))
         );
     }
@@ -226,18 +262,51 @@ mod tests {
         let current = WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES;
         let required = MAX_GROWTH_BYTES + 1;
         let pages = MAX_GROWTH_BYTES / PAGE_BYTES + 1;
-        assert_eq!(growth_pages(current, required, 32), Some((pages, pages)));
-        assert_eq!(growth_pages(current, PAGE_BYTES + 1, 32), Some((2, 2)));
         assert_eq!(
-            growth_pages(current, PAGE_BYTES, 64),
+            growth_pages(current, required, WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES),
+            Some((pages, pages))
+        );
+        assert_eq!(
+            growth_pages(
+                current,
+                PAGE_BYTES + 1,
+                WASM32_SPECULATIVE_GROWTH_CUTOFF_BYTES
+            ),
+            Some((2, 2))
+        );
+        assert_eq!(
+            growth_pages(current, PAGE_BYTES, usize::MAX),
             Some((MAX_GROWTH_BYTES / PAGE_BYTES, 1))
+        );
+    }
+
+    #[test]
+    fn device_ceiling_caps_spare_capacity_without_truncating_requests() {
+        let mib = 1024 * 1024;
+        let limit = 3584 * mib;
+        let current = 3481 * mib;
+        assert_eq!(
+            growth_pages(current, PAGE_BYTES, limit),
+            Some(((limit - current) / PAGE_BYTES, 1))
+        );
+        // A partial page of remaining headroom cannot hold spare capacity.
+        assert_eq!(growth_pages(limit - 1, PAGE_BYTES, limit), Some((1, 1)));
+        assert_eq!(growth_pages(limit, PAGE_BYTES, limit), Some((1, 1)));
+        assert_eq!(
+            growth_pages(limit + PAGE_BYTES, PAGE_BYTES, limit),
+            Some((1, 1))
+        );
+        let required = 200 * mib;
+        assert_eq!(
+            growth_pages(current, required, limit),
+            Some((required / PAGE_BYTES, required / PAGE_BYTES))
         );
     }
 
     #[test]
     fn failed_spare_growth_retries_only_required_size() {
         let current_bytes = INITIAL_GROWTH_PHASE_BYTES * 4;
-        let preferred_pages = growth_pages(current_bytes, PAGE_BYTES, usize::BITS)
+        let preferred_pages = growth_pages(current_bytes, PAGE_BYTES, speculative_growth_limit())
             .unwrap()
             .0;
         let mut calls = 0;
@@ -257,7 +326,7 @@ mod tests {
     #[test]
     fn successful_growth_has_no_retry() {
         let current_bytes = INITIAL_GROWTH_PHASE_BYTES * 4;
-        let preferred_pages = growth_pages(current_bytes, PAGE_BYTES, usize::BITS)
+        let preferred_pages = growth_pages(current_bytes, PAGE_BYTES, speculative_growth_limit())
             .unwrap()
             .0;
         let mut calls = 0;
