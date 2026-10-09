@@ -903,6 +903,8 @@ test("24-source drafts copy once and clean edits retain bitset ownership", async
         isRulerActive: false,
         createCompositeSelectionBar() {},
         cancelLazyViewportRender() {},
+        cancelCompositeAreaScan: GerberViewer.prototype.cancelCompositeAreaScan,
+        cancelCompositeAreaScanSession: GerberViewer.prototype.cancelCompositeAreaScanSession,
         clearSelectedFeature() {},
         refreshCompositeLayerBounds() {},
         renderLayerList() {},
@@ -1261,12 +1263,17 @@ test("Viewer operation sequence preserves model, renderer, camera, and recovery 
     .locator(".composite-source-choice", { hasText: "right-extra.gbo" })
     .locator("input")
     .check();
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+  await dialog.locator('[data-composite-preset="difference"]').click();
   await dialog.locator("[data-composite-submit]").click();
   await expect.poll(snapshot).toMatchObject({
-    slotNames: ["Renamed islands", "center.gbl", "left-extra.gto", "right-extra.gbo"],
-    visibleBitset: [2, 2],
+    sourceNames: ["left-extra.gto", "Renamed islands", "center.gbl", "right-extra.gbo"],
+    slotNames: ["left-extra.gto", "Renamed islands", "center.gbl", "right-extra.gbo"],
+    visibleBitset: [2, 0],
   });
-  expect((await canvas.screenshot()).equals(initialPixels)).toBe(true);
+  await page.waitForTimeout(75);
+  const addedSourcePixels = await canvas.screenshot();
+  expect(addedSourcePixels.equals(initialPixels)).toBe(false);
 
   await composite.locator(".layer-menu-btn").click();
   await page.locator('.layer-context-menu [data-layer-menu-action="edit-composite"]').click();
@@ -1274,19 +1281,22 @@ test("Viewer operation sequence preserves model, renderer, camera, and recovery 
     .locator(".composite-source-choice", { hasText: "center.gbl" })
     .locator("input")
     .uncheck();
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+  await dialog.locator('[data-composite-preset="difference"]').click();
   await dialog.locator("[data-composite-submit]").click();
   await expect.poll(snapshot).toMatchObject({
     sourceNames: ["left-extra.gto", "Renamed islands", "right-extra.gbo"],
-    slotNames: ["Renamed islands", "left-extra.gto", "right-extra.gbo"],
-    visibleBitset: [34],
+    slotNames: ["left-extra.gto", "Renamed islands", "right-extra.gbo"],
+    visibleBitset: [2],
   });
-  expect((await canvas.screenshot()).equals(initialPixels)).toBe(true);
+  await page.waitForTimeout(75);
+  expect((await canvas.screenshot()).equals(addedSourcePixels)).toBe(true);
   expect(await page.evaluate(() => window.__viewerSequenceCounters.add)).toBe(2);
 
   await page.evaluate(() => window.__resetViewerSequenceCounters());
   await composite.locator(".layer-menu-btn").click();
   await page.locator('.layer-context-menu [data-layer-menu-action="composite-difference"]').click();
-  await expect.poll(snapshot).toMatchObject({ visibleBitset: [4] });
+  await expect.poll(snapshot).toMatchObject({ visibleBitset: [2] });
   expect(await page.evaluate(() => window.__viewerSequenceCounters)).toEqual({
     add: 0,
     setBits: 1,
@@ -1309,7 +1319,7 @@ test("Viewer operation sequence preserves model, renderer, camera, and recovery 
   expect(await page.evaluate(() => window.__viewerSequenceFittedCamera)).toEqual(
     fittedCamera,
   );
-  await expect.poll(snapshot).toMatchObject({ visibleBitset: [4] });
+  await expect.poll(snapshot).toMatchObject({ visibleBitset: [2] });
 
   const outlineOption = page.locator("#board-outline-select option", {
     hasText: "board-outline.gko",
@@ -1319,17 +1329,17 @@ test("Viewer operation sequence preserves model, renderer, camera, and recovery 
   );
   await composite.locator(".layer-menu-btn").click();
   await page.locator('.layer-context-menu [data-layer-menu-action="invert-layer"]').click();
-  await expect.poll(snapshot).toMatchObject({ inverted: true, visibleBitset: [4] });
+  await expect.poll(snapshot).toMatchObject({ inverted: true, visibleBitset: [2] });
   await page.waitForTimeout(75);
   expect((await canvas.screenshot()).equals(differencePixels)).toBe(false);
   await composite.locator(".layer-menu-btn").click();
   await page.locator('.layer-context-menu [data-layer-menu-action="invert-layer"]').click();
-  await expect.poll(snapshot).toMatchObject({ inverted: false, visibleBitset: [4] });
+  await expect.poll(snapshot).toMatchObject({ inverted: false, visibleBitset: [2] });
 
   await composite.locator(".layer-checkbox").uncheck();
-  await expect.poll(snapshot).toMatchObject({ visible: false, visibleBitset: [4] });
+  await expect.poll(snapshot).toMatchObject({ visible: false, visibleBitset: [2] });
   await composite.locator(".layer-checkbox").check();
-  await expect.poll(snapshot).toMatchObject({ visible: true, visibleBitset: [4] });
+  await expect.poll(snapshot).toMatchObject({ visible: true, visibleBitset: [2] });
   await page.waitForTimeout(75);
   const beforeRecovery = await canvas.screenshot();
   const beforeRecoveryModel = await snapshot();
@@ -1582,6 +1592,16 @@ test("mobile composite selection Done stays above open and collapsed drawers", a
   await drawerToggle.click();
   await expect(drawer).not.toHaveClass(/collapsed/);
   const row = await createComposite(page, "Mobile coverage");
+  await page.evaluate(async () => {
+    const { GerberViewer } = await import("/js/main.js");
+    const prototype = GerberViewer.prototype;
+    const original = prototype.startCompositeSelection;
+    prototype.startCompositeSelection = function captureSelectionViewer(...args) {
+      window.__mobileSelectionViewer = this;
+      prototype.startCompositeSelection = original;
+      return original.apply(this, args);
+    };
+  });
 
   const startSelection = async () => {
     await expect(async () => {
@@ -1609,12 +1629,21 @@ test("mobile composite selection Done stays above open and collapsed drawers", a
   };
 
   await startSelection();
+  await expect(drawerToggle).toBeDisabled();
   let done = await expectDoneIsTopmost();
   await done.click();
   await expect(page.locator(".composite-selection-bar")).toBeHidden();
 
-  await startSelection();
+  await expect(drawerToggle).toBeEnabled();
   await drawerToggle.click();
+  await expect(drawer).toHaveClass(/collapsed/);
+  expect(await page.evaluate(() => {
+    const viewer = window.__mobileSelectionViewer;
+    return viewer.startCompositeSelection(
+      viewer.layers.find((layer) => layer.kind === "composite"),
+    );
+  })).toBe(true);
+  await expect(drawerToggle).toBeDisabled();
   await expect(drawer).toHaveClass(/collapsed/);
   done = await expectDoneIsTopmost();
   await done.click();
@@ -1683,7 +1712,12 @@ test("mobile localized source dialogs stay contained and honor reduced motion", 
   const longName = "共有銅層 매우 긴 번역 이름 ".repeat(7).trim();
   const sourceRows = page.locator(".gerber-layer-item:not(.composite-layer-item)");
   for (let index = 0; index < 2; index += 1) {
-    await sourceRows.nth(index).locator(".layer-menu-btn").click();
+    const menuButton = sourceRows.nth(index).locator(".layer-menu-btn");
+    await menuButton.scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await menuButton.click();
+    await expect(page.locator(".layer-context-menu")).toBeVisible();
     await page.locator('.layer-context-menu [data-layer-menu-action="rename-layer"]').click();
     const renameDialog = page.locator(".rename-layer-dialog");
     await renameDialog.locator("[data-rename-name]").fill(longName);
@@ -2784,6 +2818,8 @@ test("composite edit never recreates on a processor whose definition removal fai
     .locator(".composite-source-choice", { hasText: "left.gtl" })
     .locator("input")
     .uncheck();
+  await expect(dialog.locator("[data-composite-submit]")).toBeDisabled();
+  await dialog.locator('[data-composite-preset="union"]').click();
   await dialog.locator("[data-composite-submit]").click();
   await expect.poll(() => page.evaluate(() => window.__editRemovalRecoveryStarted)).toBe(true);
   expect(await page.evaluate(() => window.__editRemovalCompositeAdds)).toBe(0);
@@ -4053,7 +4089,13 @@ test("screenshot export skips a construction failure and renders the next compos
     const wasm = await import("/wasm/pkg/wasm_gerber_processor.js");
     const prototype = wasm.GerberProcessor.prototype;
     const originalAddComposite = prototype.add_composite_layer_with_bounds;
+    const originalClear = prototype.clear;
     window.__screenshotCompositeConstructionCalls = 0;
+    window.__screenshotConstructionClears = 0;
+    prototype.clear = function countConstructionClear(...args) {
+      window.__screenshotConstructionClears += 1;
+      return originalClear.apply(this, args);
+    };
     prototype.add_composite_layer_with_bounds = function forceFirstConstructionFailure(...args) {
       window.__screenshotCompositeConstructionCalls += 1;
       if (window.__screenshotCompositeConstructionCalls === 1) {
@@ -4076,7 +4118,8 @@ test("screenshot export skips a construction failure and renders the next compos
   await expect(page.locator("#diagnostics-count")).toHaveText(
     String(diagnosticsBefore + 1),
   );
-  expect(await page.evaluate(() => window.__screenshotCompositeConstructionCalls)).toBe(2);
+  expect(await page.evaluate(() => window.__screenshotCompositeConstructionCalls)).toBe(3);
+  expect(await page.evaluate(() => window.__screenshotConstructionClears)).toBe(2);
   const hasRenderedPixel = await page.evaluate(async () => {
     const bitmap = await createImageBitmap(window.__lastScreenshotBlob);
     const canvas = document.createElement("canvas");
@@ -4094,7 +4137,7 @@ test("screenshot export skips a construction failure and renders the next compos
   expect(hasRenderedPixel).toBe(true);
 });
 
-test("single and streamed screenshots isolate a failed hidden composite dependency", async ({ page }) => {
+test("base and high-resolution screenshots isolate a failed hidden composite dependency", async ({ page }) => {
   await page.goto("/");
   await page.locator("#file-input").setInputFiles([
     { name: "left.gtl", mimeType: "text/plain", buffer: Buffer.from(leftSource) },
@@ -4129,8 +4172,14 @@ test("single and streamed screenshots isolate a failed hidden composite dependen
     const prototype = wasm.GerberProcessor.prototype;
     const originalAddLayer = prototype.add_layer;
     const originalAddComposite = prototype.add_composite_layer_with_bounds;
+    const originalClear = prototype.clear;
     window.__hiddenDependencyScreenshot = {
       healthyCompositeCalls: 0,
+      clears: 0,
+    };
+    prototype.clear = function countDependencyClear(...args) {
+      window.__hiddenDependencyScreenshot.clears += 1;
+      return originalClear.apply(this, args);
     };
     prototype.add_layer = function failHiddenDependency(content, ...args) {
       if (String(content).includes("X-015000")) {
@@ -4153,7 +4202,8 @@ test("single and streamed screenshots isolate a failed hidden composite dependen
     await page.evaluate(
       () => window.__hiddenDependencyScreenshot.healthyCompositeCalls,
     ),
-  ).toBe(1);
+  ).toBe(2);
+  expect(await page.evaluate(() => window.__hiddenDependencyScreenshot.clears)).toBe(2);
 
   await page.locator("#screenshot-btn").click();
   await page.locator("#screenshot-scale-select").selectOption("2");
@@ -4165,7 +4215,8 @@ test("single and streamed screenshots isolate a failed hidden composite dependen
     await page.evaluate(
       () => window.__hiddenDependencyScreenshot.healthyCompositeCalls,
     ),
-  ).toBe(2);
+  ).toBe(4);
+  expect(await page.evaluate(() => window.__hiddenDependencyScreenshot.clears)).toBe(4);
   await expect(page.locator("#diagnostics-count")).toHaveText(
     String(diagnosticsBefore + 2),
   );
@@ -4417,9 +4468,13 @@ test("screenshot composites use a raw token for a visible inverted outline", asy
   expect(result.hasCompositePixel).toBe(true);
 });
 
-test("single-image screenshot stays modal and disables controls until encoding completes", async ({ page }) => {
+test("native PNG screenshot stays modal and locks settings until encoding completes", async ({ page }) => {
   await loadTwoSources(page);
   await page.evaluate(() => {
+    Object.defineProperty(window, "CompressionStream", {
+      configurable: true,
+      value: undefined,
+    });
     const originalToBlob = HTMLCanvasElement.prototype.toBlob;
     window.__singleScreenshotEncodingStarted = false;
     HTMLCanvasElement.prototype.toBlob = function gateScreenshotBlob(callback, ...args) {
@@ -4437,11 +4492,10 @@ test("single-image screenshot stays modal and disables controls until encoding c
     .toBe(true);
   await expect(page.locator("#screenshot-background-toggle")).toBeDisabled();
   await expect(page.locator("#screenshot-scale-select")).toBeDisabled();
-  await expect(page.locator("#screenshot-cancel-btn")).toBeDisabled();
+  await expect(page.locator("#screenshot-cancel-btn")).toBeEnabled();
   await expect(page.locator("#screenshot-dismiss-btn")).toBeDisabled();
   await expect(page.locator("#screenshot-export-btn")).toBeDisabled();
   await expect(page.locator("#screenshot-export-btn")).toHaveText("Exporting");
-  await page.keyboard.press("Escape");
   await expect(page.locator("#screenshot-dialog")).toBeVisible();
 
   await page.evaluate(() => window.__releaseSingleScreenshotEncoding());
@@ -4880,16 +4934,37 @@ test("selection maps CSS pixels, clips code zero, throttles hover, and toggles d
   expect(rightRatio - leftRatio).toBeGreaterThan(0.15);
   await move(leftRatio);
   await expect(page.locator("#composite-selection-info")).toHaveText("islands.gtl");
-  const leftBefore = await readCanvasPixel(page, leftRatio, 0.5);
-  const rightBefore = await readCanvasPixel(page, rightRatio, 0.5);
+  const sampleAreaColors = (xRatio) => canvas.evaluate((element, ratio) => {
+    const gl = element.getContext("webgl2");
+    gl.finish();
+    const pixels = new Uint8Array(8 * 8 * 4);
+    gl.readPixels(
+      Math.floor(element.width * ratio) - 4,
+      Math.floor(element.height * 0.5) - 4,
+      8,
+      8,
+      gl.RGBA,
+      gl.UNSIGNED_BYTE,
+      pixels,
+    );
+    const colors = new Set();
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      colors.add(Array.from(pixels.subarray(offset, offset + 4)).join(","));
+    }
+    return [...colors].sort();
+  }, xRatio);
+  const leftBefore = await sampleAreaColors(leftRatio);
+  const rightBefore = await sampleAreaColors(rightRatio);
+  expect(leftBefore.length).toBeGreaterThan(1);
+  expect(rightBefore).toEqual(leftBefore);
   await canvas.click({ position: { x: box.width * leftRatio, y: box.height * 0.5 } });
   await page.waitForTimeout(60);
-  const leftAfter = await readCanvasPixel(page, leftRatio, 0.5);
-  const rightAfter = await readCanvasPixel(page, rightRatio, 0.5);
-  expect(leftAfter.slice(0, 3)).toEqual(leftBefore.slice(0, 3));
-  expect(rightAfter.slice(0, 3)).toEqual(rightBefore.slice(0, 3));
-  expect(leftAfter[3]).toBeLessThan(leftBefore[3]);
-  expect(rightAfter[3]).toBeLessThan(rightBefore[3]);
+  const leftAfter = await sampleAreaColors(leftRatio);
+  const rightAfter = await sampleAreaColors(rightRatio);
+  expect(leftAfter).toHaveLength(1);
+  expect(rightAfter).toEqual(leftAfter);
+  expect(leftBefore).toContain(leftAfter[0]);
+  expect(leftAfter[0].split(",").at(-1)).toBe("255");
   expect(await page.evaluate(() => window.__viewerSelectionByteCalls.length)).toBe(1);
 
   // The horizontal scan must observe both finite zero-code fill and the
