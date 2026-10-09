@@ -1914,7 +1914,13 @@ function planForReplacementProcessor(plan, antiAliasingMode) {
   }
   // A replacement must not upgrade a stream that fell back on the first context.
   const samples = Number(antiAliasingMode?.split(":")[1]);
+  if (samples === 2) return { ...plan, effectiveMsaaSamples: 2 };
   return [4, 8, 16].includes(samples) ? { ...plan, msaaSamples: samples } : plan;
+}
+
+function applyPlanProcessorOptions(processor, plan) {
+  applyProcessorOptions(processor, plan);
+  if (plan.effectiveMsaaSamples === 2) processor.set_msaa_samples(2);
 }
 
 function disposeStreamRenderState(renderer, state, releaseContext) {
@@ -1976,7 +1982,7 @@ function createProcessorForPlan(renderer, plan, gl, width, height) {
       throw new Error("Streaming PNG export requires an updated WASM module.");
     }
     processor.init_with_size(gl, width, height);
-    applyProcessorOptions(processor, plan);
+    applyPlanProcessorOptions(processor, plan);
 
     const compositeErrorState = createPlanCompositeErrorState(renderer, plan);
     const renderEntries = createPlanRenderEntries(
@@ -2155,7 +2161,7 @@ function applyPlanRenderEntries(renderContext, renderEntries) {
 
 function rebuildPlanRenderContext(renderContext, plan) {
   renderContext.processor.clear();
-  applyProcessorOptions(renderContext.processor, plan);
+  applyPlanProcessorOptions(renderContext.processor, plan);
   applyPlanRenderEntries(
     renderContext,
     createPlanRenderEntries(renderContext.processor, plan, renderContext),
@@ -2479,7 +2485,7 @@ function createPlanRenderEntries(processor, plan, compositeErrorState) {
     // failed composite was known. Rebuild from the survivor set so a skipped
     // definition cannot affect another composite's mask or manual-view pixels.
     processor.clear();
-    applyProcessorOptions(processor, plan);
+    applyPlanProcessorOptions(processor, plan);
     return createPlanRenderEntries(processor, plan, compositeErrorState);
   }
 

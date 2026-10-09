@@ -1429,8 +1429,8 @@ impl Renderer {
     }
 
     pub fn set_msaa_samples(&mut self, samples: u32) -> Result<(), JsValue> {
-        if !matches!(samples, 4 | 8 | 16) {
-            return Err(JsValue::from_str("MSAA samples must be 4, 8 or 16"));
+        if !matches!(samples, 2 | 4 | 8 | 16) {
+            return Err(JsValue::from_str("MSAA samples must be 2, 4, 8 or 16"));
         }
         if self.msaa_samples != samples as i32 {
             self.msaa_samples = samples as i32;

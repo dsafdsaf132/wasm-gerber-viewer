@@ -1847,6 +1847,7 @@ export class GerberViewer {
 
   createWebGlProcessor() {
     this.gl = this.createWebGlContext();
+    this.refreshMsaaSupport();
     this.wasmProcessor = new this.wasmModule.GerberProcessor();
     this.wasmProcessor.init(this.gl);
     this.configureWasmProcessorOptions(this.wasmProcessor);
@@ -2535,6 +2536,7 @@ export class GerberViewer {
       }
       if (!ownsRestore()) return;
       this.gl = this.createWebGlContext();
+      this.refreshMsaaSupport();
       this.isWebGlContextLost = false;
       if (!this.wasmProcessor && !interruptedWasmRecovery) {
         throw new Error("No parsed layer data available for WebGL restore");
@@ -2559,6 +2561,8 @@ export class GerberViewer {
         } else {
           this.wasmProcessor.restore_context(this.gl);
         }
+        this.wasmProcessor.set_anti_aliasing?.(this.antiAliasing);
+        this.wasmProcessor.set_msaa_samples?.(this.msaaSamples);
         if (!ownsRestore()) return;
         this.synchronizeCompositeBitsetsAfterCachedRestore(
           layerSnapshot,
@@ -2771,6 +2775,31 @@ export class GerberViewer {
     ];
   }
 
+  refreshMsaaSupport() {
+    const gl = this.gl;
+    const color = gl.getInternalformatParameter(gl.RENDERBUFFER, gl.R8, gl.SAMPLES);
+    const stencil = gl.getInternalformatParameter(
+      gl.RENDERBUFFER, gl.STENCIL_INDEX8, gl.SAMPLES,
+    );
+    this.supportedMsaaSamples = [4, 8, 16].filter(
+      (samples) => color?.includes(samples) && stencil?.includes(samples),
+    );
+    if (this.antiAliasing && !this.supportedMsaaSamples.includes(this.msaaSamples)) {
+      const samples = this.supportedMsaaSamples.filter(
+        (value) => value <= this.msaaSamples,
+      ).at(-1);
+      this.antiAliasing = samples !== undefined;
+      this.msaaSamples = samples ?? 4;
+      this.viewerOptionsStore.set("antiAliasing", this.antiAliasing);
+      this.viewerOptionsStore.set("msaaSamples", this.msaaSamples);
+    }
+  }
+
+  isAntiAliasingInputUnsupported(input) {
+    return input.value !== "off" && this.supportedMsaaSamples !== undefined &&
+      !this.supportedMsaaSamples.includes(input.value === "on" ? 4 : Number(input.value));
+  }
+
   getBoardOutlineBoundsMarginUnitInputs() {
     return [
       this.boardOutlineBoundsMarginUnitMmInput,
@@ -2847,7 +2876,7 @@ export class GerberViewer {
           ? !this.antiAliasing
           : this.antiAliasing &&
             (input.value === "on" ? 4 : Number(input.value)) === this.msaaSamples;
-      input.disabled = this.isRendererBusy();
+      input.disabled = this.isRendererBusy() || this.isAntiAliasingInputUnsupported(input);
     }
 
     this.syncBoardOutlineBoundsMarginControl();
@@ -3305,6 +3334,11 @@ export class GerberViewer {
     const nextSamples = next ? samples : this.msaaSamples;
     if (![4, 8, 16].includes(nextSamples)) {
       throw new TypeError("MSAA samples must be 4, 8 or 16");
+    }
+    if (next && this.supportedMsaaSamples !== undefined &&
+        !this.supportedMsaaSamples.includes(nextSamples)) {
+      this.syncOptionControls();
+      return;
     }
     if (next === this.antiAliasing && nextSamples === this.msaaSamples) {
       return;
@@ -3799,7 +3833,7 @@ export class GerberViewer {
       input.disabled = rendererBusy;
     }
     for (const input of this.getAntiAliasingInputs()) {
-      input.disabled = rendererBusy;
+      input.disabled = rendererBusy || this.isAntiAliasingInputUnsupported(input);
     }
     this.syncBoardOutlineBoundsMarginControl(rendererBusy);
     for (const input of this.getDrillOutlineInputs()) {

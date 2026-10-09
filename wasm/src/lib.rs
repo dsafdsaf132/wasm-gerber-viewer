@@ -665,8 +665,8 @@ impl GerberProcessor {
     /// Requested mask sample count. Unsupported counts fall back to a lower
     /// supported count shared by the mask and stencil formats.
     pub fn set_msaa_samples(&mut self, samples: u32) -> Result<(), JsValue> {
-        if !matches!(samples, 4 | 8 | 16) {
-            return Err(JsValue::from_str("MSAA samples must be 4, 8 or 16"));
+        if !matches!(samples, 2 | 4 | 8 | 16) {
+            return Err(JsValue::from_str("MSAA samples must be 2, 4, 8 or 16"));
         }
         if let Some(renderer) = &mut self.renderer {
             renderer.set_msaa_samples(samples)?;

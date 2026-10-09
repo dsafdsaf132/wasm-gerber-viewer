@@ -1,9 +1,48 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { applyProcessorOptions, createBaseFrameOptions } from "../shared.js";
 import { ViewerOptionsStore } from "../../../js/ui/viewer-options.js";
 import { GerberViewer } from "../../../js/core/viewer.js";
 import { ScreenshotExporter } from "../../../js/rendering/screenshot-exporter.js";
+
+test("viewer disables unsupported counts and refreshes saved settings", () => {
+  const viewer = Object.create(GerberViewer.prototype);
+  viewer.viewerOptionsStore = new ViewerOptionsStore({ getItem: () => null, setItem() {} });
+  viewer.antiAliasing = true;
+  viewer.msaaSamples = 16;
+  let stencilSamples = [8, 4, 2, 1];
+  viewer.gl = {
+    RENDERBUFFER: 1, R8: 2, STENCIL_INDEX8: 3, SAMPLES: 4,
+    getInternalformatParameter: (_target, format) =>
+      new Int32Array(format === 2 ? [16, 8, 4, 2] : stencilSamples),
+  };
+  viewer.refreshMsaaSupport();
+  assert.deepEqual(viewer.supportedMsaaSamples, [4, 8]);
+  assert.equal(viewer.msaaSamples, 8);
+  assert.equal(viewer.viewerOptionsStore.get("msaaSamples"), 8);
+  for (const [value, unsupported] of [["off", false], ["on", false], ["8", false], ["16", true]]) {
+    assert.equal(viewer.isAntiAliasingInputUnsupported({ value }), unsupported);
+  }
+  stencilSamples = [2, 1];
+  viewer.refreshMsaaSupport();
+  assert.equal(viewer.antiAliasing, false);
+  assert.deepEqual(viewer.supportedMsaaSamples, []);
+});
+
+test("stream replacement pins internal x2 without broadening public sample options", () => {
+  const source = readFileSync(new URL("../node.js", import.meta.url), "utf8");
+  const start = source.indexOf("function planForReplacementProcessor(");
+  const end = source.indexOf("function disposeStreamRenderState(", start);
+  const { replace, apply } = new Function("applyProcessorOptions",
+    `${source.slice(start, end)}; return { replace: planForReplacementProcessor, apply: applyPlanProcessorOptions };`,
+  )(applyProcessorOptions);
+  const plan = replace({ antiAliasing: true, msaaSamples: 16 }, "multisampled:2");
+  const calls = [];
+  apply({ set_anti_aliasing() {}, set_msaa_samples: (samples) => calls.push(samples) }, plan);
+  assert.deepEqual(calls, [16, 2]);
+  assert.throws(() => createBaseFrameOptions({ msaaSamples: 2 }), /msaaSamples/);
+});
 
 test("MSAA options preserve boolean compatibility and validate sample counts", () => {
   assert.equal(createBaseFrameOptions().msaaSamples, 4);

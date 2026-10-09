@@ -160,6 +160,8 @@ renderTest("sample changes invalidate masks without re-querying cached format su
     }
     assert.throws(() => processor.set_msaa_samples(12), /MSAA samples/);
     assert.equal(processor.get_anti_aliasing_diagnostics().requestedSamples, 4);
+    processor.set_msaa_samples(2);
+    assert.equal(processor.get_anti_aliasing_diagnostics().requestedSamples, 2);
     assert.equal(raw.getError(), raw.NO_ERROR);
   } finally {
     processor.free();
