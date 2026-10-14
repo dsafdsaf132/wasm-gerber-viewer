@@ -1171,7 +1171,21 @@ export class GerberViewer {
     this.antiAliasing = this.viewerOptionsStore.get("antiAliasing") === true;
     this.msaaSamples = this.viewerOptionsStore.get("msaaSamples") ?? 4;
     this.grid = this.viewerOptionsStore.get("grid") === true;
-    this.gridRenderKey = null;
+    // The view the grid was last drawn for. Compared field by field so that
+    // checking for a redraw allocates nothing.
+    this.gridRenderState = {
+      drawn: false,
+      rectWidth: 0,
+      rectHeight: 0,
+      canvasWidth: 0,
+      canvasHeight: 0,
+      zoom: 0,
+      offsetX: 0,
+      offsetY: 0,
+      flipX: false,
+      flipY: false,
+      unit: "",
+    };
     this.boardOutlineBoundsMarginMm = normalizeBoardOutlineBoundsMarginMm(
       this.viewerOptionsStore.get("boardOutlineBoundsMarginMm"),
     );
@@ -7475,20 +7489,21 @@ export class GerberViewer {
     }
 
     const rect = this.getViewportRect();
-    const { zoom, offsetX, offsetY, flipX, flipY } = this.camera;
-    const key = [
-      rect.width,
-      rect.height,
-      this.canvas.width,
-      this.canvas.height,
-      zoom,
-      offsetX,
-      offsetY,
-      flipX,
-      flipY,
-      this.measurementUnit,
-    ].join(",");
-    if (key === this.gridRenderKey) {
+    const camera = this.camera;
+    const state = this.gridRenderState;
+    if (
+      state.drawn &&
+      state.rectWidth === rect.width &&
+      state.rectHeight === rect.height &&
+      state.canvasWidth === this.canvas.width &&
+      state.canvasHeight === this.canvas.height &&
+      state.zoom === camera.zoom &&
+      state.offsetX === camera.offsetX &&
+      state.offsetY === camera.offsetY &&
+      state.flipX === camera.flipX &&
+      state.flipY === camera.flipY &&
+      state.unit === this.measurementUnit
+    ) {
       return;
     }
 
@@ -7509,23 +7524,34 @@ export class GerberViewer {
       }
       this.gridSpacingReadout.textContent = spacing ? formatGridSpacing(spacing) : "";
       this.gridSpacingPill.hidden = !spacing;
-      this.gridRenderKey = key;
+      state.drawn = true;
+      state.rectWidth = rect.width;
+      state.rectHeight = rect.height;
+      state.canvasWidth = this.canvas.width;
+      state.canvasHeight = this.canvas.height;
+      state.zoom = camera.zoom;
+      state.offsetX = camera.offsetX;
+      state.offsetY = camera.offsetY;
+      state.flipX = camera.flipX;
+      state.flipY = camera.flipY;
+      state.unit = this.measurementUnit;
     } catch (error) {
       // The grid is a visual aid; a failure must not stop the measurement
-      // overlay from drawing. Leave the key unset so the next frame retries.
+      // overlay from drawing. clearGrid() marks the grid as not drawn, so
+      // the next frame retries.
       console.error("[Grid] Failed to draw grid:", error);
       this.clearGrid();
     }
   }
 
   clearGrid() {
-    if (this.gridRenderKey === null && this.gridSpacingPill.hidden) {
+    if (!this.gridRenderState.drawn && this.gridSpacingPill.hidden) {
       return;
     }
     this.gridOverlay.replaceChildren();
     this.gridSpacingReadout.textContent = "";
     this.gridSpacingPill.hidden = true;
-    this.gridRenderKey = null;
+    this.gridRenderState.drawn = false;
   }
 
   getOverlayWorldBounds(rect) {
