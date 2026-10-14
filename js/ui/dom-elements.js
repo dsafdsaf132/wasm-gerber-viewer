@@ -86,9 +86,12 @@ export function getViewerElements(documentRef = document) {
     workspaceStatus: requireElement(documentRef, "workspace-status"),
     emptyState: requireElement(documentRef, "empty-state"),
     emptyFileSizeLimit: requireElement(documentRef, "empty-file-size-limit"),
+    gridOverlay: requireElement(documentRef, "grid-overlay"),
     measurementOverlay: requireElement(documentRef, "measurement-overlay"),
     visibleLayerCount: requireElement(documentRef, "visible-layer-count"),
     zoomReadout: requireElement(documentRef, "zoom-readout"),
+    gridSpacingPill: requireElement(documentRef, "grid-spacing-pill"),
+    gridSpacingReadout: requireElement(documentRef, "grid-spacing-readout"),
     cursorReadout: requireElement(documentRef, "cursor-readout"),
     compositeSelectionInfo: requireElement(
       documentRef,
@@ -123,6 +126,8 @@ export function getViewerElements(documentRef = document) {
     antiAliasingOnInput: requireElement(documentRef, "anti-aliasing-on"),
     antiAliasing8Input: requireElement(documentRef, "anti-aliasing-8"),
     antiAliasing16Input: requireElement(documentRef, "anti-aliasing-16"),
+    gridOffInput: requireElement(documentRef, "grid-off"),
+    gridOnInput: requireElement(documentRef, "grid-on"),
     minimumVisibilityOffInput: requireElement(
       documentRef,
       "minimum-visibility-off",

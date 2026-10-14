@@ -4,6 +4,7 @@ const DEFAULT_VIEWER_OPTIONS = {
   minimumFeaturePixels: 1,
   antiAliasing: false,
   msaaSamples: 4,
+  grid: false,
   boardOutlineBoundsMarginMm: 10,
   boardOutlineBoundsMarginUnit: "mm",
   drillOutlinePixels: 0,
@@ -95,6 +96,10 @@ export class ViewerOptionsStore {
           typeof stored.antiAliasing === "boolean"
             ? stored.antiAliasing
             : DEFAULT_VIEWER_OPTIONS.antiAliasing,
+        grid:
+          typeof stored.grid === "boolean"
+            ? stored.grid
+            : DEFAULT_VIEWER_OPTIONS.grid,
         boardOutlineBoundsMarginMm: normalizeNonNegativeNumber(
           stored.boardOutlineBoundsMarginMm,
           DEFAULT_VIEWER_OPTIONS.boardOutlineBoundsMarginMm,

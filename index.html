@@ -146,6 +146,7 @@
       <main class="workspace">
         <section class="viewer-surface" aria-label="Gerber canvas">
           <canvas id="gerber-canvas"></canvas>
+          <svg class="grid-overlay" id="grid-overlay" aria-hidden="true"></svg>
           <svg
             class="measurement-overlay"
             id="measurement-overlay"
@@ -175,6 +176,10 @@
             <div class="metric-pill">
               <i data-lucide="search"></i>
               <span id="zoom-readout">100%</span>
+            </div>
+            <div class="metric-pill" id="grid-spacing-pill" title="Grid spacing" hidden>
+              <i data-lucide="grid-3x3"></i>
+              <span id="grid-spacing-readout" aria-label="Grid spacing"></span>
             </div>
           </div>
 
@@ -436,6 +441,31 @@
                             value="16"
                           />
                           <span>16x</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="option-outline">
+                    <div class="option-row">
+                      <span>Grid</span>
+                      <div class="segmented-control" role="radiogroup" aria-label="Grid">
+                        <label>
+                          <input
+                            type="radio"
+                            id="grid-off"
+                            name="grid"
+                            value="off"
+                          />
+                          <span>Off</span>
+                        </label>
+                        <label>
+                          <input
+                            type="radio"
+                            id="grid-on"
+                            name="grid"
+                            value="on"
+                          />
+                          <span>On</span>
                         </label>
                       </div>
                     </div>

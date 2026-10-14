@@ -311,6 +311,7 @@ button {
   cursor: crosshair;
 }
 
+.app-shell .grid-overlay,
 .app-shell .measurement-overlay {
   position: absolute;
   left: 0;
@@ -319,6 +320,34 @@ button {
   height: 100%;
   pointer-events: none;
   z-index: 4;
+}
+
+/* The grid shares the measurement overlay's box and sits just below it. */
+.app-shell .grid-overlay {
+  z-index: 3;
+}
+
+.grid-overlay path {
+  fill: none;
+  stroke: #e2e8f0;
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
+}
+
+.grid-overlay .grid-minor {
+  stroke-opacity: 0.12;
+}
+
+.grid-overlay .grid-major {
+  stroke-opacity: 0.28;
+}
+
+.canvas-light .grid-overlay path {
+  stroke: #0f172a;
+}
+
+#grid-spacing-pill[hidden] {
+  display: none;
 }
 
 .measurement-overlay .measurement-line-outline {
@@ -2187,6 +2216,7 @@ button {
   }
 
   .viewer-surface canvas,
+  .app-shell .grid-overlay,
   .app-shell .measurement-overlay {
     width: 100%;
     height: calc(100% - var(--canvas-reserved-height));
