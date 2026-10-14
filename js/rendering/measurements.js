@@ -1,7 +1,7 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
-const MM_PER_INCH = 25.4;
-const MILS_PER_INCH = 1000;
-const MIL_THRESHOLD_INCHES = 1;
+export const MM_PER_INCH = 25.4;
+export const MILS_PER_INCH = 1000;
+export const MIL_THRESHOLD_INCHES = 1;
 
 export function formatMeasurementLength(length, unit) {
   if (unit === "inch") {
