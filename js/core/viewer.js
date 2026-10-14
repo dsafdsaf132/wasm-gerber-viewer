@@ -47,6 +47,7 @@ import {
   formatMeasurementLength,
   renderMeasurements as renderMeasurementOverlay,
 } from "../rendering/measurements.js";
+import { formatGridSpacing, renderGridOverlay } from "../rendering/grid.js";
 import { NotificationCenter } from "../ui/notifications.js";
 import {
   collectLayerSources,
@@ -1169,6 +1170,8 @@ export class GerberViewer {
     );
     this.antiAliasing = this.viewerOptionsStore.get("antiAliasing") === true;
     this.msaaSamples = this.viewerOptionsStore.get("msaaSamples") ?? 4;
+    this.grid = this.viewerOptionsStore.get("grid") === true;
+    this.gridRenderKey = null;
     this.boardOutlineBoundsMarginMm = normalizeBoardOutlineBoundsMarginMm(
       this.viewerOptionsStore.get("boardOutlineBoundsMarginMm"),
     );
@@ -2327,6 +2330,14 @@ export class GerberViewer {
       });
     }
 
+    for (const input of this.getGridInputs()) {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          this.setGrid(input.value === "on");
+        }
+      });
+    }
+
     for (const input of this.getMinimumVisibilityInputs()) {
       input.addEventListener("change", () => {
         if (input.checked) {
@@ -2800,6 +2811,10 @@ export class GerberViewer {
       !this.supportedMsaaSamples.includes(input.value === "on" ? 4 : Number(input.value));
   }
 
+  getGridInputs() {
+    return [this.gridOffInput, this.gridOnInput];
+  }
+
   getBoardOutlineBoundsMarginUnitInputs() {
     return [
       this.boardOutlineBoundsMarginUnitMmInput,
@@ -2877,6 +2892,12 @@ export class GerberViewer {
           : this.antiAliasing &&
             (input.value === "on" ? 4 : Number(input.value)) === this.msaaSamples;
       input.disabled = this.isRendererBusy() || this.isAntiAliasingInputUnsupported(input);
+    }
+
+    // The grid is an overlay drawn outside the renderer, so it stays
+    // available while the renderer is busy.
+    for (const input of this.getGridInputs()) {
+      input.checked = (input.value === "on") === this.grid;
     }
 
     this.syncBoardOutlineBoundsMarginControl();
@@ -3377,6 +3398,17 @@ export class GerberViewer {
     } finally {
       this.updateUiState();
     }
+  }
+
+  setGrid(enabled) {
+    const next = enabled === true;
+    if (next === this.grid) {
+      return;
+    }
+    this.grid = next;
+    this.syncOptionControls();
+    this.viewerOptionsStore.set("grid", this.grid);
+    this.renderGrid();
   }
 
   setBoardOutlineBoundsMargin(value) {
@@ -7436,7 +7468,85 @@ export class GerberViewer {
     return layerAlpha === null ? clampAlpha(defaultAlpha) : layerAlpha;
   }
 
+  renderGrid() {
+    if (!this.grid || this.layers.length === 0) {
+      this.clearGrid();
+      return;
+    }
+
+    const rect = this.getViewportRect();
+    const { zoom, offsetX, offsetY, flipX, flipY } = this.camera;
+    const key = [
+      rect.width,
+      rect.height,
+      this.canvas.width,
+      this.canvas.height,
+      zoom,
+      offsetX,
+      offsetY,
+      flipX,
+      flipY,
+      this.measurementUnit,
+    ].join(",");
+    if (key === this.gridRenderKey) {
+      return;
+    }
+
+    try {
+      const bounds = this.getOverlayWorldBounds(rect);
+      const spacing = bounds
+        ? renderGridOverlay({
+            overlay: this.gridOverlay,
+            rect,
+            bounds,
+            unit: this.measurementUnit,
+            worldToCanvasPoint: (point) =>
+              worldToCanvasCoordinate({ point, canvas: this.canvas, camera: this.camera, rect }),
+          })
+        : null;
+      if (!spacing) {
+        this.gridOverlay.replaceChildren();
+      }
+      this.gridSpacingReadout.textContent = spacing ? formatGridSpacing(spacing) : "";
+      this.gridSpacingPill.hidden = !spacing;
+      this.gridRenderKey = key;
+    } catch (error) {
+      // The grid is a visual aid; a failure must not stop the measurement
+      // overlay from drawing. Leave the key unset so the next frame retries.
+      console.error("[Grid] Failed to draw grid:", error);
+      this.clearGrid();
+    }
+  }
+
+  clearGrid() {
+    if (this.gridRenderKey === null && this.gridSpacingPill.hidden) {
+      return;
+    }
+    this.gridOverlay.replaceChildren();
+    this.gridSpacingReadout.textContent = "";
+    this.gridSpacingPill.hidden = true;
+    this.gridRenderKey = null;
+  }
+
+  getOverlayWorldBounds(rect) {
+    const corners = [
+      [rect.left, rect.top],
+      [rect.left + rect.width, rect.top + rect.height],
+    ].map(([clientX, clientY]) => this.canvasPointToWorld(clientX, clientY));
+    if (corners.some((corner) => !corner)) {
+      return null;
+    }
+    const [a, b] = corners;
+    return {
+      minX: Math.min(a.x, b.x),
+      maxX: Math.max(a.x, b.x),
+      minY: Math.min(a.y, b.y),
+      maxY: Math.max(a.y, b.y),
+    };
+  }
+
   renderMeasurements() {
+    this.renderGrid();
     renderMeasurementOverlay({
       overlay: this.measurementOverlay,
       rect: this.getViewportRect(),
