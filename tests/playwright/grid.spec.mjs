@@ -107,6 +107,10 @@ test("turning the grid on draws it, persists, and turning it off empties it", as
 test("minor cells stay between 8 and 20 pixels while zooming far in and out", async ({ page }) => {
   await openSample(page);
   await setGrid(page, true);
+  // Zooming rewrites the path data of the same two elements.
+  await page.locator("#grid-overlay path.grid-major").evaluate((path) => {
+    path.dataset.probe = "first";
+  });
   const labels = new Set();
   for (const steps of [0, 12, 12, -12, -12, -12]) {
     if (steps) await zoomBy(page, steps);
@@ -118,6 +122,8 @@ test("minor cells stay between 8 and 20 pixels while zooming far in and out", as
   }
   // Zooming changes the spacing rather than the cell size.
   expect(labels.size).toBeGreaterThan(2);
+  await expect(page.locator("#grid-overlay > path")).toHaveCount(2);
+  await expect(page.locator("#grid-overlay path.grid-major")).toHaveAttribute("data-probe", "first");
 });
 
 test("the spacing label follows the measurement unit", async ({ page }) => {

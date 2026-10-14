@@ -62,7 +62,9 @@ function formatScaledNumber(mantissa, exponent) {
 }
 
 /**
- * Draws the grid into the overlay as one minor and one major path.
+ * Draws the grid into the overlay as one minor and one major path. The two
+ * paths are created on the first draw and reused afterwards, so panning and
+ * zooming only rewrite their path data.
  * @param {object} options
  * @param {SVGSVGElement} options.overlay
  * @param {{width: number, height: number}} options.rect Overlay size in CSS pixels.
@@ -74,14 +76,17 @@ function formatScaledNumber(mantissa, exponent) {
  */
 export function renderGridOverlay({ overlay, rect, bounds, unit, worldToCanvasPoint }) {
   const paths = buildGridPaths({ rect, bounds, unit, worldToCanvasPoint });
-  overlay.replaceChildren();
   if (!paths) {
+    overlay.replaceChildren();
     return null;
   }
 
+  if (overlay.childElementCount !== 2) {
+    overlay.replaceChildren(createGridPath("grid-minor"), createGridPath("grid-major"));
+  }
   overlay.setAttribute("viewBox", `0 0 ${rect.width} ${rect.height}`);
-  appendGridPath(overlay, "grid-minor", paths.minor);
-  appendGridPath(overlay, "grid-major", paths.major);
+  overlay.children[0].setAttribute("d", paths.minor);
+  overlay.children[1].setAttribute("d", paths.major);
   return paths.spacing;
 }
 
@@ -148,10 +153,8 @@ function gridLineRange(min, max, step, screenPixels) {
   return { first, last };
 }
 
-function appendGridPath(overlay, className, pathData) {
-  if (!pathData) return;
+function createGridPath(className) {
   const path = document.createElementNS(SVG_NS, "path");
   path.setAttribute("class", className);
-  path.setAttribute("d", pathData);
-  overlay.appendChild(path);
+  return path;
 }
