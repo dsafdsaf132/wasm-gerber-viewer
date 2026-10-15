@@ -1617,7 +1617,6 @@ test("mobile composite selection Done stays above open and collapsed drawers", a
   };
   const expectDoneIsTopmost = async () => {
     const done = page.locator(".composite-selection-bar button", { hasText: "Done" });
-    await done.scrollIntoViewIfNeeded();
     await expect.poll(() => done.evaluate((button) => {
       const rect = button.getBoundingClientRect();
       const hit = document.elementFromPoint(

@@ -2072,6 +2072,9 @@ export class GerberViewer {
     }
 
     this.restoreCanvasViewState(preserveViewState);
+    if (this.compositeSelectionPresets) {
+      this.compositeSelectionPresets.scrollLeft = this.compositeSelectionPresets.scrollWidth;
+    }
     this.requestRender();
     return true;
   }
@@ -9207,10 +9210,14 @@ export class GerberViewer {
     this.renderLayerList();
     this.updateUiState();
     this.requestRender();
-    requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      if (this.compositeSelectionPresets) {
+        this.compositeSelectionPresets.scrollLeft = this.compositeSelectionPresets.scrollWidth;
+      }
       this.compositeSelectionBar
         ?.querySelector("[data-composite-selection-done]")
-        ?.focus({ preventScroll: true }));
+        ?.focus({ preventScroll: true });
+    });
     return true;
   }
 
