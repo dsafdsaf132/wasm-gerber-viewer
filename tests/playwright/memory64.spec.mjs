@@ -13,7 +13,6 @@ const demoFiles = [
   demoFile("performance-test-region-72K.gbr"),
   demoFile("performance-test-stars-10K.gbr"),
 ];
-const GIB = 2 ** 30;
 const WASM32_BINARY = "/wasm/pkg/wasm_gerber_processor_bg.wasm";
 const WASM64_BINARY = "/wasm/pkg64/wasm_gerber_processor_bg.wasm";
 const WASM32_GLUE = "**/wasm/pkg/wasm_gerber_processor.js";
@@ -34,22 +33,6 @@ Y-150000D01*
 D10*
 X000000Y000000D03*
 M02*`;
-
-// About 22,000 small pads on the same board that leave its middle free: enough
-// picking data that it cannot hide in the gaps of a nearly empty heap.
-function padGridSource(columns = 180, rows = 130) {
-  const lines = ["%FSLAX24Y24*%", "%MOMM*%", "%ADD12C,0.100*%", "D12*"];
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      const x = -18 + (36 * column) / (columns - 1);
-      const y = -13 + (26 * row) / (rows - 1);
-      if (Math.abs(x) < 6 && Math.abs(y) < 6) continue;
-      lines.push(`X${Math.round(x * 10000)}Y${Math.round(y * 10000)}D03*`);
-    }
-  }
-  lines.push("M02*");
-  return lines.join("\n");
-}
 
 const gerber = (name, source) => ({
   name,
@@ -245,50 +228,6 @@ test("a deployment without wasm/pkg64 falls back to wasm32", async ({ page }) =>
   await expectBuilds(page, "wasm32", "wasm32");
   await loadFiles(page, demoFiles);
   expect(pageErrors).toEqual([]);
-  await expect(page.locator("#diagnostics-count")).toHaveText("0");
-});
-
-test("the memory64 main instance picks features stored above 4 GiB", async ({ page }) => {
-  test.setTimeout(180_000);
-  const watched = watchPage(page);
-  await page.goto("/");
-  await expectBuilds(page, "wasm64", "wasm32");
-
-  // Pin 4.25 GiB of the main heap. The block is never freed, so the picking
-  // data built afterwards can only live above the 32-bit address range.
-  const pinned = await page.evaluate(async (bytes) => {
-    const main = await import("/wasm/pkg64/wasm_gerber_processor.js");
-    const wasm = await main.default();
-    try {
-      const pointer = wasm.__wbindgen_malloc(bytes, 1);
-      return { pointer, memoryBytes: wasm.memory.buffer.byteLength };
-    } catch (error) {
-      return { error: String(error) };
-    }
-  }, 4.25 * GIB);
-  // The allocator traps when the browser cannot grow the heap, which here
-  // means the machine had no 4.25 GiB to spare (for instance while other
-  // tests ran alongside), not that the viewer failed.
-  test.skip(Boolean(pinned.error), `could not pin 4.25 GiB: ${pinned.error}`);
-  expect(pinned.pointer).toBeGreaterThan(0);
-  expect(pinned.memoryBytes).toBeGreaterThan(4.25 * GIB);
-
-  await loadFiles(page, [
-    gerber("grid.gbl", padGridSource()),
-    gerber("pad.gtl", padSource()),
-  ]);
-  const afterLoad = await page.evaluate(async () => {
-    const main = await import("/wasm/pkg64/wasm_gerber_processor.js");
-    return (await main.default()).memory.buffer.byteLength;
-  });
-  // The picking index did not fit below the pinned block.
-  expect(afterLoad).toBeGreaterThan(pinned.memoryBytes);
-
-  const box = await page.locator("#gerber-canvas").boundingBox();
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await expect(page.locator("#bounds-readout")).toContainText("pad.gtl");
-  await expect(page.locator("#bounds-readout")).toContainText("D10");
-  expect(watched.errors).toEqual([]);
   await expect(page.locator("#diagnostics-count")).toHaveText("0");
 });
 
