@@ -24,6 +24,8 @@ export function getViewerElements(documentRef = document) {
   return {
     canvas,
     viewerSurface,
+    toolbarButtonBar: requireElement(documentRef, "toolbar-button-bar"),
+    canvasToolbar: requireElement(documentRef, "canvas-toolbar"),
     fileInput: requireElement(documentRef, "file-input"),
     selectFilesBtn: requireElement(documentRef, "select-files-btn"),
     toolbarClearAllBtn: requireElement(documentRef, "toolbar-clear-all-btn"),
@@ -126,8 +128,7 @@ export function getViewerElements(documentRef = document) {
     antiAliasingOnInput: requireElement(documentRef, "anti-aliasing-on"),
     antiAliasing8Input: requireElement(documentRef, "anti-aliasing-8"),
     antiAliasing16Input: requireElement(documentRef, "anti-aliasing-16"),
-    gridOffInput: requireElement(documentRef, "grid-off"),
-    gridOnInput: requireElement(documentRef, "grid-on"),
+    gridToggleBtn: requireElement(documentRef, "grid-toggle-btn"),
     minimumVisibilityOffInput: requireElement(
       documentRef,
       "minimum-visibility-off",

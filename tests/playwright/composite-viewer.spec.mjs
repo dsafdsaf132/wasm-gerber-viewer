@@ -1617,6 +1617,7 @@ test("mobile composite selection Done stays above open and collapsed drawers", a
   };
   const expectDoneIsTopmost = async () => {
     const done = page.locator(".composite-selection-bar button", { hasText: "Done" });
+    await done.scrollIntoViewIfNeeded();
     await expect.poll(() => done.evaluate((button) => {
       const rect = button.getBoundingClientRect();
       const hit = document.elementFromPoint(
@@ -1629,7 +1630,12 @@ test("mobile composite selection Done stays above open and collapsed drawers", a
   };
 
   await startSelection();
-  await expect(drawerToggle).toBeDisabled();
+  await expect(drawerToggle).toBeEnabled();
+  await drawerToggle.click();
+  await expect(drawer).toHaveClass(/collapsed/);
+  await expect(page.locator(".composite-selection-bar")).toBeVisible();
+  await drawerToggle.click();
+  await expect(drawer).not.toHaveClass(/collapsed/);
   let done = await expectDoneIsTopmost();
   await done.click();
   await expect(page.locator(".composite-selection-bar")).toBeHidden();
@@ -1643,7 +1649,7 @@ test("mobile composite selection Done stays above open and collapsed drawers", a
       viewer.layers.find((layer) => layer.kind === "composite"),
     );
   })).toBe(true);
-  await expect(drawerToggle).toBeDisabled();
+  await expect(drawerToggle).toBeEnabled();
   await expect(drawer).toHaveClass(/collapsed/);
   done = await expectDoneIsTopmost();
   await done.click();
@@ -1795,7 +1801,12 @@ test("selection mode locks layer controls and supports cancel and commit", async
   expect(selectionBarBox).not.toBeNull();
   expect(selectionPresetBox).not.toBeNull();
   expect(selectionBarBox.y).toBeGreaterThanOrEqual(box.y);
-  expect(selectionBarBox.y).toBeLessThanOrEqual(box.y + 20);
+  const hudBox = await page.locator(".viewport-hud").boundingBox();
+  const hudOverlaps = selectionBarBox.x < hudBox.x + hudBox.width &&
+    hudBox.x < selectionBarBox.x + selectionBarBox.width &&
+    selectionBarBox.y < hudBox.y + hudBox.height &&
+    hudBox.y < selectionBarBox.y + selectionBarBox.height;
+  expect(hudOverlaps).toBe(false);
   expect(selectionBarBox.x + selectionBarBox.width).toBeLessThanOrEqual(
     box.x + box.width,
   );

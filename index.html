@@ -18,128 +18,140 @@
           </div>
         </div>
 
-        <div class="toolbar-group primary-actions">
-          <button type="button" class="tool-button primary" id="select-files-btn">
-            <i data-lucide="folder-open"></i>
-            <span>Open</span>
-          </button>
-          <button
-            type="button"
-            class="icon-button danger"
-            id="toolbar-clear-all-btn"
-            aria-label="Clear all layers"
-            title="Clear all layers"
-            disabled
-          >
-            <i data-lucide="trash-2"></i>
-          </button>
-          <input
-            type="file"
-            id="file-input"
-            multiple
-            accept="text/*,application/zip,application/x-zip-compressed,application/gzip,application/x-tar,.zip,.tgz,.tar,.gz,.gdo,.gbr,.gbx,.ger,.art,.gtl,.gbl,.gts,.gbs,.gto,.gbo,.gtp,.gbp,.cmp,.drd,.gko,.phd,.plc,.sol,.stc,.sts,.outline,.drl,.nc,.xnc,.xln"
-          />
-          <button
-            type="button"
-            class="icon-button"
-            id="fit-view-btn"
-            aria-label="Fit"
-            title="Fit"
-          >
-            <i data-lucide="scan"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="flip-horizontal-btn"
-            aria-label="Flip horizontally"
-            aria-pressed="false"
-            title="Flip horizontally"
-          >
-            <i data-lucide="flip-horizontal-2"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="flip-vertical-btn"
-            aria-label="Flip vertically"
-            aria-pressed="false"
-            title="Flip vertically"
-          >
-            <i data-lucide="flip-vertical-2"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="canvas-theme-toggle"
-            aria-label="Switch to white canvas"
-            aria-pressed="false"
-            title="Switch to white canvas"
-          >
-            <i data-lucide="sun"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="screenshot-btn"
-            aria-label="Export screenshot"
-            title="Export screenshot"
-          >
-            <i data-lucide="camera"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="ruler-toggle-btn"
-            aria-label="Enable ruler"
-            aria-pressed="false"
-            title="Enable ruler"
-          >
-            <i data-lucide="ruler"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="ruler-clear-btn"
-            aria-label="Clear ruler measurements"
-            title="Clear ruler measurements"
-            disabled
-          >
-            <i data-lucide="eraser"></i>
-          </button>
-          <button
-            type="button"
-            class="unit-toggle"
-            id="measurement-unit-toggle"
-            aria-label="Show measurements in inches"
-            title="Show measurements in inches"
-          >
-            mm
-          </button>
-        </div>
+        <div class="toolbar-button-bar drag-scroll" id="toolbar-button-bar" tabindex="0" aria-label="Workspace actions">
+          <div class="toolbar-group primary-actions">
+            <button type="button" class="tool-button primary" id="select-files-btn">
+              <i data-lucide="folder-open"></i>
+              <span>Open</span>
+            </button>
+            <button
+              type="button"
+              class="icon-button danger"
+              id="toolbar-clear-all-btn"
+              aria-label="Clear all layers"
+              title="Clear all layers"
+              disabled
+            >
+              <i data-lucide="trash-2"></i>
+            </button>
+            <input
+              type="file"
+              id="file-input"
+              multiple
+              accept="text/*,application/zip,application/x-zip-compressed,application/gzip,application/x-tar,.zip,.tgz,.tar,.gz,.gdo,.gbr,.gbx,.ger,.art,.gtl,.gbl,.gts,.gbs,.gto,.gbo,.gtp,.gbp,.cmp,.drd,.gko,.phd,.plc,.sol,.stc,.sts,.outline,.drl,.nc,.xnc,.xln"
+            />
+            <button
+              type="button"
+              class="icon-button"
+              id="fit-view-btn"
+              aria-label="Fit"
+              title="Fit"
+            >
+              <i data-lucide="scan"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="flip-horizontal-btn"
+              aria-label="Flip horizontally"
+              aria-pressed="false"
+              title="Flip horizontally"
+            >
+              <i data-lucide="flip-horizontal-2"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="flip-vertical-btn"
+              aria-label="Flip vertically"
+              aria-pressed="false"
+              title="Flip vertically"
+            >
+              <i data-lucide="flip-vertical-2"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="canvas-theme-toggle"
+              aria-label="Switch to white canvas"
+              aria-pressed="false"
+              title="Switch to white canvas"
+            >
+              <i data-lucide="sun"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="screenshot-btn"
+              aria-label="Export screenshot"
+              title="Export screenshot"
+            >
+              <i data-lucide="camera"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="ruler-toggle-btn"
+              aria-label="Enable ruler"
+              aria-pressed="false"
+              title="Enable ruler"
+            >
+              <i data-lucide="ruler"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="grid-toggle-btn"
+              aria-label="Enable grid"
+              aria-pressed="false"
+              title="Enable grid"
+            >
+              <i data-lucide="grid-3x3"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="ruler-clear-btn"
+              aria-label="Clear ruler measurements"
+              title="Clear ruler measurements"
+              disabled
+            >
+              <i data-lucide="eraser"></i>
+            </button>
+            <button
+              type="button"
+              class="unit-toggle"
+              id="measurement-unit-toggle"
+              aria-label="Show measurements in inches"
+              title="Show measurements in inches"
+            >
+              mm
+            </button>
+          </div>
 
-        <div class="toolbar-divider" aria-hidden="true"></div>
+          <div class="toolbar-divider" aria-hidden="true"></div>
 
-        <div class="toolbar-group view-actions">
-          <button
-            type="button"
-            class="icon-button"
-            id="drawer-toggle"
-            aria-label="Hide panel"
-            aria-expanded="true"
-            title="Hide panel"
-          >
-            <i data-lucide="panel-right-close"></i>
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            id="fullscreen-btn"
-            aria-label="Enter fullscreen"
-            title="Enter fullscreen"
-          >
-            <i data-lucide="maximize-2"></i>
-          </button>
+          <div class="toolbar-group view-actions">
+            <button
+              type="button"
+              class="icon-button"
+              id="drawer-toggle"
+              aria-label="Hide panel"
+              aria-expanded="true"
+              title="Hide panel"
+            >
+              <i data-lucide="panel-right-close"></i>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              id="fullscreen-btn"
+              aria-label="Enter fullscreen"
+              title="Enter fullscreen"
+            >
+              <i data-lucide="maximize-2"></i>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -168,18 +180,20 @@
             <span>Drop Files</span>
           </div>
 
-          <div class="viewport-hud">
-            <div class="metric-pill">
-              <i data-lucide="layers"></i>
-              <span id="visible-layer-count">0 / 0</span>
-            </div>
-            <div class="metric-pill">
-              <i data-lucide="search"></i>
-              <span id="zoom-readout">100%</span>
-            </div>
-            <div class="metric-pill" id="grid-spacing-pill" title="Grid spacing" hidden>
-              <i data-lucide="grid-3x3"></i>
-              <span id="grid-spacing-readout" aria-label="Grid spacing"></span>
+          <div class="canvas-toolbar" id="canvas-toolbar">
+            <div class="viewport-hud">
+              <div class="metric-pill">
+                <i data-lucide="layers"></i>
+                <span id="visible-layer-count">0 / 0</span>
+              </div>
+              <div class="metric-pill">
+                <i data-lucide="search"></i>
+                <span id="zoom-readout">100%</span>
+              </div>
+              <div class="metric-pill" id="grid-spacing-pill" title="Grid spacing" hidden>
+                <i data-lucide="grid-3x3"></i>
+                <span id="grid-spacing-readout" aria-label="Grid spacing"></span>
+              </div>
             </div>
           </div>
 
@@ -441,31 +455,6 @@
                             value="16"
                           />
                           <span>16x</span>
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="option-outline">
-                    <div class="option-row">
-                      <span>Grid</span>
-                      <div class="segmented-control" role="radiogroup" aria-label="Grid">
-                        <label>
-                          <input
-                            type="radio"
-                            id="grid-off"
-                            name="grid"
-                            value="off"
-                          />
-                          <span>Off</span>
-                        </label>
-                        <label>
-                          <input
-                            type="radio"
-                            id="grid-on"
-                            name="grid"
-                            value="on"
-                          />
-                          <span>On</span>
                         </label>
                       </div>
                     </div>

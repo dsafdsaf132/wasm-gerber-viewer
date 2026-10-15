@@ -30,6 +30,7 @@ import {
 import { DiagnosticsLog } from "../ui/diagnostics.js";
 import { getViewerElements } from "../ui/dom-elements.js";
 import { DrawerController } from "../ui/drawer-controller.js";
+import { enableDragScroll } from "../ui/drag-scroll.js";
 import {
   formatFileSize,
   getErrorMessage,
@@ -2344,13 +2345,8 @@ export class GerberViewer {
       });
     }
 
-    for (const input of this.getGridInputs()) {
-      input.addEventListener("change", () => {
-        if (input.checked) {
-          this.setGrid(input.value === "on");
-        }
-      });
-    }
+    this.gridToggleBtn.addEventListener("click", () => this.setGrid(!this.grid));
+    enableDragScroll(this.toolbarButtonBar);
 
     for (const input of this.getMinimumVisibilityInputs()) {
       input.addEventListener("change", () => {
@@ -2825,10 +2821,6 @@ export class GerberViewer {
       !this.supportedMsaaSamples.includes(input.value === "on" ? 4 : Number(input.value));
   }
 
-  getGridInputs() {
-    return [this.gridOffInput, this.gridOnInput];
-  }
-
   getBoardOutlineBoundsMarginUnitInputs() {
     return [
       this.boardOutlineBoundsMarginUnitMmInput,
@@ -2910,9 +2902,10 @@ export class GerberViewer {
 
     // The grid is an overlay drawn outside the renderer, so it stays
     // available while the renderer is busy.
-    for (const input of this.getGridInputs()) {
-      input.checked = (input.value === "on") === this.grid;
-    }
+    this.gridToggleBtn.setAttribute("aria-pressed", String(this.grid));
+    const gridLabel = this.grid ? "Disable grid" : "Enable grid";
+    this.gridToggleBtn.setAttribute("aria-label", gridLabel);
+    this.gridToggleBtn.title = gridLabel;
 
     this.syncBoardOutlineBoundsMarginControl();
 
@@ -3838,7 +3831,6 @@ export class GerberViewer {
     for (const button of this.panelTabs) {
       button.disabled = compositeSelectionLocked;
     }
-    this.drawerController.setLocked(compositeSelectionLocked);
     if (rendererBusy && (this.draggedLayerId || this.layerTouchDrag)) {
       this.cancelLayerReorderGesture();
     }
@@ -9223,6 +9215,7 @@ export class GerberViewer {
   }
 
   createCompositeSelectionBar() {
+    this.disposeCompositeSelectionScroll?.();
     this.compositeSelectionBar?.remove();
     this.compositeSelectionPresets?.remove();
     const bar = document.createElement("div");
@@ -9230,7 +9223,8 @@ export class GerberViewer {
     bar.setAttribute("role", "region");
     bar.setAttribute("aria-label", "Composite visible area selection");
     const presets = document.createElement("div");
-    presets.className = "composite-selection-presets";
+    presets.className = "composite-selection-presets drag-scroll";
+    presets.tabIndex = 0;
     presets.setAttribute("role", "toolbar");
     presets.setAttribute("aria-label", "Visible area presets");
     for (const [command, label] of [
@@ -9267,7 +9261,8 @@ export class GerberViewer {
     done.addEventListener("click", () => this.finishCompositeSelection(true));
     presets.appendChild(done);
     bar.appendChild(presets);
-    this.viewerSurface.appendChild(bar);
+    this.canvasToolbar.appendChild(bar);
+    this.disposeCompositeSelectionScroll = enableDragScroll(presets);
     this.compositeSelectionInfo.hidden = false;
     this.compositeSelectionInfo.textContent = "No area selected";
     this.compositeSelectionBar = bar;
@@ -9452,6 +9447,8 @@ export class GerberViewer {
       });
     }
     this.compositeSelectionBar?.remove();
+    this.disposeCompositeSelectionScroll?.();
+    this.disposeCompositeSelectionScroll = null;
     this.compositeSelectionBar = null;
     if (this.compositeSelectionInfo) {
       this.compositeSelectionInfo.hidden = true;

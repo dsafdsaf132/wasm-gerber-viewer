@@ -16,9 +16,8 @@ function sampleGerber() {
 
 async function openSample(page) {
   await page.goto("/");
-  // The option radios are checked once the WASM module has loaded; uploading
-  // before that is lost (see anti-aliasing.spec.mjs).
-  await expect(page.locator("#grid-off")).toBeChecked({ timeout: 60_000 });
+  // Wait for WASM initialization before uploading.
+  await expect(page.locator("#region-arc-exact")).toBeChecked({ timeout: 60_000 });
   await page.locator("#file-input").setInputFiles({
     name: "grid.gbr",
     mimeType: "text/plain",
@@ -34,7 +33,11 @@ const STEP = String.raw`(?:[125]0*|0\.0*[125])`;
 const spacingLabel = (units) => new RegExp(`^${STEP} (?:${units})$`);
 
 async function setGrid(page, on) {
-  await page.locator(on ? "#grid-on" : "#grid-off").check({ force: true });
+  const toggle = page.locator("#grid-toggle-btn");
+  if ((await toggle.getAttribute("aria-pressed")) !== String(on)) {
+    await toggle.click();
+  }
+  await expect(toggle).toHaveAttribute("aria-pressed", String(on));
 }
 
 /** Distances in CSS pixels between neighbouring vertical grid lines. */
@@ -68,7 +71,7 @@ async function zoomBy(page, steps) {
 
 test("grid is off by default and leaves the overlay empty", async ({ page }) => {
   await openSample(page);
-  await expect(page.locator("#grid-off")).toBeChecked();
+  await expect(page.locator("#grid-toggle-btn")).toHaveAttribute("aria-pressed", "false");
   await expect(page.locator("#grid-overlay > *")).toHaveCount(0);
   await expect(page.locator("#grid-spacing-pill")).toBeHidden();
 });
@@ -87,7 +90,7 @@ test("turning the grid on draws it, persists, and turning it off empties it", as
   // After a reload the option is restored, and the grid comes back with the
   // first layer: it stays hidden while the "No Layers Loaded" screen shows.
   await page.reload();
-  await expect(page.locator("#grid-on")).toBeChecked({ timeout: 60_000 });
+  await expect(page.locator("#grid-toggle-btn")).toHaveAttribute("aria-pressed", "true", { timeout: 60_000 });
   await expect(page.locator("#grid-overlay > *")).toHaveCount(0);
   await expect(page.locator("#grid-spacing-pill")).toBeHidden();
   await page.locator("#file-input").setInputFiles({
