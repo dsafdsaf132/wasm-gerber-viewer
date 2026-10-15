@@ -122,7 +122,7 @@ test("minor cells stay between 8 and 20 pixels while zooming far in and out", as
   }
   // Zooming changes the spacing rather than the cell size.
   expect(labels.size).toBeGreaterThan(2);
-  await expect(page.locator("#grid-overlay > path")).toHaveCount(2);
+  await expect(page.locator("#grid-overlay > path")).toHaveCount(4);
   await expect(page.locator("#grid-overlay path.grid-major")).toHaveAttribute("data-probe", "first");
 });
 
