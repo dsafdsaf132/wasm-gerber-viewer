@@ -168,3 +168,108 @@ test("grid lines switch colour with the canvas theme", async ({ page }) => {
   await page.locator("#canvas-theme-toggle").click();
   await expect.poll(stroke).toBe(dark);
 });
+
+test("axes and the origin marker follow the world origin", async ({ page }) => {
+  await openSample(page);
+  await setGrid(page, true);
+  // The sample board spans 0..40 x 0..30 mm, so a fitted view shows the origin.
+  await expect(page.locator("#grid-overlay path.grid-axis")).toHaveCount(1);
+  const originAndAxes = () =>
+    page.locator("#grid-overlay").evaluate((overlay) => {
+      const axes = overlay.querySelector(".grid-axis").getAttribute("d");
+      const origin = overlay.querySelector(".grid-origin").getAttribute("d");
+      const vertical = [...axes.matchAll(/M(-?[\d.]+) 0V/g)].map((match) => Number(match[1]));
+      const horizontal = [...axes.matchAll(/M0 (-?[\d.]+)H/g)].map((match) => Number(match[1]));
+      const centre = origin.match(/^M(-?[\d.]+) (-?[\d.]+)/);
+      return { vertical, horizontal, centre: centre && [Number(centre[1]), Number(centre[2])] };
+    });
+  const fitted = await originAndAxes();
+  expect(fitted.vertical).toHaveLength(1);
+  expect(fitted.horizontal).toHaveLength(1);
+  expect(fitted.centre).toEqual([fitted.vertical[0], fitted.horizontal[0]]);
+
+  // Panning moves the axes and the marker together.
+  const canvas = page.locator("#gerber-canvas");
+  const box = await canvas.boundingBox();
+  await page.mouse.move(box.x + box.width / 3, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 3 + 60, box.y + box.height / 2 - 40, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => (await originAndAxes()).vertical[0]).not.toBe(fitted.vertical[0]);
+  const panned = await originAndAxes();
+  expect(panned.vertical[0] - fitted.vertical[0]).toBeCloseTo(60, 0);
+  expect(panned.horizontal[0] - fitted.horizontal[0]).toBeCloseTo(-40, 0);
+  expect(panned.centre).toEqual([panned.vertical[0], panned.horizontal[0]]);
+});
+
+test("coordinate labels stay inside the view without overlapping while zooming", async ({ page }) => {
+  await openSample(page);
+  await setGrid(page, true);
+  await page.locator("#grid-overlay .grid-x-labels text").first().evaluate((text) => {
+    text.parentNode.dataset.probe = "first";
+  });
+
+  const labelBoxes = () =>
+    page.locator("#grid-overlay").evaluate((overlay) => {
+      const view = overlay.getBoundingClientRect();
+      const status = document.querySelector(".canvas-status").getBoundingClientRect();
+      const hud = document.querySelector(".viewport-hud").getBoundingClientRect();
+      const boxes = [...overlay.querySelectorAll(".grid-labels text")].map((text) => {
+        const box = text.getBoundingClientRect();
+        return { text: text.textContent, left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+      });
+      return {
+        boxes,
+        view: { left: view.left, right: view.right, top: view.top, bottom: view.bottom },
+        statusTop: status.top,
+        hud: { left: hud.left, right: hud.right, top: hud.top, bottom: hud.bottom },
+      };
+    });
+  const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+  for (const steps of [0, 10, 10, -10, -10, -10]) {
+    if (steps) await zoomBy(page, steps);
+    const { boxes, view, statusTop, hud } = await labelBoxes();
+    expect(boxes.length).toBeGreaterThan(2);
+    for (const box of boxes) {
+      expect(box.text).toMatch(/^-?\d+(?:\.\d+)?$/);
+      expect(box.left).toBeGreaterThanOrEqual(view.left - 0.5);
+      expect(box.right).toBeLessThanOrEqual(view.right + 0.5);
+      expect(box.bottom).toBeLessThanOrEqual(statusTop + 0.5);
+      expect(overlaps(box, hud), `${box.text} under the HUD`).toBe(false);
+    }
+    for (let a = 0; a < boxes.length; a++) {
+      for (let b = a + 1; b < boxes.length; b++) {
+        expect(overlaps(boxes[a], boxes[b]), `${boxes[a].text} / ${boxes[b].text}`).toBe(false);
+      }
+    }
+  }
+  // The label groups are reused rather than recreated.
+  await expect(page.locator("#grid-overlay .grid-x-labels")).toHaveAttribute("data-probe", "first");
+});
+
+test("coordinate labels follow the measurement unit", async ({ page }) => {
+  await openSample(page);
+  await setGrid(page, true);
+  const labels = () =>
+    page.locator("#grid-overlay .grid-x-labels text").evaluateAll((texts) => texts.map((text) => text.textContent));
+  const readout = page.locator("#grid-spacing-readout");
+
+  // The fitted 40 mm board has labels at 0 and at 10 mm, written with the
+  // decimals of the spacing ("0", "0.0" or "0.00").
+  const mm = await labels();
+  expect(mm.some((text) => Number(text) === 0)).toBe(true);
+  expect(mm.some((text) => Number(text) === 10)).toBe(true);
+
+  await page.locator("#measurement-unit-toggle").click();
+  await expect(readout).toHaveText(spacingLabel("in|mil"));
+  const unit = (await readout.textContent()).split(" ")[1];
+  const step = Number((await readout.textContent()).split(" ")[0]);
+  const imperial = await labels();
+  expect(imperial).not.toEqual(mm);
+  // Every label is a multiple of five minor steps, in the readout's unit.
+  for (const text of imperial) {
+    const ratio = Number(text) / (step * 5);
+    expect(Math.abs(ratio - Math.round(ratio)), `${text} ${unit}`).toBeLessThan(1e-6);
+  }
+});
