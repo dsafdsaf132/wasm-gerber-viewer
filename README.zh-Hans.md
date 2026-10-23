@@ -17,9 +17,9 @@
 在线体验：
 
 - [查看器](https://dsafdsaf132.github.io/wasm-gerber-viewer/) / [镜像站点](https://wasm-gerber-viewer.vercel.app/)
-- [Sample 1: KLP-5e ESP32 Sensor Board](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffutureshocked%2FKLP-5e-ESP32-sensor-board%2Fmain%2FKiCad%2520project%2Fdfm%2Fgerber.zip)
-- [Sample 2: Xassette-Asterisk](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fprocessor-cdn.kitspace.org%2Fv6%2FSdtElectronics%2FXassette-Asterisk%2F6ccd88501c99e2339571de744d003d571be47fad%2F_%2FXassette-Asterisk-6ccd885-gerbers.zip)
-- [Sample 3: OtterCastAmp](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fprocessor-cdn.kitspace.org%2Fv6%2FOttercast%2FOtterCastAmp%2F0b5f7f9a8e4e43a5d39048b9a1fa03e5cf7fc9f7%2F_%2FOtterCastAmp-0b5f7f9-gerbers.zip)
+- [Sample 1: SparkFun Thing Plus ESP32 WROOM C Panel](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsparkfun%2FSparkFun_Thing_Plus_ESP32_WROOM_C%2Fmain%2FHardware%2FProduction%2FSparkFun_Thing_Plus_ESP32_WROOM_C-Panel.zip)
+- [Sample 2: LimeSDR-PCIe](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmyriadrf%2FLimeSDR-PCIe%2Fmaster%2Fhardware%2F1v3%2FDFM%2FLimeSDR-PCIe_1v3_DB_DFMr2.zip)
+- [Sample 3: LimeNET-Micro](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmyriadrf%2FLimeNET-Micro%2Fmaster%2Fhardware%2F2v1%2FLimeNet-Micro_2v1-SDR_DB_DFMr2.zip)
 - [Sample 4: Zaius EVT3 Motherboard (ODB++)](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fmedia.githubusercontent.com%2Fmedia%2Fopencomputeproject%2Fzaius-barreleye-g2%2Fmaster%2FHW%2FEE%2FGBR%2FEVT%2FMB%2FZaius-EVT3-LAYOUT-MB-ODB-X02-20161226-Final.zip)
 - [功能测试](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fgerber-feature-test.gbr)
 - 性能测试 - Stars: [1K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-1K.gbr), [10K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fwasm-gerber-viewer.vercel.app%2Fdemo%2Fperformance-test-stars-10K.gbr), [100K](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-100K.gbr), [1M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr), [5M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=5&repeatOffsetX=70), [10M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=10&repeatOffsetX=70), [20M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=20&repeatOffsetX=70), [50M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=50&repeatOffsetX=70), [100M](https://wasm-gerber-viewer.vercel.app/?url=https%3A%2F%2Fw2f6wchhvqyk5cap.public.blob.vercel-storage.com%2Fdemo%2Fperformance-test-stars-1M.gbr&repeat=100&repeatOffsetX=0.007)
@@ -178,32 +178,32 @@ wasm-gerber-viewer/
 示例压缩包从各自的上游项目加载，不包含在本仓库中。
 
 <details>
-<summary>Sample 1: KLP-5e ESP32 Sensor Board</summary>
+<summary>Sample 1: SparkFun Thing Plus ESP32 WROOM C Panel</summary>
 
-- Project: [KLP-5e ESP32 Sensor Board](https://github.com/futureshocked/KLP-5e-ESP32-sensor-board)
-- Copyright: Copyright (c) 2025, Peter Dalmaris
-- License: CERN-OHL-S v2.0
-- Archive: <https://raw.githubusercontent.com/futureshocked/KLP-5e-ESP32-sensor-board/main/KiCad%20project/dfm/gerber.zip>
-
-</details>
-
-<details>
-<summary>Sample 2: Xassette-Asterisk</summary>
-
-- Project: [Xassette-Asterisk](https://github.com/SdtElectronics/Xassette-Asterisk)
-- Copyright: SdtElectronics
-- License: CERN-OHL-W v2.0
-- Archive: <https://processor-cdn.kitspace.org/v6/SdtElectronics/Xassette-Asterisk/6ccd88501c99e2339571de744d003d571be47fad/_/Xassette-Asterisk-6ccd885-gerbers.zip>
+- Project: [SparkFun Thing Plus ESP32 WROOM C Panel](https://github.com/sparkfun/SparkFun_Thing_Plus_ESP32_WROOM_C)
+- Copyright: SparkFun Electronics
+- License: [CC BY-SA 4.0](https://github.com/sparkfun/SparkFun_Thing_Plus_ESP32_WROOM_C/blob/main/LICENSE.md)
+- Archive: <https://raw.githubusercontent.com/sparkfun/SparkFun_Thing_Plus_ESP32_WROOM_C/main/Hardware/Production/SparkFun_Thing_Plus_ESP32_WROOM_C-Panel.zip>
 
 </details>
 
 <details>
-<summary>Sample 3: OtterCastAmp</summary>
+<summary>Sample 2: LimeSDR-PCIe</summary>
 
-- Project: [OtterCastAmp](https://github.com/Ottercast/OtterCastAmp)
-- Copyright: Copyright (c) 2021 Ottercast, Niklas Fauth
-- License: MIT License
-- Archive: <https://processor-cdn.kitspace.org/v6/Ottercast/OtterCastAmp/0b5f7f9a8e4e43a5d39048b9a1fa03e5cf7fc9f7/_/OtterCastAmp-0b5f7f9-gerbers.zip>
+- Project: [LimeSDR-PCIe](https://github.com/myriadrf/LimeSDR-PCIe)
+- Copyright: LimeSDR-PCIe (c) 2016 Lime Microsystems Ltd
+- License: [CC BY 3.0](https://github.com/myriadrf/LimeSDR-PCIe/blob/master/hardware/COPYING)
+- Archive: <https://raw.githubusercontent.com/myriadrf/LimeSDR-PCIe/master/hardware/1v3/DFM/LimeSDR-PCIe_1v3_DB_DFMr2.zip>
+
+</details>
+
+<details>
+<summary>Sample 3: LimeNET-Micro</summary>
+
+- Project: [LimeNET-Micro](https://github.com/myriadrf/LimeNET-Micro)
+- Copyright: Lime Microsystems Ltd
+- License: [CC BY 3.0](https://github.com/myriadrf/LimeNET-Micro#licensing)
+- Archive: <https://raw.githubusercontent.com/myriadrf/LimeNET-Micro/master/hardware/2v1/LimeNet-Micro_2v1-SDR_DB_DFMr2.zip>
 
 </details>
 
