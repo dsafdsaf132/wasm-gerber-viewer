@@ -26,6 +26,8 @@ jobs:
   publish:
     name: Version, tag, publish, and release
     runs-on: ubuntu-latest
+    env:
+      SKIP_COMPOSITE_LIFECYCLE_STRESS: "1"
 
     steps:
       - name: Check out
