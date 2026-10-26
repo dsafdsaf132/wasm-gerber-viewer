@@ -12,7 +12,7 @@
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@types/node": "^26.3.0",
-    "node-gles-webgl2": "^0.4.0",
+    "node-gles-webgl2": "^0.5.2",
     "typescript": "^7.0.2"
   },
   "allowScripts": {
