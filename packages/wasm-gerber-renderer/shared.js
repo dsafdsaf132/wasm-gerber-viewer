@@ -1,3 +1,10 @@
+import {
+  detectLayerFormat,
+  looksLikeDrillContent,
+  needsLayerFormatDetection,
+} from "./dst/layer-format.js";
+export { looksLikeDrillContent, needsLayerFormatDetection } from "./dst/layer-format.js";
+
 const DEV_WASM_MODULE_PATH = "../../wasm/pkg/wasm_gerber_processor.js";
 
 export const DEFAULT_WASM_MODULE_URLS = [
@@ -641,6 +648,10 @@ export function isDrillSource(source, name = "", content = "") {
   const hasDrillPath = (name && isDrillPath(name)) || (sourceName && isDrillPath(sourceName));
   const hasAmbiguousDrdPath =
     (name && isAmbiguousDrdPath(name)) || (sourceName && isAmbiguousDrdPath(sourceName));
+  if ((needsLayerFormatDetection(name) || needsLayerFormatDetection(sourceName)) && content) {
+    const detected = detectLayerFormat(content);
+    if (detected) return detected === LAYER_KIND_DRILL;
+  }
   const hasSourcePath = Boolean(sourceName || (name && hasFileExtension(name)));
   return Boolean(
     hasDrillPath || ((!hasSourcePath || hasAmbiguousDrdPath) && looksLikeDrillContent(content)),
@@ -676,20 +687,6 @@ function hasFileExtension(path) {
   const fileName = fileBasename(String(path));
   const dotIndex = fileName.lastIndexOf(".");
   return dotIndex > 0 && dotIndex < fileName.length - 1;
-}
-
-export function looksLikeDrillContent(content) {
-  const lines = String(content ?? "")
-    .split(/\r?\n/, 80)
-    .map((line) => line.trim().toUpperCase());
-  if (lines.some((line) => line === "M48")) {
-    return true;
-  }
-  const hasToolDeclaration = lines.some((line) => /^T\d+C[+\-.\d]+/.test(line));
-  const hasDrillCommand = lines.some((line) =>
-    /^(METRIC|INCH|M71|M72|G05|G90|G91|ICI,ON|ICI,OFF)\b/.test(line),
-  );
-  return hasToolDeclaration && hasDrillCommand;
 }
 
 export function resolveDrillRenderColors(background) {

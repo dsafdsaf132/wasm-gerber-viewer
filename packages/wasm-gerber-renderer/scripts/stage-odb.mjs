@@ -38,6 +38,10 @@ export function isArchiveMetadataPath(path) {
 await rm(destinationRoot, { recursive: true, force: true });
 await mkdir(dirname(destinationRoot), { recursive: true });
 await cp(sourceRoot, destinationRoot, { recursive: true });
+await cp(
+  resolve(packageRoot, "../../js/src/layer-format.js"),
+  resolve(packageRoot, "dst/layer-format.js"),
+);
 await writeFile(resolve(destinationRoot, "config.js"), packageConfig);
 
 // Keep this check visible in logs when a source file accidentally imports a

@@ -19,6 +19,7 @@ import {
   MAX_SOURCE_FILE_SIZE_BYTES,
   MAX_TAR_EXPANDED_SIZE_BYTES,
   normalizeLayerKind,
+  needsLayerFormatDetection,
   parseColor,
   validateCompositeSourceCount,
 } from "../shared.js";
@@ -110,7 +111,7 @@ async function main() {
     ? await readCompositeConfig(compositeConfigPath)
     : { hiddenSources: [], composites: [] };
   if (compositeConfigPath) {
-    await classifyAmbiguousDrdLayers(layers);
+    await classifyAmbiguousLayers(layers);
   }
   const cliOutlineSelection = applyLayerSelectionOptions(layers, frameOptions);
   const normalizedCompositeConfig = normalizeCompositeConfig(
@@ -429,9 +430,9 @@ async function collectInputLayers(inputs) {
   return layers;
 }
 
-async function classifyAmbiguousDrdLayers(layers) {
+async function classifyAmbiguousLayers(layers) {
   for (const layer of layers) {
-    if (layer?.kind != null || !hasAmbiguousDrdName(layer)) continue;
+    if (layer?.kind != null || !hasAmbiguousLayerName(layer)) continue;
     let content;
     if (typeof layer.source === "string") {
       content = layer.source;
@@ -456,12 +457,12 @@ async function classifyAmbiguousDrdLayers(layers) {
   }
 }
 
-function hasAmbiguousDrdName(layer) {
+function hasAmbiguousLayerName(layer) {
   return [
     layer?.name,
     layer?.source?.path,
     layer?.__archiveEntryPath,
-  ].some((value) => String(value ?? "").toLowerCase().endsWith(".drd"));
+  ].some(needsLayerFormatDetection);
 }
 
 function applyLayerSelectionOptions(layers, frameOptions) {

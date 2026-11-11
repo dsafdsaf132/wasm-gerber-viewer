@@ -1,6 +1,6 @@
 import {
   getBaseFileName,
-  isAmbiguousDrdPath,
+  needsLayerFormatDetection,
   getLayerSourceKind,
   isArchiveMetadataPath,
   isLikelyTextBytes,
@@ -472,24 +472,28 @@ function getDroppedJobLabel(items) {
 }
 
 async function createKnownZipLayerSource(entry, archiveName, onArchiveWarning) {
-  const readText = createSharedTextReader((onProgress = () => {}) =>
-    readZipEntryText(entry, onProgress),
-  );
-  let preview = "";
-  if (isAmbiguousDrdPath(entry.name)) {
+  let preview = null;
+  const readText = createSharedTextReader((onProgress = () => {}) => {
+    if (preview !== null) {
+      onProgress(1);
+      return Promise.resolve(preview);
+    }
+    return readZipEntryText(entry, onProgress);
+  });
+  if (needsLayerFormatDetection(entry.name)) {
     try {
       preview = await readZipEntryText(entry);
     } catch (_error) {
       onArchiveWarning(
         archiveName,
-        `Could not inspect ${getBaseFileName(entry.name)}; loading as Gerber`,
+        `Could not inspect ${getBaseFileName(entry.name)}; using the file extension`,
       );
     }
   }
 
   return {
     name: getBaseFileName(entry.name),
-    kind: getLayerSourceKind(entry.name, preview),
+    kind: getLayerSourceKind(entry.name, preview ?? ""),
     sizeBytes: getZipEntrySizeBytes(entry),
     readText,
   };
@@ -572,13 +576,17 @@ function getHeadLineBytes(bytes, maxLines) {
 }
 
 async function readLayerKindPreview(file) {
-  if (!isAmbiguousDrdPath(file.name)) {
+  if (!needsLayerFormatDetection(file.name)) {
     return "";
   }
-  if (typeof file.slice === "function") {
-    return file.slice(0, 8192).text();
+  try {
+    if (typeof file.slice === "function") {
+      return await file.slice(0, 8192).text();
+    }
+    return await file.text();
+  } catch (_error) {
+    return "";
   }
-  return file.text();
 }
 
 function getZipEntrySizeBytes(entry) {

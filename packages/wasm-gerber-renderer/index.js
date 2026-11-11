@@ -23,6 +23,7 @@ import {
   normalizeDrillOutlineColor,
   normalizeColor,
   normalizeLayerKind,
+  needsLayerFormatDetection,
   normalizeLayer,
   normalizeLayerList,
   mergeBounds,
@@ -449,13 +450,14 @@ export class GerberRenderer {
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
     const initialKind = normalizeLayerKind(options.kind, source, options.name);
-    if (isDrillLayerKind(initialKind) && !this.frame.options.renderDrills) {
+    const inspectFormat = !options.kind && (
+      needsLayerFormatDetection(options.name) || needsLayerFormatDetection(getSourceName(source))
+    );
+    if (isDrillLayerKind(initialKind) && !this.frame.options.renderDrills && !inspectFormat) {
       return null;
     }
     const content = await sourceToText(source);
-    const kind = isDrillLayerKind(initialKind)
-      ? initialKind
-      : normalizeLayerKind(options.kind, source, options.name, content);
+    const kind = normalizeLayerKind(options.kind, source, options.name, content);
     if (isDrillLayerKind(kind)) {
       if (!this.frame.options.renderDrills) {
         return null;

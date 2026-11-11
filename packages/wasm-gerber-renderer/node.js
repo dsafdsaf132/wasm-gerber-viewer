@@ -49,6 +49,7 @@ import {
   normalizeColor,
   normalizeLayer,
   normalizeLayerKind,
+  needsLayerFormatDetection,
   normalizeLayerList,
   normalizeParseOptions,
   numberOrDefault,
@@ -695,7 +696,10 @@ export class NodeGerberRenderer {
     const offsetX = numberOrDefault(options.offsetX, 0);
     const offsetY = numberOrDefault(options.offsetY, 0);
     const initialKind = normalizeLayerKind(options.kind, source, options.name);
-    if (isDrillLayerKind(initialKind) && options.renderDrills === false) {
+    const inspectFormat = !options.kind && (
+      needsLayerFormatDetection(options.name) || needsLayerFormatDetection(getSourceName(source))
+    );
+    if (isDrillLayerKind(initialKind) && options.renderDrills === false && !inspectFormat) {
       return null;
     }
     const content = await sourceToText(source, {
@@ -704,9 +708,7 @@ export class NodeGerberRenderer {
       sourceDescription:
         "a string, File, Blob, ArrayBuffer, Uint8Array, URL, or path config",
     });
-    const kind = isDrillLayerKind(initialKind)
-      ? initialKind
-      : normalizeLayerKind(options.kind, source, options.name, content);
+    const kind = normalizeLayerKind(options.kind, source, options.name, content);
     if (isDrillLayerKind(kind) && options.renderDrills === false) {
       return null;
     }
