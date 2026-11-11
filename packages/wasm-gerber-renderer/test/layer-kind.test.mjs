@@ -122,16 +122,20 @@ test("batch load callbacks await rejection and leave the renderer reusable", asy
 test("viewer layer kind keeps ambiguous .drd Gerbers as Gerber", () => {
   assert.equal(getLayerSourceKind("board.drd", GERBER_CONTENT), "gerber");
   assert.equal(getLayerSourceKind("holes.drd", DRILL_CONTENT), "drill");
-  assert.equal(getLayerSourceKind("holes.drl", GERBER_CONTENT), "drill");
+  assert.equal(getLayerSourceKind("holes.drl", GERBER_CONTENT), "gerber");
 });
 
-test("viewer source loader inspects regular .drd file previews", async () => {
+test("viewer source loader inspects regular .drl and .drd file previews", async () => {
   const sources = await collectLayerSources([
     makeFile(DRILL_CONTENT, "holes.drd", "text/plain"),
     makeFile(GERBER_CONTENT, "board.drd", "text/plain"),
+    makeFile(GERBER_CONTENT, "board.drl", "text/plain"),
+    makeFile(DRILL_CONTENT, "holes.drl", "text/plain"),
   ]);
 
-  assert.equal(sources.length, 2);
+  assert.equal(sources.length, 4);
+  assert.equal(sources[2].kind, "gerber");
+  assert.equal(sources[3].kind, "drill");
   assert.equal(sources[0].kind, "drill");
   assert.equal(sources[1].kind, "gerber");
   assert.equal(await sources[0].readText(), DRILL_CONTENT);
@@ -224,7 +228,7 @@ test("viewer ZIP loads unknown text entries that look like drills", async () => 
   assert.equal(await sources[0].readText(), DRILL_CONTENT);
 });
 
-test("viewer ZIP preserves known extension behavior without sniffing", async () => {
+test("viewer ZIP keeps extension defaults when content is unrecognized", async () => {
   const plainText = "not a Gerber layer";
   const sources = await collectLayerSources(
     [makeFile("zip", "layers.zip", "application/zip")],
@@ -525,7 +529,7 @@ test("package layer kind uses source paths, names, and raw content deliberately"
   assert.equal(normalizeLayerKind("drill", GERBER_CONTENT, "board.gbr"), "drill");
 });
 
-test("renderDrills false skips drill sources before reading", async () => {
+test("renderDrills false skips explicit drill sources before reading", async () => {
   const unreadableFile = {
     name: "holes.drl",
     async text() {
@@ -536,7 +540,7 @@ test("renderDrills false skips drill sources before reading", async () => {
   const browserRecord = await GerberRenderer.prototype.createLayerRecord.call(
     { frame: { options: { renderDrills: false } } },
     { source: unreadableFile },
-    {},
+    { kind: "drill" },
   );
   assert.equal(browserRecord, null);
 
@@ -544,6 +548,7 @@ test("renderDrills false skips drill sources before reading", async () => {
   try {
     const nodeRecord = await node.loadLayer(fileLayer("/missing/holes.drl"), {
       renderDrills: false,
+      kind: "drill",
     });
     assert.equal(nodeRecord, null);
   } finally {
@@ -852,4 +857,128 @@ test("viewer accepts Zuken CR-5000 .phd photo data as Gerber", () => {
   // Companion report (.phl) and aperture table (.ptb) are not layer sources.
   assert.equal(isSupportedLayerPath("metal-mask-top.phl"), false);
   assert.equal(isSupportedLayerPath("metal-mask-top.ptb"), false);
+});
+
+test("ZIP .drl format detection reuses decoded content", async () => {
+  let reads = 0;
+  const sources = await collectLayerSources([makeFile("zip", "layers.zip", "application/zip")], {
+    jsZip: {
+      async loadAsync() {
+        return { files: {
+          "board.drl": {
+            ...makeZipEntry(GERBER_CONTENT, "board.drl"),
+            async async() {
+              reads++;
+              return GERBER_CONTENT;
+            },
+          },
+          "holes.drl": makeZipEntry(DRILL_CONTENT, "holes.drl"),
+        } };
+      },
+    },
+  });
+  assert.equal(sources.find(s => s.name === "board.drl").kind, "gerber");
+  assert.equal(sources.find(s => s.name === "holes.drl").kind, "drill");
+  assert.equal(await sources.find(s => s.name === "board.drl").readText(), GERBER_CONTENT);
+  assert.equal(reads, 1);
+});
+
+test("Gerber .drl is parsed even when drill rendering is disabled", async () => {
+  const renderer = new NodeGerberRenderer({}, makeParsedReuseWasmModule());
+  try {
+    const layer = await renderer.loadLayer(GERBER_CONTENT, { name: "board.drl", renderDrills: false });
+    assert.equal(layer.kind, "gerber");
+    assert.equal(normalizeLayerKind(null, { path: "board.drl" }, "", GERBER_CONTENT), "gerber");
+    assert.equal(normalizeLayerKind("drill", GERBER_CONTENT, "board.drl", GERBER_CONTENT), "drill");
+    assert.equal(normalizeLayerKind(null, { path: "holes.drl" }, "", DRILL_CONTENT), "drill");
+    assert.equal(getLayerSourceKind("holes.drl", "unrecognized"), "drill");
+    assert.equal(getLayerSourceKind("holes.drl", "T01\nX10Y20\nM30"), "drill");
+    assert.equal(getLayerSourceKind("board.drl", `G04 M48*${GERBER_CONTENT}`), "gerber");
+  } finally {
+    renderer.dispose();
+  }
+});
+
+test("browser API classifies Gerber .drl before applying renderDrills", async () => {
+  const frame = {
+    options: { renderDrills: false },
+    nextColor: () => [1, 0, 0],
+    processor: {
+      add_layer(content) { assert.equal(content, GERBER_CONTENT); return 1; },
+      get_layer_boundary() { return { minX: 0, maxX: 1, minY: 0, maxY: 1 }; },
+    },
+  };
+  const record = await GerberRenderer.prototype.createLayerRecord.call(
+    { frame }, Object.assign(new Blob([GERBER_CONTENT]), { name: "board.drl" }), {},
+  );
+  assert.equal(record.kind, "gerber");
+  assert.equal(record.layerId, 1);
+  assert.equal(await GerberRenderer.prototype.createLayerRecord.call(
+    { frame }, Object.assign(new Blob([DRILL_CONTENT]), { name: "holes.drl" }), {},
+  ), null);
+});
+
+test("detected Gerber errors are reported without trying the drill parser", async () => {
+  const wasm = makeParsedReuseWasmModule();
+  wasm.parse_gerber_layer_with_options = () => { throw new Error("invalid Gerber geometry"); };
+  wasm.parse_drill_layer = () => assert.fail("must not retry as Excellon");
+  const renderer = new NodeGerberRenderer({}, wasm);
+  try {
+    await assert.rejects(renderer.loadLayer(GERBER_CONTENT, { name: "invalid.drl" }), /invalid Gerber geometry/);
+  } finally {
+    renderer.dispose();
+  }
+});
+
+test("format detection ignores Gerber markers in Excellon comments", () => {
+  const content = DRILL_CONTENT.replace("M48", "M48\n; Input Gerber units: %MOMM*% %ADD10C,1*%");
+  assert.equal(getLayerSourceKind("holes.drl", content), "drill");
+  assert.equal(normalizeLayerKind(null, { path: "holes.drl" }, "", content), "drill");
+  const packedGerber = `G04 ; exported layer*${GERBER_CONTENT.replaceAll("\n", "")}`;
+  assert.equal(getLayerSourceKind("board.drl", packedGerber), "gerber");
+});
+
+test("regular DRL preview errors leave file reads isolated", async () => {
+  const unreadable = makeFile(DRILL_CONTENT, "unreadable.drl", "text/plain");
+  unreadable.slice = () => ({ async text() { throw new Error("NotReadableError"); } });
+  unreadable.text = async () => { throw new Error("NotReadableError"); };
+  const sources = await collectLayerSources([
+    unreadable,
+    makeFile(GERBER_CONTENT, "good.gbr", "text/plain"),
+  ]);
+  assert.equal(sources.length, 2);
+  assert.equal(sources[0].kind, "drill");
+  await assert.rejects(sources[0].readText(), /NotReadableError/);
+  assert.equal(await sources[1].readText(), GERBER_CONTENT);
+});
+
+test("Gerber detection uses complete commands without requiring FS or MO", () => {
+  for (const content of [
+    "%ADD10C,1*%D10*X0Y0D03*M02*",
+    "%AMROUND*1,1,1,0,0*%%ADD10ROUND*%D10*X0Y0D03*M02*",
+    "G04 units omitted*%LPD*%D10*X0Y0D03*M02*",
+    "%FS\nLAX26Y26*%D10*X0Y0D03*M02*",
+    "*%MOMM*%%ADD10C,1*%D10*X0Y0D03*M02*",
+    "%MOMM*FSLAX26Y26*%D10*X0Y0D03*M02*",
+  ]) {
+    assert.equal(getLayerSourceKind("board.drl", content), "gerber", content);
+    assert.equal(normalizeLayerKind(null, { path: "board.drl" }, "", content), "gerber", content);
+  }
+});
+
+test("shared NC commands and quoted Gerber snippets do not identify Gerber", () => {
+  for (const content of [
+    "M48\nMETRIC,LZ\nT01C0.6\n%\nT01\nX10Y20\nM30",
+    "; %LPD*% %ADD10C,1*%\nT01\nX10Y20\nM30",
+    "M48\n; %AMROUND*1,1,1,0,0*%\nMETRIC\nT01C0.6\n%\nX10Y20\nM30",
+    "G04 %MOMM*%",
+    "%MOMM",
+    "%ADD10C,1*",
+    "%AMROUND*1,1,1,0,0*",
+    "NOT_A_COMMAND%MOMM*%",
+    "FS MO AD AM LPD\nX10Y20\nM30",
+  ]) {
+    assert.equal(getLayerSourceKind("holes.drl", content), "drill", content);
+    assert.equal(normalizeLayerKind(null, { path: "holes.drl" }, "", content), "drill", content);
+  }
 });

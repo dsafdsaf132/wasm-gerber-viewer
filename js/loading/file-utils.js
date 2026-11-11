@@ -1,4 +1,9 @@
 import {
+  detectLayerFormat,
+  needsLayerFormatDetection,
+} from "../src/layer-format.js";
+export { looksLikeDrillContent, needsLayerFormatDetection } from "../src/layer-format.js";
+import {
   DRILL_FILE_EXTENSIONS,
   GERBER_FILE_EXTENSIONS,
   ZIP_MIME_TYPES,
@@ -49,12 +54,11 @@ export function isLikelyTextBytes(bytes) {
 }
 
 export function getLayerSourceKind(path, content = "") {
-  if (isSupportedDrillPath(path)) {
-    return "drill";
+  if (needsLayerFormatDetection(path)) {
+    const detected = detectLayerFormat(content);
+    if (detected) return detected;
   }
-  if (isAmbiguousDrdPath(path) && looksLikeDrillContent(content)) {
-    return "drill";
-  }
+  if (isSupportedDrillPath(path)) return "drill";
   return "gerber";
 }
 
@@ -95,20 +99,6 @@ export function getFileExtension(path) {
 
 export function isAmbiguousDrdPath(path) {
   return getFileExtension(path) === ".drd";
-}
-
-export function looksLikeDrillContent(content) {
-  const lines = String(content ?? "")
-    .split(/\r?\n/, 80)
-    .map((line) => line.trim().toUpperCase());
-  if (lines.some((line) => line === "M48")) {
-    return true;
-  }
-  const hasToolDeclaration = lines.some((line) => /^T\d+C[+\-.\d]+/.test(line));
-  const hasDrillCommand = lines.some((line) =>
-    /^(METRIC|INCH|M71|M72|G05|G90|G91|ICI,ON|ICI,OFF)\b/.test(line),
-  );
-  return hasToolDeclaration && hasDrillCommand;
 }
 
 export function getBaseFileName(path) {
