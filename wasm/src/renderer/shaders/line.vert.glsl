@@ -8,6 +8,7 @@ in int end_x_instance;
 in int end_y_instance;
 in int width_instance;
 uniform mat3 transform;
+uniform ivec2 u_eye_nm;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
 uniform float inner_outline_pixels;
@@ -16,9 +17,9 @@ out highp float vSide;
 out highp float vInnerSide;
 
 void main() {
-    // Nanometers to millimeters conversion factor: 1e-6
-    vec2 start = vec2(float(start_x_instance) * 0.000001, float(start_y_instance) * 0.000001);
-    vec2 end = vec2(float(end_x_instance) * 0.000001, float(end_y_instance) * 0.000001);
+    // Relative-To-Eye: subtract u_eye_nm in integer space first
+    vec2 start = vec2(float(start_x_instance - u_eye_nm.x) * 0.000001, float(start_y_instance - u_eye_nm.y) * 0.000001);
+    vec2 end = vec2(float(end_x_instance - u_eye_nm.x) * 0.000001, float(end_y_instance - u_eye_nm.y) * 0.000001);
 
     // Compute line segment direction and normal in world space
     vec2 lineWorld = end - start;
@@ -64,14 +65,14 @@ void main() {
         int half_w_bottom = width_instance / 2;
         int edge_y_nm = start_y_instance + (norm_y > 0.0 ? half_w_top : -half_w_bottom);
         int edge_x_nm = position.x < 0.0 ? start_x_instance : end_x_instance;
-        vertexWorld = vec2(float(edge_x_nm) * 0.000001, float(edge_y_nm) * 0.000001);
+        vertexWorld = vec2(float(edge_x_nm - u_eye_nm.x) * 0.000001, float(edge_y_nm - u_eye_nm.y) * 0.000001);
     } else if (useExactInteger && start_x_instance == end_x_instance) {
         float norm_x = worldNormal.x * position.y;
         int half_w_right = (width_instance + 1) / 2;
         int half_w_left = width_instance / 2;
         int edge_x_nm = start_x_instance + (norm_x > 0.0 ? half_w_right : -half_w_left);
         int edge_y_nm = position.x < 0.0 ? start_y_instance : end_y_instance;
-        vertexWorld = vec2(float(edge_x_nm) * 0.000001, float(edge_y_nm) * 0.000001);
+        vertexWorld = vec2(float(edge_x_nm - u_eye_nm.x) * 0.000001, float(edge_y_nm - u_eye_nm.y) * 0.000001);
     } else {
         vertexWorld = centerWorld + worldNormal * (position.y * totalHalfWidthWorld);
     }

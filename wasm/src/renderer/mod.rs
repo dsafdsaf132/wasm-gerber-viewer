@@ -5,7 +5,7 @@ mod shader;
 
 // Internal use only
 use buffer::{BufferCache, Fbo, TriangleTemplateBufferCache};
-use camera::Camera;
+use camera::{compute_rte_transform_and_eye, Camera};
 use composite::{
     get_bit as composite_get_bit, normalize_fallback_bounds, preset_bitset,
     validate_bitset as validate_composite_bitset,
@@ -3407,13 +3407,25 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let triangles = Self::js_property(sublayer, "triangles")?;
-        let vertices = Self::js_f32_array(&triangles, "vertices")?;
-        if vertices.length() == 0 {
-            return Ok(());
-        }
+        let (vertex_count, vertices_nm) = if let Ok(v_nm) = Self::js_i32_array(&triangles, "verticesNm") {
+            if v_nm.length() == 0 {
+                return Ok(());
+            }
+            let vertex_count = (v_nm.length() / 2) as i32;
+            (vertex_count, v_nm)
+        } else {
+            let vertices = Self::js_f32_array(&triangles, "vertices")?;
+            if vertices.length() == 0 {
+                return Ok(());
+            }
+            let vertex_count = Self::validate_triangle_vertex_array("triangle vertices", &vertices)?;
+            Self::validate_js_finite_array("triangle vertices", &vertices)?;
+            let mut temp = vec![0.0f32; vertices.length() as usize];
+            vertices.copy_to(&mut temp);
+            let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+            (vertex_count, Int32Array::from(nm_vec.as_slice()))
+        };
 
-        let vertex_count = Self::validate_triangle_vertex_array("triangle vertices", &vertices)?;
-        Self::validate_js_finite_array("triangle vertices", &vertices)?;
         let vao = self
             .gl
             .create_vertex_array()
@@ -3421,10 +3433,10 @@ impl Renderer {
         self.gl.bind_vertex_array(Some(&vao));
         buffer_cache.triangle_vao = Some(vao);
         buffer_cache.triangle_vertex_count = vertex_count;
-        let vertex_buffer = Self::create_attrib_buffer_from_js_array(
+        let vertex_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &vertices,
+            &vertices_nm,
             &self.programs.triangle,
             "position",
             2,
@@ -3432,58 +3444,73 @@ impl Renderer {
         )?;
         buffer_cache.triangle_vertex_buffer = Some(vertex_buffer);
 
-        let hole_radius = Self::js_f32_array(&triangles, "holeRadius")?;
-        if hole_radius.length() == 0 {
-            Self::use_constant_vertex_attrib_1f(
+        let has_holes = if let Ok(r_nm) = Self::js_i32_array(&triangles, "holeRadiusNm") {
+            r_nm.length() > 0
+        } else if let Ok(r) = Self::js_f32_array(&triangles, "holeRadius") {
+            r.length() > 0
+        } else {
+            false
+        };
+
+        if !has_holes {
+            Self::use_constant_vertex_attrib_1i(
                 &self.gl,
                 &self.programs.triangle,
                 "hole_x_instance",
-                0.0,
+                0,
             )?;
-            Self::use_constant_vertex_attrib_1f(
+            Self::use_constant_vertex_attrib_1i(
                 &self.gl,
                 &self.programs.triangle,
                 "hole_y_instance",
-                0.0,
+                0,
             )?;
-            Self::use_constant_vertex_attrib_1f(
+            Self::use_constant_vertex_attrib_1i(
                 &self.gl,
                 &self.programs.triangle,
                 "hole_radius_instance",
-                0.0,
+                0,
             )?;
         } else {
-            let hole_x = Self::js_f32_array(&triangles, "holeX")?;
-            let hole_y = Self::js_f32_array(&triangles, "holeY")?;
-            Self::validate_js_array_len("triangle hole_x", &hole_x, vertex_count as u32)?;
-            Self::validate_js_array_len("triangle hole_y", &hole_y, vertex_count as u32)?;
-            Self::validate_js_array_len("triangle hole_radius", &hole_radius, vertex_count as u32)?;
-            Self::validate_js_finite_array("triangle hole_x", &hole_x)?;
-            Self::validate_js_finite_array("triangle hole_y", &hole_y)?;
-            Self::validate_js_non_negative_array("triangle hole_radius", &hole_radius)?;
-            buffer_cache.triangle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            let (hole_x_nm, hole_y_nm, hole_radius_nm) = if let Ok(r_nm) = Self::js_i32_array(&triangles, "holeRadiusNm") {
+                let x_nm = Self::js_i32_array(&triangles, "holeXNm")?;
+                let y_nm = Self::js_i32_array(&triangles, "holeYNm")?;
+                (x_nm, y_nm, r_nm)
+            } else {
+                let hole_x = Self::js_f32_array(&triangles, "holeX")?;
+                let hole_y = Self::js_f32_array(&triangles, "holeY")?;
+                let hole_radius = Self::js_f32_array(&triangles, "holeRadius")?;
+                let to_nm = |farr: &Float32Array| -> Int32Array {
+                    let mut temp = vec![0.0f32; farr.length() as usize];
+                    farr.copy_to(&mut temp);
+                    let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    Int32Array::from(nm_vec.as_slice())
+                };
+                (to_nm(&hole_x), to_nm(&hole_y), to_nm(&hole_radius))
+            };
+            buffer_cache.triangle_hole_x_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
-                &hole_x,
+                &hole_x_nm,
                 &self.programs.triangle,
                 "hole_x_instance",
                 1,
                 0,
             )?);
-            buffer_cache.triangle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            buffer_cache.triangle_hole_y_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
-                &hole_y,
+                &hole_y_nm,
                 &self.programs.triangle,
                 "hole_y_instance",
                 1,
                 0,
             )?);
             buffer_cache.triangle_hole_radius_buffer =
-                Some(Self::create_attrib_buffer_from_js_array(
+                Some(Self::create_i32_attrib_buffer_from_js_array(
                     batch,
                     &self.gl,
-                    &hole_radius,
+                    &hole_radius_nm,
                     &self.programs.triangle,
                     "hole_radius_instance",
                     1,
@@ -3509,24 +3536,28 @@ impl Renderer {
 
         for (template_idx, template) in templates.iter().enumerate() {
             let vertices = Self::js_f32_array(&template, "vertices")?;
-            let instance_x = Self::js_f32_array(&template, "instanceX")?;
-            let instance_y = Self::js_f32_array(&template, "instanceY")?;
-            if vertices.length() == 0 || instance_x.length() == 0 {
+            let (instance_count, instance_x_nm, instance_y_nm) = if let Ok(ix_nm) = Self::js_i32_array(&template, "instanceXNm") {
+                let instance_count = ix_nm.length() as i32;
+                let iy_nm = Self::js_i32_array(&template, "instanceYNm")?;
+                (instance_count, ix_nm, iy_nm)
+            } else {
+                let instance_x = Self::js_f32_array(&template, "instanceX")?;
+                let instance_y = Self::js_f32_array(&template, "instanceY")?;
+                let instance_count = Self::validate_instance_array("triangle template instances", &instance_x)?;
+                let to_nm = |farr: &Float32Array| -> Int32Array {
+                    let mut temp = vec![0.0f32; instance_count as usize];
+                    farr.copy_to(&mut temp);
+                    let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    Int32Array::from(nm_vec.as_slice())
+                };
+                (instance_count, to_nm(&instance_x), to_nm(&instance_y))
+            };
+            if vertices.length() == 0 || instance_count == 0 {
                 continue;
             }
 
             let vertex_count =
                 Self::validate_triangle_vertex_array("triangle template vertices", &vertices)?;
-            let instance_count =
-                Self::validate_instance_array("triangle template instances", &instance_x)?;
-            Self::validate_js_array_len(
-                "triangle template instance_y",
-                &instance_y,
-                instance_count as u32,
-            )?;
-            Self::validate_js_finite_array("triangle template vertices", &vertices)?;
-            Self::validate_js_finite_array("triangle template instance_x", &instance_x)?;
-            Self::validate_js_finite_array("triangle template instance_y", &instance_y)?;
 
             let vao = self
                 .gl
@@ -3547,20 +3578,20 @@ impl Renderer {
                 0,
             )?;
             template_cache.vertex_buffer = Some(vertex_buffer);
-            let instance_x_buffer = Self::create_attrib_buffer_from_js_array(
+            let instance_x_buffer = Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
-                &instance_x,
+                &instance_x_nm,
                 &self.programs.triangle_template,
                 "instance_x",
                 1,
                 1,
             )?;
             template_cache.instance_x_buffer = Some(instance_x_buffer);
-            let instance_y_buffer = Self::create_attrib_buffer_from_js_array(
+            let instance_y_buffer = Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
-                &instance_y,
+                &instance_y_nm,
                 &self.programs.triangle_template,
                 "instance_y",
                 1,
@@ -3635,6 +3666,7 @@ impl Renderer {
             &self.programs.line,
             "start_x_instance",
             1,
+            1,
         )?);
         buffer_cache.line_start_y_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
@@ -3642,6 +3674,7 @@ impl Renderer {
             &start_y_nm,
             &self.programs.line,
             "start_y_instance",
+            1,
             1,
         )?);
         buffer_cache.line_end_x_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
@@ -3651,6 +3684,7 @@ impl Renderer {
             &self.programs.line,
             "end_x_instance",
             1,
+            1,
         )?);
         buffer_cache.line_end_y_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
@@ -3659,6 +3693,7 @@ impl Renderer {
             &self.programs.line,
             "end_y_instance",
             1,
+            1,
         )?);
         buffer_cache.line_width_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
@@ -3666,6 +3701,7 @@ impl Renderer {
             &width_nm,
             &self.programs.line,
             "width_instance",
+            1,
             1,
         )?);
 
@@ -3680,21 +3716,38 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let circles = Self::js_property(sublayer, "circles")?;
-        let x = Self::js_f32_array(&circles, "x")?;
-        if x.length() == 0 {
-            return Ok(());
-        }
+        let (instance_count, x_nm, y_nm, radius_nm) = if let Ok(x_nm) = Self::js_i32_array(&circles, "xNm") {
+            let instance_count = x_nm.length() as usize;
+            if instance_count == 0 {
+                return Ok(());
+            }
+            let y_nm = Self::js_i32_array(&circles, "yNm")?;
+            let radius_nm = Self::js_i32_array(&circles, "radiusNm")?;
+            (instance_count, x_nm, y_nm, radius_nm)
+        } else {
+            let x = Self::js_f32_array(&circles, "x")?;
+            if x.length() == 0 {
+                return Ok(());
+            }
+            let y = Self::js_f32_array(&circles, "y")?;
+            let radius = Self::js_f32_array(&circles, "radius")?;
+            let instance_count = Self::validate_instance_array("circle", &x)? as usize;
+            let to_nm = |farr: &Float32Array| -> Int32Array {
+                let mut temp = vec![0.0f32; instance_count];
+                farr.copy_to(&mut temp);
+                let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                Int32Array::from(nm_vec.as_slice())
+            };
+            (instance_count, to_nm(&x), to_nm(&y), to_nm(&radius))
+        };
 
-        let y = Self::js_f32_array(&circles, "y")?;
-        let radius = Self::js_f32_array(&circles, "radius")?;
-        let instance_count = Self::validate_instance_array("circle", &x)?;
-        Self::validate_js_array_len("circle y", &y, instance_count as u32)?;
-        Self::validate_js_array_len("circle radius", &radius, instance_count as u32)?;
-        Self::validate_js_finite_array("circle x", &x)?;
-        Self::validate_js_finite_array("circle y", &y)?;
-        Self::validate_js_non_negative_array("circle radius", &radius)?;
-        let hole_radius = Self::js_f32_array(&circles, "holeRadius")?;
-        let has_holes = hole_radius.length() > 0;
+        let has_holes = if let Ok(hole_radius_nm) = Self::js_i32_array(&circles, "holeRadiusNm") {
+            hole_radius_nm.length() > 0
+        } else if let Ok(hole_radius) = Self::js_f32_array(&circles, "holeRadius") {
+            hole_radius.length() > 0
+        } else {
+            false
+        };
         let program = if has_holes {
             &self.programs.circle_holed
         } else {
@@ -3707,32 +3760,32 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
         self.gl.bind_vertex_array(Some(&vao));
         buffer_cache.circle_vao = Some(vao);
-        buffer_cache.circle_instance_count = instance_count;
+        buffer_cache.circle_instance_count = instance_count as i32;
         self.bind_quad_position(program)?;
-        let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+        let center_x_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &x,
+            &x_nm,
             program,
             "center_x_instance",
             1,
             1,
         )?;
         buffer_cache.circle_center_x_buffer = Some(center_x_buffer);
-        let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+        let center_y_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &y,
+            &y_nm,
             program,
             "center_y_instance",
             1,
             1,
         )?;
         buffer_cache.circle_center_y_buffer = Some(center_y_buffer);
-        let radius_buffer = Self::create_attrib_buffer_from_js_array(
+        let radius_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &radius,
+            &radius_nm,
             program,
             "radius_instance",
             1,
@@ -3741,37 +3794,45 @@ impl Renderer {
         buffer_cache.circle_radius_buffer = Some(radius_buffer);
 
         if has_holes {
-            let hole_x = Self::js_f32_array(&circles, "holeX")?;
-            let hole_y = Self::js_f32_array(&circles, "holeY")?;
-            Self::validate_js_array_len("circle hole_x", &hole_x, instance_count as u32)?;
-            Self::validate_js_array_len("circle hole_y", &hole_y, instance_count as u32)?;
-            Self::validate_js_array_len("circle hole_radius", &hole_radius, instance_count as u32)?;
-            Self::validate_js_finite_array("circle hole_x", &hole_x)?;
-            Self::validate_js_finite_array("circle hole_y", &hole_y)?;
-            Self::validate_js_non_negative_array("circle hole_radius", &hole_radius)?;
-            buffer_cache.circle_hole_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            let (hole_x_nm, hole_y_nm, hole_radius_nm) = if let Ok(r_nm) = Self::js_i32_array(&circles, "holeRadiusNm") {
+                let x_nm = Self::js_i32_array(&circles, "holeXNm")?;
+                let y_nm = Self::js_i32_array(&circles, "holeYNm")?;
+                (x_nm, y_nm, r_nm)
+            } else {
+                let hole_x = Self::js_f32_array(&circles, "holeX")?;
+                let hole_y = Self::js_f32_array(&circles, "holeY")?;
+                let hole_radius = Self::js_f32_array(&circles, "holeRadius")?;
+                let to_nm = |farr: &Float32Array| -> Int32Array {
+                    let mut temp = vec![0.0f32; instance_count];
+                    farr.copy_to(&mut temp);
+                    let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    Int32Array::from(nm_vec.as_slice())
+                };
+                (to_nm(&hole_x), to_nm(&hole_y), to_nm(&hole_radius))
+            };
+            buffer_cache.circle_hole_x_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
-                &hole_x,
+                &hole_x_nm,
                 program,
                 "hole_x_instance",
                 1,
                 1,
             )?);
-            buffer_cache.circle_hole_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+            buffer_cache.circle_hole_y_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
-                &hole_y,
+                &hole_y_nm,
                 program,
                 "hole_y_instance",
                 1,
                 1,
             )?);
             buffer_cache.circle_hole_radius_buffer =
-                Some(Self::create_attrib_buffer_from_js_array(
+                Some(Self::create_i32_attrib_buffer_from_js_array(
                     batch,
                     &self.gl,
-                    &hole_radius,
+                    &hole_radius_nm,
                     program,
                     "hole_radius_instance",
                     1,
@@ -3790,28 +3851,37 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let arcs = Self::js_property(sublayer, "arcs")?;
-        let x = Self::js_f32_array(&arcs, "x")?;
-        if x.length() == 0 {
-            return Ok(());
-        }
-
-        let y = Self::js_f32_array(&arcs, "y")?;
-        let radius = Self::js_f32_array(&arcs, "radius")?;
-        let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
-        let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
-        let thickness = Self::js_f32_array(&arcs, "thickness")?;
-        let instance_count = Self::validate_instance_array("arc", &x)?;
-        Self::validate_js_array_len("arc y", &y, instance_count as u32)?;
-        Self::validate_js_array_len("arc radius", &radius, instance_count as u32)?;
-        Self::validate_js_array_len("arc start_angle", &start_angle, instance_count as u32)?;
-        Self::validate_js_array_len("arc sweep_angle", &sweep_angle, instance_count as u32)?;
-        Self::validate_js_array_len("arc thickness", &thickness, instance_count as u32)?;
-        Self::validate_js_finite_array("arc x", &x)?;
-        Self::validate_js_finite_array("arc y", &y)?;
-        Self::validate_js_non_negative_array("arc radius", &radius)?;
-        Self::validate_js_finite_array("arc start_angle", &start_angle)?;
-        Self::validate_js_finite_array("arc sweep_angle", &sweep_angle)?;
-        Self::validate_js_non_negative_array("arc thickness", &thickness)?;
+        let (instance_count, x_nm, y_nm, radius_nm, thickness_nm, start_angle, sweep_angle) =
+            if let Ok(x_nm) = Self::js_i32_array(&arcs, "xNm") {
+                let instance_count = x_nm.length() as usize;
+                if instance_count == 0 {
+                    return Ok(());
+                }
+                let y_nm = Self::js_i32_array(&arcs, "yNm")?;
+                let radius_nm = Self::js_i32_array(&arcs, "radiusNm")?;
+                let thickness_nm = Self::js_i32_array(&arcs, "thicknessNm")?;
+                let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
+                let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
+                (instance_count, x_nm, y_nm, radius_nm, thickness_nm, start_angle, sweep_angle)
+            } else {
+                let x = Self::js_f32_array(&arcs, "x")?;
+                if x.length() == 0 {
+                    return Ok(());
+                }
+                let y = Self::js_f32_array(&arcs, "y")?;
+                let radius = Self::js_f32_array(&arcs, "radius")?;
+                let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
+                let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
+                let thickness = Self::js_f32_array(&arcs, "thickness")?;
+                let instance_count = Self::validate_instance_array("arc", &x)? as usize;
+                let to_nm = |farr: &Float32Array| -> Int32Array {
+                    let mut temp = vec![0.0f32; instance_count];
+                    farr.copy_to(&mut temp);
+                    let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    Int32Array::from(nm_vec.as_slice())
+                };
+                (instance_count, to_nm(&x), to_nm(&y), to_nm(&radius), to_nm(&thickness), start_angle, sweep_angle)
+            };
 
         let vao = self
             .gl
@@ -3819,32 +3889,32 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
         self.gl.bind_vertex_array(Some(&vao));
         buffer_cache.arc_vao = Some(vao);
-        buffer_cache.arc_instance_count = instance_count;
+        buffer_cache.arc_instance_count = instance_count as i32;
         self.bind_quad_position(&self.programs.arc)?;
-        let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+        let center_x_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &x,
+            &x_nm,
             &self.programs.arc,
             "center_x_instance",
             1,
             1,
         )?;
         buffer_cache.arc_center_x_buffer = Some(center_x_buffer);
-        let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+        let center_y_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &y,
+            &y_nm,
             &self.programs.arc,
             "center_y_instance",
             1,
             1,
         )?;
         buffer_cache.arc_center_y_buffer = Some(center_y_buffer);
-        let radius_buffer = Self::create_attrib_buffer_from_js_array(
+        let radius_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &radius,
+            &radius_nm,
             &self.programs.arc,
             "radius_instance",
             1,
@@ -3871,10 +3941,10 @@ impl Renderer {
             1,
         )?;
         buffer_cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
-        let thickness_buffer = Self::create_attrib_buffer_from_js_array(
+        let thickness_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &thickness,
+            &thickness_nm,
             &self.programs.arc,
             "thickness_instance",
             1,
@@ -3893,40 +3963,37 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let thermals = Self::js_property(sublayer, "thermals")?;
-        let x = Self::js_f32_array(&thermals, "x")?;
-        if x.length() == 0 {
-            return Ok(());
-        }
-
-        let y = Self::js_f32_array(&thermals, "y")?;
-        let outer_diameter = Self::js_f32_array(&thermals, "outerDiameter")?;
-        let inner_diameter = Self::js_f32_array(&thermals, "innerDiameter")?;
-        let gap_thickness = Self::js_f32_array(&thermals, "gapThickness")?;
-        let rotation = Self::js_f32_array(&thermals, "rotation")?;
-        let instance_count = Self::validate_instance_array("thermal", &x)?;
-        Self::validate_js_array_len("thermal y", &y, instance_count as u32)?;
-        Self::validate_js_array_len(
-            "thermal outer_diameter",
-            &outer_diameter,
-            instance_count as u32,
-        )?;
-        Self::validate_js_array_len(
-            "thermal inner_diameter",
-            &inner_diameter,
-            instance_count as u32,
-        )?;
-        Self::validate_js_array_len(
-            "thermal gap_thickness",
-            &gap_thickness,
-            instance_count as u32,
-        )?;
-        Self::validate_js_array_len("thermal rotation", &rotation, instance_count as u32)?;
-        Self::validate_js_finite_array("thermal x", &x)?;
-        Self::validate_js_finite_array("thermal y", &y)?;
-        Self::validate_js_non_negative_array("thermal outer_diameter", &outer_diameter)?;
-        Self::validate_js_non_negative_array("thermal inner_diameter", &inner_diameter)?;
-        Self::validate_js_non_negative_array("thermal gap_thickness", &gap_thickness)?;
-        Self::validate_js_finite_array("thermal rotation", &rotation)?;
+        let (instance_count, x_nm, y_nm, outer_nm, inner_nm, gap_nm, rotation) =
+            if let Ok(x_nm) = Self::js_i32_array(&thermals, "xNm") {
+                let instance_count = x_nm.length() as usize;
+                if instance_count == 0 {
+                    return Ok(());
+                }
+                let y_nm = Self::js_i32_array(&thermals, "yNm")?;
+                let outer_nm = Self::js_i32_array(&thermals, "outerDiameterNm")?;
+                let inner_nm = Self::js_i32_array(&thermals, "innerDiameterNm")?;
+                let gap_nm = Self::js_i32_array(&thermals, "gapThicknessNm")?;
+                let rotation = Self::js_f32_array(&thermals, "rotation")?;
+                (instance_count, x_nm, y_nm, outer_nm, inner_nm, gap_nm, rotation)
+            } else {
+                let x = Self::js_f32_array(&thermals, "x")?;
+                if x.length() == 0 {
+                    return Ok(());
+                }
+                let y = Self::js_f32_array(&thermals, "y")?;
+                let outer_diameter = Self::js_f32_array(&thermals, "outerDiameter")?;
+                let inner_diameter = Self::js_f32_array(&thermals, "innerDiameter")?;
+                let gap_thickness = Self::js_f32_array(&thermals, "gapThickness")?;
+                let rotation = Self::js_f32_array(&thermals, "rotation")?;
+                let instance_count = Self::validate_instance_array("thermal", &x)? as usize;
+                let to_nm = |farr: &Float32Array| -> Int32Array {
+                    let mut temp = vec![0.0f32; instance_count];
+                    farr.copy_to(&mut temp);
+                    let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    Int32Array::from(nm_vec.as_slice())
+                };
+                (instance_count, to_nm(&x), to_nm(&y), to_nm(&outer_diameter), to_nm(&inner_diameter), to_nm(&gap_thickness), rotation)
+            };
 
         let vao = self
             .gl
@@ -3934,52 +4001,52 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
         self.gl.bind_vertex_array(Some(&vao));
         buffer_cache.thermal_vao = Some(vao);
-        buffer_cache.thermal_instance_count = instance_count;
+        buffer_cache.thermal_instance_count = instance_count as i32;
         self.bind_quad_position(&self.programs.thermal)?;
-        let center_x_buffer = Self::create_attrib_buffer_from_js_array(
+        let center_x_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &x,
+            &x_nm,
             &self.programs.thermal,
             "center_x_instance",
             1,
             1,
         )?;
         buffer_cache.thermal_center_x_buffer = Some(center_x_buffer);
-        let center_y_buffer = Self::create_attrib_buffer_from_js_array(
+        let center_y_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &y,
+            &y_nm,
             &self.programs.thermal,
             "center_y_instance",
             1,
             1,
         )?;
         buffer_cache.thermal_center_y_buffer = Some(center_y_buffer);
-        let outer_diameter_buffer = Self::create_attrib_buffer_from_js_array(
+        let outer_diameter_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &outer_diameter,
+            &outer_nm,
             &self.programs.thermal,
             "outer_diameter_instance",
             1,
             1,
         )?;
         buffer_cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
-        let inner_diameter_buffer = Self::create_attrib_buffer_from_js_array(
+        let inner_diameter_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &inner_diameter,
+            &inner_nm,
             &self.programs.thermal,
             "inner_diameter_instance",
             1,
             1,
         )?;
         buffer_cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
-        let gap_thickness_buffer = Self::create_attrib_buffer_from_js_array(
+        let gap_thickness_buffer = Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &gap_thickness,
+            &gap_nm,
             &self.programs.thermal,
             "gap_thickness_instance",
             1,
@@ -4236,6 +4303,7 @@ impl Renderer {
         self.gl.enable_vertex_attrib_array(loc);
         self.gl
             .vertex_attrib_pointer_with_i32(loc, components, FLOAT, false, stride, offset);
+        self.gl.vertex_attrib_divisor(loc, 0);
         Ok(())
     }
 
@@ -4275,6 +4343,7 @@ impl Renderer {
         data: &Int32Array,
         program: &ShaderProgram,
         attr_name: &str,
+        components: i32,
         divisor: u32,
     ) -> Result<WebGlBuffer, JsValue> {
         let buffer = gl
@@ -4293,7 +4362,7 @@ impl Renderer {
             }
         };
         gl.enable_vertex_attrib_array(loc);
-        gl.vertex_attrib_i_pointer_with_i32(loc, 1, INT, 0, 0);
+        gl.vertex_attrib_i_pointer_with_i32(loc, components, INT, 0, 0);
         gl.vertex_attrib_divisor(loc, divisor);
         Ok(buffer)
     }
@@ -4304,6 +4373,7 @@ impl Renderer {
         self.gl.enable_vertex_attrib_array(position_loc);
         self.gl
             .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+        self.gl.vertex_attrib_divisor(position_loc, 0);
         Ok(())
     }
 
@@ -5861,6 +5931,7 @@ impl Renderer {
         Ok(buffer)
     }
 
+    #[allow(dead_code)]
     fn use_constant_vertex_attrib_1f(
         gl: &WebGl2RenderingContext,
         program: &ShaderProgram,
@@ -5870,6 +5941,18 @@ impl Renderer {
         let loc = Self::shader_attribute(program, attr_name)?;
         gl.disable_vertex_attrib_array(loc);
         gl.vertex_attrib1f(loc, x);
+        Ok(())
+    }
+
+    fn use_constant_vertex_attrib_1i(
+        gl: &WebGl2RenderingContext,
+        program: &ShaderProgram,
+        attr_name: &str,
+        x: i32,
+    ) -> Result<(), JsValue> {
+        let loc = Self::shader_attribute(program, attr_name)?;
+        gl.disable_vertex_attrib_array(loc);
+        gl.vertex_attrib_i4i(loc, x, 0, 0, 0);
         Ok(())
     }
 
@@ -6312,14 +6395,14 @@ impl Renderer {
             HIGHLIGHT_VERTEX_SHADER,
             HIGHLIGHT_FRAGMENT_SHADER,
             &["position"],
-            &["transform"],
+            &["transform", "u_eye_nm"],
         )?;
         let stencil_program = match compile_program(
             &self.gl,
             HIGHLIGHT_VERTEX_SHADER,
             HIGHLIGHT_STENCIL_FRAGMENT_SHADER,
             &["position"],
-            &["transform"],
+            &["transform", "u_eye_nm"],
         ) {
             Ok(program) => program,
             Err(error) => {
@@ -6388,6 +6471,7 @@ impl Renderer {
         program: &ShaderProgram,
         vertices: &[f32],
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
     ) -> Result<(), JsValue> {
         if vertices.len() < 6 {
             return Ok(());
@@ -6411,6 +6495,9 @@ impl Renderer {
             false,
             transform,
         );
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+        }
         self.gl
             .bind_vertex_array(self.highlight_vertex_array.as_ref());
         self.gl
@@ -6429,6 +6516,7 @@ impl Renderer {
         &self,
         batches: &[HighlightBatch],
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         stencil_program: &ShaderProgram,
     ) -> Result<(), JsValue> {
         if batches.is_empty() {
@@ -6447,7 +6535,7 @@ impl Renderer {
             }
             let stencil_value = if batch.clear { 0 } else { 1 };
             self.gl.stencil_func(ALWAYS, stencil_value, 0x01);
-            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform, eye_nm)?;
         }
 
         Ok(())
@@ -6457,6 +6545,7 @@ impl Renderer {
         &self,
         batches: &[HighlightBatch],
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         stencil_program: &ShaderProgram,
     ) -> Result<(), JsValue> {
         if batches.is_empty() {
@@ -6480,7 +6569,7 @@ impl Renderer {
             }
             let stencil_value = if batch.clear { 0 } else { 0x02 };
             self.gl.stencil_func(ALWAYS, stencil_value, 0x02);
-            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform, eye_nm)?;
         }
 
         self.gl.stencil_mask(0x01);
@@ -6490,7 +6579,7 @@ impl Renderer {
             if batch.vertices.len() < 6 {
                 continue;
             }
-            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform)?;
+            self.draw_highlight_vertices(stencil_program, &batch.vertices, transform, eye_nm)?;
         }
 
         self.gl.stencil_mask(0x02);
@@ -6553,6 +6642,7 @@ impl Renderer {
         layer_id: usize,
         path_region_ref: PathRegionRef,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         set_mask: bool,
     ) -> Result<(), JsValue> {
         self.ensure_layer_path_region_gpu_cache(layer_id, path_region_ref.sublayer_idx as usize)?;
@@ -6565,6 +6655,7 @@ impl Renderer {
             path_region_ref.region_start as usize,
             path_region_ref.region_count as usize,
             transform,
+            eye_nm,
             set_mask,
         )
     }
@@ -6576,6 +6667,7 @@ impl Renderer {
         region_start: usize,
         region_count: usize,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         set_mask: bool,
     ) -> Result<(), JsValue> {
         if region_count == 0 {
@@ -6605,6 +6697,7 @@ impl Renderer {
             self.gl.stencil_op(ZERO, ZERO, ZERO);
             self.draw_path_solid_range(
                 transform,
+                eye_nm,
                 &solid_color,
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
@@ -6627,6 +6720,7 @@ impl Renderer {
             if wedge_end > wedge_start {
                 self.draw_path_solid_range(
                     transform,
+                    eye_nm,
                     &solid_color,
                     buffer_cache.path_wedge_vao.as_ref(),
                     wedge_start,
@@ -6646,6 +6740,7 @@ impl Renderer {
             if sector_end > sector_start {
                 self.draw_path_sector_range(
                     transform,
+                    eye_nm,
                     buffer_cache,
                     sector_start,
                     sector_end - sector_start,
@@ -6662,6 +6757,7 @@ impl Renderer {
             }
             self.draw_path_solid_range(
                 transform,
+                eye_nm,
                 &solid_color,
                 buffer_cache.path_cover_vao.as_ref(),
                 quad_start,
@@ -6674,6 +6770,7 @@ impl Renderer {
             self.gl.stencil_op(ZERO, ZERO, ZERO);
             self.draw_path_solid_range(
                 transform,
+                eye_nm,
                 &solid_color,
                 buffer_cache.path_clear_vao.as_ref(),
                 quad_start,
@@ -6739,7 +6836,7 @@ impl Renderer {
         }
         let width_i32 = Self::checked_u32_to_i32("canvas width", width)?;
         let height_i32 = Self::checked_u32_to_i32("canvas height", height)?;
-        let transform = self.camera.get_transform_matrix(width, height);
+        let (transform, eye_nm) = self.camera.get_rte_transform_and_eye(width, height);
         let bounds_vertices = Self::bounds_rect_triangles(&feature.bounds);
         self.ensure_highlight_resources()?;
 
@@ -6774,7 +6871,7 @@ impl Renderer {
                     .highlight_stencil_program
                     .as_ref()
                     .ok_or_else(|| JsValue::from_str("Highlight stencil program unavailable"))?;
-                self.apply_highlight_batches_to_mask(&batches, &transform, stencil_program)?;
+                self.apply_highlight_batches_to_mask(&batches, &transform, eye_nm, stencil_program)?;
             }
 
             if let Some(path_region_ref) = path_region_ref {
@@ -6782,6 +6879,7 @@ impl Renderer {
                     layer_id,
                     path_region_ref,
                     &transform,
+                    eye_nm,
                     true,
                 )?;
             }
@@ -6796,6 +6894,7 @@ impl Renderer {
                     self.apply_coverage_batches_to_highlight_mask(
                         &clear_batches,
                         &transform,
+                        eye_nm,
                         stencil_program,
                     )?;
                 }
@@ -6804,6 +6903,7 @@ impl Renderer {
                         layer_id,
                         path_region_ref,
                         &transform,
+                        eye_nm,
                         false,
                     )?;
                 }
@@ -6821,7 +6921,7 @@ impl Renderer {
                 .highlight_program
                 .as_ref()
                 .ok_or_else(|| JsValue::from_str("Highlight program unavailable"))?;
-            self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform)?;
+            self.draw_highlight_vertices(highlight_program, &bounds_vertices, &transform, eye_nm)?;
             Ok(())
         })();
 
@@ -6841,6 +6941,7 @@ impl Renderer {
     fn draw_instanced_triangles(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -6866,13 +6967,23 @@ impl Renderer {
             // Check if VAO is cached for this sublayer
             if layer.buffer_caches[sublayer_idx].triangle_vao.is_none() {
                 let triangles = &layer.gerber_data[sublayer_idx].triangles;
-                if triangles.vertices.is_empty() {
+                if triangles.vertices_nm.is_empty() && triangles.vertices.is_empty() {
                     return Ok(());
                 }
-                let vertex_count = Self::checked_usize_to_i32(
-                    "triangle vertex count",
-                    triangles.vertices.len() / 2,
-                )?;
+                let (vertex_count, vertices_nm) = if !triangles.vertices_nm.is_empty() {
+                    let count = Self::checked_usize_to_i32(
+                        "triangle vertex count",
+                        triangles.vertices_nm.len() / 2,
+                    )?;
+                    (count, triangles.vertices_nm.clone())
+                } else {
+                    let count = Self::checked_usize_to_i32(
+                        "triangle vertex count",
+                        triangles.vertices.len() / 2,
+                    )?;
+                    let nm: Vec<i32> = triangles.vertices.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    (count, nm)
+                };
                 let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
@@ -6890,43 +7001,50 @@ impl Renderer {
                     .ok_or_else(|| JsValue::from_str("Failed to create vertex buffer"))?;
                 self.gl.bind_buffer(ARRAY_BUFFER, Some(&vertex_buffer));
                 pending_cache.cache.triangle_vertex_buffer = Some(vertex_buffer);
-                Self::upload_f32_slice_to_bound_buffer(&self.gl, &triangles.vertices)?;
+                Self::upload_i32_slice_to_bound_buffer(&self.gl, &vertices_nm)?;
 
                 // Set up attributes
                 let position_loc = Self::shader_attribute(program, "position")?;
                 self.gl.enable_vertex_attrib_array(position_loc);
                 self.gl
-                    .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+                    .vertex_attrib_i_pointer_with_i32(position_loc, 2, INT, 0, 0);
+                self.gl.vertex_attrib_divisor(position_loc, 0);
 
-                if triangles.hole_radius.is_empty() {
-                    Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
-                    Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
-                    Self::use_constant_vertex_attrib_1f(
+                if triangles.hole_radius_nm.is_empty() && triangles.hole_radius.is_empty() {
+                    Self::use_constant_vertex_attrib_1i(&self.gl, program, "hole_x_instance", 0)?;
+                    Self::use_constant_vertex_attrib_1i(&self.gl, program, "hole_y_instance", 0)?;
+                    Self::use_constant_vertex_attrib_1i(
                         &self.gl,
                         program,
                         "hole_radius_instance",
-                        0.0,
+                        0,
                     )?;
                 } else {
-                    let hole_x_buffer = Self::create_instance_buffer(
+                    let (hx, hy, hr) = if !triangles.hole_radius_nm.is_empty() {
+                        (triangles.hole_x_nm.clone(), triangles.hole_y_nm.clone(), triangles.hole_radius_nm.clone())
+                    } else {
+                        let to_nm = |v: &[f32]| v.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect::<Vec<i32>>();
+                        (to_nm(&triangles.hole_x), to_nm(&triangles.hole_y), to_nm(&triangles.hole_radius))
+                    };
+                    let hole_x_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &triangles.hole_x,
+                        &hx,
                         program,
                         "hole_x_instance",
                         0,
                     )?;
                     pending_cache.cache.triangle_hole_x_buffer = Some(hole_x_buffer);
-                    let hole_y_buffer = Self::create_instance_buffer(
+                    let hole_y_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &triangles.hole_y,
+                        &hy,
                         program,
                         "hole_y_instance",
                         0,
                     )?;
                     pending_cache.cache.triangle_hole_y_buffer = Some(hole_y_buffer);
-                    let hole_radius_buffer = Self::create_instance_buffer(
+                    let hole_radius_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &triangles.hole_radius,
+                        &hr,
                         program,
                         "hole_radius_instance",
                         0,
@@ -6967,15 +7085,18 @@ impl Renderer {
         self.gl
             .bind_vertex_array(buffer_cache.triangle_vao.as_ref());
         if buffer_cache.triangle_hole_radius_buffer.is_none() {
-            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_x_instance", 0.0)?;
-            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_y_instance", 0.0)?;
-            Self::use_constant_vertex_attrib_1f(&self.gl, program, "hole_radius_instance", 0.0)?;
+            Self::use_constant_vertex_attrib_1i(&self.gl, program, "hole_x_instance", 0)?;
+            Self::use_constant_vertex_attrib_1i(&self.gl, program, "hole_y_instance", 0)?;
+            Self::use_constant_vertex_attrib_1i(&self.gl, program, "hole_radius_instance", 0)?;
         }
 
         // Set uniforms (only these change per frame)
         if let Some(loc) = program.uniforms.get("transform") {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
+        }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
         }
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
@@ -7002,6 +7123,7 @@ impl Renderer {
     fn draw_instanced_triangle_templates(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -7038,7 +7160,7 @@ impl Renderer {
                 {
                     let template =
                         &layer.gerber_data[sublayer_idx].triangle_templates[template_idx];
-                    if template.vertices.is_empty() || template.instance_x.is_empty() {
+                    if template.vertices.is_empty() || (template.instance_x.is_empty() && template.instance_x_nm.is_empty()) {
                         continue;
                     }
 
@@ -7046,10 +7168,20 @@ impl Renderer {
                         "triangle template vertex count",
                         template.vertices.len() / 2,
                     )?;
-                    let instance_count = Self::checked_usize_to_i32(
-                        "triangle template instance count",
-                        template.instance_x.len(),
-                    )?;
+                    let (instance_count, ix, iy) = if !template.instance_x_nm.is_empty() {
+                        let count = Self::checked_usize_to_i32(
+                            "triangle template instance count",
+                            template.instance_x_nm.len(),
+                        )?;
+                        (count, template.instance_x_nm.clone(), template.instance_y_nm.clone())
+                    } else {
+                        let count = Self::checked_usize_to_i32(
+                            "triangle template instance count",
+                            template.instance_x.len(),
+                        )?;
+                        let to_nm = |v: &[f32]| v.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect::<Vec<i32>>();
+                        (count, to_nm(&template.instance_x), to_nm(&template.instance_y))
+                    };
                     let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
                     pending_cache
                         .cache
@@ -7076,19 +7208,20 @@ impl Renderer {
                     self.gl.enable_vertex_attrib_array(position_loc);
                     self.gl
                         .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+                    self.gl.vertex_attrib_divisor(position_loc, 0);
 
-                    let instance_x_buffer = Self::create_instance_buffer(
+                    let instance_x_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &template.instance_x,
+                        &ix,
                         program,
                         "instance_x",
                         1,
                     )?;
                     pending_cache.cache.triangle_template_caches[0].instance_x_buffer =
                         Some(instance_x_buffer);
-                    let instance_y_buffer = Self::create_instance_buffer(
+                    let instance_y_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &template.instance_y,
+                        &iy,
                         program,
                         "instance_y",
                         1,
@@ -7134,6 +7267,9 @@ impl Renderer {
                 self.gl
                     .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
             }
+            if let Some(loc) = program.uniforms.get("u_eye_nm") {
+                self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+            }
             if let Some(loc) = program.uniforms.get("color") {
                 self.gl.uniform4fv_with_f32_array(Some(loc), color);
             }
@@ -7150,6 +7286,7 @@ impl Renderer {
     fn draw_instanced_lines(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -7166,11 +7303,17 @@ impl Renderer {
 
             if layer.buffer_caches[sublayer_idx].line_vao.is_none() {
                 let lines = &layer.gerber_data[sublayer_idx].lines;
-                if lines.start_x.is_empty() {
+                if lines.start_x.is_empty() && lines.start_x_nm.is_empty() {
                     return Ok(());
                 }
-                let instance_count =
-                    Self::checked_usize_to_i32("line instance count", lines.start_x.len())?;
+                let (instance_count, sx, sy, ex, ey, w) = if !lines.start_x_nm.is_empty() {
+                    let count = Self::checked_usize_to_i32("line instance count", lines.start_x_nm.len())?;
+                    (count, lines.start_x_nm.clone(), lines.start_y_nm.clone(), lines.end_x_nm.clone(), lines.end_y_nm.clone(), lines.width_nm.clone())
+                } else {
+                    let count = Self::checked_usize_to_i32("line instance count", lines.start_x.len())?;
+                    let to_nm = |v: &[f32]| v.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect::<Vec<i32>>();
+                    (count, to_nm(&lines.start_x), to_nm(&lines.start_y), to_nm(&lines.end_x), to_nm(&lines.end_y), to_nm(&lines.width))
+                };
                 let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 let vao = self
@@ -7184,10 +7327,11 @@ impl Renderer {
                 self.gl.enable_vertex_attrib_array(position_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+                self.gl.vertex_attrib_divisor(position_loc, 0);
 
                 let start_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.start_x_nm,
+                    &sx,
                     program,
                     "start_x_instance",
                     1,
@@ -7195,7 +7339,7 @@ impl Renderer {
                 pending_cache.cache.line_start_x_buffer = Some(start_x_buffer);
                 let start_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.start_y_nm,
+                    &sy,
                     program,
                     "start_y_instance",
                     1,
@@ -7203,7 +7347,7 @@ impl Renderer {
                 pending_cache.cache.line_start_y_buffer = Some(start_y_buffer);
                 let end_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.end_x_nm,
+                    &ex,
                     program,
                     "end_x_instance",
                     1,
@@ -7211,7 +7355,7 @@ impl Renderer {
                 pending_cache.cache.line_end_x_buffer = Some(end_x_buffer);
                 let end_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.end_y_nm,
+                    &ey,
                     program,
                     "end_y_instance",
                     1,
@@ -7219,7 +7363,7 @@ impl Renderer {
                 pending_cache.cache.line_end_y_buffer = Some(end_y_buffer);
                 let width_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.width_nm,
+                    &w,
                     program,
                     "width_instance",
                     1,
@@ -7255,6 +7399,9 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+        }
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
@@ -7288,6 +7435,7 @@ impl Renderer {
     fn draw_instanced_circles(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -7301,12 +7449,40 @@ impl Renderer {
 
             if layer.buffer_caches[sublayer_idx].circle_vao.is_none() {
                 let circles = &layer.gerber_data[sublayer_idx].circles;
-                if circles.x.is_empty() {
+                if circles.x.is_empty() && circles.x_nm.is_empty() {
                     return Ok(());
                 }
-                let instance_count =
-                    Self::checked_usize_to_i32("circle instance count", circles.x.len())?;
-                let has_holes = !circles.hole_radius.is_empty();
+                let (instance_count, cx, cy, rad, hx, hy, hr) = if !circles.x_nm.is_empty() {
+                    let count =
+                        Self::checked_usize_to_i32("circle instance count", circles.x_nm.len())?;
+                    (
+                        count,
+                        circles.x_nm.clone(),
+                        circles.y_nm.clone(),
+                        circles.radius_nm.clone(),
+                        circles.hole_x_nm.clone(),
+                        circles.hole_y_nm.clone(),
+                        circles.hole_radius_nm.clone(),
+                    )
+                } else {
+                    let count =
+                        Self::checked_usize_to_i32("circle instance count", circles.x.len())?;
+                    let to_nm = |v: &[f32]| {
+                        v.iter()
+                            .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
+                            .collect::<Vec<i32>>()
+                    };
+                    (
+                        count,
+                        to_nm(&circles.x),
+                        to_nm(&circles.y),
+                        to_nm(&circles.radius),
+                        to_nm(&circles.hole_x),
+                        to_nm(&circles.hole_y),
+                        to_nm(&circles.hole_radius),
+                    )
+                };
+                let has_holes = !hr.is_empty();
                 let program = if has_holes {
                     &self.programs.circle_holed
                 } else {
@@ -7329,51 +7505,52 @@ impl Renderer {
                 self.gl.enable_vertex_attrib_array(position_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+                self.gl.vertex_attrib_divisor(position_loc, 0);
 
-                let center_x_buffer = Self::create_instance_buffer(
+                let center_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &circles.x,
+                    &cx,
                     program,
                     "center_x_instance",
                     1,
                 )?;
                 pending_cache.cache.circle_center_x_buffer = Some(center_x_buffer);
-                let center_y_buffer = Self::create_instance_buffer(
+                let center_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &circles.y,
+                    &cy,
                     program,
                     "center_y_instance",
                     1,
                 )?;
                 pending_cache.cache.circle_center_y_buffer = Some(center_y_buffer);
-                let radius_buffer = Self::create_instance_buffer(
+                let radius_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &circles.radius,
+                    &rad,
                     program,
                     "radius_instance",
                     1,
                 )?;
                 pending_cache.cache.circle_radius_buffer = Some(radius_buffer);
                 if has_holes {
-                    let hole_x_buffer = Self::create_instance_buffer(
+                    let hole_x_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &circles.hole_x,
+                        &hx,
                         program,
                         "hole_x_instance",
                         1,
                     )?;
                     pending_cache.cache.circle_hole_x_buffer = Some(hole_x_buffer);
-                    let hole_y_buffer = Self::create_instance_buffer(
+                    let hole_y_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &circles.hole_y,
+                        &hy,
                         program,
                         "hole_y_instance",
                         1,
                     )?;
                     pending_cache.cache.circle_hole_y_buffer = Some(hole_y_buffer);
-                    let hole_radius_buffer = Self::create_instance_buffer(
+                    let hole_radius_buffer = Self::create_i32_instance_buffer(
                         &self.gl,
-                        &circles.hole_radius,
+                        &hr,
                         program,
                         "hole_radius_instance",
                         1,
@@ -7426,6 +7603,9 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+        }
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
@@ -7453,6 +7633,7 @@ impl Renderer {
     fn draw_instanced_arcs(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -7469,11 +7650,39 @@ impl Renderer {
 
             if layer.buffer_caches[sublayer_idx].arc_vao.is_none() {
                 let arcs = &layer.gerber_data[sublayer_idx].arcs;
-                if arcs.x.is_empty() {
+                if arcs.x.is_empty() && arcs.x_nm.is_empty() {
                     return Ok(());
                 }
-                let instance_count =
-                    Self::checked_usize_to_i32("arc instance count", arcs.x.len())?;
+                let (instance_count, cx, cy, rad, thick, sa, sw) = if !arcs.x_nm.is_empty() {
+                    let count =
+                        Self::checked_usize_to_i32("arc instance count", arcs.x_nm.len())?;
+                    (
+                        count,
+                        arcs.x_nm.clone(),
+                        arcs.y_nm.clone(),
+                        arcs.radius_nm.clone(),
+                        arcs.thickness_nm.clone(),
+                        arcs.start_angle.clone(),
+                        arcs.sweep_angle.clone(),
+                    )
+                } else {
+                    let count =
+                        Self::checked_usize_to_i32("arc instance count", arcs.x.len())?;
+                    let to_nm = |v: &[f32]| {
+                        v.iter()
+                            .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
+                            .collect::<Vec<i32>>()
+                    };
+                    (
+                        count,
+                        to_nm(&arcs.x),
+                        to_nm(&arcs.y),
+                        to_nm(&arcs.radius),
+                        to_nm(&arcs.thickness),
+                        arcs.start_angle.clone(),
+                        arcs.sweep_angle.clone(),
+                    )
+                };
                 let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
@@ -7490,26 +7699,27 @@ impl Renderer {
                 self.gl.enable_vertex_attrib_array(position_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+                self.gl.vertex_attrib_divisor(position_loc, 0);
 
-                let center_x_buffer = Self::create_instance_buffer(
+                let center_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &arcs.x,
+                    &cx,
                     program,
                     "center_x_instance",
                     1,
                 )?;
                 pending_cache.cache.arc_center_x_buffer = Some(center_x_buffer);
-                let center_y_buffer = Self::create_instance_buffer(
+                let center_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &arcs.y,
+                    &cy,
                     program,
                     "center_y_instance",
                     1,
                 )?;
                 pending_cache.cache.arc_center_y_buffer = Some(center_y_buffer);
-                let radius_buffer = Self::create_instance_buffer(
+                let radius_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &arcs.radius,
+                    &rad,
                     program,
                     "radius_instance",
                     1,
@@ -7517,7 +7727,7 @@ impl Renderer {
                 pending_cache.cache.arc_radius_buffer = Some(radius_buffer);
                 let start_angle_buffer = Self::create_instance_buffer(
                     &self.gl,
-                    &arcs.start_angle,
+                    &sa,
                     program,
                     "startAngle_instance",
                     1,
@@ -7525,15 +7735,15 @@ impl Renderer {
                 pending_cache.cache.arc_start_angle_buffer = Some(start_angle_buffer);
                 let sweep_angle_buffer = Self::create_instance_buffer(
                     &self.gl,
-                    &arcs.sweep_angle,
+                    &sw,
                     program,
                     "sweepAngle_instance",
                     1,
                 )?;
                 pending_cache.cache.arc_sweep_angle_buffer = Some(sweep_angle_buffer);
-                let thickness_buffer = Self::create_instance_buffer(
+                let thickness_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &arcs.thickness,
+                    &thick,
                     program,
                     "thickness_instance",
                     1,
@@ -7576,6 +7786,9 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+        }
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
@@ -7603,6 +7816,7 @@ impl Renderer {
     fn draw_instanced_thermals(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -7617,11 +7831,39 @@ impl Renderer {
 
             if layer.buffer_caches[sublayer_idx].thermal_vao.is_none() {
                 let thermals = &layer.gerber_data[sublayer_idx].thermals;
-                if thermals.x.is_empty() {
+                if thermals.x.is_empty() && thermals.x_nm.is_empty() {
                     return Ok(());
                 }
-                let instance_count =
-                    Self::checked_usize_to_i32("thermal instance count", thermals.x.len())?;
+                let (instance_count, cx, cy, od, id, gap, rot) = if !thermals.x_nm.is_empty() {
+                    let count =
+                        Self::checked_usize_to_i32("thermal instance count", thermals.x_nm.len())?;
+                    (
+                        count,
+                        thermals.x_nm.clone(),
+                        thermals.y_nm.clone(),
+                        thermals.outer_diameter_nm.clone(),
+                        thermals.inner_diameter_nm.clone(),
+                        thermals.gap_thickness_nm.clone(),
+                        thermals.rotation.clone(),
+                    )
+                } else {
+                    let count =
+                        Self::checked_usize_to_i32("thermal instance count", thermals.x.len())?;
+                    let to_nm = |v: &[f32]| {
+                        v.iter()
+                            .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
+                            .collect::<Vec<i32>>()
+                    };
+                    (
+                        count,
+                        to_nm(&thermals.x),
+                        to_nm(&thermals.y),
+                        to_nm(&thermals.outer_diameter),
+                        to_nm(&thermals.inner_diameter),
+                        to_nm(&thermals.gap_thickness),
+                        thermals.rotation.clone(),
+                    )
+                };
                 let mut pending_cache = BufferCacheBuildGuard::new(&self.gl);
 
                 // Create VAO
@@ -7638,42 +7880,43 @@ impl Renderer {
                 self.gl.enable_vertex_attrib_array(position_loc);
                 self.gl
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
+                self.gl.vertex_attrib_divisor(position_loc, 0);
 
-                let center_x_buffer = Self::create_instance_buffer(
+                let center_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &thermals.x,
+                    &cx,
                     program,
                     "center_x_instance",
                     1,
                 )?;
                 pending_cache.cache.thermal_center_x_buffer = Some(center_x_buffer);
-                let center_y_buffer = Self::create_instance_buffer(
+                let center_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &thermals.y,
+                    &cy,
                     program,
                     "center_y_instance",
                     1,
                 )?;
                 pending_cache.cache.thermal_center_y_buffer = Some(center_y_buffer);
-                let outer_diameter_buffer = Self::create_instance_buffer(
+                let outer_diameter_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &thermals.outer_diameter,
+                    &od,
                     program,
                     "outer_diameter_instance",
                     1,
                 )?;
                 pending_cache.cache.thermal_outer_diameter_buffer = Some(outer_diameter_buffer);
-                let inner_diameter_buffer = Self::create_instance_buffer(
+                let inner_diameter_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &thermals.inner_diameter,
+                    &id,
                     program,
                     "inner_diameter_instance",
                     1,
                 )?;
                 pending_cache.cache.thermal_inner_diameter_buffer = Some(inner_diameter_buffer);
-                let gap_thickness_buffer = Self::create_instance_buffer(
+                let gap_thickness_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &thermals.gap_thickness,
+                    &gap,
                     program,
                     "gap_thickness_instance",
                     1,
@@ -7681,7 +7924,7 @@ impl Renderer {
                 pending_cache.cache.thermal_gap_thickness_buffer = Some(gap_thickness_buffer);
                 let rotation_buffer = Self::create_instance_buffer(
                     &self.gl,
-                    &thermals.rotation,
+                    &rot,
                     program,
                     "rotation_instance",
                     1,
@@ -7724,10 +7967,13 @@ impl Renderer {
         // Bind cached VAO for this sublayer
         self.gl.bind_vertex_array(buffer_cache.thermal_vao.as_ref());
 
-        // Set uniforms (only transform and color)
+        // Set uniforms (only transform, u_eye_nm, and color)
         if let Some(loc) = program.uniforms.get("transform") {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
+        }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
         }
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
@@ -7746,6 +7992,7 @@ impl Renderer {
     fn draw_path_regions(
         &mut self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         layer_id: usize,
         sublayer_idx: usize,
@@ -7816,6 +8063,7 @@ impl Renderer {
                 if wedge_end > wedge_start {
                     self.draw_path_solid_range(
                         transform,
+                        eye_nm,
                         color,
                         buffer_cache.path_wedge_vao.as_ref(),
                         wedge_start,
@@ -7835,6 +8083,7 @@ impl Renderer {
                 if sector_end > sector_start {
                     self.draw_path_sector_range(
                         transform,
+                        eye_nm,
                         buffer_cache,
                         sector_start,
                         sector_end - sector_start,
@@ -7847,6 +8096,7 @@ impl Renderer {
 
                 self.draw_path_solid_range(
                     transform,
+                    eye_nm,
                     color,
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
@@ -7859,6 +8109,7 @@ impl Renderer {
                 self.gl.stencil_op(ZERO, ZERO, ZERO);
                 self.draw_path_solid_range(
                     transform,
+                    eye_nm,
                     color,
                     buffer_cache.path_clear_vao.as_ref(),
                     Self::checked_path_region_quad_start(region_idx)?,
@@ -7990,6 +8241,7 @@ impl Renderer {
         };
         gl.enable_vertex_attrib_array(loc);
         gl.vertex_attrib_pointer_with_i32(loc, components, FLOAT, false, 0, 0);
+        gl.vertex_attrib_divisor(loc, 0);
         Ok(buffer)
     }
 
@@ -8034,6 +8286,7 @@ impl Renderer {
         let loc = Self::shader_attribute(program, attr_name)?;
         gl.enable_vertex_attrib_array(loc);
         gl.vertex_attrib_pointer_with_i32(loc, components, FLOAT, false, stride, offset);
+        gl.vertex_attrib_divisor(loc, 0);
         Ok(())
     }
 
@@ -8041,6 +8294,7 @@ impl Renderer {
     fn draw_path_solid_range(
         &self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         color: &[f32; 4],
         vao: Option<&web_sys::WebGlVertexArrayObject>,
         start: i32,
@@ -8063,6 +8317,9 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+        }
         if let Some(loc) = program.uniforms.get("color") {
             self.gl.uniform4fv_with_f32_array(Some(loc), color);
         }
@@ -8073,6 +8330,7 @@ impl Renderer {
     fn draw_path_sector_range(
         &self,
         transform: &[f32; 9],
+        eye_nm: [i32; 2],
         buffer_cache: &BufferCache,
         start: i32,
         count: i32,
@@ -8111,6 +8369,9 @@ impl Renderer {
             self.gl
                 .uniform_matrix3fv_with_f32_array(Some(loc), false, transform);
         }
+        if let Some(loc) = program.uniforms.get("u_eye_nm") {
+            self.gl.uniform2i(Some(loc), eye_nm[0], eye_nm[1]);
+        }
         self.gl.draw_arrays(TRIANGLES, start, count);
         Ok(())
     }
@@ -8141,6 +8402,8 @@ impl Renderer {
             self.gl
                 .enable(WebGl2RenderingContext::SAMPLE_ALPHA_TO_COVERAGE);
         }
+        let (transform_rte, eye_nm) = compute_rte_transform_and_eye(transform);
+
         let result = (|| {
             // Render each polarity sublayer with appropriate blending
             for sublayer_idx in 0..sublayer_count {
@@ -8196,7 +8459,8 @@ impl Renderer {
 
                 // Render all shapes (empty checks done inside draw methods)
                 self.draw_instanced_triangles(
-                    transform,
+                    &transform_rte,
+                    eye_nm,
                     mask_color,
                     layer_id,
                     sublayer_idx,
@@ -8204,13 +8468,15 @@ impl Renderer {
                     viewport_height,
                 )?;
                 self.draw_instanced_triangle_templates(
-                    transform,
+                    &transform_rte,
+                    eye_nm,
                     mask_color,
                     layer_id,
                     sublayer_idx,
                 )?;
                 self.draw_instanced_lines(
-                    transform,
+                    &transform_rte,
+                    eye_nm,
                     mask_color,
                     layer_id,
                     sublayer_idx,
@@ -8218,7 +8484,8 @@ impl Renderer {
                     viewport_height,
                 )?;
                 self.draw_instanced_circles(
-                    transform,
+                    &transform_rte,
+                    eye_nm,
                     mask_color,
                     layer_id,
                     sublayer_idx,
@@ -8226,15 +8493,28 @@ impl Renderer {
                     viewport_height,
                 )?;
                 self.draw_instanced_arcs(
-                    transform,
+                    &transform_rte,
+                    eye_nm,
                     mask_color,
                     layer_id,
                     sublayer_idx,
                     viewport_width,
                     viewport_height,
                 )?;
-                self.draw_instanced_thermals(transform, mask_color, layer_id, sublayer_idx)?;
-                self.draw_path_regions(transform, mask_color, layer_id, sublayer_idx)?;
+                self.draw_instanced_thermals(
+                    &transform_rte,
+                    eye_nm,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                )?;
+                self.draw_path_regions(
+                    &transform_rte,
+                    eye_nm,
+                    mask_color,
+                    layer_id,
+                    sublayer_idx,
+                )?;
             }
             Ok(())
         })();

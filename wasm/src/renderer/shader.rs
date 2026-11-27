@@ -171,7 +171,13 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color", "anti_aliasing", "pixels_per_world"],
+            &[
+                "transform",
+                "u_eye_nm",
+                "color",
+                "anti_aliasing",
+                "pixels_per_world",
+            ],
         )?;
         pending.track(&triangle);
 
@@ -180,7 +186,7 @@ impl ShaderPrograms {
             TRIANGLE_TEMPLATE_VERTEX_SHADER,
             TRIANGLE_TEMPLATE_FRAGMENT_SHADER,
             &["position", "instance_x", "instance_y"],
-            &["transform", "color"],
+            &["transform", "u_eye_nm", "color"],
         )?;
         pending.track(&triangle_template);
 
@@ -198,6 +204,7 @@ impl ShaderPrograms {
             ],
             &[
                 "transform",
+                "u_eye_nm",
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
@@ -219,6 +226,7 @@ impl ShaderPrograms {
             ],
             &[
                 "transform",
+                "u_eye_nm",
                 "color",
                 "viewport_size",
                 "anti_aliasing",
@@ -242,7 +250,13 @@ impl ShaderPrograms {
                 "hole_y_instance",
                 "hole_radius_instance",
             ],
-            &["transform", "color", "anti_aliasing", "pixels_per_world"],
+            &[
+                "transform",
+                "u_eye_nm",
+                "color",
+                "anti_aliasing",
+                "pixels_per_world",
+            ],
         )?;
         pending.track(&circle_holed);
 
@@ -261,6 +275,7 @@ impl ShaderPrograms {
             ],
             &[
                 "transform",
+                "u_eye_nm",
                 "color",
                 "viewport_size",
                 "minimum_feature_pixels",
@@ -285,7 +300,7 @@ impl ShaderPrograms {
                 "gap_thickness_instance",
                 "rotation_instance",
             ],
-            &["transform", "color"],
+            &["transform", "u_eye_nm", "color"],
         )?;
         pending.track(&thermal);
 
@@ -303,7 +318,7 @@ impl ShaderPrograms {
             PATH_SOLID_VERTEX_SHADER,
             PATH_SOLID_FRAGMENT_SHADER,
             &["position"],
-            &["transform", "color", "bounds_padding"],
+            &["transform", "u_eye_nm", "color", "bounds_padding"],
         )?;
         pending.track(&path_solid);
 
@@ -312,7 +327,7 @@ impl ShaderPrograms {
             PATH_SECTOR_VERTEX_SHADER,
             PATH_SECTOR_FRAGMENT_SHADER,
             &["position", "center", "radius"],
-            &["transform", "anti_aliasing", "pixels_per_world"],
+            &["transform", "u_eye_nm", "anti_aliasing", "pixels_per_world"],
         )?;
         pending.track(&path_sector);
 

@@ -645,15 +645,15 @@ impl FeaturePrimitives {
                 hole_y,
                 hole_radius,
             } => {
-                let primitive = Primitive::Circle {
-                    x: *x,
-                    y: *y,
-                    radius: *radius,
-                    exposure: *exposure,
-                    hole_x: *hole_x,
-                    hole_y: *hole_y,
-                    hole_radius: *hole_radius,
-                };
+                let primitive = Primitive::new_circle(
+                    *x,
+                    *y,
+                    *radius,
+                    *exposure,
+                    *hole_x,
+                    *hole_y,
+                    *hole_radius,
+                );
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Arc {
@@ -665,15 +665,15 @@ impl FeaturePrimitives {
                 thickness,
                 exposure,
             } => {
-                let primitive = Primitive::Arc {
-                    x: *x,
-                    y: *y,
-                    radius: *radius,
-                    start_angle: *start_angle,
-                    end_angle: *end_angle,
-                    thickness: *thickness,
-                    exposure: *exposure,
-                };
+                let primitive = Primitive::new_arc(
+                    *x,
+                    *y,
+                    *radius,
+                    *start_angle,
+                    *end_angle,
+                    *thickness,
+                    *exposure,
+                );
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Thermal {
@@ -685,23 +685,19 @@ impl FeaturePrimitives {
                 rotation,
                 exposure,
             } => {
-                let primitive = Primitive::Thermal {
-                    x: *x,
-                    y: *y,
-                    outer_diameter: *outer_diameter,
-                    inner_diameter: *inner_diameter,
-                    gap_thickness: *gap_thickness,
-                    rotation: *rotation,
-                    exposure: *exposure,
-                };
+                let primitive = Primitive::new_thermal(
+                    *x,
+                    *y,
+                    *outer_diameter,
+                    *inner_diameter,
+                    *gap_thickness,
+                    *rotation,
+                    *exposure,
+                );
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y } => {
-                let primitive = Primitive::TriangleTemplateFlash {
-                    template: Rc::clone(template),
-                    x: *x,
-                    y: *y,
-                };
+                let primitive = Primitive::new_triangle_template_flash(Rc::clone(template), *x, *y);
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Line {
@@ -1007,6 +1003,7 @@ fn append_compact_primitive(
             hole_x,
             hole_y,
             hole_radius,
+            ..
         } => {
             primitive_types.push(0);
             primitive_data.extend_from_slice(&[
@@ -1030,6 +1027,7 @@ fn append_compact_primitive(
             hole_x,
             hole_y,
             hole_radius,
+            ..
         } => {
             primitive_types.push(1);
             primitive_data.extend_from_slice(&[
@@ -1053,6 +1051,7 @@ fn append_compact_primitive(
             end_angle,
             thickness,
             exposure,
+            ..
         } => {
             primitive_types.push(2);
             primitive_data.extend_from_slice(&[
@@ -1076,6 +1075,7 @@ fn append_compact_primitive(
             gap_thickness,
             rotation,
             exposure,
+            ..
         } => {
             primitive_types.push(3);
             primitive_data.extend_from_slice(&[
@@ -1091,7 +1091,7 @@ fn append_compact_primitive(
                 0.0,
             ]);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             primitive_types.push(4);
             primitive_data.extend_from_slice(&[
                 templates.intern(template) as f32,
@@ -1157,50 +1157,32 @@ fn compact_primitive_from_parts(
     templates: &[Rc<Vec<f32>>],
 ) -> Result<Primitive, JsValue> {
     Ok(match tag {
-        0 => Primitive::Triangle {
-            vertices: [[data[0], data[1]], [data[2], data[3]], [data[4], data[5]]],
-            exposure: data[6],
-            hole_x: data[7],
-            hole_y: data[8],
-            hole_radius: data[9],
-        },
-        1 => Primitive::Circle {
-            x: data[0],
-            y: data[1],
-            radius: data[2],
-            exposure: data[3],
-            hole_x: data[4],
-            hole_y: data[5],
-            hole_radius: data[6],
-        },
-        2 => Primitive::Arc {
-            x: data[0],
-            y: data[1],
-            radius: data[2],
-            start_angle: data[3],
-            end_angle: data[4],
-            thickness: data[5],
-            exposure: data[6],
-        },
-        3 => Primitive::Thermal {
-            x: data[0],
-            y: data[1],
-            outer_diameter: data[2],
-            inner_diameter: data[3],
-            gap_thickness: data[4],
-            rotation: data[5],
-            exposure: data[6],
-        },
+        0 => Primitive::new_triangle(
+            [[data[0], data[1]], [data[2], data[3]], [data[4], data[5]]],
+            data[6],
+            data[7],
+            data[8],
+            data[9],
+        ),
+        1 => Primitive::new_circle(
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+        ),
+        2 => Primitive::new_arc(
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+        ),
+        3 => Primitive::new_thermal(
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+        ),
         4 => {
             let template_id = data[0] as usize;
-            Primitive::TriangleTemplateFlash {
-                template: templates
+            Primitive::new_triangle_template_flash(
+                templates
                     .get(template_id)
                     .cloned()
                     .ok_or_else(|| JsValue::from_str("Compact template index is invalid"))?,
-                x: data[1],
-                y: data[2],
-            }
+                data[1],
+                data[2],
+            )
         }
         5 => Primitive::new_line(data[0], data[1], data[2], data[3], data[4], data[5]),
         _ => return Err(JsValue::from_str("Invalid compact primitive type")),
@@ -1218,6 +1200,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             hole_x,
             hole_y,
             hole_radius,
+            ..
         } => FeaturePrimitiveStorage::Circle {
             x,
             y,
@@ -1235,6 +1218,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             end_angle,
             thickness,
             exposure,
+            ..
         } => FeaturePrimitiveStorage::Arc {
             x,
             y,
@@ -1252,6 +1236,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             gap_thickness,
             rotation,
             exposure,
+            ..
         } => FeaturePrimitiveStorage::Thermal {
             x,
             y,
@@ -1261,7 +1246,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             rotation,
             exposure,
         },
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y }
         }
         Primitive::Line {
@@ -1648,15 +1633,7 @@ pub fn drill_hit_feature(
         None,
         None,
         Polarity::Positive,
-        vec![Primitive::Circle {
-            x,
-            y,
-            radius,
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        }],
+        vec![Primitive::new_circle(x, y, radius, 1.0, 0.0, 0.0, 0.0)],
         InteractionFeature::drill_properties(tool_code, diameter),
     )
 }
@@ -1780,7 +1757,7 @@ fn include_primitive_bounds(
         } => {
             include_circle_bounds(*x, *y, *outer_diameter * 0.5, min_x, max_x, min_y, max_y);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             for point in template.chunks_exact(2) {
                 include_point_bounds(point[0] + *x, point[1] + *y, min_x, max_x, min_y, max_y);
             }
@@ -1923,7 +1900,7 @@ fn primitive_hit(primitive: &Primitive, point: [f32; 2], tolerance: f32) -> bool
             *rotation,
             tolerance,
         ),
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             for triangle in template.chunks_exact(6) {
                 let vertices = [
                     [triangle[0] + *x, triangle[1] + *y],
@@ -2017,7 +1994,7 @@ fn append_primitive_triangles(vertices: &mut Vec<f32>, primitive: &Primitive) {
         } => {
             append_circle(vertices, [*x, *y], *outer_diameter * 0.5, CIRCLE_SEGMENTS);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             for triangle in template.chunks_exact(6) {
                 vertices.extend_from_slice(&[
                     triangle[0] + *x,

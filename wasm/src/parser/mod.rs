@@ -440,7 +440,7 @@ fn primitive_is_renderable(primitive: &Primitive) -> bool {
                 && has_non_negative_extent(*width)
                 && points_are_distinct(*start_x, *start_y, *end_x, *end_y)
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             finite_point(*x, *y) && template.len() >= 6 && template.len().is_multiple_of(6)
         }
     }
@@ -450,6 +450,9 @@ struct TriangleTemplateOutputBuffers {
     vertices: Vec<f32>,
     instance_x: Vec<f32>,
     instance_y: Vec<f32>,
+    vertices_nm: Vec<i32>,
+    instance_x_nm: Vec<i32>,
+    instance_y_nm: Vec<i32>,
 }
 
 struct PrimitiveOutputBuffers {
@@ -458,6 +461,10 @@ struct PrimitiveOutputBuffers {
     triangle_hole_x: Vec<f32>,
     triangle_hole_y: Vec<f32>,
     triangle_hole_radius: Vec<f32>,
+    triangle_vertices_nm: Vec<i32>,
+    triangle_hole_x_nm: Vec<i32>,
+    triangle_hole_y_nm: Vec<i32>,
+    triangle_hole_radius_nm: Vec<i32>,
     triangle_templates: Vec<TriangleTemplateOutputBuffers>,
     triangle_template_indices: HashMap<usize, usize>,
     triangle_template_instance_counts: HashMap<usize, usize>,
@@ -478,18 +485,33 @@ struct PrimitiveOutputBuffers {
     circles_hole_x: Vec<f32>,
     circles_hole_y: Vec<f32>,
     circles_hole_radius: Vec<f32>,
+    circles_x_nm: Vec<i32>,
+    circles_y_nm: Vec<i32>,
+    circles_radius_nm: Vec<i32>,
+    circles_hole_x_nm: Vec<i32>,
+    circles_hole_y_nm: Vec<i32>,
+    circles_hole_radius_nm: Vec<i32>,
     arcs_x: Vec<f32>,
     arcs_y: Vec<f32>,
     arcs_radius: Vec<f32>,
     arcs_start_angle: Vec<f32>,
     arcs_sweep_angle: Vec<f32>,
     arcs_thickness: Vec<f32>,
+    arcs_x_nm: Vec<i32>,
+    arcs_y_nm: Vec<i32>,
+    arcs_radius_nm: Vec<i32>,
+    arcs_thickness_nm: Vec<i32>,
     thermals_x: Vec<f32>,
     thermals_y: Vec<f32>,
     thermals_outer_diameter: Vec<f32>,
     thermals_inner_diameter: Vec<f32>,
     thermals_gap_thickness: Vec<f32>,
     thermals_rotation: Vec<f32>,
+    thermals_x_nm: Vec<i32>,
+    thermals_y_nm: Vec<i32>,
+    thermals_outer_diameter_nm: Vec<i32>,
+    thermals_inner_diameter_nm: Vec<i32>,
+    thermals_gap_thickness_nm: Vec<i32>,
 }
 
 impl PrimitiveOutputBuffers {
@@ -503,6 +525,10 @@ impl PrimitiveOutputBuffers {
             triangle_hole_x: Vec::new(),
             triangle_hole_y: Vec::new(),
             triangle_hole_radius: Vec::new(),
+            triangle_vertices_nm: Vec::new(),
+            triangle_hole_x_nm: Vec::new(),
+            triangle_hole_y_nm: Vec::new(),
+            triangle_hole_radius_nm: Vec::new(),
             triangle_templates: Vec::new(),
             triangle_template_indices: HashMap::new(),
             triangle_template_instance_counts: counts.triangle_template_instance_counts.clone(),
@@ -523,24 +549,44 @@ impl PrimitiveOutputBuffers {
             circles_hole_x: Vec::new(),
             circles_hole_y: Vec::new(),
             circles_hole_radius: Vec::new(),
+            circles_x_nm: Vec::new(),
+            circles_y_nm: Vec::new(),
+            circles_radius_nm: Vec::new(),
+            circles_hole_x_nm: Vec::new(),
+            circles_hole_y_nm: Vec::new(),
+            circles_hole_radius_nm: Vec::new(),
             arcs_x: Vec::new(),
             arcs_y: Vec::new(),
             arcs_radius: Vec::new(),
             arcs_start_angle: Vec::new(),
             arcs_sweep_angle: Vec::new(),
             arcs_thickness: Vec::new(),
+            arcs_x_nm: Vec::new(),
+            arcs_y_nm: Vec::new(),
+            arcs_radius_nm: Vec::new(),
+            arcs_thickness_nm: Vec::new(),
             thermals_x: Vec::new(),
             thermals_y: Vec::new(),
             thermals_outer_diameter: Vec::new(),
             thermals_inner_diameter: Vec::new(),
             thermals_gap_thickness: Vec::new(),
             thermals_rotation: Vec::new(),
+            thermals_x_nm: Vec::new(),
+            thermals_y_nm: Vec::new(),
+            thermals_outer_diameter_nm: Vec::new(),
+            thermals_inner_diameter_nm: Vec::new(),
+            thermals_gap_thickness_nm: Vec::new(),
         };
 
         try_reserve_exact(
             &mut buffers.triangle_vertices,
             triangle_vertex_values,
             "triangle vertex buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.triangle_vertices_nm,
+            triangle_vertex_values,
+            "triangle vertex nm buffer",
         )?;
         if counts.has_triangle_holes {
             let triangle_vertex_count =
@@ -559,6 +605,21 @@ impl PrimitiveOutputBuffers {
                 &mut buffers.triangle_hole_radius,
                 triangle_vertex_count,
                 "triangle hole radius buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.triangle_hole_x_nm,
+                triangle_vertex_count,
+                "triangle hole X nm buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.triangle_hole_y_nm,
+                triangle_vertex_count,
+                "triangle hole Y nm buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.triangle_hole_radius_nm,
+                triangle_vertex_count,
+                "triangle hole radius nm buffer",
             )?;
         }
         try_reserve_exact(
@@ -621,6 +682,21 @@ impl PrimitiveOutputBuffers {
             counts.circles,
             "circle radius buffer",
         )?;
+        try_reserve_exact(
+            &mut buffers.circles_x_nm,
+            counts.circles,
+            "circle X nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.circles_y_nm,
+            counts.circles,
+            "circle Y nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.circles_radius_nm,
+            counts.circles,
+            "circle radius nm buffer",
+        )?;
         if counts.has_circle_holes {
             try_reserve_exact(
                 &mut buffers.circles_hole_x,
@@ -636,6 +712,21 @@ impl PrimitiveOutputBuffers {
                 &mut buffers.circles_hole_radius,
                 counts.circles,
                 "circle hole radius buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.circles_hole_x_nm,
+                counts.circles,
+                "circle hole X nm buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.circles_hole_y_nm,
+                counts.circles,
+                "circle hole Y nm buffer",
+            )?;
+            try_reserve_exact(
+                &mut buffers.circles_hole_radius_nm,
+                counts.circles,
+                "circle hole radius nm buffer",
             )?;
         }
 
@@ -656,6 +747,18 @@ impl PrimitiveOutputBuffers {
             &mut buffers.arcs_thickness,
             counts.arcs,
             "arc thickness buffer",
+        )?;
+        try_reserve_exact(&mut buffers.arcs_x_nm, counts.arcs, "arc X nm buffer")?;
+        try_reserve_exact(&mut buffers.arcs_y_nm, counts.arcs, "arc Y nm buffer")?;
+        try_reserve_exact(
+            &mut buffers.arcs_radius_nm,
+            counts.arcs,
+            "arc radius nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.arcs_thickness_nm,
+            counts.arcs,
+            "arc thickness nm buffer",
         )?;
 
         try_reserve_exact(&mut buffers.thermals_x, counts.thermals, "thermal X buffer")?;
@@ -680,6 +783,31 @@ impl PrimitiveOutputBuffers {
             counts.thermals,
             "thermal rotation buffer",
         )?;
+        try_reserve_exact(
+            &mut buffers.thermals_x_nm,
+            counts.thermals,
+            "thermal X nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.thermals_y_nm,
+            counts.thermals,
+            "thermal Y nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.thermals_outer_diameter_nm,
+            counts.thermals,
+            "thermal outer diameter nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.thermals_inner_diameter_nm,
+            counts.thermals,
+            "thermal inner diameter nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.thermals_gap_thickness_nm,
+            counts.thermals,
+            "thermal gap thickness nm buffer",
+        )?;
 
         Ok(buffers)
     }
@@ -698,11 +826,19 @@ impl PrimitiveOutputBuffers {
                 hole_x,
                 hole_y,
                 hole_radius,
+                vertices_nm,
+                hole_x_nm,
+                hole_y_nm,
+                hole_radius_nm,
                 ..
             } => {
                 for vertex in vertices {
                     self.triangle_vertices.push(vertex[0] * TO_MM);
                     self.triangle_vertices.push(vertex[1] * TO_MM);
+                }
+                for vertex_nm in vertices_nm {
+                    self.triangle_vertices_nm.push(vertex_nm[0]);
+                    self.triangle_vertices_nm.push(vertex_nm[1]);
                 }
 
                 if self.has_triangle_holes {
@@ -710,6 +846,9 @@ impl PrimitiveOutputBuffers {
                         self.triangle_hole_x.push(hole_x * TO_MM);
                         self.triangle_hole_y.push(hole_y * TO_MM);
                         self.triangle_hole_radius.push(hole_radius * TO_MM);
+                        self.triangle_hole_x_nm.push(hole_x_nm);
+                        self.triangle_hole_y_nm.push(hole_y_nm);
+                        self.triangle_hole_radius_nm.push(hole_radius_nm);
                     }
                 }
             }
@@ -720,15 +859,27 @@ impl PrimitiveOutputBuffers {
                 hole_x,
                 hole_y,
                 hole_radius,
+                x_nm,
+                y_nm,
+                radius_nm,
+                hole_x_nm,
+                hole_y_nm,
+                hole_radius_nm,
                 ..
             } => {
                 self.circles_x.push(x * TO_MM);
                 self.circles_y.push(y * TO_MM);
                 self.circles_radius.push(radius * TO_MM);
+                self.circles_x_nm.push(x_nm);
+                self.circles_y_nm.push(y_nm);
+                self.circles_radius_nm.push(radius_nm);
                 if self.has_circle_holes {
                     self.circles_hole_x.push(hole_x * TO_MM);
                     self.circles_hole_y.push(hole_y * TO_MM);
                     self.circles_hole_radius.push(hole_radius * TO_MM);
+                    self.circles_hole_x_nm.push(hole_x_nm);
+                    self.circles_hole_y_nm.push(hole_y_nm);
+                    self.circles_hole_radius_nm.push(hole_radius_nm);
                 }
             }
             Primitive::Arc {
@@ -738,6 +889,10 @@ impl PrimitiveOutputBuffers {
                 start_angle,
                 end_angle,
                 thickness,
+                x_nm,
+                y_nm,
+                radius_nm,
+                thickness_nm,
                 ..
             } => {
                 self.arcs_x.push(x * TO_MM);
@@ -746,6 +901,10 @@ impl PrimitiveOutputBuffers {
                 self.arcs_start_angle.push(start_angle);
                 self.arcs_sweep_angle.push(end_angle - start_angle);
                 self.arcs_thickness.push(thickness * TO_MM);
+                self.arcs_x_nm.push(x_nm);
+                self.arcs_y_nm.push(y_nm);
+                self.arcs_radius_nm.push(radius_nm);
+                self.arcs_thickness_nm.push(thickness_nm);
             }
             Primitive::Line {
                 start_x,
@@ -778,6 +937,11 @@ impl PrimitiveOutputBuffers {
                 inner_diameter,
                 gap_thickness,
                 rotation,
+                x_nm,
+                y_nm,
+                outer_diameter_nm,
+                inner_diameter_nm,
+                gap_thickness_nm,
                 ..
             } => {
                 self.thermals_x.push(x * TO_MM);
@@ -786,8 +950,19 @@ impl PrimitiveOutputBuffers {
                 self.thermals_inner_diameter.push(inner_diameter * TO_MM);
                 self.thermals_gap_thickness.push(gap_thickness * TO_MM);
                 self.thermals_rotation.push(rotation);
+                self.thermals_x_nm.push(x_nm);
+                self.thermals_y_nm.push(y_nm);
+                self.thermals_outer_diameter_nm.push(outer_diameter_nm);
+                self.thermals_inner_diameter_nm.push(inner_diameter_nm);
+                self.thermals_gap_thickness_nm.push(gap_thickness_nm);
             }
-            Primitive::TriangleTemplateFlash { template, x, y } => {
+            Primitive::TriangleTemplateFlash {
+                template,
+                x,
+                y,
+                x_nm,
+                y_nm,
+            } => {
                 let key = std::rc::Rc::as_ptr(&template) as usize;
                 let template_idx =
                     if let Some(index) = self.triangle_template_indices.get(&key).copied() {
@@ -806,8 +981,22 @@ impl PrimitiveOutputBuffers {
                         )?;
                         vertices.extend(template.iter().copied());
 
+                        let mut vertices_nm = Vec::new();
+                        try_reserve_exact(
+                            &mut vertices_nm,
+                            template.len(),
+                            "triangle template vertex nm buffer",
+                        )?;
+                        vertices_nm.extend(
+                            template
+                                .iter()
+                                .map(|&v| (v as f64 * 1_000_000.0).round() as i32),
+                        );
+
                         let mut instance_x = Vec::new();
                         let mut instance_y = Vec::new();
+                        let mut instance_x_nm = Vec::new();
+                        let mut instance_y_nm = Vec::new();
                         try_reserve_exact(
                             &mut instance_x,
                             expected_instances,
@@ -818,12 +1007,25 @@ impl PrimitiveOutputBuffers {
                             expected_instances,
                             "triangle template instance Y buffer",
                         )?;
+                        try_reserve_exact(
+                            &mut instance_x_nm,
+                            expected_instances,
+                            "triangle template instance X nm buffer",
+                        )?;
+                        try_reserve_exact(
+                            &mut instance_y_nm,
+                            expected_instances,
+                            "triangle template instance Y nm buffer",
+                        )?;
 
                         let index = self.triangle_templates.len();
                         self.triangle_templates.push(TriangleTemplateOutputBuffers {
                             vertices,
                             instance_x,
                             instance_y,
+                            vertices_nm,
+                            instance_x_nm,
+                            instance_y_nm,
                         });
                         self.triangle_template_indices.insert(key, index);
                         index
@@ -832,6 +1034,8 @@ impl PrimitiveOutputBuffers {
                 let template = &mut self.triangle_templates[template_idx];
                 template.instance_x.push(x * TO_MM);
                 template.instance_y.push(y * TO_MM);
+                template.instance_x_nm.push(x_nm);
+                template.instance_y_nm.push(y_nm);
             }
         }
 
@@ -844,20 +1048,27 @@ impl PrimitiveOutputBuffers {
             .triangle_templates
             .into_iter()
             .map(|template| {
-                TriangleTemplateInstances::new(
+                TriangleTemplateInstances::new_with_nm(
                     template.vertices,
                     template.instance_x,
                     template.instance_y,
+                    template.vertices_nm,
+                    template.instance_x_nm,
+                    template.instance_y_nm,
                 )
             })
             .collect();
 
         GerberData::new(
-            Triangles::new(
+            Triangles::new_with_nm(
                 self.triangle_vertices,
                 self.triangle_hole_x,
                 self.triangle_hole_y,
                 self.triangle_hole_radius,
+                self.triangle_vertices_nm,
+                self.triangle_hole_x_nm,
+                self.triangle_hole_y_nm,
+                self.triangle_hole_radius_nm,
             ),
             triangle_templates,
             Lines::new_with_nm(
@@ -872,29 +1083,44 @@ impl PrimitiveOutputBuffers {
                 self.lines_end_y_nm,
                 self.lines_width_nm,
             ),
-            Circles::new(
+            Circles::new_with_nm(
                 self.circles_x,
                 self.circles_y,
                 self.circles_radius,
                 self.circles_hole_x,
                 self.circles_hole_y,
                 self.circles_hole_radius,
+                self.circles_x_nm,
+                self.circles_y_nm,
+                self.circles_radius_nm,
+                self.circles_hole_x_nm,
+                self.circles_hole_y_nm,
+                self.circles_hole_radius_nm,
             ),
-            Arcs::new(
+            Arcs::new_with_nm(
                 self.arcs_x,
                 self.arcs_y,
                 self.arcs_radius,
                 self.arcs_start_angle,
                 self.arcs_sweep_angle,
                 self.arcs_thickness,
+                self.arcs_x_nm,
+                self.arcs_y_nm,
+                self.arcs_radius_nm,
+                self.arcs_thickness_nm,
             ),
-            Thermals::new(
+            Thermals::new_with_nm(
                 self.thermals_x,
                 self.thermals_y,
                 self.thermals_outer_diameter,
                 self.thermals_inner_diameter,
                 self.thermals_gap_thickness,
                 self.thermals_rotation,
+                self.thermals_x_nm,
+                self.thermals_y_nm,
+                self.thermals_outer_diameter_nm,
+                self.thermals_inner_diameter_nm,
+                self.thermals_gap_thickness_nm,
             ),
             path_regions,
             boundary,
@@ -1603,8 +1829,7 @@ fn parse_aperture_block(
         state.polarity,
     )?;
 
-    state.x = 0.0;
-    state.y = 0.0;
+    state.set_point(0.0, 0.0);
     state.pen_state = "up".to_string();
 
     apertures.insert(block_code, Aperture::new_block(block_layers));

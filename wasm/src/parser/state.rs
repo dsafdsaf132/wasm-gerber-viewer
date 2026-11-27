@@ -146,6 +146,23 @@ impl Default for ParserState {
 }
 
 impl ParserState {
+    #[inline]
+    pub fn set_point(&mut self, x: f32, y: f32) {
+        self.x = x;
+        self.y = y;
+        self.x_nm = (x as f64 * 1_000_000.0).round() as i64;
+        self.y_nm = (y as f64 * 1_000_000.0).round() as i64;
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    pub fn set_point_with_nm(&mut self, x: f32, y: f32, x_nm: i64, y_nm: i64) {
+        self.x = x;
+        self.y = y;
+        self.x_nm = x_nm;
+        self.y_nm = y_nm;
+    }
+
     pub(crate) fn step_repeat_count(&self, context: &str) -> Result<usize, String> {
         let count = (self.sr_x as usize)
             .checked_mul(self.sr_y as usize)

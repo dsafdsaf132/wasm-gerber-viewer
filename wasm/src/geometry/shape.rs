@@ -86,6 +86,13 @@ fn translate_point_pairs(values: &mut [f32], dx: f32, dy: f32) {
     }
 }
 
+fn translate_point_pairs_i32(values: &mut [i32], dx: i32, dy: i32) {
+    for point in values.chunks_exact_mut(2) {
+        point[0] = point[0].saturating_add(dx);
+        point[1] = point[1].saturating_add(dy);
+    }
+}
+
 fn translate_components(xs: &mut [f32], ys: &mut [f32], dx: f32, dy: f32) {
     for x in xs {
         *x += dx;
@@ -96,12 +103,26 @@ fn translate_components(xs: &mut [f32], ys: &mut [f32], dx: f32, dy: f32) {
     }
 }
 
+fn translate_components_i32(xs: &mut [i32], ys: &mut [i32], dx: i32, dy: i32) {
+    for x in xs {
+        *x = x.saturating_add(dx);
+    }
+
+    for y in ys {
+        *y = y.saturating_add(dy);
+    }
+}
+
 /// Triangle mesh data structure
 pub struct Triangles {
     pub(crate) vertices: Vec<f32>,
     pub(crate) hole_x: Vec<f32>,
     pub(crate) hole_y: Vec<f32>,
     pub(crate) hole_radius: Vec<f32>,
+    pub(crate) vertices_nm: Vec<i32>,
+    pub(crate) hole_x_nm: Vec<i32>,
+    pub(crate) hole_y_nm: Vec<i32>,
+    pub(crate) hole_radius_nm: Vec<i32>,
 }
 
 impl Triangles {
@@ -111,11 +132,41 @@ impl Triangles {
         hole_y: Vec<f32>,
         hole_radius: Vec<f32>,
     ) -> Triangles {
+        let vertices_nm = vertices.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let hole_x_nm = hole_x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let hole_y_nm = hole_y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let hole_radius_nm = hole_radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
         Triangles {
             vertices,
             hole_x,
             hole_y,
             hole_radius,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
+        }
+    }
+
+    pub fn new_with_nm(
+        vertices: Vec<f32>,
+        hole_x: Vec<f32>,
+        hole_y: Vec<f32>,
+        hole_radius: Vec<f32>,
+        vertices_nm: Vec<i32>,
+        hole_x_nm: Vec<i32>,
+        hole_y_nm: Vec<i32>,
+        hole_radius_nm: Vec<i32>,
+    ) -> Triangles {
+        Triangles {
+            vertices,
+            hole_x,
+            hole_y,
+            hole_radius,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
         }
     }
 
@@ -124,11 +175,19 @@ impl Triangles {
         self.hole_x = Vec::new();
         self.hole_y = Vec::new();
         self.hole_radius = Vec::new();
+        self.vertices_nm = Vec::new();
+        self.hole_x_nm = Vec::new();
+        self.hole_y_nm = Vec::new();
+        self.hole_radius_nm = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_point_pairs(&mut self.vertices, dx, dy);
         translate_components(&mut self.hole_x, &mut self.hole_y, dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
+        translate_point_pairs_i32(&mut self.vertices_nm, dx_nm, dy_nm);
+        translate_components_i32(&mut self.hole_x_nm, &mut self.hole_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -137,15 +196,43 @@ impl Triangles {
         set_property(&object, "holeX", &f32_array_to_js(&self.hole_x)?)?;
         set_property(&object, "holeY", &f32_array_to_js(&self.hole_y)?)?;
         set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius)?)?;
+        set_property(&object, "verticesNm", &i32_array_to_js(&self.vertices_nm)?)?;
+        set_property(&object, "holeXNm", &i32_array_to_js(&self.hole_x_nm)?)?;
+        set_property(&object, "holeYNm", &i32_array_to_js(&self.hole_y_nm)?)?;
+        set_property(&object, "holeRadiusNm", &i32_array_to_js(&self.hole_radius_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Triangles, JsValue> {
-        Ok(Triangles::new(
-            f32_array_from_js(value, "vertices")?,
-            f32_array_from_js(value, "holeX")?,
-            f32_array_from_js(value, "holeY")?,
-            f32_array_from_js(value, "holeRadius")?,
+        let vertices = f32_array_from_js(value, "vertices")?;
+        let hole_x = f32_array_from_js(value, "holeX")?;
+        let hole_y = f32_array_from_js(value, "holeY")?;
+        let hole_radius = f32_array_from_js(value, "holeRadius")?;
+        let vertices_nm = match i32_array_from_js(value, "verticesNm") {
+            Ok(v) if v.len() == vertices.len() => v,
+            _ => vertices.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let hole_x_nm = match i32_array_from_js(value, "holeXNm") {
+            Ok(v) if v.len() == hole_x.len() => v,
+            _ => hole_x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let hole_y_nm = match i32_array_from_js(value, "holeYNm") {
+            Ok(v) if v.len() == hole_y.len() => v,
+            _ => hole_y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let hole_radius_nm = match i32_array_from_js(value, "holeRadiusNm") {
+            Ok(v) if v.len() == hole_radius.len() => v,
+            _ => hole_radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        Ok(Triangles::new_with_nm(
+            vertices,
+            hole_x,
+            hole_y,
+            hole_radius,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
         ))
     }
 }
@@ -155,6 +242,9 @@ pub struct TriangleTemplateInstances {
     pub(crate) vertices: Vec<f32>,
     pub(crate) instance_x: Vec<f32>,
     pub(crate) instance_y: Vec<f32>,
+    pub(crate) vertices_nm: Vec<i32>,
+    pub(crate) instance_x_nm: Vec<i32>,
+    pub(crate) instance_y_nm: Vec<i32>,
 }
 
 impl TriangleTemplateInstances {
@@ -163,10 +253,34 @@ impl TriangleTemplateInstances {
         instance_x: Vec<f32>,
         instance_y: Vec<f32>,
     ) -> TriangleTemplateInstances {
+        let vertices_nm = vertices.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let instance_x_nm = instance_x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let instance_y_nm = instance_y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
         TriangleTemplateInstances {
             vertices,
             instance_x,
             instance_y,
+            vertices_nm,
+            instance_x_nm,
+            instance_y_nm,
+        }
+    }
+
+    pub fn new_with_nm(
+        vertices: Vec<f32>,
+        instance_x: Vec<f32>,
+        instance_y: Vec<f32>,
+        vertices_nm: Vec<i32>,
+        instance_x_nm: Vec<i32>,
+        instance_y_nm: Vec<i32>,
+    ) -> TriangleTemplateInstances {
+        TriangleTemplateInstances {
+            vertices,
+            instance_x,
+            instance_y,
+            vertices_nm,
+            instance_x_nm,
+            instance_y_nm,
         }
     }
 
@@ -174,10 +288,16 @@ impl TriangleTemplateInstances {
         self.vertices = Vec::new();
         self.instance_x = Vec::new();
         self.instance_y = Vec::new();
+        self.vertices_nm = Vec::new();
+        self.instance_x_nm = Vec::new();
+        self.instance_y_nm = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_components(&mut self.instance_x, &mut self.instance_y, dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
+        translate_components_i32(&mut self.instance_x_nm, &mut self.instance_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -185,14 +305,35 @@ impl TriangleTemplateInstances {
         set_property(&object, "vertices", &f32_array_to_js(&self.vertices)?)?;
         set_property(&object, "instanceX", &f32_array_to_js(&self.instance_x)?)?;
         set_property(&object, "instanceY", &f32_array_to_js(&self.instance_y)?)?;
+        set_property(&object, "verticesNm", &i32_array_to_js(&self.vertices_nm)?)?;
+        set_property(&object, "instanceXNm", &i32_array_to_js(&self.instance_x_nm)?)?;
+        set_property(&object, "instanceYNm", &i32_array_to_js(&self.instance_y_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<TriangleTemplateInstances, JsValue> {
-        Ok(TriangleTemplateInstances::new(
-            f32_array_from_js(value, "vertices")?,
-            f32_array_from_js(value, "instanceX")?,
-            f32_array_from_js(value, "instanceY")?,
+        let vertices = f32_array_from_js(value, "vertices")?;
+        let instance_x = f32_array_from_js(value, "instanceX")?;
+        let instance_y = f32_array_from_js(value, "instanceY")?;
+        let vertices_nm = match i32_array_from_js(value, "verticesNm") {
+            Ok(v) if v.len() == vertices.len() => v,
+            _ => vertices.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let instance_x_nm = match i32_array_from_js(value, "instanceXNm") {
+            Ok(v) if v.len() == instance_x.len() => v,
+            _ => instance_x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let instance_y_nm = match i32_array_from_js(value, "instanceYNm") {
+            Ok(v) if v.len() == instance_y.len() => v,
+            _ => instance_y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        Ok(TriangleTemplateInstances::new_with_nm(
+            vertices,
+            instance_x,
+            instance_y,
+            vertices_nm,
+            instance_x_nm,
+            instance_y_nm,
         ))
     }
 }
@@ -282,10 +423,8 @@ impl Lines {
         translate_components(&mut self.end_x, &mut self.end_y, dx, dy);
         let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
         let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        for x in &mut self.start_x_nm { *x = x.saturating_add(dx_nm); }
-        for y in &mut self.start_y_nm { *y = y.saturating_add(dy_nm); }
-        for x in &mut self.end_x_nm { *x = x.saturating_add(dx_nm); }
-        for y in &mut self.end_y_nm { *y = y.saturating_add(dy_nm); }
+        translate_components_i32(&mut self.start_x_nm, &mut self.start_y_nm, dx_nm, dy_nm);
+        translate_components_i32(&mut self.end_x_nm, &mut self.end_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -344,6 +483,12 @@ pub struct Circles {
     pub(crate) hole_x: Vec<f32>,
     pub(crate) hole_y: Vec<f32>,
     pub(crate) hole_radius: Vec<f32>,
+    pub(crate) x_nm: Vec<i32>,
+    pub(crate) y_nm: Vec<i32>,
+    pub(crate) radius_nm: Vec<i32>,
+    pub(crate) hole_x_nm: Vec<i32>,
+    pub(crate) hole_y_nm: Vec<i32>,
+    pub(crate) hole_radius_nm: Vec<i32>,
 }
 
 impl Circles {
@@ -355,6 +500,12 @@ impl Circles {
         hole_y: Vec<f32>,
         hole_radius: Vec<f32>,
     ) -> Circles {
+        let x_nm = x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let y_nm = y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let radius_nm = radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let hole_x_nm = hole_x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let hole_y_nm = hole_y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let hole_radius_nm = hole_radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
         Circles {
             x,
             y,
@@ -362,6 +513,42 @@ impl Circles {
             hole_x,
             hole_y,
             hole_radius,
+            x_nm,
+            y_nm,
+            radius_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
+        }
+    }
+
+    pub fn new_with_nm(
+        x: Vec<f32>,
+        y: Vec<f32>,
+        radius: Vec<f32>,
+        hole_x: Vec<f32>,
+        hole_y: Vec<f32>,
+        hole_radius: Vec<f32>,
+        x_nm: Vec<i32>,
+        y_nm: Vec<i32>,
+        radius_nm: Vec<i32>,
+        hole_x_nm: Vec<i32>,
+        hole_y_nm: Vec<i32>,
+        hole_radius_nm: Vec<i32>,
+    ) -> Circles {
+        Circles {
+            x,
+            y,
+            radius,
+            hole_x,
+            hole_y,
+            hole_radius,
+            x_nm,
+            y_nm,
+            radius_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
         }
     }
 
@@ -372,11 +559,21 @@ impl Circles {
         self.hole_x = Vec::new();
         self.hole_y = Vec::new();
         self.hole_radius = Vec::new();
+        self.x_nm = Vec::new();
+        self.y_nm = Vec::new();
+        self.radius_nm = Vec::new();
+        self.hole_x_nm = Vec::new();
+        self.hole_y_nm = Vec::new();
+        self.hole_radius_nm = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_components(&mut self.x, &mut self.y, dx, dy);
         translate_components(&mut self.hole_x, &mut self.hole_y, dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
+        translate_components_i32(&mut self.x_nm, &mut self.y_nm, dx_nm, dy_nm);
+        translate_components_i32(&mut self.hole_x_nm, &mut self.hole_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -387,17 +584,59 @@ impl Circles {
         set_property(&object, "holeX", &f32_array_to_js(&self.hole_x)?)?;
         set_property(&object, "holeY", &f32_array_to_js(&self.hole_y)?)?;
         set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius)?)?;
+        set_property(&object, "xNm", &i32_array_to_js(&self.x_nm)?)?;
+        set_property(&object, "yNm", &i32_array_to_js(&self.y_nm)?)?;
+        set_property(&object, "radiusNm", &i32_array_to_js(&self.radius_nm)?)?;
+        set_property(&object, "holeXNm", &i32_array_to_js(&self.hole_x_nm)?)?;
+        set_property(&object, "holeYNm", &i32_array_to_js(&self.hole_y_nm)?)?;
+        set_property(&object, "holeRadiusNm", &i32_array_to_js(&self.hole_radius_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Circles, JsValue> {
-        Ok(Circles::new(
-            f32_array_from_js(value, "x")?,
-            f32_array_from_js(value, "y")?,
-            f32_array_from_js(value, "radius")?,
-            f32_array_from_js(value, "holeX")?,
-            f32_array_from_js(value, "holeY")?,
-            f32_array_from_js(value, "holeRadius")?,
+        let x = f32_array_from_js(value, "x")?;
+        let y = f32_array_from_js(value, "y")?;
+        let radius = f32_array_from_js(value, "radius")?;
+        let hole_x = f32_array_from_js(value, "holeX")?;
+        let hole_y = f32_array_from_js(value, "holeY")?;
+        let hole_radius = f32_array_from_js(value, "holeRadius")?;
+        let x_nm = match i32_array_from_js(value, "xNm") {
+            Ok(v) if v.len() == x.len() => v,
+            _ => x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let y_nm = match i32_array_from_js(value, "yNm") {
+            Ok(v) if v.len() == y.len() => v,
+            _ => y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let radius_nm = match i32_array_from_js(value, "radiusNm") {
+            Ok(v) if v.len() == radius.len() => v,
+            _ => radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let hole_x_nm = match i32_array_from_js(value, "holeXNm") {
+            Ok(v) if v.len() == hole_x.len() => v,
+            _ => hole_x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let hole_y_nm = match i32_array_from_js(value, "holeYNm") {
+            Ok(v) if v.len() == hole_y.len() => v,
+            _ => hole_y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let hole_radius_nm = match i32_array_from_js(value, "holeRadiusNm") {
+            Ok(v) if v.len() == hole_radius.len() => v,
+            _ => hole_radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        Ok(Circles::new_with_nm(
+            x,
+            y,
+            radius,
+            hole_x,
+            hole_y,
+            hole_radius,
+            x_nm,
+            y_nm,
+            radius_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
         ))
     }
 }
@@ -410,6 +649,10 @@ pub struct Arcs {
     pub(crate) start_angle: Vec<f32>,
     pub(crate) sweep_angle: Vec<f32>,
     pub(crate) thickness: Vec<f32>,
+    pub(crate) x_nm: Vec<i32>,
+    pub(crate) y_nm: Vec<i32>,
+    pub(crate) radius_nm: Vec<i32>,
+    pub(crate) thickness_nm: Vec<i32>,
 }
 
 impl Arcs {
@@ -421,6 +664,10 @@ impl Arcs {
         sweep_angle: Vec<f32>,
         thickness: Vec<f32>,
     ) -> Arcs {
+        let x_nm = x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let y_nm = y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let radius_nm = radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let thickness_nm = thickness.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
         Arcs {
             x,
             y,
@@ -428,6 +675,36 @@ impl Arcs {
             start_angle,
             sweep_angle,
             thickness,
+            x_nm,
+            y_nm,
+            radius_nm,
+            thickness_nm,
+        }
+    }
+
+    pub fn new_with_nm(
+        x: Vec<f32>,
+        y: Vec<f32>,
+        radius: Vec<f32>,
+        start_angle: Vec<f32>,
+        sweep_angle: Vec<f32>,
+        thickness: Vec<f32>,
+        x_nm: Vec<i32>,
+        y_nm: Vec<i32>,
+        radius_nm: Vec<i32>,
+        thickness_nm: Vec<i32>,
+    ) -> Arcs {
+        Arcs {
+            x,
+            y,
+            radius,
+            start_angle,
+            sweep_angle,
+            thickness,
+            x_nm,
+            y_nm,
+            radius_nm,
+            thickness_nm,
         }
     }
 
@@ -438,10 +715,17 @@ impl Arcs {
         self.start_angle = Vec::new();
         self.sweep_angle = Vec::new();
         self.thickness = Vec::new();
+        self.x_nm = Vec::new();
+        self.y_nm = Vec::new();
+        self.radius_nm = Vec::new();
+        self.thickness_nm = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_components(&mut self.x, &mut self.y, dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
+        translate_components_i32(&mut self.x_nm, &mut self.y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -452,17 +736,47 @@ impl Arcs {
         set_property(&object, "startAngle", &f32_array_to_js(&self.start_angle)?)?;
         set_property(&object, "sweepAngle", &f32_array_to_js(&self.sweep_angle)?)?;
         set_property(&object, "thickness", &f32_array_to_js(&self.thickness)?)?;
+        set_property(&object, "xNm", &i32_array_to_js(&self.x_nm)?)?;
+        set_property(&object, "yNm", &i32_array_to_js(&self.y_nm)?)?;
+        set_property(&object, "radiusNm", &i32_array_to_js(&self.radius_nm)?)?;
+        set_property(&object, "thicknessNm", &i32_array_to_js(&self.thickness_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Arcs, JsValue> {
-        Ok(Arcs::new(
-            f32_array_from_js(value, "x")?,
-            f32_array_from_js(value, "y")?,
-            f32_array_from_js(value, "radius")?,
-            f32_array_from_js(value, "startAngle")?,
-            f32_array_from_js(value, "sweepAngle")?,
-            f32_array_from_js(value, "thickness")?,
+        let x = f32_array_from_js(value, "x")?;
+        let y = f32_array_from_js(value, "y")?;
+        let radius = f32_array_from_js(value, "radius")?;
+        let start_angle = f32_array_from_js(value, "startAngle")?;
+        let sweep_angle = f32_array_from_js(value, "sweepAngle")?;
+        let thickness = f32_array_from_js(value, "thickness")?;
+        let x_nm = match i32_array_from_js(value, "xNm") {
+            Ok(v) if v.len() == x.len() => v,
+            _ => x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let y_nm = match i32_array_from_js(value, "yNm") {
+            Ok(v) if v.len() == y.len() => v,
+            _ => y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let radius_nm = match i32_array_from_js(value, "radiusNm") {
+            Ok(v) if v.len() == radius.len() => v,
+            _ => radius.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let thickness_nm = match i32_array_from_js(value, "thicknessNm") {
+            Ok(v) if v.len() == thickness.len() => v,
+            _ => thickness.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        Ok(Arcs::new_with_nm(
+            x,
+            y,
+            radius,
+            start_angle,
+            sweep_angle,
+            thickness,
+            x_nm,
+            y_nm,
+            radius_nm,
+            thickness_nm,
         ))
     }
 }
@@ -475,6 +789,11 @@ pub struct Thermals {
     pub(crate) inner_diameter: Vec<f32>,
     pub(crate) gap_thickness: Vec<f32>,
     pub(crate) rotation: Vec<f32>,
+    pub(crate) x_nm: Vec<i32>,
+    pub(crate) y_nm: Vec<i32>,
+    pub(crate) outer_diameter_nm: Vec<i32>,
+    pub(crate) inner_diameter_nm: Vec<i32>,
+    pub(crate) gap_thickness_nm: Vec<i32>,
 }
 
 impl Thermals {
@@ -486,6 +805,11 @@ impl Thermals {
         gap_thickness: Vec<f32>,
         rotation: Vec<f32>,
     ) -> Thermals {
+        let x_nm = x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let y_nm = y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let outer_diameter_nm = outer_diameter.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let inner_diameter_nm = inner_diameter.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+        let gap_thickness_nm = gap_thickness.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
         Thermals {
             x,
             y,
@@ -493,6 +817,39 @@ impl Thermals {
             inner_diameter,
             gap_thickness,
             rotation,
+            x_nm,
+            y_nm,
+            outer_diameter_nm,
+            inner_diameter_nm,
+            gap_thickness_nm,
+        }
+    }
+
+    pub fn new_with_nm(
+        x: Vec<f32>,
+        y: Vec<f32>,
+        outer_diameter: Vec<f32>,
+        inner_diameter: Vec<f32>,
+        gap_thickness: Vec<f32>,
+        rotation: Vec<f32>,
+        x_nm: Vec<i32>,
+        y_nm: Vec<i32>,
+        outer_diameter_nm: Vec<i32>,
+        inner_diameter_nm: Vec<i32>,
+        gap_thickness_nm: Vec<i32>,
+    ) -> Thermals {
+        Thermals {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            x_nm,
+            y_nm,
+            outer_diameter_nm,
+            inner_diameter_nm,
+            gap_thickness_nm,
         }
     }
 
@@ -503,10 +860,18 @@ impl Thermals {
         self.inner_diameter = Vec::new();
         self.gap_thickness = Vec::new();
         self.rotation = Vec::new();
+        self.x_nm = Vec::new();
+        self.y_nm = Vec::new();
+        self.outer_diameter_nm = Vec::new();
+        self.inner_diameter_nm = Vec::new();
+        self.gap_thickness_nm = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_components(&mut self.x, &mut self.y, dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
+        translate_components_i32(&mut self.x_nm, &mut self.y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -529,17 +894,53 @@ impl Thermals {
             &f32_array_to_js(&self.gap_thickness)?,
         )?;
         set_property(&object, "rotation", &f32_array_to_js(&self.rotation)?)?;
+        set_property(&object, "xNm", &i32_array_to_js(&self.x_nm)?)?;
+        set_property(&object, "yNm", &i32_array_to_js(&self.y_nm)?)?;
+        set_property(&object, "outerDiameterNm", &i32_array_to_js(&self.outer_diameter_nm)?)?;
+        set_property(&object, "innerDiameterNm", &i32_array_to_js(&self.inner_diameter_nm)?)?;
+        set_property(&object, "gapThicknessNm", &i32_array_to_js(&self.gap_thickness_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Thermals, JsValue> {
-        Ok(Thermals::new(
-            f32_array_from_js(value, "x")?,
-            f32_array_from_js(value, "y")?,
-            f32_array_from_js(value, "outerDiameter")?,
-            f32_array_from_js(value, "innerDiameter")?,
-            f32_array_from_js(value, "gapThickness")?,
-            f32_array_from_js(value, "rotation")?,
+        let x = f32_array_from_js(value, "x")?;
+        let y = f32_array_from_js(value, "y")?;
+        let outer_diameter = f32_array_from_js(value, "outerDiameter")?;
+        let inner_diameter = f32_array_from_js(value, "innerDiameter")?;
+        let gap_thickness = f32_array_from_js(value, "gapThickness")?;
+        let rotation = f32_array_from_js(value, "rotation")?;
+        let x_nm = match i32_array_from_js(value, "xNm") {
+            Ok(v) if v.len() == x.len() => v,
+            _ => x.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let y_nm = match i32_array_from_js(value, "yNm") {
+            Ok(v) if v.len() == y.len() => v,
+            _ => y.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let outer_diameter_nm = match i32_array_from_js(value, "outerDiameterNm") {
+            Ok(v) if v.len() == outer_diameter.len() => v,
+            _ => outer_diameter.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let inner_diameter_nm = match i32_array_from_js(value, "innerDiameterNm") {
+            Ok(v) if v.len() == inner_diameter.len() => v,
+            _ => inner_diameter.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        let gap_thickness_nm = match i32_array_from_js(value, "gapThicknessNm") {
+            Ok(v) if v.len() == gap_thickness.len() => v,
+            _ => gap_thickness.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect(),
+        };
+        Ok(Thermals::new_with_nm(
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            x_nm,
+            y_nm,
+            outer_diameter_nm,
+            inner_diameter_nm,
+            gap_thickness_nm,
         ))
     }
 }

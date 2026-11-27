@@ -3,46 +3,16 @@ use super::*;
 #[test]
 fn compact_single_primitive_decodes_directly_into_retained_storage() {
     let primitives = vec![
-        Primitive::Circle {
-            x: 0.3,
-            y: -0.2,
-            radius: 0.5,
-            exposure: 1.0,
-            hole_x: 0.1,
-            hole_y: -0.1,
-            hole_radius: 0.05,
-        },
-        Primitive::Arc {
-            x: 0.3,
-            y: -0.2,
-            radius: 0.7,
-            start_angle: -0.4,
-            end_angle: 2.1,
-            thickness: 0.15,
-            exposure: 1.0,
-        },
-        Primitive::Thermal {
-            x: 0.3,
-            y: -0.2,
-            outer_diameter: 1.4,
-            inner_diameter: 0.7,
-            gap_thickness: 0.16,
-            rotation: 0.31,
-            exposure: 1.0,
-        },
+        Primitive::new_circle(0.3, -0.2, 0.5, 1.0, 0.1, -0.1, 0.05),
+        Primitive::new_arc(0.3, -0.2, 0.7, -0.4, 2.1, 0.15, 1.0),
+        Primitive::new_thermal(0.3, -0.2, 1.4, 0.7, 0.16, 0.31, 1.0),
         Primitive::new_line(-0.8, 0.3, 0.7, -0.2, 0.15, 1.0),
-        Primitive::Triangle {
-            vertices: [[-0.3, 0.2], [0.7, -0.4], [0.6, 0.8]],
-            exposure: 1.0,
-            hole_x: 0.3,
-            hole_y: 0.2,
-            hole_radius: 0.03,
-        },
-        Primitive::TriangleTemplateFlash {
-            template: Rc::new(vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
-            x: 0.2,
-            y: -0.1,
-        },
+        Primitive::new_triangle([[-0.3, 0.2], [0.7, -0.4], [0.6, 0.8]], 1.0, 0.3, 0.2, 0.03),
+        Primitive::new_triangle_template_flash(
+            Rc::new(vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]),
+            0.2,
+            -0.1,
+        ),
     ];
     assert!(compact_primitives_from_parts(&[], &[], &[])
         .unwrap()
@@ -93,15 +63,7 @@ fn compact_single_primitive_decodes_directly_into_retained_storage() {
 fn repeated_flash_shares_descriptor_but_preserves_independent_geometry() {
     let mut layer = InteractionLayer::new();
     layer.push(circle_feature(0.0, 0.5, Polarity::Positive));
-    let primitive = Primitive::Circle {
-        x: 1.0,
-        y: 0.0,
-        radius: 0.5,
-        exposure: 1.0,
-        hole_x: 1.0,
-        hole_y: 0.0,
-        hole_radius: 0.0,
-    };
+    let primitive = Primitive::new_circle(1.0, 0.0, 0.5, 1.0, 1.0, 0.0, 0.0);
     layer.push_repeated_flash(0, std::slice::from_ref(&primitive));
     assert!(Rc::ptr_eq(
         &layer.features[0].descriptor,
@@ -133,15 +95,7 @@ fn circle_feature(x: f32, radius: f32, polarity: Polarity) -> InteractionFeature
         Some("circle".to_string()),
         None,
         polarity,
-        vec![Primitive::Circle {
-            x,
-            y: 0.0,
-            radius,
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        }],
+        vec![Primitive::new_circle(x, 0.0, radius, 1.0, 0.0, 0.0, 0.0)],
         FeatureProperties::default(),
     )
     .expect("circle feature should have bounds")
@@ -154,15 +108,15 @@ fn thermal_feature(rotation: f32) -> InteractionFeature {
         Some("macro".to_string()),
         Some("THERM".to_string()),
         Polarity::Positive,
-        vec![Primitive::Thermal {
-            x: 0.0,
-            y: 0.0,
-            outer_diameter: 2.0,
-            inner_diameter: 0.5,
-            gap_thickness: 0.4,
+        vec![Primitive::new_thermal(
+            0.0,
+            0.0,
+            2.0,
+            0.5,
+            0.4,
             rotation,
-            exposure: 1.0,
-        }],
+            1.0,
+        )],
         FeatureProperties::default(),
     )
     .expect("thermal feature should have bounds")
@@ -223,13 +177,13 @@ fn non_aperture_features_do_not_report_aperture_type() {
         None,
         None,
         Polarity::Positive,
-        vec![Primitive::Triangle {
-            vertices: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        }],
+        vec![Primitive::new_triangle(
+            [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        )],
         FeatureProperties::default(),
     )
     .expect("region feature should have bounds");
@@ -268,15 +222,7 @@ fn negative_coverage_batches_preserve_aperture_holes() {
         Some("circle".to_string()),
         None,
         Polarity::Negative,
-        vec![Primitive::Circle {
-            x: 0.0,
-            y: 0.0,
-            radius: 2.0,
-            exposure: 0.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.5,
-        }],
+        vec![Primitive::new_circle(0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.5)],
         FeatureProperties::default(),
     )
     .expect("negative circle feature should have bounds");

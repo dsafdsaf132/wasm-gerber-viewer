@@ -939,24 +939,8 @@ impl DrillParser {
                 diameter_mm,
                 vec![
                     Primitive::new_line(start_x, start_y, end_x, end_y, diameter_mm, 1.0),
-                    Primitive::Circle {
-                        x: start_x,
-                        y: start_y,
-                        radius: fill_radius,
-                        exposure: 1.0,
-                        hole_x: 0.0,
-                        hole_y: 0.0,
-                        hole_radius: 0.0,
-                    },
-                    Primitive::Circle {
-                        x: end_x,
-                        y: end_y,
-                        radius: fill_radius,
-                        exposure: 1.0,
-                        hole_x: 0.0,
-                        hole_y: 0.0,
-                        hole_radius: 0.0,
-                    },
+                    Primitive::new_circle(start_x, start_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
+                    Primitive::new_circle(end_x, end_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
                 ],
             ) {
                 interaction_layer.push(feature);
@@ -1020,33 +1004,17 @@ impl DrillParser {
                 code,
                 diameter_mm,
                 vec![
-                    Primitive::Arc {
-                        x: center_x,
-                        y: center_y,
-                        radius: arc.radius,
-                        start_angle: arc.start_angle,
-                        end_angle: arc.start_angle + arc.sweep_angle,
-                        thickness: diameter_mm,
-                        exposure: 1.0,
-                    },
-                    Primitive::Circle {
-                        x: start_x,
-                        y: start_y,
-                        radius: fill_radius,
-                        exposure: 1.0,
-                        hole_x: 0.0,
-                        hole_y: 0.0,
-                        hole_radius: 0.0,
-                    },
-                    Primitive::Circle {
-                        x: end_x,
-                        y: end_y,
-                        radius: fill_radius,
-                        exposure: 1.0,
-                        hole_x: 0.0,
-                        hole_y: 0.0,
-                        hole_radius: 0.0,
-                    },
+                    Primitive::new_arc(
+                        center_x,
+                        center_y,
+                        arc.radius,
+                        arc.start_angle,
+                        arc.start_angle + arc.sweep_angle,
+                        diameter_mm,
+                        1.0,
+                    ),
+                    Primitive::new_circle(start_x, start_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
+                    Primitive::new_circle(end_x, end_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
                 ],
             ) {
                 interaction_layer.push(feature);

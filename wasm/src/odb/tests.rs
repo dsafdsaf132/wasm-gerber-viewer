@@ -1210,3 +1210,33 @@ fn envelope_errors_and_empty_layers() {
     let mut parser = GerberParser::with_options(true, 1);
     assert!(parser.parse(&empty).unwrap().is_empty());
 }
+
+#[test]
+fn zaius_sst_line_endpoints_do_not_collapse_to_origin() {
+    let features = "#\n#Feature symbol names\n#\n$1 r5\n#Layer features\n#\nL 8.818 5.61 8.845 5.61 1 P 0\nL 8.845 5.61 8.845 5.66 1 P 0\n";
+    let text = envelope("signal", features, &[]);
+    let layers = parse_gerber_with_options(&text, true, 1).unwrap();
+    assert_eq!(layers.len(), 1);
+    let sublayer = &layers[0];
+    assert_eq!(sublayer.lines.start_x.len(), 2);
+
+    // First line start: 8.818 in = 223.9772 mm
+    assert_approx(sublayer.lines.start_x[0], 8.818 * 25.4);
+    assert_approx(sublayer.lines.start_y[0], 5.61 * 25.4);
+    assert_approx(sublayer.lines.end_x[0], 8.845 * 25.4);
+    assert_approx(sublayer.lines.end_y[0], 5.61 * 25.4);
+
+    // Nanometer integer coordinates match f32 coordinate conversions exactly
+    assert!((sublayer.lines.start_x_nm[0] - 223_977_200).abs() < 50);
+    assert!((sublayer.lines.start_y_nm[0] - 142_494_000).abs() < 50);
+    assert!((sublayer.lines.end_x_nm[0] - 224_663_000).abs() < 50);
+    assert!((sublayer.lines.end_y_nm[0] - 142_494_000).abs() < 50);
+    assert_eq!(sublayer.lines.start_x_nm[0], (sublayer.lines.start_x[0] as f64 * 1_000_000.0).round() as i32);
+    assert_eq!(sublayer.lines.start_y_nm[0], (sublayer.lines.start_y[0] as f64 * 1_000_000.0).round() as i32);
+    assert_eq!(sublayer.lines.end_x_nm[0], (sublayer.lines.end_x[0] as f64 * 1_000_000.0).round() as i32);
+    assert_eq!(sublayer.lines.end_y_nm[0], (sublayer.lines.end_y[0] as f64 * 1_000_000.0).round() as i32);
+
+    // CRITICAL: start_x_nm must NOT be 0!
+    assert!(sublayer.lines.start_x_nm[0] > 200_000_000);
+    assert!(sublayer.lines.end_x_nm[0] > 200_000_000);
+}
