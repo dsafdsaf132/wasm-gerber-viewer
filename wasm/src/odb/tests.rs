@@ -1231,10 +1231,22 @@ fn zaius_sst_line_endpoints_do_not_collapse_to_origin() {
     assert!((sublayer.lines.start_y_nm[0] - 142_494_000).abs() < 50);
     assert!((sublayer.lines.end_x_nm[0] - 224_663_000).abs() < 50);
     assert!((sublayer.lines.end_y_nm[0] - 142_494_000).abs() < 50);
-    assert_eq!(sublayer.lines.start_x_nm[0], (sublayer.lines.start_x[0] as f64 * 1_000_000.0).round() as i32);
-    assert_eq!(sublayer.lines.start_y_nm[0], (sublayer.lines.start_y[0] as f64 * 1_000_000.0).round() as i32);
-    assert_eq!(sublayer.lines.end_x_nm[0], (sublayer.lines.end_x[0] as f64 * 1_000_000.0).round() as i32);
-    assert_eq!(sublayer.lines.end_y_nm[0], (sublayer.lines.end_y[0] as f64 * 1_000_000.0).round() as i32);
+    assert_eq!(
+        sublayer.lines.start_x_nm[0],
+        (sublayer.lines.start_x[0] as f64 * 1_000_000.0).round() as i32
+    );
+    assert_eq!(
+        sublayer.lines.start_y_nm[0],
+        (sublayer.lines.start_y[0] as f64 * 1_000_000.0).round() as i32
+    );
+    assert_eq!(
+        sublayer.lines.end_x_nm[0],
+        (sublayer.lines.end_x[0] as f64 * 1_000_000.0).round() as i32
+    );
+    assert_eq!(
+        sublayer.lines.end_y_nm[0],
+        (sublayer.lines.end_y[0] as f64 * 1_000_000.0).round() as i32
+    );
 
     // CRITICAL: start_x_nm must NOT be 0!
     assert!(sublayer.lines.start_x_nm[0] > 200_000_000);

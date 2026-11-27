@@ -470,13 +470,9 @@ impl Driver<'_> {
             [corners[0], corners[1], corners[2]],
             [corners[0], corners[2], corners[3]],
         ] {
-            parser.current_primitives.push(Primitive::new_triangle(
-                vertices,
-                1.0,
-                0.0,
-                0.0,
-                0.0,
-            ));
+            parser
+                .current_primitives
+                .push(Primitive::new_triangle(vertices, 1.0, 0.0, 0.0, 0.0));
         }
         let state = &parser.current_state;
         record_primitive_delta(

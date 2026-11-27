@@ -1908,15 +1908,9 @@ fn moire(
         for _ in 0..rings {
             inner += ring_gap;
             let outer = inner + ring_width;
-            aperture.primitives.push(Primitive::new_circle(
-                0.0,
-                0.0,
-                outer,
-                1.0,
-                0.0,
-                0.0,
-                inner,
-            ));
+            aperture
+                .primitives
+                .push(Primitive::new_circle(0.0, 0.0, outer, 1.0, 0.0, 0.0, inner));
             inner = outer;
         }
         // Highlight batches are drawn in primitive order. Draw the outer

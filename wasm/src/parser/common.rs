@@ -293,7 +293,9 @@ pub fn parse_dimension_nm(param: &str, unit_multiplier: f32) -> Result<i64, Stri
     } else if (unit_multiplier - 1.0).abs() < 1e-4 {
         parse_decimal_nanometers(trimmed, NANOMETERS_PER_MM, "dimension")
     } else {
-        let val = trimmed.parse::<f64>().map_err(|_| format!("Invalid dimension `{trimmed}`"))?;
+        let val = trimmed
+            .parse::<f64>()
+            .map_err(|_| format!("Invalid dimension `{trimmed}`"))?;
         Ok((val * unit_multiplier as f64 * 1_000_000.0).round() as i64)
     }
 }
@@ -307,7 +309,9 @@ pub fn parse_dimension_mm(param: &str, unit_multiplier: f32) -> Result<f32, Stri
         let nm = parse_decimal_nanometers(trimmed, NANOMETERS_PER_MM, "dimension")?;
         Ok((nm as f64 / 1_000_000.0) as f32)
     } else {
-        let val = trimmed.parse::<f32>().map_err(|_| format!("Invalid dimension `{trimmed}`"))?;
+        let val = trimmed
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid dimension `{trimmed}`"))?;
         Ok(val * unit_multiplier)
     }
 }

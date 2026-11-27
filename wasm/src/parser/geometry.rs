@@ -374,9 +374,18 @@ impl Primitive {
             hole_y,
             hole_radius,
             vertices_nm: [
-                [(vertices[0][0] as f64 * 1_000_000.0).round() as i32, (vertices[0][1] as f64 * 1_000_000.0).round() as i32],
-                [(vertices[1][0] as f64 * 1_000_000.0).round() as i32, (vertices[1][1] as f64 * 1_000_000.0).round() as i32],
-                [(vertices[2][0] as f64 * 1_000_000.0).round() as i32, (vertices[2][1] as f64 * 1_000_000.0).round() as i32],
+                [
+                    (vertices[0][0] as f64 * 1_000_000.0).round() as i32,
+                    (vertices[0][1] as f64 * 1_000_000.0).round() as i32,
+                ],
+                [
+                    (vertices[1][0] as f64 * 1_000_000.0).round() as i32,
+                    (vertices[1][1] as f64 * 1_000_000.0).round() as i32,
+                ],
+                [
+                    (vertices[2][0] as f64 * 1_000_000.0).round() as i32,
+                    (vertices[2][1] as f64 * 1_000_000.0).round() as i32,
+                ],
             ],
             hole_x_nm: (hole_x as f64 * 1_000_000.0).round() as i32,
             hole_y_nm: (hole_y as f64 * 1_000_000.0).round() as i32,
@@ -1242,17 +1251,8 @@ pub fn line_to_body_with_nm(
     }
 
     Some(Primitive::new_line_with_nm(
-        start_x,
-        start_y,
-        end_x,
-        end_y,
-        width,
-        exposure,
-        start_x_nm,
-        start_y_nm,
-        end_x_nm,
-        end_y_nm,
-        width_nm,
+        start_x, start_y, end_x, end_y, width, exposure, start_x_nm, start_y_nm, end_x_nm,
+        end_y_nm, width_nm,
     ))
 }
 
@@ -1580,9 +1580,18 @@ pub fn offset_primitive_by_nm(
             hole_y: hole_y + dy,
             hole_radius: *hole_radius,
             vertices_nm: [
-                [vertices_nm[0][0].saturating_add(dx_nm), vertices_nm[0][1].saturating_add(dy_nm)],
-                [vertices_nm[1][0].saturating_add(dx_nm), vertices_nm[1][1].saturating_add(dy_nm)],
-                [vertices_nm[2][0].saturating_add(dx_nm), vertices_nm[2][1].saturating_add(dy_nm)],
+                [
+                    vertices_nm[0][0].saturating_add(dx_nm),
+                    vertices_nm[0][1].saturating_add(dy_nm),
+                ],
+                [
+                    vertices_nm[1][0].saturating_add(dx_nm),
+                    vertices_nm[1][1].saturating_add(dy_nm),
+                ],
+                [
+                    vertices_nm[2][0].saturating_add(dx_nm),
+                    vertices_nm[2][1].saturating_add(dy_nm),
+                ],
             ],
             hole_x_nm: hole_x_nm.saturating_add(dx_nm),
             hole_y_nm: hole_y_nm.saturating_add(dy_nm),
@@ -2254,16 +2263,36 @@ pub fn flash_aperture(
         let repeat_count = state.step_repeat_count("aperture flash")?;
         let calc_flash_pos = |sx: u32, sy: u32| -> (f32, f32, i32, i32) {
             let (fx, fx_nm) = if sx == 0 {
-                (x, (x as f64 * 1_000_000.0).clamp(i32::MIN as f64, i32::MAX as f64).round() as i32)
+                (
+                    x,
+                    (x as f64 * 1_000_000.0)
+                        .clamp(i32::MIN as f64, i32::MAX as f64)
+                        .round() as i32,
+                )
             } else {
                 let fx_f64 = x as f64 + (sx as f64) * (state.sr_i as f64);
-                (fx_f64 as f32, (fx_f64 * 1_000_000.0).clamp(i32::MIN as f64, i32::MAX as f64).round() as i32)
+                (
+                    fx_f64 as f32,
+                    (fx_f64 * 1_000_000.0)
+                        .clamp(i32::MIN as f64, i32::MAX as f64)
+                        .round() as i32,
+                )
             };
             let (fy, fy_nm) = if sy == 0 {
-                (y, (y as f64 * 1_000_000.0).clamp(i32::MIN as f64, i32::MAX as f64).round() as i32)
+                (
+                    y,
+                    (y as f64 * 1_000_000.0)
+                        .clamp(i32::MIN as f64, i32::MAX as f64)
+                        .round() as i32,
+                )
             } else {
                 let fy_f64 = y as f64 + (sy as f64) * (state.sr_j as f64);
-                (fy_f64 as f32, (fy_f64 * 1_000_000.0).clamp(i32::MIN as f64, i32::MAX as f64).round() as i32)
+                (
+                    fy_f64 as f32,
+                    (fy_f64 * 1_000_000.0)
+                        .clamp(i32::MIN as f64, i32::MAX as f64)
+                        .round() as i32,
+                )
             };
             (fx, fy, fx_nm, fy_nm)
         };
@@ -2354,11 +2383,7 @@ pub fn flash_aperture(
                     let (flash_x, flash_y, flash_x_nm, flash_y_nm) = calc_flash_pos(sx, sy);
                     for primitive in transformed {
                         primitives.push(offset_primitive_by_nm(
-                            primitive,
-                            flash_x,
-                            flash_y,
-                            flash_x_nm,
-                            flash_y_nm,
+                            primitive, flash_x, flash_y, flash_x_nm, flash_y_nm,
                         ));
                     }
                 }
@@ -2409,15 +2434,7 @@ pub fn execute_interpolation(
     let end_x_nm = (end_x as f64 * 1_000_000.0).round() as i64;
     let end_y_nm = (end_y as f64 * 1_000_000.0).round() as i64;
     execute_interpolation_with_nm(
-        state,
-        apertures,
-        primitives,
-        end_x,
-        end_y,
-        i,
-        j,
-        end_x_nm,
-        end_y_nm,
+        state, apertures, primitives, end_x, end_y, i, j, end_x_nm, end_y_nm,
     )
 }
 
@@ -4437,9 +4454,7 @@ pub fn parse_graphic_command(
         } else {
             flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
             let primitive_start = primitives.len();
-            execute_interpolation_with_nm(
-                state, apertures, primitives, x, y, i, j, x_nm, y_nm,
-            )?;
+            execute_interpolation_with_nm(state, apertures, primitives, x, y, i, j, x_nm, y_nm)?;
             let aperture = apertures.get(&state.current_aperture);
             let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
             record_interpolation_interactions(

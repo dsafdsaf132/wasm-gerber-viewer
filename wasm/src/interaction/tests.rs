@@ -109,13 +109,7 @@ fn thermal_feature(rotation: f32) -> InteractionFeature {
         Some("THERM".to_string()),
         Polarity::Positive,
         vec![Primitive::new_thermal(
-            0.0,
-            0.0,
-            2.0,
-            0.5,
-            0.4,
-            rotation,
-            1.0,
+            0.0, 0.0, 2.0, 0.5, 0.4, rotation, 1.0,
         )],
         FeatureProperties::default(),
     )

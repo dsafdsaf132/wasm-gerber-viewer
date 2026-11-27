@@ -65,13 +65,7 @@ fn sr_template_fallback_accounts_for_every_raw_primitive() {
 fn sr_circle_aperture() -> Aperture {
     let mut aperture = Aperture::new(0.005);
     aperture.primitives.push(Primitive::new_circle(
-        0.3,
-        -0.2,
-        0.005,
-        1.0,
-        0.3,
-        -0.2,
-        0.001,
+        0.3, -0.2, 0.005, 1.0, 0.3, -0.2, 0.001,
     ));
     aperture
 }
@@ -330,15 +324,9 @@ fn sr_integer_nanometer_coordinates_stay_exact_across_copies() {
     state.sr_i = 2.54; // 100 mils = 2.54 mm = 2,540,000 nm
     state.sr_j = 1.27; // 50 mils = 1.27 mm = 1,270,000 nm
     let mut aperture = Aperture::new(0.5);
-    aperture.primitives.push(Primitive::new_circle(
-        0.0,
-        0.0,
-        0.5,
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-    ));
+    aperture
+        .primitives
+        .push(Primitive::new_circle(0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0));
     let apertures = HashMap::from([("10".into(), aperture)]);
     let mut actual = Vec::new();
     flash_aperture(
@@ -357,7 +345,13 @@ fn sr_integer_nanometer_coordinates_stay_exact_across_copies() {
     for sy in 0..3 {
         for sx in 0..4 {
             let prim = &actual[idx];
-            if let Primitive::Circle { x_nm, y_nm, radius_nm, .. } = prim {
+            if let Primitive::Circle {
+                x_nm,
+                y_nm,
+                radius_nm,
+                ..
+            } = prim
+            {
                 let expected_x_nm = 10_000_000 + sx * 2_540_000;
                 let expected_y_nm = 20_000_000 + sy * 1_270_000;
                 assert_eq!(*x_nm, expected_x_nm);

@@ -708,7 +708,8 @@ impl FeaturePrimitives {
                 width,
                 exposure,
             } => {
-                let primitive = Primitive::new_line(*start_x, *start_y, *end_x, *end_y, *width, *exposure);
+                let primitive =
+                    Primitive::new_line(*start_x, *start_y, *end_x, *end_y, *width, *exposure);
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Multiple(primitives) => {
