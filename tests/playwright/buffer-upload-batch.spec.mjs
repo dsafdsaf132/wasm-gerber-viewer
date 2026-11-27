@@ -53,7 +53,7 @@ for (const variant of ["32", "64"]) {
           };
         }
       }
-      for (const name of ["bufferData", "bufferSubData", "vertexAttribPointer", "getError"]) {
+      for (const name of ["bufferData", "bufferSubData", "vertexAttribPointer", "vertexAttribIPointer", "getError"]) {
         const original = gl[name].bind(gl);
         originals.set(name, original);
         gl[name] = (...args) => {
@@ -117,13 +117,18 @@ for (const variant of ["32", "64"]) {
           "%FSLAX24Y24*%%MOMM*%%ADD10C,1*%D10*X0Y0D03*M02*", 0, 0, true, 1,
         ).renderPayload;
         const first = tiny.sublayers[0];
-        const invalidCircles = { ...first, circles: { ...first.circles, y: new Float32Array(0) } };
+        const invalidCircles = {
+          ...first,
+          circles: { ...first.circles, y: new Float32Array(0), yNm: new Int32Array(0) },
+        };
         const earlyReturnPayloads = [
           { ...tiny, sublayers: [first, { pathRegions: {} }] },
           { ...tiny, sublayers: [first, { ...first, boundary: { ...first.boundary, minX: NaN } }] },
           { ...tiny, sublayers: [first, invalidCircles] },
           { ...tiny, sublayers: [{ ...invalidCircles, triangles: {
-            ...first.triangles, vertices: new Float32Array([0, 0, 1, 0, 0, 1]),
+            ...first.triangles,
+            vertices: new Float32Array([0, 0, 1, 0, 0, 1]),
+            verticesNm: new Int32Array([0, 0, 1_000_000, 0, 0, 1_000_000]),
           } }] },
         ];
         const earlyReturns = [];
@@ -156,9 +161,9 @@ for (const variant of ["32", "64"]) {
         ).renderPayload;
         const crossLayerErrors = [];
         const crossLayerLeaks = [];
-        for (const [name, occurrence] of [["bufferData", 17], ["vertexAttribPointer", 192]]) {
+        for (const [name, occurrence] of [["bufferData", 17], ["vertexAttribIPointer", 192]]) {
           reset(); operation = name; remaining = occurrence;
-          attributeFailure = name === "vertexAttribPointer";
+          attributeFailure = name === "vertexAttribIPointer";
           try { processor.add_render_payload(alternating); crossLayerErrors.push("missing error"); }
           catch (error) { crossLayerErrors.push(String(error)); }
           crossLayerLeaks.push([...created.values()].reduce((sum, resources) => sum + resources.size, 0));
@@ -193,6 +198,9 @@ for (const variant of ["32", "64"]) {
           circles.x = new Float32Array(length);
           circles.y = new Float32Array(length);
           circles.radius = new Float32Array(length).fill(0.5);
+          circles.xNm = new Int32Array(length);
+          circles.yNm = new Int32Array(length);
+          circles.radiusNm = new Int32Array(length).fill(500_000);
           reset();
           const large = processor.add_render_payload(circle);
           byteChecks.push([...queryUploads]);
@@ -203,10 +211,10 @@ for (const variant of ["32", "64"]) {
         // and final attribute must be caught by the next or final checkpoint.
         const thresholdErrors = [];
         const thresholdLeaks = [];
-        for (const name of ["bufferData", "bufferSubData", "vertexAttribPointer"]) {
+        for (const name of ["bufferData", "bufferSubData", "vertexAttribIPointer"]) {
           for (const occurrence of [1, 3]) {
             reset(); operation = name; remaining = occurrence;
-            attributeFailure = name === "vertexAttribPointer";
+            attributeFailure = name === "vertexAttribIPointer";
             try { processor.add_render_payload(circle); thresholdErrors.push("missing error"); }
             catch (error) { thresholdErrors.push(String(error)); }
             thresholdLeaks.push([...created.values()].reduce((sum, resources) => sum + resources.size, 0));
