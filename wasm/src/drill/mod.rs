@@ -938,14 +938,7 @@ impl DrillParser {
                 code,
                 diameter_mm,
                 vec![
-                    Primitive::Line {
-                        start_x,
-                        start_y,
-                        end_x,
-                        end_y,
-                        width: diameter_mm,
-                        exposure: 1.0,
-                    },
+                    Primitive::new_line(start_x, start_y, end_x, end_y, diameter_mm, 1.0),
                     Primitive::Circle {
                         x: start_x,
                         y: start_y,

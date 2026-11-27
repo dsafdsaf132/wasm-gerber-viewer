@@ -712,14 +712,7 @@ impl FeaturePrimitives {
                 width,
                 exposure,
             } => {
-                let primitive = Primitive::Line {
-                    start_x: *start_x,
-                    start_y: *start_y,
-                    end_x: *end_x,
-                    end_y: *end_y,
-                    width: *width,
-                    exposure: *exposure,
-                };
+                let primitive = Primitive::new_line(*start_x, *start_y, *end_x, *end_y, *width, *exposure);
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Multiple(primitives) => {
@@ -1120,6 +1113,7 @@ fn append_compact_primitive(
             end_y,
             width,
             exposure,
+            ..
         } => {
             primitive_types.push(5);
             primitive_data.extend_from_slice(&[
@@ -1208,14 +1202,7 @@ fn compact_primitive_from_parts(
                 y: data[2],
             }
         }
-        5 => Primitive::Line {
-            start_x: data[0],
-            start_y: data[1],
-            end_x: data[2],
-            end_y: data[3],
-            width: data[4],
-            exposure: data[5],
-        },
+        5 => Primitive::new_line(data[0], data[1], data[2], data[3], data[4], data[5]),
         _ => return Err(JsValue::from_str("Invalid compact primitive type")),
     })
 }
@@ -1284,6 +1271,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             end_y,
             width,
             exposure,
+            ..
         } => FeaturePrimitiveStorage::Line {
             start_x,
             start_y,

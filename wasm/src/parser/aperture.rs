@@ -1,4 +1,5 @@
 use super::aperture_macro::ApertureMacro;
+use super::common::{parse_dimension_mm, parse_dimension_nm};
 use super::geometry::{scale_primitive, Primitive};
 use super::state::Polarity;
 use super::PolarityLayer;
@@ -44,6 +45,7 @@ impl ApertureKind {
 #[derive(Clone, Debug)]
 pub struct Aperture {
     pub radius: f32,
+    pub radius_nm: i64,
     pub primitives: Vec<Primitive>, // Aperture contains multiple basic primitives
     pub has_negative: bool,         // true if primitives contain exposure=0
     pub block_layers: Option<Vec<PolarityLayer>>,
@@ -63,6 +65,7 @@ impl Aperture {
     pub fn new(radius: f32) -> Self {
         Aperture {
             radius,
+            radius_nm: (radius as f64 * 1_000_000.0).round() as i64,
             primitives: Vec::new(),
             has_negative: false,
             block_layers: None,
@@ -86,6 +89,7 @@ impl Aperture {
 
         Aperture {
             radius: 0.0,
+            radius_nm: 0,
             primitives: Vec::new(),
             has_negative,
             block_layers: Some(block_layers),
@@ -334,15 +338,17 @@ pub fn parse_aperture(
             // Circle: %ADD10C,0.20*% or with hole: %ADD10C,0.20X0.10*%
             if shape_and_params.len() > 1 {
                 let params: Vec<&str> = shape_and_params[1].split('X').collect();
-                if let Ok(diameter) = params[0].trim().parse::<f32>() {
-                    let diameter_mm = diameter * unit_multiplier;
+                if let Ok(diameter_mm) = parse_dimension_mm(params[0], unit_multiplier) {
+                    let diameter_nm = parse_dimension_nm(params[0], unit_multiplier)
+                        .unwrap_or((diameter_mm as f64 * 1_000_000.0).round() as i64);
                     let hole_diameter_mm = if params.len() > 1 {
-                        params[1].trim().parse::<f32>().unwrap_or(0.0) * unit_multiplier
+                        parse_dimension_mm(params[1], unit_multiplier).unwrap_or(0.0)
                     } else {
                         0.0
                     };
 
                     aperture.radius = diameter_mm / 2.0;
+                    aperture.radius_nm = (diameter_nm + 1) / 2;
                     aperture.is_solid_circle = hole_diameter_mm == 0.0;
                     if collect_metadata {
                         aperture.kind = ApertureKind::Circle;
@@ -367,14 +373,12 @@ pub fn parse_aperture(
             if shape_and_params.len() > 1 {
                 let params: Vec<&str> = shape_and_params[1].split('X').collect();
                 if params.len() >= 2 {
-                    if let (Ok(width), Ok(height)) = (
-                        params[0].trim().parse::<f32>(),
-                        params[1].trim().parse::<f32>(),
+                    if let (Ok(width_mm), Ok(height_mm)) = (
+                        parse_dimension_mm(params[0], unit_multiplier),
+                        parse_dimension_mm(params[1], unit_multiplier),
                     ) {
-                        let width_mm = width * unit_multiplier;
-                        let height_mm = height * unit_multiplier;
                         let hole_diameter_mm = if params.len() > 2 {
-                            params[2].trim().parse::<f32>().unwrap_or(0.0) * unit_multiplier
+                            parse_dimension_mm(params[2], unit_multiplier).unwrap_or(0.0)
                         } else {
                             0.0
                         };
@@ -418,14 +422,12 @@ pub fn parse_aperture(
             if shape_and_params.len() > 1 {
                 let params: Vec<&str> = shape_and_params[1].split('X').collect();
                 if params.len() >= 2 {
-                    if let (Ok(width), Ok(height)) = (
-                        params[0].trim().parse::<f32>(),
-                        params[1].trim().parse::<f32>(),
+                    if let (Ok(width_mm), Ok(height_mm)) = (
+                        parse_dimension_mm(params[0], unit_multiplier),
+                        parse_dimension_mm(params[1], unit_multiplier),
                     ) {
-                        let width_mm = width * unit_multiplier;
-                        let height_mm = height * unit_multiplier;
                         let hole_diameter_mm = if params.len() > 2 {
-                            params[2].trim().parse::<f32>().unwrap_or(0.0) * unit_multiplier
+                            parse_dimension_mm(params[2], unit_multiplier).unwrap_or(0.0)
                         } else {
                             0.0
                         };
@@ -549,8 +551,8 @@ pub fn parse_aperture(
             if shape_and_params.len() > 1 {
                 let params: Vec<&str> = shape_and_params[1].split('X').collect();
                 if params.len() >= 2 {
-                    if let (Ok(diameter), Ok(num_vertices)) = (
-                        params[0].trim().parse::<f32>(),
+                    if let (Ok(diameter_mm), Ok(num_vertices)) = (
+                        parse_dimension_mm(params[0], unit_multiplier),
                         params[1].trim().parse::<f64>(),
                     ) {
                         if !num_vertices.is_finite()
@@ -560,7 +562,6 @@ pub fn parse_aperture(
                             return;
                         }
                         let num_vertices = num_vertices as u32;
-                        let diameter_mm = diameter * unit_multiplier;
 
                         // Parse rotation (degrees, defaults to 0)
                         // 3 parameters: rotation (NOT hole!)
@@ -574,7 +575,7 @@ pub fn parse_aperture(
 
                         // Parse hole (only if 4+ parameters)
                         let hole_diameter_mm = if params.len() > 3 {
-                            params[3].trim().parse::<f32>().unwrap_or(0.0) * unit_multiplier
+                            parse_dimension_mm(params[3], unit_multiplier).unwrap_or(0.0)
                         } else {
                             0.0
                         };

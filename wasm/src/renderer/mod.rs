@@ -16,7 +16,7 @@ use composite::{
 use shader::{
     compile_program, ShaderProgram, ShaderPrograms, ALWAYS, ARRAY_BUFFER, BLEND, COLOR_BUFFER_BIT,
     EQUAL, FLOAT, FUNC_ADD, HIGHLIGHT_FRAGMENT_SHADER, HIGHLIGHT_STENCIL_FRAGMENT_SHADER,
-    HIGHLIGHT_VERTEX_SHADER, INVERT, KEEP, NOTEQUAL, ONE, ONE_MINUS_SRC_ALPHA, REPLACE, SRC_ALPHA,
+    HIGHLIGHT_VERTEX_SHADER, INT, INVERT, KEEP, NOTEQUAL, ONE, ONE_MINUS_SRC_ALPHA, REPLACE, SRC_ALPHA,
     STATIC_DRAW, STENCIL_BUFFER_BIT, STENCIL_TEST, STREAM_DRAW, TRIANGLES, ZERO,
 };
 
@@ -28,7 +28,7 @@ use crate::geometry::{RegionContour, RegionSegment};
 use crate::interaction::{HighlightBatch, InteractionFeature, PathRegionRef};
 use crate::parser::geometry::{build_path_regions, canonical_arc_curve_bounds};
 use crate::parser::ParserState;
-use js_sys::{Array, Float32Array, Reflect, Uint32Array};
+use js_sys::{Array, Float32Array, Int32Array, Reflect, Uint32Array};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use wasm_bindgen::{prelude::*, JsCast};
@@ -251,6 +251,19 @@ impl<'a> BufferUploadBatch<'a> {
         // Whole attributes keep their existing buffer layout. A crossing or
         // oversized attribute is checked immediately after its upload; the
         // threshold is not a hard cap on the size of an individual buffer.
+        if self.bytes >= Self::MAX_BYTES {
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn upload_i32(&mut self, data: &Int32Array) -> Result<(), JsValue> {
+        let bytes = data.byte_length() as usize;
+        self.gl
+            .buffer_data_with_f64(ARRAY_BUFFER, bytes as f64, STATIC_DRAW);
+        self.gl
+            .buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
+        self.bytes = self.bytes.saturating_add(bytes);
         if self.bytes >= Self::MAX_BYTES {
             self.checkpoint()?;
         }
@@ -3567,25 +3580,45 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let lines = Self::js_property(sublayer, "lines")?;
-        let start_x = Self::js_f32_array(&lines, "startX")?;
-        if start_x.length() == 0 {
-            return Ok(());
-        }
+        let (instance_count, start_x_nm, start_y_nm, end_x_nm, end_y_nm, width_nm) =
+            if let Ok(start_x_nm) = Self::js_i32_array(&lines, "startXNm") {
+                let instance_count = start_x_nm.length() as usize;
+                if instance_count == 0 {
+                    return Ok(());
+                }
+                let start_y_nm = Self::js_i32_array(&lines, "startYNm")?;
+                let end_x_nm = Self::js_i32_array(&lines, "endXNm")?;
+                let end_y_nm = Self::js_i32_array(&lines, "endYNm")?;
+                let width_nm = Self::js_i32_array(&lines, "widthNm")?;
+                (instance_count, start_x_nm, start_y_nm, end_x_nm, end_y_nm, width_nm)
+            } else {
+                let start_x = Self::js_f32_array(&lines, "startX")?;
+                if start_x.length() == 0 {
+                    return Ok(());
+                }
+                let instance_count = Self::validate_instance_array("line instances", &start_x)? as usize;
+                let start_y = Self::js_f32_array(&lines, "startY")?;
+                let end_x = Self::js_f32_array(&lines, "endX")?;
+                let end_y = Self::js_f32_array(&lines, "endY")?;
+                let width = Self::js_f32_array(&lines, "width")?;
+                Self::validate_js_array_len("line start_y", &start_y, instance_count as u32)?;
+                Self::validate_js_array_len("line end_x", &end_x, instance_count as u32)?;
+                Self::validate_js_array_len("line end_y", &end_y, instance_count as u32)?;
+                Self::validate_js_array_len("line width", &width, instance_count as u32)?;
+                Self::validate_js_finite_array("line start_x", &start_x)?;
+                Self::validate_js_finite_array("line start_y", &start_y)?;
+                Self::validate_js_finite_array("line end_x", &end_x)?;
+                Self::validate_js_finite_array("line end_y", &end_y)?;
+                Self::validate_js_non_negative_array("line width", &width)?;
 
-        let instance_count = Self::validate_instance_array("line instances", &start_x)?;
-        let start_y = Self::js_f32_array(&lines, "startY")?;
-        let end_x = Self::js_f32_array(&lines, "endX")?;
-        let end_y = Self::js_f32_array(&lines, "endY")?;
-        let width = Self::js_f32_array(&lines, "width")?;
-        Self::validate_js_array_len("line start_y", &start_y, instance_count as u32)?;
-        Self::validate_js_array_len("line end_x", &end_x, instance_count as u32)?;
-        Self::validate_js_array_len("line end_y", &end_y, instance_count as u32)?;
-        Self::validate_js_array_len("line width", &width, instance_count as u32)?;
-        Self::validate_js_finite_array("line start_x", &start_x)?;
-        Self::validate_js_finite_array("line start_y", &start_y)?;
-        Self::validate_js_finite_array("line end_x", &end_x)?;
-        Self::validate_js_finite_array("line end_y", &end_y)?;
-        Self::validate_js_non_negative_array("line width", &width)?;
+                let to_nm = |farr: &Float32Array| -> Int32Array {
+                    let mut temp = vec![0.0f32; instance_count];
+                    farr.copy_to(&mut temp);
+                    let nm_vec: Vec<i32> = temp.iter().map(|&v| (v as f64 * 1_000_000.0).round() as i32).collect();
+                    Int32Array::from(nm_vec.as_slice())
+                };
+                (instance_count, to_nm(&start_x), to_nm(&start_y), to_nm(&end_x), to_nm(&end_y), to_nm(&width))
+            };
 
         let vao = self
             .gl
@@ -3593,51 +3626,46 @@ impl Renderer {
             .ok_or_else(|| JsValue::from_str("Failed to create VAO"))?;
         self.gl.bind_vertex_array(Some(&vao));
         buffer_cache.line_vao = Some(vao);
-        buffer_cache.line_instance_count = instance_count;
+        buffer_cache.line_instance_count = instance_count as i32;
         self.bind_quad_position(&self.programs.line)?;
-        buffer_cache.line_start_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+        buffer_cache.line_start_x_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &start_x,
+            &start_x_nm,
             &self.programs.line,
             "start_x_instance",
             1,
-            1,
         )?);
-        buffer_cache.line_start_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+        buffer_cache.line_start_y_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &start_y,
+            &start_y_nm,
             &self.programs.line,
             "start_y_instance",
             1,
-            1,
         )?);
-        buffer_cache.line_end_x_buffer = Some(Self::create_attrib_buffer_from_js_array(
+        buffer_cache.line_end_x_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &end_x,
+            &end_x_nm,
             &self.programs.line,
             "end_x_instance",
             1,
-            1,
         )?);
-        buffer_cache.line_end_y_buffer = Some(Self::create_attrib_buffer_from_js_array(
+        buffer_cache.line_end_y_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &end_y,
+            &end_y_nm,
             &self.programs.line,
             "end_y_instance",
             1,
-            1,
         )?);
-        buffer_cache.line_width_buffer = Some(Self::create_attrib_buffer_from_js_array(
+        buffer_cache.line_width_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
             batch,
             &self.gl,
-            &width,
+            &width_nm,
             &self.programs.line,
             "width_instance",
-            1,
             1,
         )?);
 
@@ -4241,6 +4269,35 @@ impl Renderer {
         Ok(buffer)
     }
 
+    fn create_i32_attrib_buffer_from_js_array(
+        batch: &mut BufferUploadBatch<'_>,
+        gl: &WebGl2RenderingContext,
+        data: &Int32Array,
+        program: &ShaderProgram,
+        attr_name: &str,
+        divisor: u32,
+    ) -> Result<WebGlBuffer, JsValue> {
+        let buffer = gl
+            .create_buffer()
+            .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
+        gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
+        if let Err(error) = batch.upload_i32(data) {
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
+        let loc = match Self::shader_attribute(program, attr_name) {
+            Ok(loc) => loc,
+            Err(error) => {
+                gl.delete_buffer(Some(&buffer));
+                return Err(error);
+            }
+        };
+        gl.enable_vertex_attrib_array(loc);
+        gl.vertex_attrib_i_pointer_with_i32(loc, 1, INT, 0, 0);
+        gl.vertex_attrib_divisor(loc, divisor);
+        Ok(buffer)
+    }
+
     fn bind_quad_position(&self, program: &ShaderProgram) -> Result<(), JsValue> {
         self.gl.bind_buffer(ARRAY_BUFFER, Some(&self.quad_buffer));
         let position_loc = Self::shader_attribute(program, "position")?;
@@ -4404,6 +4461,16 @@ impl Renderer {
             .map_err(|_| {
                 JsValue::from_str(&format!(
                     "Render payload field `{key}` must be a Uint32Array"
+                ))
+            })
+    }
+
+    fn js_i32_array(value: &JsValue, key: &str) -> Result<Int32Array, JsValue> {
+        Self::js_property(value, key)?
+            .dyn_into::<Int32Array>()
+            .map_err(|_| {
+                JsValue::from_str(&format!(
+                    "Render payload field `{key}` must be an Int32Array"
                 ))
             })
     }
@@ -5763,6 +5830,37 @@ impl Renderer {
         Ok(buffer)
     }
 
+    fn create_i32_instance_buffer(
+        gl: &WebGl2RenderingContext,
+        data: &[i32],
+        program: &ShaderProgram,
+        attr_name: &str,
+        divisor: u32,
+    ) -> Result<WebGlBuffer, JsValue> {
+        let buffer = gl
+            .create_buffer()
+            .ok_or_else(|| JsValue::from_str("Failed to create buffer"))?;
+        gl.bind_buffer(ARRAY_BUFFER, Some(&buffer));
+        if let Err(error) = Self::upload_i32_slice_to_bound_buffer(gl, data) {
+            gl.delete_buffer(Some(&buffer));
+            return Err(error);
+        }
+        let loc = match program.attributes.get(attr_name) {
+            Some(loc) => loc,
+            None => {
+                gl.delete_buffer(Some(&buffer));
+                return Err(JsValue::from_str(&format!(
+                    "Missing shader attribute: {}",
+                    attr_name
+                )));
+            }
+        };
+        gl.enable_vertex_attrib_array(*loc);
+        gl.vertex_attrib_i_pointer_with_i32(*loc, 1, INT, 0, 0);
+        gl.vertex_attrib_divisor(*loc, divisor);
+        Ok(buffer)
+    }
+
     fn use_constant_vertex_attrib_1f(
         gl: &WebGl2RenderingContext,
         program: &ShaderProgram,
@@ -5849,6 +5947,29 @@ impl Renderer {
         unsafe {
             let array = Float32Array::view(data);
             Self::upload_float_array_to_bound_buffer(gl, &array)
+        }
+    }
+
+    fn upload_int32_array_to_bound_buffer(
+        gl: &WebGl2RenderingContext,
+        data: &Int32Array,
+    ) -> Result<(), JsValue> {
+        Self::drain_gl_errors(gl);
+        gl.buffer_data_with_f64(ARRAY_BUFFER, data.byte_length() as f64, STATIC_DRAW);
+        Self::check_buffer_upload_error(gl, "bufferData")?;
+
+        Self::drain_gl_errors(gl);
+        gl.buffer_sub_data_with_i32_and_array_buffer_view(ARRAY_BUFFER, 0, data);
+        Self::check_buffer_upload_error(gl, "bufferSubData")
+    }
+
+    fn upload_i32_slice_to_bound_buffer(
+        gl: &WebGl2RenderingContext,
+        data: &[i32],
+    ) -> Result<(), JsValue> {
+        unsafe {
+            let array = Int32Array::view(data);
+            Self::upload_int32_array_to_bound_buffer(gl, &array)
         }
     }
 
@@ -7064,41 +7185,41 @@ impl Renderer {
                 self.gl
                     .vertex_attrib_pointer_with_i32(position_loc, 2, FLOAT, false, 0, 0);
 
-                let start_x_buffer = Self::create_instance_buffer(
+                let start_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.start_x,
+                    &lines.start_x_nm,
                     program,
                     "start_x_instance",
                     1,
                 )?;
                 pending_cache.cache.line_start_x_buffer = Some(start_x_buffer);
-                let start_y_buffer = Self::create_instance_buffer(
+                let start_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.start_y,
+                    &lines.start_y_nm,
                     program,
                     "start_y_instance",
                     1,
                 )?;
                 pending_cache.cache.line_start_y_buffer = Some(start_y_buffer);
-                let end_x_buffer = Self::create_instance_buffer(
+                let end_x_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.end_x,
+                    &lines.end_x_nm,
                     program,
                     "end_x_instance",
                     1,
                 )?;
                 pending_cache.cache.line_end_x_buffer = Some(end_x_buffer);
-                let end_y_buffer = Self::create_instance_buffer(
+                let end_y_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.end_y,
+                    &lines.end_y_nm,
                     program,
                     "end_y_instance",
                     1,
                 )?;
                 pending_cache.cache.line_end_y_buffer = Some(end_y_buffer);
-                let width_buffer = Self::create_instance_buffer(
+                let width_buffer = Self::create_i32_instance_buffer(
                     &self.gl,
-                    &lines.width,
+                    &lines.width_nm,
                     program,
                     "width_instance",
                     1,

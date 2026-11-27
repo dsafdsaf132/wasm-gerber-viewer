@@ -7,6 +7,7 @@ pub const COLOR_BUFFER_BIT: u32 = WebGl2RenderingContext::COLOR_BUFFER_BIT;
 pub const STENCIL_BUFFER_BIT: u32 = WebGl2RenderingContext::STENCIL_BUFFER_BIT;
 pub const TRIANGLES: u32 = WebGl2RenderingContext::TRIANGLES;
 pub const FLOAT: u32 = WebGl2RenderingContext::FLOAT;
+pub const INT: u32 = WebGl2RenderingContext::INT;
 pub const ARRAY_BUFFER: u32 = WebGl2RenderingContext::ARRAY_BUFFER;
 pub const STATIC_DRAW: u32 = WebGl2RenderingContext::STATIC_DRAW;
 pub const STREAM_DRAW: u32 = WebGl2RenderingContext::STREAM_DRAW;

@@ -30,14 +30,7 @@ fn compact_single_primitive_decodes_directly_into_retained_storage() {
             rotation: 0.31,
             exposure: 1.0,
         },
-        Primitive::Line {
-            start_x: -0.8,
-            start_y: 0.3,
-            end_x: 0.7,
-            end_y: -0.2,
-            width: 0.15,
-            exposure: 1.0,
-        },
+        Primitive::new_line(-0.8, 0.3, 0.7, -0.2, 0.15, 1.0),
         Primitive::Triangle {
             vertices: [[-0.3, 0.2], [0.7, -0.4], [0.6, 0.8]],
             exposure: 1.0,

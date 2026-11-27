@@ -1,6 +1,6 @@
 use crate::geometry::{RegionContour, RegionSegment};
 use crate::util::checked_u32_len;
-use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
+use js_sys::{Array, Float32Array, Int32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 
 fn set_property(object: &Object, key: &str, value: &JsValue) -> Result<(), JsValue> {
@@ -26,6 +26,21 @@ fn f32_array_to_js(values: &[f32]) -> Result<JsValue, JsValue> {
 
 fn f32_array_from_js(value: &JsValue, key: &str) -> Result<Vec<f32>, JsValue> {
     Ok(Float32Array::new(&get_property(value, key)?).to_vec())
+}
+
+fn i32_array_to_js(values: &[i32]) -> Result<JsValue, JsValue> {
+    let array = Int32Array::new_with_length(typed_array_length(values.len())?);
+    array.copy_from(values);
+    Ok(array.into())
+}
+
+fn i32_array_from_js(value: &JsValue, key: &str) -> Result<Vec<i32>, JsValue> {
+    match get_property(value, key) {
+        Ok(prop) if !prop.is_undefined() && !prop.is_null() => {
+            Ok(Int32Array::new(&prop).to_vec())
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn u32_array_to_js(values: &[u32]) -> Result<JsValue, JsValue> {
@@ -189,6 +204,11 @@ pub struct Lines {
     pub(crate) end_x: Vec<f32>,
     pub(crate) end_y: Vec<f32>,
     pub(crate) width: Vec<f32>,
+    pub(crate) start_x_nm: Vec<i32>,
+    pub(crate) start_y_nm: Vec<i32>,
+    pub(crate) end_x_nm: Vec<i32>,
+    pub(crate) end_y_nm: Vec<i32>,
+    pub(crate) width_nm: Vec<i32>,
 }
 
 impl Lines {
@@ -199,12 +219,48 @@ impl Lines {
         end_y: Vec<f32>,
         width: Vec<f32>,
     ) -> Lines {
+        let start_x_nm = start_x.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect();
+        let start_y_nm = start_y.iter().map(|&y| (y as f64 * 1_000_000.0).round() as i32).collect();
+        let end_x_nm = end_x.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect();
+        let end_y_nm = end_y.iter().map(|&y| (y as f64 * 1_000_000.0).round() as i32).collect();
+        let width_nm = width.iter().map(|&w| (w as f64 * 1_000_000.0).round() as i32).collect();
         Lines {
             start_x,
             start_y,
             end_x,
             end_y,
             width,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
+        }
+    }
+
+    pub fn new_with_nm(
+        start_x: Vec<f32>,
+        start_y: Vec<f32>,
+        end_x: Vec<f32>,
+        end_y: Vec<f32>,
+        width: Vec<f32>,
+        start_x_nm: Vec<i32>,
+        start_y_nm: Vec<i32>,
+        end_x_nm: Vec<i32>,
+        end_y_nm: Vec<i32>,
+        width_nm: Vec<i32>,
+    ) -> Lines {
+        Lines {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
         }
     }
 
@@ -214,11 +270,22 @@ impl Lines {
         self.end_x = Vec::new();
         self.end_y = Vec::new();
         self.width = Vec::new();
+        self.start_x_nm = Vec::new();
+        self.start_y_nm = Vec::new();
+        self.end_x_nm = Vec::new();
+        self.end_y_nm = Vec::new();
+        self.width_nm = Vec::new();
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
         translate_components(&mut self.start_x, &mut self.start_y, dx, dy);
         translate_components(&mut self.end_x, &mut self.end_y, dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
+        for x in &mut self.start_x_nm { *x = x.saturating_add(dx_nm); }
+        for y in &mut self.start_y_nm { *y = y.saturating_add(dy_nm); }
+        for x in &mut self.end_x_nm { *x = x.saturating_add(dx_nm); }
+        for y in &mut self.end_y_nm { *y = y.saturating_add(dy_nm); }
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -228,16 +295,43 @@ impl Lines {
         set_property(&object, "endX", &f32_array_to_js(&self.end_x)?)?;
         set_property(&object, "endY", &f32_array_to_js(&self.end_y)?)?;
         set_property(&object, "width", &f32_array_to_js(&self.width)?)?;
+        set_property(&object, "startXNm", &i32_array_to_js(&self.start_x_nm)?)?;
+        set_property(&object, "startYNm", &i32_array_to_js(&self.start_y_nm)?)?;
+        set_property(&object, "endXNm", &i32_array_to_js(&self.end_x_nm)?)?;
+        set_property(&object, "endYNm", &i32_array_to_js(&self.end_y_nm)?)?;
+        set_property(&object, "widthNm", &i32_array_to_js(&self.width_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Lines, JsValue> {
-        Ok(Lines::new(
-            f32_array_from_js(value, "startX")?,
-            f32_array_from_js(value, "startY")?,
-            f32_array_from_js(value, "endX")?,
-            f32_array_from_js(value, "endY")?,
-            f32_array_from_js(value, "width")?,
+        let start_x = f32_array_from_js(value, "startX")?;
+        let start_y = f32_array_from_js(value, "startY")?;
+        let end_x = f32_array_from_js(value, "endX")?;
+        let end_y = f32_array_from_js(value, "endY")?;
+        let width = f32_array_from_js(value, "width")?;
+        let mut start_x_nm = i32_array_from_js(value, "startXNm")?;
+        let mut start_y_nm = i32_array_from_js(value, "startYNm")?;
+        let mut end_x_nm = i32_array_from_js(value, "endXNm")?;
+        let mut end_y_nm = i32_array_from_js(value, "endYNm")?;
+        let mut width_nm = i32_array_from_js(value, "widthNm")?;
+        if start_x_nm.len() != start_x.len() {
+            start_x_nm = start_x.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect();
+            start_y_nm = start_y.iter().map(|&y| (y as f64 * 1_000_000.0).round() as i32).collect();
+            end_x_nm = end_x.iter().map(|&x| (x as f64 * 1_000_000.0).round() as i32).collect();
+            end_y_nm = end_y.iter().map(|&y| (y as f64 * 1_000_000.0).round() as i32).collect();
+            width_nm = width.iter().map(|&w| (w as f64 * 1_000_000.0).round() as i32).collect();
+        }
+        Ok(Lines::new_with_nm(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
         ))
     }
 }

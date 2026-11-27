@@ -4,7 +4,10 @@ use crate::interaction::{
     aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
     InteractionFeature, InteractionLayer, PathRegionRef,
 };
-use crate::parser::common::{extract_command_tokens, parse_coordinate_number, parse_g_code};
+use crate::parser::common::{
+    extract_command_tokens, parse_coordinate_number, parse_coordinate_number_nm, parse_g_code,
+    NANOMETERS_PER_INCH, NANOMETERS_PER_MM,
+};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
@@ -327,7 +330,65 @@ pub enum Primitive {
         end_y: f32,
         width: f32,
         exposure: f32,
+        start_x_nm: i32,
+        start_y_nm: i32,
+        end_x_nm: i32,
+        end_y_nm: i32,
+        width_nm: i32,
     },
+}
+
+impl Primitive {
+    pub fn new_line(
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        width: f32,
+        exposure: f32,
+    ) -> Self {
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+            start_x_nm: (start_x as f64 * 1_000_000.0).round() as i32,
+            start_y_nm: (start_y as f64 * 1_000_000.0).round() as i32,
+            end_x_nm: (end_x as f64 * 1_000_000.0).round() as i32,
+            end_y_nm: (end_y as f64 * 1_000_000.0).round() as i32,
+            width_nm: (width as f64 * 1_000_000.0).round() as i32,
+        }
+    }
+
+    pub fn new_line_with_nm(
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        width: f32,
+        exposure: f32,
+        start_x_nm: i32,
+        start_y_nm: i32,
+        end_x_nm: i32,
+        end_y_nm: i32,
+        width_nm: i32,
+    ) -> Self {
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
+        }
+    }
 }
 
 /// Rotate point around given center
@@ -418,6 +479,11 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             end_x,
             end_y,
             width,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
             ..
         } => {
             *start_x *= scale;
@@ -425,6 +491,11 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *end_x *= scale;
             *end_y *= scale;
             *width *= scale;
+            *start_x_nm = (*start_x_nm as f64 * scale as f64).round() as i32;
+            *start_y_nm = (*start_y_nm as f64 * scale as f64).round() as i32;
+            *end_x_nm = (*end_x_nm as f64 * scale as f64).round() as i32;
+            *end_y_nm = (*end_y_nm as f64 * scale as f64).round() as i32;
+            *width_nm = (*width_nm as f64 * scale as f64).round() as i32;
         }
     }
 }
@@ -532,15 +603,23 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
             start_y,
             end_x,
             end_y,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
             ..
         } => {
             if mirror_x {
                 *start_x = -*start_x;
                 *end_x = -*end_x;
+                *start_x_nm = -*start_x_nm;
+                *end_x_nm = -*end_x_nm;
             }
             if mirror_y {
                 *start_y = -*start_y;
                 *end_y = -*end_y;
+                *start_y_nm = -*start_y_nm;
+                *end_y_nm = -*end_y_nm;
             }
         }
     }
@@ -628,6 +707,10 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             start_y,
             end_x,
             end_y,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
             ..
         } => {
             let mut start = [*start_x, *start_y];
@@ -638,6 +721,10 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             *start_y = start[1];
             *end_x = end[0];
             *end_y = end[1];
+            *start_x_nm = (start[0] as f64 * 1_000_000.0).round() as i32;
+            *start_y_nm = (start[1] as f64 * 1_000_000.0).round() as i32;
+            *end_x_nm = (end[0] as f64 * 1_000_000.0).round() as i32;
+            *end_y_nm = (end[1] as f64 * 1_000_000.0).round() as i32;
         }
     }
 }
@@ -686,6 +773,7 @@ pub fn triangulate_outline(vertices: &[[f32; 2]], exposure: f32) -> Result<Vec<P
 }
 
 /// Store a stroked straight line body for instanced rendering.
+#[allow(dead_code)]
 pub fn line_to_body(
     start_x: f32,
     start_y: f32,
@@ -694,18 +782,51 @@ pub fn line_to_body(
     width: f32,
     exposure: f32,
 ) -> Option<Primitive> {
-    if !width.is_finite() || width < 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
-        return None;
-    }
-
-    Some(Primitive::Line {
+    line_to_body_with_nm(
         start_x,
         start_y,
         end_x,
         end_y,
         width,
         exposure,
-    })
+        (start_x as f64 * 1_000_000.0).round() as i32,
+        (start_y as f64 * 1_000_000.0).round() as i32,
+        (end_x as f64 * 1_000_000.0).round() as i32,
+        (end_y as f64 * 1_000_000.0).round() as i32,
+        (width as f64 * 1_000_000.0).round() as i32,
+    )
+}
+
+pub fn line_to_body_with_nm(
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    width: f32,
+    exposure: f32,
+    start_x_nm: i32,
+    start_y_nm: i32,
+    end_x_nm: i32,
+    end_y_nm: i32,
+    width_nm: i32,
+) -> Option<Primitive> {
+    if !width.is_finite() || width < 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
+        return None;
+    }
+
+    Some(Primitive::new_line_with_nm(
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        width,
+        exposure,
+        start_x_nm,
+        start_y_nm,
+        end_x_nm,
+        end_y_nm,
+        width_nm,
+    ))
 }
 
 /// Split a macro line primitive into two triangles.
@@ -1061,6 +1182,11 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             end_y,
             width,
             exposure,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
         } => Primitive::Line {
             start_x: start_x + dx,
             start_y: start_y + dy,
@@ -1068,11 +1194,31 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             end_y: end_y + dy,
             width: *width,
             exposure: *exposure,
+            start_x_nm: start_x_nm + (dx as f64 * 1_000_000.0).round() as i32,
+            start_y_nm: start_y_nm + (dy as f64 * 1_000_000.0).round() as i32,
+            end_x_nm: end_x_nm + (dx as f64 * 1_000_000.0).round() as i32,
+            end_y_nm: end_y_nm + (dy as f64 * 1_000_000.0).round() as i32,
+            width_nm: *width_nm,
         },
     }
 }
 
 // (Replaced by extract_command_tokens in common.rs)
+
+pub fn convert_coordinate_nm(
+    coord_str: &str,
+    axis: char,
+    format_spec: &FormatSpec,
+    unit_multiplier: f32,
+) -> i64 {
+    let format = format_spec.coordinate_format(axis);
+    let mult_nm = if (unit_multiplier - 25.4).abs() < 1e-4 {
+        NANOMETERS_PER_INCH
+    } else {
+        NANOMETERS_PER_MM
+    };
+    parse_coordinate_number_nm(coord_str, format, mult_nm, "Gerber coordinate").unwrap_or(0)
+}
 
 /// Coordinate value conversion - decimal point processing according to format spec
 pub fn convert_coordinate(
@@ -1081,13 +1227,15 @@ pub fn convert_coordinate(
     format_spec: &FormatSpec,
     unit_multiplier: f32,
 ) -> f32 {
-    let result = parse_coordinate_number(
-        coord_str,
-        format_spec.coordinate_format(axis),
-        unit_multiplier,
-        "Gerber coordinate",
-    )
-    .unwrap_or(0.0);
+    let format = format_spec.coordinate_format(axis);
+    let result = if (unit_multiplier - 25.4).abs() < 1e-4 {
+        parse_coordinate_number_nm(coord_str, format, NANOMETERS_PER_INCH, "Gerber coordinate")
+            .map(|nm| (nm as f64 / 1_000_000.0) as f32)
+            .unwrap_or(0.0)
+    } else {
+        parse_coordinate_number(coord_str, format, unit_multiplier, "Gerber coordinate")
+            .unwrap_or(0.0)
+    };
 
     if result.is_finite() {
         result
@@ -1200,12 +1348,20 @@ fn flash_aperture_no_sr(
                     start_y,
                     end_x,
                     end_y,
+                    start_x_nm,
+                    start_y_nm,
+                    end_x_nm,
+                    end_y_nm,
                     ..
                 } => {
                     *start_x += x;
                     *start_y += y;
                     *end_x += x;
                     *end_y += y;
+                    *start_x_nm += (x as f64 * 1_000_000.0).round() as i32;
+                    *start_y_nm += (y as f64 * 1_000_000.0).round() as i32;
+                    *end_x_nm += (x as f64 * 1_000_000.0).round() as i32;
+                    *end_y_nm += (y as f64 * 1_000_000.0).round() as i32;
                 }
             }
             primitives.push(new_primitive);
@@ -1676,8 +1832,36 @@ pub fn execute_interpolation(
     i: f32,
     j: f32,
 ) -> Result<(), String> {
+    let end_x_nm = (end_x as f64 * 1_000_000.0).round() as i64;
+    let end_y_nm = (end_y as f64 * 1_000_000.0).round() as i64;
+    execute_interpolation_with_nm(
+        state,
+        apertures,
+        primitives,
+        end_x,
+        end_y,
+        i,
+        j,
+        end_x_nm,
+        end_y_nm,
+    )
+}
+
+pub fn execute_interpolation_with_nm(
+    state: &mut ParserState,
+    apertures: &HashMap<String, Aperture>,
+    primitives: &mut Vec<Primitive>,
+    end_x: f32,
+    end_y: f32,
+    i: f32,
+    j: f32,
+    end_x_nm: i64,
+    end_y_nm: i64,
+) -> Result<(), String> {
     let start_x = state.x;
     let start_y = state.y;
+    let start_x_nm = state.x_nm;
+    let start_y_nm = state.y_nm;
 
     if let Some(aperture) = apertures.get(&state.current_aperture) {
         let repeat_count = state.step_repeat_count("interpolation")?;
@@ -1695,7 +1879,9 @@ pub fn execute_interpolation(
             for sx in 0..state.sr_x {
                 let offset_x = sx as f32 * state.sr_i;
                 let offset_y = sy as f32 * state.sr_j;
-                append_interpolation_no_sr(
+                let offset_x_nm = (sx as f64 * state.sr_i as f64 * 1_000_000.0).round() as i64;
+                let offset_y_nm = (sy as f64 * state.sr_j as f64 * 1_000_000.0).round() as i64;
+                append_interpolation_no_sr_with_nm(
                     state,
                     aperture,
                     primitives,
@@ -1705,6 +1891,10 @@ pub fn execute_interpolation(
                     end_y + offset_y,
                     i,
                     j,
+                    start_x_nm + offset_x_nm,
+                    start_y_nm + offset_y_nm,
+                    end_x_nm + offset_x_nm,
+                    end_y_nm + offset_y_nm,
                 )?;
             }
         }
@@ -1723,6 +1913,38 @@ fn append_interpolation_no_sr(
     end_y: f32,
     i: f32,
     j: f32,
+) -> Result<(), String> {
+    append_interpolation_no_sr_with_nm(
+        state,
+        aperture,
+        primitives,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        i,
+        j,
+        (start_x as f64 * 1_000_000.0).round() as i64,
+        (start_y as f64 * 1_000_000.0).round() as i64,
+        (end_x as f64 * 1_000_000.0).round() as i64,
+        (end_y as f64 * 1_000_000.0).round() as i64,
+    )
+}
+
+fn append_interpolation_no_sr_with_nm(
+    state: &ParserState,
+    aperture: &Aperture,
+    primitives: &mut Vec<Primitive>,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    i: f32,
+    j: f32,
+    start_x_nm: i64,
+    start_y_nm: i64,
+    end_x_nm: i64,
+    end_y_nm: i64,
 ) -> Result<(), String> {
     match state.interpolation_mode.as_str() {
         "linear" | "linear_x10" | "linear_x01" | "linear_x001" => {
@@ -1760,7 +1982,25 @@ fn append_interpolation_no_sr(
             // Store line body separately from the two round cap flashes so
             // the renderer can keep it instanced and clamp screen thickness.
             let diameter = aperture.radius * 2.0 * state.layer_scale;
-            if let Some(line) = line_to_body(start_x, start_y, end_x, end_y, diameter, 1.0) {
+            let radius_nm = if aperture.radius_nm != 0 {
+                aperture.radius_nm
+            } else {
+                (aperture.radius as f64 * 1_000_000.0).round() as i64
+            };
+            let diameter_nm = ((radius_nm * 2) as f64 * state.layer_scale as f64).round() as i32;
+            if let Some(line) = line_to_body_with_nm(
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                diameter,
+                1.0,
+                start_x_nm as i32,
+                start_y_nm as i32,
+                end_x_nm as i32,
+                end_y_nm as i32,
+                diameter_nm,
+            ) {
                 try_reserve_primitives(primitives, 1, "linear interpolation")?;
                 primitives.push(line);
             }
@@ -3428,28 +3668,52 @@ pub fn parse_graphic_command(
 
     let mut x = state.x;
     let mut y = state.y;
+    let mut x_nm = state.x_nm;
+    let mut y_nm = state.y_nm;
     let mut i = 0.0;
     let mut j = 0.0;
 
     // Process X coordinate
     if let Some(x_val) = tokens.x {
-        let new_x =
-            convert_coordinate(x_val, 'x', &state.format_spec, state.unit_multiplier) * state.scale;
-        x = if state.coordinate_mode == "absolute" {
-            new_x
+        let new_x_nm = convert_coordinate_nm(x_val, 'x', &state.format_spec, state.unit_multiplier);
+        let new_x = if (state.unit_multiplier - 25.4).abs() < 1e-4 {
+            (new_x_nm as f64 / 1_000_000.0) as f32
         } else {
-            state.x + new_x
+            convert_coordinate(x_val, 'x', &state.format_spec, state.unit_multiplier)
+        } * state.scale;
+        let scaled_x_nm = if state.scale == 1.0 {
+            new_x_nm
+        } else {
+            (new_x_nm as f64 * state.scale as f64).round() as i64
+        };
+        if state.coordinate_mode == "absolute" {
+            x = new_x;
+            x_nm = scaled_x_nm;
+        } else {
+            x = state.x + new_x;
+            x_nm = state.x_nm + scaled_x_nm;
         };
     }
 
     // Process Y coordinate
     if let Some(y_val) = tokens.y {
-        let new_y =
-            convert_coordinate(y_val, 'y', &state.format_spec, state.unit_multiplier) * state.scale;
-        y = if state.coordinate_mode == "absolute" {
-            new_y
+        let new_y_nm = convert_coordinate_nm(y_val, 'y', &state.format_spec, state.unit_multiplier);
+        let new_y = if (state.unit_multiplier - 25.4).abs() < 1e-4 {
+            (new_y_nm as f64 / 1_000_000.0) as f32
         } else {
-            state.y + new_y
+            convert_coordinate(y_val, 'y', &state.format_spec, state.unit_multiplier)
+        } * state.scale;
+        let scaled_y_nm = if state.scale == 1.0 {
+            new_y_nm
+        } else {
+            (new_y_nm as f64 * state.scale as f64).round() as i64
+        };
+        if state.coordinate_mode == "absolute" {
+            y = new_y;
+            y_nm = scaled_y_nm;
+        } else {
+            y = state.y + new_y;
+            y_nm = state.y_nm + scaled_y_nm;
         };
     }
 
@@ -3491,7 +3755,9 @@ pub fn parse_graphic_command(
                     } else {
                         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
                         let primitive_start = primitives.len();
-                        execute_interpolation(state, apertures, primitives, x, y, i, j)?;
+                        execute_interpolation_with_nm(
+                            state, apertures, primitives, x, y, i, j, x_nm, y_nm,
+                        )?;
                         let aperture = apertures.get(&state.current_aperture);
                         let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
                         record_interpolation_interactions(
@@ -3597,7 +3863,9 @@ pub fn parse_graphic_command(
         } else {
             flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
             let primitive_start = primitives.len();
-            execute_interpolation(state, apertures, primitives, x, y, i, j)?;
+            execute_interpolation_with_nm(
+                state, apertures, primitives, x, y, i, j, x_nm, y_nm,
+            )?;
             let aperture = apertures.get(&state.current_aperture);
             let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
             record_interpolation_interactions(
@@ -3622,6 +3890,8 @@ pub fn parse_graphic_command(
     // Update state
     state.x = x;
     state.y = y;
+    state.x_nm = x_nm;
+    state.y_nm = y_nm;
     state.i = i;
     state.j = j;
 

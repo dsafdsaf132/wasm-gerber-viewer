@@ -84,6 +84,8 @@ impl FormatSpec {
 pub struct ParserState {
     pub x: f32,
     pub y: f32,
+    pub x_nm: i64,
+    pub y_nm: i64,
     pub current_aperture: String,
     pub interpolation_mode: String,
     pub quadrant_mode: String,
@@ -116,6 +118,8 @@ impl Default for ParserState {
         ParserState {
             x: 0.0,
             y: 0.0,
+            x_nm: 0,
+            y_nm: 0,
             current_aperture: String::new(),
             interpolation_mode: "linear".to_string(),
             quadrant_mode: "single".to_string(),

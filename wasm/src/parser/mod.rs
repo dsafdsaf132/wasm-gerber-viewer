@@ -466,6 +466,11 @@ struct PrimitiveOutputBuffers {
     lines_end_x: Vec<f32>,
     lines_end_y: Vec<f32>,
     lines_width: Vec<f32>,
+    lines_start_x_nm: Vec<i32>,
+    lines_start_y_nm: Vec<i32>,
+    lines_end_x_nm: Vec<i32>,
+    lines_end_y_nm: Vec<i32>,
+    lines_width_nm: Vec<i32>,
     has_circle_holes: bool,
     circles_x: Vec<f32>,
     circles_y: Vec<f32>,
@@ -506,6 +511,11 @@ impl PrimitiveOutputBuffers {
             lines_end_x: Vec::new(),
             lines_end_y: Vec::new(),
             lines_width: Vec::new(),
+            lines_start_x_nm: Vec::new(),
+            lines_start_y_nm: Vec::new(),
+            lines_end_x_nm: Vec::new(),
+            lines_end_y_nm: Vec::new(),
+            lines_width_nm: Vec::new(),
             has_circle_holes: counts.has_circle_holes,
             circles_x: Vec::new(),
             circles_y: Vec::new(),
@@ -578,6 +588,31 @@ impl PrimitiveOutputBuffers {
         try_reserve_exact(&mut buffers.lines_end_x, counts.lines, "line end X buffer")?;
         try_reserve_exact(&mut buffers.lines_end_y, counts.lines, "line end Y buffer")?;
         try_reserve_exact(&mut buffers.lines_width, counts.lines, "line width buffer")?;
+        try_reserve_exact(
+            &mut buffers.lines_start_x_nm,
+            counts.lines,
+            "line start X nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_start_y_nm,
+            counts.lines,
+            "line start Y nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_end_x_nm,
+            counts.lines,
+            "line end X nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_end_y_nm,
+            counts.lines,
+            "line end Y nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_width_nm,
+            counts.lines,
+            "line width nm buffer",
+        )?;
 
         try_reserve_exact(&mut buffers.circles_x, counts.circles, "circle X buffer")?;
         try_reserve_exact(&mut buffers.circles_y, counts.circles, "circle Y buffer")?;
@@ -718,6 +753,11 @@ impl PrimitiveOutputBuffers {
                 end_x,
                 end_y,
                 width,
+                start_x_nm,
+                start_y_nm,
+                end_x_nm,
+                end_y_nm,
+                width_nm,
                 ..
             } => {
                 self.lines_start_x.push(start_x * TO_MM);
@@ -725,6 +765,11 @@ impl PrimitiveOutputBuffers {
                 self.lines_end_x.push(end_x * TO_MM);
                 self.lines_end_y.push(end_y * TO_MM);
                 self.lines_width.push(width * TO_MM);
+                self.lines_start_x_nm.push(start_x_nm);
+                self.lines_start_y_nm.push(start_y_nm);
+                self.lines_end_x_nm.push(end_x_nm);
+                self.lines_end_y_nm.push(end_y_nm);
+                self.lines_width_nm.push(width_nm);
             }
             Primitive::Thermal {
                 x,
@@ -815,12 +860,17 @@ impl PrimitiveOutputBuffers {
                 self.triangle_hole_radius,
             ),
             triangle_templates,
-            Lines::new(
+            Lines::new_with_nm(
                 self.lines_start_x,
                 self.lines_start_y,
                 self.lines_end_x,
                 self.lines_end_y,
                 self.lines_width,
+                self.lines_start_x_nm,
+                self.lines_start_y_nm,
+                self.lines_end_x_nm,
+                self.lines_end_y_nm,
+                self.lines_width_nm,
             ),
             Circles::new(
                 self.circles_x,
