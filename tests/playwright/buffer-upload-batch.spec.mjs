@@ -119,7 +119,7 @@ for (const variant of ["32", "64"]) {
         const first = tiny.sublayers[0];
         const invalidCircles = {
           ...first,
-          circles: { ...first.circles, y: new Float32Array(0), yNm: new Int32Array(0) },
+          circles: { ...first.circles, y: new Int32Array(0) },
         };
         const earlyReturnPayloads = [
           { ...tiny, sublayers: [first, { pathRegions: {} }] },
@@ -127,8 +127,7 @@ for (const variant of ["32", "64"]) {
           { ...tiny, sublayers: [first, invalidCircles] },
           { ...tiny, sublayers: [{ ...invalidCircles, triangles: {
             ...first.triangles,
-            vertices: new Float32Array([0, 0, 1, 0, 0, 1]),
-            verticesNm: new Int32Array([0, 0, 1_000_000, 0, 0, 1_000_000]),
+            vertices: new Int32Array([0, 0, 1_000_000, 0, 0, 1_000_000]),
           } }] },
         ];
         const earlyReturns = [];
@@ -195,12 +194,9 @@ for (const variant of ["32", "64"]) {
         const byteChecks = [];
         for (const length of [3 * 1024 * 1024 / 4, 8 * 1024 * 1024 / 4,
           16 * 1024 * 1024 / 4, 16 * 1024 * 1024 / 4 + 1]) {
-          circles.x = new Float32Array(length);
-          circles.y = new Float32Array(length);
-          circles.radius = new Float32Array(length).fill(0.5);
-          circles.xNm = new Int32Array(length);
-          circles.yNm = new Int32Array(length);
-          circles.radiusNm = new Int32Array(length).fill(500_000);
+          circles.x = new Int32Array(length);
+          circles.y = new Int32Array(length);
+          circles.radius = new Int32Array(length).fill(500_000);
           reset();
           const large = processor.add_render_payload(circle);
           byteChecks.push([...queryUploads]);

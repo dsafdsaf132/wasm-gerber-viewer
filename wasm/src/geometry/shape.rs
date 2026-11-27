@@ -202,59 +202,29 @@ impl Triangles {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "vertices", &f32_array_to_js(&self.vertices)?)?;
-        set_property(&object, "holeX", &f32_array_to_js(&self.hole_x)?)?;
-        set_property(&object, "holeY", &f32_array_to_js(&self.hole_y)?)?;
-        set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius)?)?;
-        set_property(&object, "verticesNm", &i32_array_to_js(&self.vertices_nm)?)?;
-        set_property(&object, "holeXNm", &i32_array_to_js(&self.hole_x_nm)?)?;
-        set_property(&object, "holeYNm", &i32_array_to_js(&self.hole_y_nm)?)?;
+        set_property(&object, "vertices", &i32_array_to_js(&self.vertices_nm)?)?;
+        set_property(&object, "holeX", &i32_array_to_js(&self.hole_x_nm)?)?;
+        set_property(&object, "holeY", &i32_array_to_js(&self.hole_y_nm)?)?;
         set_property(
             &object,
-            "holeRadiusNm",
+            "holeRadius",
             &i32_array_to_js(&self.hole_radius_nm)?,
         )?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Triangles, JsValue> {
-        let vertices = f32_array_from_js(value, "vertices")?;
-        let hole_x = f32_array_from_js(value, "holeX")?;
-        let hole_y = f32_array_from_js(value, "holeY")?;
-        let hole_radius = f32_array_from_js(value, "holeRadius")?;
-        let vertices_nm = match i32_array_from_js(value, "verticesNm") {
-            Ok(v) if v.len() == vertices.len() => v,
-            _ => vertices
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let hole_x_nm = match i32_array_from_js(value, "holeXNm") {
-            Ok(v) if v.len() == hole_x.len() => v,
-            _ => hole_x
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let hole_y_nm = match i32_array_from_js(value, "holeYNm") {
-            Ok(v) if v.len() == hole_y.len() => v,
-            _ => hole_y
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let hole_radius_nm = match i32_array_from_js(value, "holeRadiusNm") {
-            Ok(v) if v.len() == hole_radius.len() => v,
-            _ => hole_radius
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
+        let vertices_nm = i32_array_from_js(value, "vertices")?;
+        let hole_x_nm = i32_array_from_js(value, "holeX")?;
+        let hole_y_nm = i32_array_from_js(value, "holeY")?;
+        let hole_radius_nm = i32_array_from_js(value, "holeRadius")?;
+        let to_mm =
+            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Triangles::new_with_nm(
-            vertices,
-            hole_x,
-            hole_y,
-            hole_radius,
+            to_mm(&vertices_nm),
+            to_mm(&hole_x_nm),
+            to_mm(&hole_y_nm),
+            to_mm(&hole_radius_nm),
             vertices_nm,
             hole_x_nm,
             hole_y_nm,
@@ -343,51 +313,25 @@ impl TriangleTemplateInstances {
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
         set_property(&object, "vertices", &f32_array_to_js(&self.vertices)?)?;
-        set_property(&object, "instanceX", &f32_array_to_js(&self.instance_x)?)?;
-        set_property(&object, "instanceY", &f32_array_to_js(&self.instance_y)?)?;
-        set_property(&object, "verticesNm", &i32_array_to_js(&self.vertices_nm)?)?;
-        set_property(
-            &object,
-            "instanceXNm",
-            &i32_array_to_js(&self.instance_x_nm)?,
-        )?;
-        set_property(
-            &object,
-            "instanceYNm",
-            &i32_array_to_js(&self.instance_y_nm)?,
-        )?;
+        set_property(&object, "instanceX", &i32_array_to_js(&self.instance_x_nm)?)?;
+        set_property(&object, "instanceY", &i32_array_to_js(&self.instance_y_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<TriangleTemplateInstances, JsValue> {
         let vertices = f32_array_from_js(value, "vertices")?;
-        let instance_x = f32_array_from_js(value, "instanceX")?;
-        let instance_y = f32_array_from_js(value, "instanceY")?;
-        let vertices_nm = match i32_array_from_js(value, "verticesNm") {
-            Ok(v) if v.len() == vertices.len() => v,
-            _ => vertices
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let instance_x_nm = match i32_array_from_js(value, "instanceXNm") {
-            Ok(v) if v.len() == instance_x.len() => v,
-            _ => instance_x
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let instance_y_nm = match i32_array_from_js(value, "instanceYNm") {
-            Ok(v) if v.len() == instance_y.len() => v,
-            _ => instance_y
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
+        let instance_x_nm = i32_array_from_js(value, "instanceX")?;
+        let instance_y_nm = i32_array_from_js(value, "instanceY")?;
+        let vertices_nm = vertices
+            .iter()
+            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+            .collect();
+        let to_mm =
+            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(TriangleTemplateInstances::new_with_nm(
             vertices,
-            instance_x,
-            instance_y,
+            to_mm(&instance_x_nm),
+            to_mm(&instance_y_nm),
             vertices_nm,
             instance_x_nm,
             instance_y_nm,
@@ -501,54 +445,32 @@ impl Lines {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "startX", &f32_array_to_js(&self.start_x)?)?;
-        set_property(&object, "startY", &f32_array_to_js(&self.start_y)?)?;
-        set_property(&object, "endX", &f32_array_to_js(&self.end_x)?)?;
-        set_property(&object, "endY", &f32_array_to_js(&self.end_y)?)?;
-        set_property(&object, "width", &f32_array_to_js(&self.width)?)?;
-        set_property(&object, "startXNm", &i32_array_to_js(&self.start_x_nm)?)?;
-        set_property(&object, "startYNm", &i32_array_to_js(&self.start_y_nm)?)?;
-        set_property(&object, "endXNm", &i32_array_to_js(&self.end_x_nm)?)?;
-        set_property(&object, "endYNm", &i32_array_to_js(&self.end_y_nm)?)?;
-        set_property(&object, "widthNm", &i32_array_to_js(&self.width_nm)?)?;
+        set_property(&object, "startX", &i32_array_to_js(&self.start_x_nm)?)?;
+        set_property(&object, "startY", &i32_array_to_js(&self.start_y_nm)?)?;
+        set_property(&object, "endX", &i32_array_to_js(&self.end_x_nm)?)?;
+        set_property(&object, "endY", &i32_array_to_js(&self.end_y_nm)?)?;
+        set_property(&object, "width", &i32_array_to_js(&self.width_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Lines, JsValue> {
-        let start_x = f32_array_from_js(value, "startX")?;
-        let start_y = f32_array_from_js(value, "startY")?;
-        let end_x = f32_array_from_js(value, "endX")?;
-        let end_y = f32_array_from_js(value, "endY")?;
-        let width = f32_array_from_js(value, "width")?;
-        let mut start_x_nm = i32_array_from_js(value, "startXNm")?;
-        let mut start_y_nm = i32_array_from_js(value, "startYNm")?;
-        let mut end_x_nm = i32_array_from_js(value, "endXNm")?;
-        let mut end_y_nm = i32_array_from_js(value, "endYNm")?;
-        let mut width_nm = i32_array_from_js(value, "widthNm")?;
-        if start_x_nm.len() != start_x.len() {
-            start_x_nm = start_x
-                .iter()
-                .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
-                .collect();
-            start_y_nm = start_y
-                .iter()
-                .map(|&y| (y as f64 * 1_000_000.0).round() as i32)
-                .collect();
-            end_x_nm = end_x
-                .iter()
-                .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
-                .collect();
-            end_y_nm = end_y
-                .iter()
-                .map(|&y| (y as f64 * 1_000_000.0).round() as i32)
-                .collect();
-            width_nm = width
-                .iter()
-                .map(|&w| (w as f64 * 1_000_000.0).round() as i32)
-                .collect();
-        }
+        let start_x_nm = i32_array_from_js(value, "startX")?;
+        let start_y_nm = i32_array_from_js(value, "startY")?;
+        let end_x_nm = i32_array_from_js(value, "endX")?;
+        let end_y_nm = i32_array_from_js(value, "endY")?;
+        let width_nm = i32_array_from_js(value, "width")?;
+        let to_mm =
+            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Lines::new_with_nm(
-            start_x, start_y, end_x, end_y, width, start_x_nm, start_y_nm, end_x_nm, end_y_nm,
+            to_mm(&start_x_nm),
+            to_mm(&start_y_nm),
+            to_mm(&end_x_nm),
+            to_mm(&end_y_nm),
+            to_mm(&width_nm),
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
             width_nm,
         ))
     }
@@ -675,81 +597,35 @@ impl Circles {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "x", &f32_array_to_js(&self.x)?)?;
-        set_property(&object, "y", &f32_array_to_js(&self.y)?)?;
-        set_property(&object, "radius", &f32_array_to_js(&self.radius)?)?;
-        set_property(&object, "holeX", &f32_array_to_js(&self.hole_x)?)?;
-        set_property(&object, "holeY", &f32_array_to_js(&self.hole_y)?)?;
-        set_property(&object, "holeRadius", &f32_array_to_js(&self.hole_radius)?)?;
-        set_property(&object, "xNm", &i32_array_to_js(&self.x_nm)?)?;
-        set_property(&object, "yNm", &i32_array_to_js(&self.y_nm)?)?;
-        set_property(&object, "radiusNm", &i32_array_to_js(&self.radius_nm)?)?;
-        set_property(&object, "holeXNm", &i32_array_to_js(&self.hole_x_nm)?)?;
-        set_property(&object, "holeYNm", &i32_array_to_js(&self.hole_y_nm)?)?;
+        set_property(&object, "x", &i32_array_to_js(&self.x_nm)?)?;
+        set_property(&object, "y", &i32_array_to_js(&self.y_nm)?)?;
+        set_property(&object, "radius", &i32_array_to_js(&self.radius_nm)?)?;
+        set_property(&object, "holeX", &i32_array_to_js(&self.hole_x_nm)?)?;
+        set_property(&object, "holeY", &i32_array_to_js(&self.hole_y_nm)?)?;
         set_property(
             &object,
-            "holeRadiusNm",
+            "holeRadius",
             &i32_array_to_js(&self.hole_radius_nm)?,
         )?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Circles, JsValue> {
-        let x = f32_array_from_js(value, "x")?;
-        let y = f32_array_from_js(value, "y")?;
-        let radius = f32_array_from_js(value, "radius")?;
-        let hole_x = f32_array_from_js(value, "holeX")?;
-        let hole_y = f32_array_from_js(value, "holeY")?;
-        let hole_radius = f32_array_from_js(value, "holeRadius")?;
-        let x_nm = match i32_array_from_js(value, "xNm") {
-            Ok(v) if v.len() == x.len() => v,
-            _ => x
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let y_nm = match i32_array_from_js(value, "yNm") {
-            Ok(v) if v.len() == y.len() => v,
-            _ => y
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let radius_nm = match i32_array_from_js(value, "radiusNm") {
-            Ok(v) if v.len() == radius.len() => v,
-            _ => radius
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let hole_x_nm = match i32_array_from_js(value, "holeXNm") {
-            Ok(v) if v.len() == hole_x.len() => v,
-            _ => hole_x
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let hole_y_nm = match i32_array_from_js(value, "holeYNm") {
-            Ok(v) if v.len() == hole_y.len() => v,
-            _ => hole_y
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let hole_radius_nm = match i32_array_from_js(value, "holeRadiusNm") {
-            Ok(v) if v.len() == hole_radius.len() => v,
-            _ => hole_radius
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
+        let x_nm = i32_array_from_js(value, "x")?;
+        let y_nm = i32_array_from_js(value, "y")?;
+        let radius_nm = i32_array_from_js(value, "radius")?;
+        let hole_x_nm = i32_array_from_js(value, "holeX")?;
+        let hole_y_nm = i32_array_from_js(value, "holeY")?;
+        let hole_radius_nm = i32_array_from_js(value, "holeRadius")?;
+        let to_mm =
+            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Circles::new_with_nm(
-            x,
-            y,
-            radius,
-            hole_x,
-            hole_y,
-            hole_radius,
+            to_mm(&x_nm),
+            to_mm(&y_nm),
+            to_mm(&radius_nm),
+            to_mm(&hole_x_nm),
+            to_mm(&hole_y_nm),
+            to_mm(&hole_radius_nm),
             x_nm,
             y_nm,
             radius_nm,
@@ -861,65 +737,31 @@ impl Arcs {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "x", &f32_array_to_js(&self.x)?)?;
-        set_property(&object, "y", &f32_array_to_js(&self.y)?)?;
-        set_property(&object, "radius", &f32_array_to_js(&self.radius)?)?;
+        set_property(&object, "x", &i32_array_to_js(&self.x_nm)?)?;
+        set_property(&object, "y", &i32_array_to_js(&self.y_nm)?)?;
+        set_property(&object, "radius", &i32_array_to_js(&self.radius_nm)?)?;
         set_property(&object, "startAngle", &f32_array_to_js(&self.start_angle)?)?;
         set_property(&object, "sweepAngle", &f32_array_to_js(&self.sweep_angle)?)?;
-        set_property(&object, "thickness", &f32_array_to_js(&self.thickness)?)?;
-        set_property(&object, "xNm", &i32_array_to_js(&self.x_nm)?)?;
-        set_property(&object, "yNm", &i32_array_to_js(&self.y_nm)?)?;
-        set_property(&object, "radiusNm", &i32_array_to_js(&self.radius_nm)?)?;
-        set_property(
-            &object,
-            "thicknessNm",
-            &i32_array_to_js(&self.thickness_nm)?,
-        )?;
+        set_property(&object, "thickness", &i32_array_to_js(&self.thickness_nm)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Arcs, JsValue> {
-        let x = f32_array_from_js(value, "x")?;
-        let y = f32_array_from_js(value, "y")?;
-        let radius = f32_array_from_js(value, "radius")?;
+        let x_nm = i32_array_from_js(value, "x")?;
+        let y_nm = i32_array_from_js(value, "y")?;
+        let radius_nm = i32_array_from_js(value, "radius")?;
         let start_angle = f32_array_from_js(value, "startAngle")?;
         let sweep_angle = f32_array_from_js(value, "sweepAngle")?;
-        let thickness = f32_array_from_js(value, "thickness")?;
-        let x_nm = match i32_array_from_js(value, "xNm") {
-            Ok(v) if v.len() == x.len() => v,
-            _ => x
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let y_nm = match i32_array_from_js(value, "yNm") {
-            Ok(v) if v.len() == y.len() => v,
-            _ => y
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let radius_nm = match i32_array_from_js(value, "radiusNm") {
-            Ok(v) if v.len() == radius.len() => v,
-            _ => radius
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let thickness_nm = match i32_array_from_js(value, "thicknessNm") {
-            Ok(v) if v.len() == thickness.len() => v,
-            _ => thickness
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
+        let thickness_nm = i32_array_from_js(value, "thickness")?;
+        let to_mm =
+            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Arcs::new_with_nm(
-            x,
-            y,
-            radius,
+            to_mm(&x_nm),
+            to_mm(&y_nm),
+            to_mm(&radius_nm),
             start_angle,
             sweep_angle,
-            thickness,
+            to_mm(&thickness_nm),
             x_nm,
             y_nm,
             radius_nm,
@@ -1038,92 +880,42 @@ impl Thermals {
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
         let object = Object::new();
-        set_property(&object, "x", &f32_array_to_js(&self.x)?)?;
-        set_property(&object, "y", &f32_array_to_js(&self.y)?)?;
+        set_property(&object, "x", &i32_array_to_js(&self.x_nm)?)?;
+        set_property(&object, "y", &i32_array_to_js(&self.y_nm)?)?;
         set_property(
             &object,
             "outerDiameter",
-            &f32_array_to_js(&self.outer_diameter)?,
-        )?;
-        set_property(
-            &object,
-            "innerDiameter",
-            &f32_array_to_js(&self.inner_diameter)?,
-        )?;
-        set_property(
-            &object,
-            "gapThickness",
-            &f32_array_to_js(&self.gap_thickness)?,
-        )?;
-        set_property(&object, "rotation", &f32_array_to_js(&self.rotation)?)?;
-        set_property(&object, "xNm", &i32_array_to_js(&self.x_nm)?)?;
-        set_property(&object, "yNm", &i32_array_to_js(&self.y_nm)?)?;
-        set_property(
-            &object,
-            "outerDiameterNm",
             &i32_array_to_js(&self.outer_diameter_nm)?,
         )?;
         set_property(
             &object,
-            "innerDiameterNm",
+            "innerDiameter",
             &i32_array_to_js(&self.inner_diameter_nm)?,
         )?;
         set_property(
             &object,
-            "gapThicknessNm",
+            "gapThickness",
             &i32_array_to_js(&self.gap_thickness_nm)?,
         )?;
+        set_property(&object, "rotation", &f32_array_to_js(&self.rotation)?)?;
         Ok(object.into())
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Thermals, JsValue> {
-        let x = f32_array_from_js(value, "x")?;
-        let y = f32_array_from_js(value, "y")?;
-        let outer_diameter = f32_array_from_js(value, "outerDiameter")?;
-        let inner_diameter = f32_array_from_js(value, "innerDiameter")?;
-        let gap_thickness = f32_array_from_js(value, "gapThickness")?;
+        let x_nm = i32_array_from_js(value, "x")?;
+        let y_nm = i32_array_from_js(value, "y")?;
+        let outer_diameter_nm = i32_array_from_js(value, "outerDiameter")?;
+        let inner_diameter_nm = i32_array_from_js(value, "innerDiameter")?;
+        let gap_thickness_nm = i32_array_from_js(value, "gapThickness")?;
         let rotation = f32_array_from_js(value, "rotation")?;
-        let x_nm = match i32_array_from_js(value, "xNm") {
-            Ok(v) if v.len() == x.len() => v,
-            _ => x
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let y_nm = match i32_array_from_js(value, "yNm") {
-            Ok(v) if v.len() == y.len() => v,
-            _ => y
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let outer_diameter_nm = match i32_array_from_js(value, "outerDiameterNm") {
-            Ok(v) if v.len() == outer_diameter.len() => v,
-            _ => outer_diameter
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let inner_diameter_nm = match i32_array_from_js(value, "innerDiameterNm") {
-            Ok(v) if v.len() == inner_diameter.len() => v,
-            _ => inner_diameter
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
-        let gap_thickness_nm = match i32_array_from_js(value, "gapThicknessNm") {
-            Ok(v) if v.len() == gap_thickness.len() => v,
-            _ => gap_thickness
-                .iter()
-                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                .collect(),
-        };
+        let to_mm =
+            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Thermals::new_with_nm(
-            x,
-            y,
-            outer_diameter,
-            inner_diameter,
-            gap_thickness,
+            to_mm(&x_nm),
+            to_mm(&y_nm),
+            to_mm(&outer_diameter_nm),
+            to_mm(&inner_diameter_nm),
+            to_mm(&gap_thickness_nm),
             rotation,
             x_nm,
             y_nm,

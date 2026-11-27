@@ -3407,29 +3407,12 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let triangles = Self::js_property(sublayer, "triangles")?;
-        let (vertex_count, vertices_nm) =
-            if let Ok(v_nm) = Self::js_i32_array(&triangles, "verticesNm") {
-                if v_nm.length() == 0 {
-                    return Ok(());
-                }
-                let vertex_count = (v_nm.length() / 2) as i32;
-                (vertex_count, v_nm)
-            } else {
-                let vertices = Self::js_f32_array(&triangles, "vertices")?;
-                if vertices.length() == 0 {
-                    return Ok(());
-                }
-                let vertex_count =
-                    Self::validate_triangle_vertex_array("triangle vertices", &vertices)?;
-                Self::validate_js_finite_array("triangle vertices", &vertices)?;
-                let mut temp = vec![0.0f32; vertices.length() as usize];
-                vertices.copy_to(&mut temp);
-                let nm_vec: Vec<i32> = temp
-                    .iter()
-                    .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                    .collect();
-                (vertex_count, Int32Array::from(nm_vec.as_slice()))
-            };
+        let vertices_nm = Self::js_i32_array(&triangles, "vertices")?;
+        if vertices_nm.length() == 0 {
+            return Ok(());
+        }
+        let vertex_count =
+            Self::validate_triangle_vertex_len("triangle vertices", vertices_nm.length())?;
 
         let vao = self
             .gl
@@ -3449,13 +3432,8 @@ impl Renderer {
         )?;
         buffer_cache.triangle_vertex_buffer = Some(vertex_buffer);
 
-        let has_holes = if let Ok(r_nm) = Self::js_i32_array(&triangles, "holeRadiusNm") {
-            r_nm.length() > 0
-        } else if let Ok(r) = Self::js_f32_array(&triangles, "holeRadius") {
-            r.length() > 0
-        } else {
-            false
-        };
+        let hole_radius_nm = Self::js_i32_array(&triangles, "holeRadius")?;
+        let has_holes = hole_radius_nm.length() > 0;
 
         if !has_holes {
             Self::use_constant_vertex_attrib_1i(
@@ -3477,26 +3455,15 @@ impl Renderer {
                 0,
             )?;
         } else {
-            let (hole_x_nm, hole_y_nm, hole_radius_nm) =
-                if let Ok(r_nm) = Self::js_i32_array(&triangles, "holeRadiusNm") {
-                    let x_nm = Self::js_i32_array(&triangles, "holeXNm")?;
-                    let y_nm = Self::js_i32_array(&triangles, "holeYNm")?;
-                    (x_nm, y_nm, r_nm)
-                } else {
-                    let hole_x = Self::js_f32_array(&triangles, "holeX")?;
-                    let hole_y = Self::js_f32_array(&triangles, "holeY")?;
-                    let hole_radius = Self::js_f32_array(&triangles, "holeRadius")?;
-                    let to_nm = |farr: &Float32Array| -> Int32Array {
-                        let mut temp = vec![0.0f32; farr.length() as usize];
-                        farr.copy_to(&mut temp);
-                        let nm_vec: Vec<i32> = temp
-                            .iter()
-                            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                            .collect();
-                        Int32Array::from(nm_vec.as_slice())
-                    };
-                    (to_nm(&hole_x), to_nm(&hole_y), to_nm(&hole_radius))
-                };
+            let hole_x_nm = Self::js_i32_array(&triangles, "holeX")?;
+            let hole_y_nm = Self::js_i32_array(&triangles, "holeY")?;
+            Self::validate_js_len("triangle hole_x", hole_x_nm.length(), vertex_count as u32)?;
+            Self::validate_js_len("triangle hole_y", hole_y_nm.length(), vertex_count as u32)?;
+            Self::validate_js_len(
+                "triangle hole_radius",
+                hole_radius_nm.length(),
+                vertex_count as u32,
+            )?;
             buffer_cache.triangle_hole_x_buffer =
                 Some(Self::create_i32_attrib_buffer_from_js_array(
                     batch,
@@ -3547,27 +3514,15 @@ impl Renderer {
 
         for (template_idx, template) in templates.iter().enumerate() {
             let vertices = Self::js_f32_array(&template, "vertices")?;
-            let (instance_count, instance_x_nm, instance_y_nm) =
-                if let Ok(ix_nm) = Self::js_i32_array(&template, "instanceXNm") {
-                    let instance_count = ix_nm.length() as i32;
-                    let iy_nm = Self::js_i32_array(&template, "instanceYNm")?;
-                    (instance_count, ix_nm, iy_nm)
-                } else {
-                    let instance_x = Self::js_f32_array(&template, "instanceX")?;
-                    let instance_y = Self::js_f32_array(&template, "instanceY")?;
-                    let instance_count =
-                        Self::validate_instance_array("triangle template instances", &instance_x)?;
-                    let to_nm = |farr: &Float32Array| -> Int32Array {
-                        let mut temp = vec![0.0f32; instance_count as usize];
-                        farr.copy_to(&mut temp);
-                        let nm_vec: Vec<i32> = temp
-                            .iter()
-                            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                            .collect();
-                        Int32Array::from(nm_vec.as_slice())
-                    };
-                    (instance_count, to_nm(&instance_x), to_nm(&instance_y))
-                };
+            let instance_x_nm = Self::js_i32_array(&template, "instanceX")?;
+            let instance_y_nm = Self::js_i32_array(&template, "instanceY")?;
+            let instance_count =
+                Self::validate_instance_len("triangle template instances", instance_x_nm.length())?;
+            Self::validate_js_len(
+                "triangle template instance_y",
+                instance_y_nm.length(),
+                instance_x_nm.length(),
+            )?;
             if vertices.length() == 0 || instance_count == 0 {
                 continue;
             }
@@ -3627,63 +3582,20 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let lines = Self::js_property(sublayer, "lines")?;
-        let (instance_count, start_x_nm, start_y_nm, end_x_nm, end_y_nm, width_nm) =
-            if let Ok(start_x_nm) = Self::js_i32_array(&lines, "startXNm") {
-                let instance_count = start_x_nm.length() as usize;
-                if instance_count == 0 {
-                    return Ok(());
-                }
-                let start_y_nm = Self::js_i32_array(&lines, "startYNm")?;
-                let end_x_nm = Self::js_i32_array(&lines, "endXNm")?;
-                let end_y_nm = Self::js_i32_array(&lines, "endYNm")?;
-                let width_nm = Self::js_i32_array(&lines, "widthNm")?;
-                (
-                    instance_count,
-                    start_x_nm,
-                    start_y_nm,
-                    end_x_nm,
-                    end_y_nm,
-                    width_nm,
-                )
-            } else {
-                let start_x = Self::js_f32_array(&lines, "startX")?;
-                if start_x.length() == 0 {
-                    return Ok(());
-                }
-                let instance_count =
-                    Self::validate_instance_array("line instances", &start_x)? as usize;
-                let start_y = Self::js_f32_array(&lines, "startY")?;
-                let end_x = Self::js_f32_array(&lines, "endX")?;
-                let end_y = Self::js_f32_array(&lines, "endY")?;
-                let width = Self::js_f32_array(&lines, "width")?;
-                Self::validate_js_array_len("line start_y", &start_y, instance_count as u32)?;
-                Self::validate_js_array_len("line end_x", &end_x, instance_count as u32)?;
-                Self::validate_js_array_len("line end_y", &end_y, instance_count as u32)?;
-                Self::validate_js_array_len("line width", &width, instance_count as u32)?;
-                Self::validate_js_finite_array("line start_x", &start_x)?;
-                Self::validate_js_finite_array("line start_y", &start_y)?;
-                Self::validate_js_finite_array("line end_x", &end_x)?;
-                Self::validate_js_finite_array("line end_y", &end_y)?;
-                Self::validate_js_non_negative_array("line width", &width)?;
-
-                let to_nm = |farr: &Float32Array| -> Int32Array {
-                    let mut temp = vec![0.0f32; instance_count];
-                    farr.copy_to(&mut temp);
-                    let nm_vec: Vec<i32> = temp
-                        .iter()
-                        .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                        .collect();
-                    Int32Array::from(nm_vec.as_slice())
-                };
-                (
-                    instance_count,
-                    to_nm(&start_x),
-                    to_nm(&start_y),
-                    to_nm(&end_x),
-                    to_nm(&end_y),
-                    to_nm(&width),
-                )
-            };
+        let start_x_nm = Self::js_i32_array(&lines, "startX")?;
+        if start_x_nm.length() == 0 {
+            return Ok(());
+        }
+        let instance_count =
+            Self::validate_instance_len("line instances", start_x_nm.length())? as usize;
+        let start_y_nm = Self::js_i32_array(&lines, "startY")?;
+        let end_x_nm = Self::js_i32_array(&lines, "endX")?;
+        let end_y_nm = Self::js_i32_array(&lines, "endY")?;
+        let width_nm = Self::js_i32_array(&lines, "width")?;
+        Self::validate_js_len("line start_y", start_y_nm.length(), instance_count as u32)?;
+        Self::validate_js_len("line end_x", end_x_nm.length(), instance_count as u32)?;
+        Self::validate_js_len("line end_y", end_y_nm.length(), instance_count as u32)?;
+        Self::validate_js_len("line width", width_nm.length(), instance_count as u32)?;
 
         let vao = self
             .gl
@@ -3750,42 +3662,18 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let circles = Self::js_property(sublayer, "circles")?;
-        let (instance_count, x_nm, y_nm, radius_nm) =
-            if let Ok(x_nm) = Self::js_i32_array(&circles, "xNm") {
-                let instance_count = x_nm.length() as usize;
-                if instance_count == 0 {
-                    return Ok(());
-                }
-                let y_nm = Self::js_i32_array(&circles, "yNm")?;
-                let radius_nm = Self::js_i32_array(&circles, "radiusNm")?;
-                (instance_count, x_nm, y_nm, radius_nm)
-            } else {
-                let x = Self::js_f32_array(&circles, "x")?;
-                if x.length() == 0 {
-                    return Ok(());
-                }
-                let y = Self::js_f32_array(&circles, "y")?;
-                let radius = Self::js_f32_array(&circles, "radius")?;
-                let instance_count = Self::validate_instance_array("circle", &x)? as usize;
-                let to_nm = |farr: &Float32Array| -> Int32Array {
-                    let mut temp = vec![0.0f32; instance_count];
-                    farr.copy_to(&mut temp);
-                    let nm_vec: Vec<i32> = temp
-                        .iter()
-                        .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                        .collect();
-                    Int32Array::from(nm_vec.as_slice())
-                };
-                (instance_count, to_nm(&x), to_nm(&y), to_nm(&radius))
-            };
+        let x_nm = Self::js_i32_array(&circles, "x")?;
+        if x_nm.length() == 0 {
+            return Ok(());
+        }
+        let instance_count = Self::validate_instance_len("circle", x_nm.length())? as usize;
+        let y_nm = Self::js_i32_array(&circles, "y")?;
+        let radius_nm = Self::js_i32_array(&circles, "radius")?;
+        Self::validate_js_len("circle y", y_nm.length(), instance_count as u32)?;
+        Self::validate_js_len("circle radius", radius_nm.length(), instance_count as u32)?;
 
-        let has_holes = if let Ok(hole_radius_nm) = Self::js_i32_array(&circles, "holeRadiusNm") {
-            hole_radius_nm.length() > 0
-        } else if let Ok(hole_radius) = Self::js_f32_array(&circles, "holeRadius") {
-            hole_radius.length() > 0
-        } else {
-            false
-        };
+        let hole_radius_nm = Self::js_i32_array(&circles, "holeRadius")?;
+        let has_holes = hole_radius_nm.length() > 0;
         let program = if has_holes {
             &self.programs.circle_holed
         } else {
@@ -3832,26 +3720,15 @@ impl Renderer {
         buffer_cache.circle_radius_buffer = Some(radius_buffer);
 
         if has_holes {
-            let (hole_x_nm, hole_y_nm, hole_radius_nm) =
-                if let Ok(r_nm) = Self::js_i32_array(&circles, "holeRadiusNm") {
-                    let x_nm = Self::js_i32_array(&circles, "holeXNm")?;
-                    let y_nm = Self::js_i32_array(&circles, "holeYNm")?;
-                    (x_nm, y_nm, r_nm)
-                } else {
-                    let hole_x = Self::js_f32_array(&circles, "holeX")?;
-                    let hole_y = Self::js_f32_array(&circles, "holeY")?;
-                    let hole_radius = Self::js_f32_array(&circles, "holeRadius")?;
-                    let to_nm = |farr: &Float32Array| -> Int32Array {
-                        let mut temp = vec![0.0f32; instance_count];
-                        farr.copy_to(&mut temp);
-                        let nm_vec: Vec<i32> = temp
-                            .iter()
-                            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                            .collect();
-                        Int32Array::from(nm_vec.as_slice())
-                    };
-                    (to_nm(&hole_x), to_nm(&hole_y), to_nm(&hole_radius))
-                };
+            let hole_x_nm = Self::js_i32_array(&circles, "holeX")?;
+            let hole_y_nm = Self::js_i32_array(&circles, "holeY")?;
+            Self::validate_js_len("circle hole_x", hole_x_nm.length(), instance_count as u32)?;
+            Self::validate_js_len("circle hole_y", hole_y_nm.length(), instance_count as u32)?;
+            Self::validate_js_len(
+                "circle hole_radius",
+                hole_radius_nm.length(),
+                instance_count as u32,
+            )?;
             buffer_cache.circle_hole_x_buffer = Some(Self::create_i32_attrib_buffer_from_js_array(
                 batch,
                 &self.gl,
@@ -3893,56 +3770,33 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let arcs = Self::js_property(sublayer, "arcs")?;
-        let (instance_count, x_nm, y_nm, radius_nm, thickness_nm, start_angle, sweep_angle) =
-            if let Ok(x_nm) = Self::js_i32_array(&arcs, "xNm") {
-                let instance_count = x_nm.length() as usize;
-                if instance_count == 0 {
-                    return Ok(());
-                }
-                let y_nm = Self::js_i32_array(&arcs, "yNm")?;
-                let radius_nm = Self::js_i32_array(&arcs, "radiusNm")?;
-                let thickness_nm = Self::js_i32_array(&arcs, "thicknessNm")?;
-                let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
-                let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
-                (
-                    instance_count,
-                    x_nm,
-                    y_nm,
-                    radius_nm,
-                    thickness_nm,
-                    start_angle,
-                    sweep_angle,
-                )
-            } else {
-                let x = Self::js_f32_array(&arcs, "x")?;
-                if x.length() == 0 {
-                    return Ok(());
-                }
-                let y = Self::js_f32_array(&arcs, "y")?;
-                let radius = Self::js_f32_array(&arcs, "radius")?;
-                let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
-                let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
-                let thickness = Self::js_f32_array(&arcs, "thickness")?;
-                let instance_count = Self::validate_instance_array("arc", &x)? as usize;
-                let to_nm = |farr: &Float32Array| -> Int32Array {
-                    let mut temp = vec![0.0f32; instance_count];
-                    farr.copy_to(&mut temp);
-                    let nm_vec: Vec<i32> = temp
-                        .iter()
-                        .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                        .collect();
-                    Int32Array::from(nm_vec.as_slice())
-                };
-                (
-                    instance_count,
-                    to_nm(&x),
-                    to_nm(&y),
-                    to_nm(&radius),
-                    to_nm(&thickness),
-                    start_angle,
-                    sweep_angle,
-                )
-            };
+        let x_nm = Self::js_i32_array(&arcs, "x")?;
+        if x_nm.length() == 0 {
+            return Ok(());
+        }
+        let instance_count = Self::validate_instance_len("arc", x_nm.length())? as usize;
+        let y_nm = Self::js_i32_array(&arcs, "y")?;
+        let radius_nm = Self::js_i32_array(&arcs, "radius")?;
+        let thickness_nm = Self::js_i32_array(&arcs, "thickness")?;
+        let start_angle = Self::js_f32_array(&arcs, "startAngle")?;
+        let sweep_angle = Self::js_f32_array(&arcs, "sweepAngle")?;
+        Self::validate_js_len("arc y", y_nm.length(), instance_count as u32)?;
+        Self::validate_js_len("arc radius", radius_nm.length(), instance_count as u32)?;
+        Self::validate_js_len(
+            "arc thickness",
+            thickness_nm.length(),
+            instance_count as u32,
+        )?;
+        Self::validate_js_len(
+            "arc startAngle",
+            start_angle.length(),
+            instance_count as u32,
+        )?;
+        Self::validate_js_len(
+            "arc sweepAngle",
+            sweep_angle.length(),
+            instance_count as u32,
+        )?;
 
         let vao = self
             .gl
@@ -4024,56 +3878,33 @@ impl Renderer {
         batch: &mut BufferUploadBatch<'_>,
     ) -> Result<(), JsValue> {
         let thermals = Self::js_property(sublayer, "thermals")?;
-        let (instance_count, x_nm, y_nm, outer_nm, inner_nm, gap_nm, rotation) =
-            if let Ok(x_nm) = Self::js_i32_array(&thermals, "xNm") {
-                let instance_count = x_nm.length() as usize;
-                if instance_count == 0 {
-                    return Ok(());
-                }
-                let y_nm = Self::js_i32_array(&thermals, "yNm")?;
-                let outer_nm = Self::js_i32_array(&thermals, "outerDiameterNm")?;
-                let inner_nm = Self::js_i32_array(&thermals, "innerDiameterNm")?;
-                let gap_nm = Self::js_i32_array(&thermals, "gapThicknessNm")?;
-                let rotation = Self::js_f32_array(&thermals, "rotation")?;
-                (
-                    instance_count,
-                    x_nm,
-                    y_nm,
-                    outer_nm,
-                    inner_nm,
-                    gap_nm,
-                    rotation,
-                )
-            } else {
-                let x = Self::js_f32_array(&thermals, "x")?;
-                if x.length() == 0 {
-                    return Ok(());
-                }
-                let y = Self::js_f32_array(&thermals, "y")?;
-                let outer_diameter = Self::js_f32_array(&thermals, "outerDiameter")?;
-                let inner_diameter = Self::js_f32_array(&thermals, "innerDiameter")?;
-                let gap_thickness = Self::js_f32_array(&thermals, "gapThickness")?;
-                let rotation = Self::js_f32_array(&thermals, "rotation")?;
-                let instance_count = Self::validate_instance_array("thermal", &x)? as usize;
-                let to_nm = |farr: &Float32Array| -> Int32Array {
-                    let mut temp = vec![0.0f32; instance_count];
-                    farr.copy_to(&mut temp);
-                    let nm_vec: Vec<i32> = temp
-                        .iter()
-                        .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-                        .collect();
-                    Int32Array::from(nm_vec.as_slice())
-                };
-                (
-                    instance_count,
-                    to_nm(&x),
-                    to_nm(&y),
-                    to_nm(&outer_diameter),
-                    to_nm(&inner_diameter),
-                    to_nm(&gap_thickness),
-                    rotation,
-                )
-            };
+        let x_nm = Self::js_i32_array(&thermals, "x")?;
+        if x_nm.length() == 0 {
+            return Ok(());
+        }
+        let instance_count = Self::validate_instance_len("thermal", x_nm.length())? as usize;
+        let y_nm = Self::js_i32_array(&thermals, "y")?;
+        let outer_nm = Self::js_i32_array(&thermals, "outerDiameter")?;
+        let inner_nm = Self::js_i32_array(&thermals, "innerDiameter")?;
+        let gap_nm = Self::js_i32_array(&thermals, "gapThickness")?;
+        let rotation = Self::js_f32_array(&thermals, "rotation")?;
+        Self::validate_js_len("thermal y", y_nm.length(), instance_count as u32)?;
+        Self::validate_js_len(
+            "thermal outerDiameter",
+            outer_nm.length(),
+            instance_count as u32,
+        )?;
+        Self::validate_js_len(
+            "thermal innerDiameter",
+            inner_nm.length(),
+            instance_count as u32,
+        )?;
+        Self::validate_js_len(
+            "thermal gapThickness",
+            gap_nm.length(),
+            instance_count as u32,
+        )?;
+        Self::validate_js_len("thermal rotation", rotation.length(), instance_count as u32)?;
 
         let vao = self
             .gl
@@ -4487,14 +4318,14 @@ impl Renderer {
         Self::checked_usize_to_i32("path region cover vertex start", start)
     }
 
-    fn validate_triangle_vertex_array(label: &str, values: &Float32Array) -> Result<i32, JsValue> {
-        if !values.length().is_multiple_of(2) {
+    fn validate_triangle_vertex_len(label: &str, length: u32) -> Result<i32, JsValue> {
+        if !length.is_multiple_of(2) {
             return Err(JsValue::from_str(&format!(
                 "{} buffer has an odd number of coordinates",
                 label
             )));
         }
-        let vertex_count = values.length() / 2;
+        let vertex_count = length / 2;
         if !vertex_count.is_multiple_of(3) {
             return Err(JsValue::from_str(&format!(
                 "{} count is not divisible by 3",
@@ -4508,6 +4339,10 @@ impl Renderer {
             )));
         }
         Self::checked_u32_to_i32(label, vertex_count)
+    }
+
+    fn validate_triangle_vertex_array(label: &str, values: &Float32Array) -> Result<i32, JsValue> {
+        Self::validate_triangle_vertex_len(label, values.length())
     }
 
     fn set_view_feature_uniforms(
@@ -4558,27 +4393,21 @@ impl Renderer {
         }
     }
 
-    fn validate_instance_array(label: &str, values: &Float32Array) -> Result<i32, JsValue> {
-        if values.length() > i32::MAX as u32 {
+    fn validate_instance_len(label: &str, length: u32) -> Result<i32, JsValue> {
+        if length > i32::MAX as u32 {
             return Err(JsValue::from_str(&format!(
                 "{} count exceeds WebGL draw limits",
                 label
             )));
         }
-        Self::checked_u32_to_i32(label, values.length())
+        Self::checked_u32_to_i32(label, length)
     }
 
-    fn validate_js_array_len(
-        label: &str,
-        values: &Float32Array,
-        expected: u32,
-    ) -> Result<(), JsValue> {
-        if values.length() != expected {
+    fn validate_js_len(label: &str, actual: u32, expected: u32) -> Result<(), JsValue> {
+        if actual != expected {
             return Err(JsValue::from_str(&format!(
                 "{} length mismatch: expected {}, got {}",
-                label,
-                expected,
-                values.length()
+                label, expected, actual
             )));
         }
         Ok(())
@@ -5128,20 +4957,6 @@ impl Renderer {
                 return Err(JsValue::from_str(
                     "path region arc sector radius contains a negative value",
                 ));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_js_non_negative_array(label: &str, values: &Float32Array) -> Result<(), JsValue> {
-        for index in 0..values.length() {
-            let value = values.get_index(index);
-            Self::validate_finite_value(label, value)?;
-            if value < 0.0 {
-                return Err(JsValue::from_str(&format!(
-                    "{} contains a negative value",
-                    label
-                )));
             }
         }
         Ok(())
