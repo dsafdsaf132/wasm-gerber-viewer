@@ -4,6 +4,7 @@ import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "no
 
 const root = resolve(process.cwd());
 const port = Number(process.env.GERBER_VIEWER_TEST_PORT ?? 4173);
+const host = process.env.GERBER_VIEWER_HOST ?? "0.0.0.0";
 // "32" or "64": adds ?wasm= to viewer page requests that do not choose a build
 // themselves, so specs that open "/" run on one build (js/core/wasm-variant.js).
 const pinnedWasmVariant = process.env.GERBER_VIEWER_TEST_WASM ?? "";
@@ -74,8 +75,8 @@ const server = createServer((request, response) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  process.stdout.write(`Gerber viewer test server listening on http://127.0.0.1:${port}\n`);
+server.listen(port, host, () => {
+  process.stdout.write(`Gerber viewer test server listening on http://${host}:${port}\n`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
