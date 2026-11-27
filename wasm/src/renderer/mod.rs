@@ -177,8 +177,8 @@ struct MaskNeeds {
 }
 
 /// Samples per pixel for the layer masks. Triangle edges (regions, macro
-/// flashes, path regions) are anti-aliased by the multisampling; discs and
-/// line bodies compute their edge coverage analytically in the fragment
+/// flashes, path regions) and line bodies are anti-aliased by the multisampling; discs and
+/// arcs compute their edge coverage analytically in the fragment
 /// shader, which multisampling cannot do for a `discard`-shaped edge.
 const DEFAULT_MSAA_SAMPLES: i32 = 4;
 
@@ -304,7 +304,8 @@ pub struct Renderer {
     fullscreen_vertex_array: WebGlVertexArrayObject,
     minimum_feature_pixels: f32,
     /// Anti-aliased layer masks: multisampled render target plus analytic
-    /// edge coverage in the disc, line, arc and hole shaders. Off by default;
+    /// edge coverage in the disc, arc and hole shaders (lines and triangles use
+    /// hardware multisampling). Off by default;
     /// costs one canvas-sized multisample target and a resolve per layer.
     anti_aliasing: bool,
     msaa_samples: i32,
@@ -7146,8 +7147,17 @@ impl Renderer {
             layer.inner_outline_world,
         );
 
+        let analytic = self.mask_pass_analytic_edges;
+        if analytic {
+            self.gl
+                .disable(WebGl2RenderingContext::SAMPLE_ALPHA_TO_COVERAGE);
+        }
         self.gl
             .draw_arrays_instanced(TRIANGLES, 0, 6, instance_count);
+        if analytic {
+            self.gl
+                .enable(WebGl2RenderingContext::SAMPLE_ALPHA_TO_COVERAGE);
+        }
         self.gl.bind_vertex_array(None);
 
         Ok(())

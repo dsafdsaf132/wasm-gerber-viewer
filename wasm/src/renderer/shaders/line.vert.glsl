@@ -9,65 +9,50 @@ in float width_instance;
 uniform mat3 transform;
 uniform vec2 viewport_size;
 uniform float minimum_feature_pixels;
-uniform float anti_aliasing;
 uniform float inner_outline_pixels;
 uniform float inner_outline_world;
 out highp float vSide;
 out highp float vInnerSide;
-// Change of vSide across one pixel for the anti-aliased edge.
-out highp float vEdgeWidth;
-
-vec2 clipToPixel(vec2 clipPosition) {
-    return clipPosition * viewport_size * 0.5;
-}
-
-vec2 pixelToClip(vec2 pixelPosition) {
-    return pixelPosition / max(viewport_size * 0.5, vec2(1.0));
-}
 
 void main() {
     vec2 start = vec2(start_x_instance, start_y_instance);
     vec2 end = vec2(end_x_instance, end_y_instance);
-    vec3 startClip = transform * vec3(start, 1.0);
-    vec3 endClip = transform * vec3(end, 1.0);
-    vec2 startPixels = clipToPixel(startClip.xy);
-    vec2 endPixels = clipToPixel(endClip.xy);
 
-    vec2 linePixels = endPixels - startPixels;
-    float lineLength = length(linePixels);
-    vec2 direction = lineLength > 0.000001 ? linePixels / lineLength : vec2(1.0, 0.0);
-    vec2 normal = vec2(-direction.y, direction.x);
-
+    // Compute line segment direction and normal in world space
     vec2 lineWorld = end - start;
     float worldLength = length(lineWorld);
     vec2 worldNormal = worldLength > 0.000001
         ? vec2(-lineWorld.y, lineWorld.x) / worldLength
         : vec2(0.0, 1.0);
-    vec2 widthClip = mat2(transform) * worldNormal * width_instance;
-    float halfWidthPixels = length(widthClip * viewport_size * 0.5) * 0.5;
-    halfWidthPixels = max(halfWidthPixels, minimum_feature_pixels * 0.5);
-    float pixelsPerWorld = width_instance > 0.000001
-        ? halfWidthPixels / (width_instance * 0.5)
-        : 0.0;
-    float outlinePixels = inner_outline_pixels + inner_outline_world * pixelsPerWorld;
-    float expandedHalfWidthPixels = halfWidthPixels + outlinePixels;
-    float drawnHalfWidthPixels = expandedHalfWidthPixels;
+
+    // Screen pixel scale along the normal
+    vec2 normalClip = mat2(transform) * worldNormal;
+    float pixelsPerWorld = length(normalClip * viewport_size * 0.5);
+
+    float baseHalfWidthWorld = width_instance * 0.5;
+    float halfWidthPixels = baseHalfWidthWorld * pixelsPerWorld;
+
+    // Minimum feature clamping and outline calculations
+    float clampedHalfWidthPixels = max(halfWidthPixels, minimum_feature_pixels * 0.5);
+    float effectiveHalfWidthWorld = (clampedHalfWidthPixels > halfWidthPixels && pixelsPerWorld > 0.000001)
+        ? clampedHalfWidthPixels / pixelsPerWorld
+        : baseHalfWidthWorld;
+
+    float outlineWorld = inner_outline_world
+        + (inner_outline_pixels > 0.0 && pixelsPerWorld > 0.000001 ? inner_outline_pixels / pixelsPerWorld : 0.0);
+    float totalHalfWidthWorld = effectiveHalfWidthWorld + outlineWorld;
+
     vSide = position.y;
-    vEdgeWidth = 0.0;
-    if (anti_aliasing > 0.5) {
-        // The body grows by half a pixel on each side so the soft edge has
-        // room; abs(vSide) == 1.0 stays the true edge. Round caps are drawn
-        // separately as circles.
-        drawnHalfWidthPixels = expandedHalfWidthPixels + 0.5;
-        vSide = position.y * (drawnHalfWidthPixels / max(expandedHalfWidthPixels, 0.000001));
-        vEdgeWidth = 1.0 / max(expandedHalfWidthPixels, 0.000001);
-    }
-    vInnerSide = outlinePixels > 0.0 && expandedHalfWidthPixels > 0.000001
-        ? halfWidthPixels / expandedHalfWidthPixels
+    vInnerSide = outlineWorld > 0.0 && totalHalfWidthWorld > 0.000001
+        ? effectiveHalfWidthWorld / totalHalfWidthWorld
         : 0.0;
 
+    // Compute vertex directly in world coordinates
     float t = position.x * 0.5 + 0.5;
-    vec2 centerPixels = mix(startPixels, endPixels, t);
-    vec2 adjustedPixels = centerPixels + normal * position.y * drawnHalfWidthPixels;
-    gl_Position = vec4(pixelToClip(adjustedPixels), 0.0, 1.0);
+    vec2 centerWorld = mix(start, end, t);
+    vec2 vertexWorld = centerWorld + worldNormal * (position.y * totalHalfWidthWorld);
+
+    // Transform directly to clip space
+    vec3 transformed = transform * vec3(vertexWorld, 1.0);
+    gl_Position = vec4(transformed.xy, 0.0, 1.0);
 }
