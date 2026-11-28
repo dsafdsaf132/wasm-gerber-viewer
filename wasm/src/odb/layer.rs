@@ -386,8 +386,7 @@ impl Driver<'_> {
         let parser = &mut *self.parser;
         let state = &mut parser.current_state;
         state.current_aperture = code.to_string();
-        state.x = xs;
-        state.y = ys;
+        state.set_point(xs, ys);
         let (i, j) = match arc {
             Some((xc, yc, cw)) => {
                 state.interpolation_mode =
@@ -429,8 +428,7 @@ impl Driver<'_> {
             j,
             arc_command,
         )?;
-        state.x = xe;
-        state.y = ye;
+        state.set_point(xe, ye);
         state.interpolation_mode = "linear".to_string();
         Ok(())
     }
@@ -472,13 +470,9 @@ impl Driver<'_> {
             [corners[0], corners[1], corners[2]],
             [corners[0], corners[2], corners[3]],
         ] {
-            parser.current_primitives.push(Primitive::Triangle {
-                vertices,
-                exposure: 1.0,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: 0.0,
-            });
+            parser
+                .current_primitives
+                .push(Primitive::new_triangle(vertices, 1.0, 0.0, 0.0, 0.0));
         }
         let state = &parser.current_state;
         record_primitive_delta(
@@ -562,8 +556,7 @@ impl Driver<'_> {
         let (x0, y0) = placed_point(placement, polygon.x0, polygon.y0);
         contour.push_start([x0, y0])?;
         let state = &mut self.parser.current_state;
-        state.x = x0;
-        state.y = y0;
+        state.set_point(x0, y0);
         for segment in &polygon.segments {
             let (x, y, i, j) = match *segment {
                 Segment::Line { x, y } => {
@@ -584,8 +577,7 @@ impl Driver<'_> {
                 continue;
             }
             append_region_segment(&mut contour, state, x, y, i, j)?;
-            state.x = x;
-            state.y = y;
+            state.set_point(x, y);
         }
         state.interpolation_mode = "linear".to_string();
         Ok(contour)

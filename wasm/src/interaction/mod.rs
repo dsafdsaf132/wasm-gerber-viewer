@@ -21,7 +21,8 @@ const PROPERTY_HEIGHT: u32 = 1 << 2;
 const PROPERTY_ROTATION: u32 = 1 << 3;
 
 pub struct HighlightBatch {
-    pub vertices: Vec<f32>,
+    pub vertices_nm: Vec<i32>,
+    pub origin_nm: [i64; 2],
     pub clear: bool,
 }
 
@@ -270,16 +271,23 @@ impl InteractionLayer {
         shared
     }
 
+    #[allow(dead_code)]
     pub fn translate(&mut self, dx: f32, dy: f32) {
+        self.translate_f64(dx as f64, dy as f64);
+    }
+
+    pub fn translate_f64(&mut self, dx: f64, dy: f64) {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
 
+        let dx_f32 = dx as f32;
+        let dy_f32 = dy as f32;
         for feature in &mut self.features {
-            feature.bounds.translate(dx, dy);
-            feature.primitives.translate(dx, dy);
+            feature.bounds.translate(dx_f32, dy_f32);
+            feature.primitives.translate(dx_f32, dy_f32);
             if let Some(path_regions) = &mut feature.path_regions {
-                path_regions.translate(dx, dy);
+                path_regions.translate(dx_f32, dy_f32);
             }
         }
     }
@@ -645,15 +653,15 @@ impl FeaturePrimitives {
                 hole_y,
                 hole_radius,
             } => {
-                let primitive = Primitive::Circle {
-                    x: *x,
-                    y: *y,
-                    radius: *radius,
-                    exposure: *exposure,
-                    hole_x: *hole_x,
-                    hole_y: *hole_y,
-                    hole_radius: *hole_radius,
-                };
+                let primitive = Primitive::new_circle(
+                    *x,
+                    *y,
+                    *radius,
+                    *exposure,
+                    *hole_x,
+                    *hole_y,
+                    *hole_radius,
+                );
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Arc {
@@ -665,15 +673,15 @@ impl FeaturePrimitives {
                 thickness,
                 exposure,
             } => {
-                let primitive = Primitive::Arc {
-                    x: *x,
-                    y: *y,
-                    radius: *radius,
-                    start_angle: *start_angle,
-                    end_angle: *end_angle,
-                    thickness: *thickness,
-                    exposure: *exposure,
-                };
+                let primitive = Primitive::new_arc(
+                    *x,
+                    *y,
+                    *radius,
+                    *start_angle,
+                    *end_angle,
+                    *thickness,
+                    *exposure,
+                );
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Thermal {
@@ -685,23 +693,19 @@ impl FeaturePrimitives {
                 rotation,
                 exposure,
             } => {
-                let primitive = Primitive::Thermal {
-                    x: *x,
-                    y: *y,
-                    outer_diameter: *outer_diameter,
-                    inner_diameter: *inner_diameter,
-                    gap_thickness: *gap_thickness,
-                    rotation: *rotation,
-                    exposure: *exposure,
-                };
+                let primitive = Primitive::new_thermal(
+                    *x,
+                    *y,
+                    *outer_diameter,
+                    *inner_diameter,
+                    *gap_thickness,
+                    *rotation,
+                    *exposure,
+                );
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y } => {
-                let primitive = Primitive::TriangleTemplateFlash {
-                    template: Rc::clone(template),
-                    x: *x,
-                    y: *y,
-                };
+                let primitive = Primitive::new_triangle_template_flash(Rc::clone(template), *x, *y);
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Line {
@@ -712,14 +716,8 @@ impl FeaturePrimitives {
                 width,
                 exposure,
             } => {
-                let primitive = Primitive::Line {
-                    start_x: *start_x,
-                    start_y: *start_y,
-                    end_x: *end_x,
-                    end_y: *end_y,
-                    width: *width,
-                    exposure: *exposure,
-                };
+                let primitive =
+                    Primitive::new_line(*start_x, *start_y, *end_x, *end_y, *width, *exposure);
                 visit(&primitive);
             }
             FeaturePrimitiveStorage::Multiple(primitives) => {
@@ -1014,6 +1012,7 @@ fn append_compact_primitive(
             hole_x,
             hole_y,
             hole_radius,
+            ..
         } => {
             primitive_types.push(0);
             primitive_data.extend_from_slice(&[
@@ -1037,6 +1036,7 @@ fn append_compact_primitive(
             hole_x,
             hole_y,
             hole_radius,
+            ..
         } => {
             primitive_types.push(1);
             primitive_data.extend_from_slice(&[
@@ -1060,6 +1060,7 @@ fn append_compact_primitive(
             end_angle,
             thickness,
             exposure,
+            ..
         } => {
             primitive_types.push(2);
             primitive_data.extend_from_slice(&[
@@ -1083,6 +1084,7 @@ fn append_compact_primitive(
             gap_thickness,
             rotation,
             exposure,
+            ..
         } => {
             primitive_types.push(3);
             primitive_data.extend_from_slice(&[
@@ -1098,7 +1100,7 @@ fn append_compact_primitive(
                 0.0,
             ]);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             primitive_types.push(4);
             primitive_data.extend_from_slice(&[
                 templates.intern(template) as f32,
@@ -1120,6 +1122,7 @@ fn append_compact_primitive(
             end_y,
             width,
             exposure,
+            ..
         } => {
             primitive_types.push(5);
             primitive_data.extend_from_slice(&[
@@ -1163,59 +1166,34 @@ fn compact_primitive_from_parts(
     templates: &[Rc<Vec<f32>>],
 ) -> Result<Primitive, JsValue> {
     Ok(match tag {
-        0 => Primitive::Triangle {
-            vertices: [[data[0], data[1]], [data[2], data[3]], [data[4], data[5]]],
-            exposure: data[6],
-            hole_x: data[7],
-            hole_y: data[8],
-            hole_radius: data[9],
-        },
-        1 => Primitive::Circle {
-            x: data[0],
-            y: data[1],
-            radius: data[2],
-            exposure: data[3],
-            hole_x: data[4],
-            hole_y: data[5],
-            hole_radius: data[6],
-        },
-        2 => Primitive::Arc {
-            x: data[0],
-            y: data[1],
-            radius: data[2],
-            start_angle: data[3],
-            end_angle: data[4],
-            thickness: data[5],
-            exposure: data[6],
-        },
-        3 => Primitive::Thermal {
-            x: data[0],
-            y: data[1],
-            outer_diameter: data[2],
-            inner_diameter: data[3],
-            gap_thickness: data[4],
-            rotation: data[5],
-            exposure: data[6],
-        },
+        0 => Primitive::new_triangle(
+            [[data[0], data[1]], [data[2], data[3]], [data[4], data[5]]],
+            data[6],
+            data[7],
+            data[8],
+            data[9],
+        ),
+        1 => Primitive::new_circle(
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+        ),
+        2 => Primitive::new_arc(
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+        ),
+        3 => Primitive::new_thermal(
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6],
+        ),
         4 => {
             let template_id = data[0] as usize;
-            Primitive::TriangleTemplateFlash {
-                template: templates
+            Primitive::new_triangle_template_flash(
+                templates
                     .get(template_id)
                     .cloned()
                     .ok_or_else(|| JsValue::from_str("Compact template index is invalid"))?,
-                x: data[1],
-                y: data[2],
-            }
+                data[1],
+                data[2],
+            )
         }
-        5 => Primitive::Line {
-            start_x: data[0],
-            start_y: data[1],
-            end_x: data[2],
-            end_y: data[3],
-            width: data[4],
-            exposure: data[5],
-        },
+        5 => Primitive::new_line(data[0], data[1], data[2], data[3], data[4], data[5]),
         _ => return Err(JsValue::from_str("Invalid compact primitive type")),
     })
 }
@@ -1231,6 +1209,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             hole_x,
             hole_y,
             hole_radius,
+            ..
         } => FeaturePrimitiveStorage::Circle {
             x,
             y,
@@ -1248,6 +1227,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             end_angle,
             thickness,
             exposure,
+            ..
         } => FeaturePrimitiveStorage::Arc {
             x,
             y,
@@ -1265,6 +1245,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             gap_thickness,
             rotation,
             exposure,
+            ..
         } => FeaturePrimitiveStorage::Thermal {
             x,
             y,
@@ -1274,7 +1255,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             rotation,
             exposure,
         },
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             FeaturePrimitiveStorage::TriangleTemplateFlash { template, x, y }
         }
         Primitive::Line {
@@ -1284,6 +1265,7 @@ fn primitive_to_storage(primitive: Primitive) -> FeaturePrimitiveStorage {
             end_y,
             width,
             exposure,
+            ..
         } => FeaturePrimitiveStorage::Line {
             start_x,
             start_y,
@@ -1359,7 +1341,7 @@ impl InteractionFeature {
         let mut path_regions =
             path_regions_has_interaction_geometry(&path_regions).then(|| Box::new(path_regions));
         if let Some(path_regions) = &mut path_regions {
-            path_regions.cover_vertices = Vec::new();
+            path_regions.cover_vertices_nm = Vec::new();
         }
         Self::from_parts(
             kind,
@@ -1660,15 +1642,7 @@ pub fn drill_hit_feature(
         None,
         None,
         Polarity::Positive,
-        vec![Primitive::Circle {
-            x,
-            y,
-            radius,
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        }],
+        vec![Primitive::new_circle(x, y, radius, 1.0, 0.0, 0.0, 0.0)],
         InteractionFeature::drill_properties(tool_code, diameter),
     )
 }
@@ -1724,9 +1698,14 @@ fn path_regions_bounds(path_regions: &PathRegions) -> Option<Boundary> {
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
 
-    for point in path_regions.cover_vertices.chunks_exact(2) {
+    for point in path_regions.cover_vertices_nm.chunks_exact(2) {
         include_point_bounds(
-            point[0], point[1], &mut min_x, &mut max_x, &mut min_y, &mut max_y,
+            (point[0] as f64 * 1e-6) as f32,
+            (point[1] as f64 * 1e-6) as f32,
+            &mut min_x,
+            &mut max_x,
+            &mut min_y,
+            &mut max_y,
         );
     }
     for region in &path_regions.pick_contours {
@@ -1792,7 +1771,7 @@ fn include_primitive_bounds(
         } => {
             include_circle_bounds(*x, *y, *outer_diameter * 0.5, min_x, max_x, min_y, max_y);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             for point in template.chunks_exact(2) {
                 include_point_bounds(point[0] + *x, point[1] + *y, min_x, max_x, min_y, max_y);
             }
@@ -1935,7 +1914,7 @@ fn primitive_hit(primitive: &Primitive, point: [f32; 2], tolerance: f32) -> bool
             *rotation,
             tolerance,
         ),
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             for triangle in template.chunks_exact(6) {
                 let vertices = [
                     [triangle[0] + *x, triangle[1] + *y],
@@ -2029,7 +2008,7 @@ fn append_primitive_triangles(vertices: &mut Vec<f32>, primitive: &Primitive) {
         } => {
             append_circle(vertices, [*x, *y], *outer_diameter * 0.5, CIRCLE_SEGMENTS);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             for triangle in template.chunks_exact(6) {
                 vertices.extend_from_slice(&[
                     triangle[0] + *x,
@@ -2128,14 +2107,51 @@ fn append_highlight_batch(batches: &mut Vec<HighlightBatch>, vertices: Vec<f32>,
         return;
     }
 
+    let mut min_x = i64::MAX;
+    let mut max_x = i64::MIN;
+    let mut min_y = i64::MAX;
+    let mut max_y = i64::MIN;
+    let mut coords_nm = Vec::with_capacity(vertices.len());
+    for pair in vertices.chunks_exact(2) {
+        let x_nm = (pair[0] as f64 * 1_000_000.0).round() as i64;
+        let y_nm = (pair[1] as f64 * 1_000_000.0).round() as i64;
+        min_x = min_x.min(x_nm);
+        max_x = max_x.max(x_nm);
+        min_y = min_y.min(y_nm);
+        max_y = max_y.max(y_nm);
+        coords_nm.push(x_nm);
+        coords_nm.push(y_nm);
+    }
+
     if let Some(last) = batches.last_mut() {
-        if last.clear == clear {
-            last.vertices.extend_from_slice(&vertices);
+        if last.clear == clear
+            && (min_x - last.origin_nm[0]) >= i32::MIN as i64
+            && (max_x - last.origin_nm[0]) <= i32::MAX as i64
+            && (min_y - last.origin_nm[1]) >= i32::MIN as i64
+            && (max_y - last.origin_nm[1]) <= i32::MAX as i64
+        {
+            for pair in coords_nm.chunks_exact(2) {
+                last.vertices_nm.push((pair[0] - last.origin_nm[0]) as i32);
+                last.vertices_nm.push((pair[1] - last.origin_nm[1]) as i32);
+            }
             return;
         }
     }
 
-    batches.push(HighlightBatch { vertices, clear });
+    let span_x = max_x.saturating_sub(min_x);
+    let span_y = max_y.saturating_sub(min_y);
+    let origin_nm = [min_x + (span_x + 1) / 2, min_y + (span_y + 1) / 2];
+    let mut vertices_nm = Vec::with_capacity(coords_nm.len());
+    for pair in coords_nm.chunks_exact(2) {
+        vertices_nm.push((pair[0] - origin_nm[0]) as i32);
+        vertices_nm.push((pair[1] - origin_nm[1]) as i32);
+    }
+
+    batches.push(HighlightBatch {
+        vertices_nm,
+        origin_nm,
+        clear,
+    });
 }
 
 fn primitive_exposure(primitive: &Primitive) -> f32 {
@@ -2587,11 +2603,18 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
         )?);
     }
 
+    let i32_array_to_js = |values: &[i32]| -> Result<JsValue, JsValue> {
+        let len = u32::try_from(values.len())
+            .map_err(|_| JsValue::from_str("Compact path region array exceeds u32 length"))?;
+        let array = js_sys::Int32Array::new_with_length(len);
+        array.copy_from(values);
+        Ok(array.into())
+    };
     let object = Object::new();
     set_property(
         &object,
         "wedgeVertices",
-        f32_array_to_js(&path_regions.wedge_vertices)?,
+        i32_array_to_js(&path_regions.wedge_vertices_nm)?,
     )?;
     set_property(
         &object,
@@ -2601,7 +2624,7 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
     set_property(
         &object,
         "sectorVertices",
-        f32_array_to_js(&path_regions.sector_vertices)?,
+        i32_array_to_js(&path_regions.sector_vertices_nm)?,
     )?;
     set_property(
         &object,
@@ -2616,12 +2639,12 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
     set_property(
         &object,
         "coverVertices",
-        f32_array_to_js(&path_regions.cover_vertices)?,
+        i32_array_to_js(&path_regions.cover_vertices_nm)?,
     )?;
     set_property(
         &object,
         "clearVertices",
-        f32_array_to_js(&path_regions.clear_vertices)?,
+        i32_array_to_js(&path_regions.clear_vertices_nm)?,
     )?;
     set_property(
         &object,
@@ -2754,56 +2777,51 @@ fn validate_compact_path_region(path_regions: &PathRegions) -> Result<(), JsValu
 }
 
 fn validate_compact_path_region_invariant(path_regions: &PathRegions) -> Result<(), &'static str> {
-    if !path_regions.wedge_vertices.len().is_multiple_of(2) {
+    if !path_regions.wedge_vertices_nm.len().is_multiple_of(2) {
         return Err("Invalid compact path wedge vertex buffer length");
     }
     if !path_regions
-        .sector_vertices
+        .sector_vertices_nm
         .len()
         .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
     {
         return Err("Invalid compact path sector vertex buffer length");
     }
-    if !path_regions.cover_vertices.len().is_multiple_of(12)
-        || !path_regions.clear_vertices.len().is_multiple_of(12)
+    if !path_regions.cover_vertices_nm.len().is_multiple_of(12)
+        || !path_regions.clear_vertices_nm.len().is_multiple_of(12)
     {
         return Err("Invalid compact path region quad data");
     }
 
     let region_count = path_regions.region_count();
-    if region_count > 0 && path_regions.cover_vertices.len() != path_regions.clear_vertices.len() {
+    if region_count > 0
+        && path_regions.cover_vertices_nm.len() != path_regions.clear_vertices_nm.len()
+    {
         return Err("Invalid compact path region quad data");
     }
-    if region_count > 0 && path_regions.cover_vertices.len() / 12 != region_count {
+    if region_count > 0 && path_regions.cover_vertices_nm.len() / 12 != region_count {
         return Err("Invalid compact path region quad data");
     }
-    if region_count > 0 && path_regions.clear_vertices.len() / 12 != region_count {
+    if region_count > 0 && path_regions.clear_vertices_nm.len() / 12 != region_count {
         return Err("Invalid compact path region quad data");
     }
     validate_compact_offsets(
         "compact path wedge offsets",
         &path_regions.wedge_vertex_offsets,
-        path_regions.wedge_vertices.len() / 2,
+        path_regions.wedge_vertices_nm.len() / 2,
         region_count,
     )?;
     validate_compact_offsets(
         "compact path sector offsets",
         &path_regions.sector_vertex_offsets,
-        path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+        path_regions.sector_vertices_nm.len() / PATH_SECTOR_VERTEX_FLOATS,
         region_count,
     )?;
-    validate_finite_slice("compact path wedge vertices", &path_regions.wedge_vertices)?;
-    validate_finite_slice(
-        "compact path sector vertices",
-        &path_regions.sector_vertices,
-    )?;
-    validate_finite_slice("compact path cover vertices", &path_regions.cover_vertices)?;
-    validate_finite_slice("compact path clear vertices", &path_regions.clear_vertices)?;
     for vertex in path_regions
-        .sector_vertices
+        .sector_vertices_nm
         .chunks_exact(PATH_SECTOR_VERTEX_FLOATS)
     {
-        if vertex[4] < 0.0 {
+        if vertex[4] < 0 {
             return Err("compact path sector radius contains a negative value");
         }
     }
@@ -2828,13 +2846,6 @@ fn validate_compact_offsets(
         previous = offset;
     }
     if previous != vertex_count {
-        return Err(label);
-    }
-    Ok(())
-}
-
-fn validate_finite_slice(label: &'static str, values: &[f32]) -> Result<(), &'static str> {
-    if values.iter().any(|value| !value.is_finite()) {
         return Err(label);
     }
     Ok(())

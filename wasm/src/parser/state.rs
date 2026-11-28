@@ -1,6 +1,6 @@
 use super::geometry::Primitive;
 use super::PolarityLayer;
-use crate::geometry::PathRegions;
+use crate::geometry::PathRegionsBuilder;
 use crate::parser::common::{
     read_word_value, CoordinateFormat as CommonCoordinateFormat,
     ZeroSuppression as CommonZeroSuppression,
@@ -84,6 +84,8 @@ impl FormatSpec {
 pub struct ParserState {
     pub x: f32,
     pub y: f32,
+    pub x_nm: i64,
+    pub y_nm: i64,
     pub current_aperture: String,
     pub interpolation_mode: String,
     pub quadrant_mode: String,
@@ -116,6 +118,8 @@ impl Default for ParserState {
         ParserState {
             x: 0.0,
             y: 0.0,
+            x_nm: 0,
+            y_nm: 0,
             current_aperture: String::new(),
             interpolation_mode: "linear".to_string(),
             quadrant_mode: "single".to_string(),
@@ -142,6 +146,23 @@ impl Default for ParserState {
 }
 
 impl ParserState {
+    #[inline]
+    pub fn set_point(&mut self, x: f32, y: f32) {
+        self.x = x;
+        self.y = y;
+        self.x_nm = (x as f64 * 1_000_000.0).round() as i64;
+        self.y_nm = (y as f64 * 1_000_000.0).round() as i64;
+    }
+
+    #[allow(dead_code)]
+    #[inline]
+    pub fn set_point_with_nm(&mut self, x: f32, y: f32, x_nm: i64, y_nm: i64) {
+        self.x = x;
+        self.y = y;
+        self.x_nm = x_nm;
+        self.y_nm = y_nm;
+    }
+
     pub(crate) fn step_repeat_count(&self, context: &str) -> Result<usize, String> {
         let count = (self.sr_x as usize)
             .checked_mul(self.sr_y as usize)
@@ -359,7 +380,7 @@ pub fn parse_lp(
     line: &str,
     state: &mut ParserState,
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
     // Extract D or C from %LPD* or %LPC* format

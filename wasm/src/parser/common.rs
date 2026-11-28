@@ -178,6 +178,144 @@ pub fn parse_omitted_decimal_number(
     Ok(sign * value as f32 / divisor)
 }
 
+pub const NANOMETERS_PER_MM: i64 = 1_000_000;
+pub const NANOMETERS_PER_INCH: i64 = 25_400_000;
+#[allow(dead_code)]
+pub const NANOMETERS_PER_MIL: i64 = 25_400;
+
+pub fn parse_decimal_nanometers(
+    token: &str,
+    unit_multiplier_nm: i64,
+    context: &str,
+) -> Result<i64, String> {
+    let (sign, rest) = if let Some(stripped) = token.strip_prefix('-') {
+        (-1_i64, stripped)
+    } else if let Some(stripped) = token.strip_prefix('+') {
+        (1_i64, stripped)
+    } else {
+        (1_i64, token)
+    };
+
+    let (int_str, frac_str) = match rest.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (rest, ""),
+    };
+
+    let int_part = if int_str.is_empty() {
+        0_i64
+    } else {
+        int_str
+            .parse::<i64>()
+            .map_err(|_| format!("Invalid {context} integer part `{token}`"))?
+    };
+
+    if frac_str.is_empty() {
+        return Ok(sign * int_part.saturating_mul(unit_multiplier_nm));
+    }
+
+    let frac_digits = frac_str.len() as u32;
+    let frac_part = frac_str
+        .parse::<i64>()
+        .map_err(|_| format!("Invalid {context} fraction `{token}`"))?;
+
+    let base_nm = int_part.saturating_mul(unit_multiplier_nm);
+    let frac_mul = frac_part.saturating_mul(unit_multiplier_nm);
+    let divisor = 10_i64.checked_pow(frac_digits).unwrap_or(i64::MAX);
+    let frac_nm = (frac_mul + divisor / 2) / divisor;
+
+    Ok(sign * (base_nm + frac_nm))
+}
+
+pub fn parse_omitted_decimal_nanometers(
+    token: &str,
+    format: CoordinateFormat,
+    unit_multiplier_nm: i64,
+    context: &str,
+) -> Result<i64, String> {
+    let (sign, digits) = if let Some(stripped) = token.strip_prefix('-') {
+        (-1_i64, stripped.as_bytes())
+    } else if let Some(stripped) = token.strip_prefix('+') {
+        (1_i64, stripped.as_bytes())
+    } else {
+        (1_i64, token.as_bytes())
+    };
+
+    if digits.is_empty() {
+        return Err(format!("Invalid {context} number `{token}`"));
+    }
+
+    let parsed = super::simd_scan::parse_decimal_digits(digits)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| {
+            format!("Invalid {context} number `{token}` (integer overflow or invalid digit)")
+        })?;
+    let mut value = parsed;
+
+    if let ZeroSuppression::Trailing = format.zero_suppression {
+        let total_digits = (format.integer_digits + format.decimal_digits) as usize;
+        if digits.len() < total_digits {
+            let missing = (total_digits - digits.len()) as u32;
+            let multiplier = 10_i64.checked_pow(missing).ok_or_else(|| {
+                format!("Invalid {context} format specifier (missing digits too large)")
+            })?;
+            value = value.checked_mul(multiplier).ok_or_else(|| {
+                format!("Invalid {context} number `{token}` (trailing padding overflow)")
+            })?;
+        }
+    }
+
+    let dec_digits = format.decimal_digits;
+    let divisor = 10_i64.checked_pow(dec_digits).unwrap_or(i64::MAX);
+
+    let mul = value.saturating_mul(unit_multiplier_nm);
+    let result = (mul.saturating_add(divisor / 2)) / divisor;
+
+    Ok(sign * result)
+}
+
+pub fn parse_coordinate_number_nm(
+    token: &str,
+    format: CoordinateFormat,
+    unit_multiplier_nm: i64,
+    context: &str,
+) -> Result<i64, String> {
+    if token.as_bytes().contains(&b'.') {
+        parse_decimal_nanometers(token, unit_multiplier_nm, context)
+    } else {
+        parse_omitted_decimal_nanometers(token, format, unit_multiplier_nm, context)
+    }
+}
+
+pub fn parse_dimension_nm(param: &str, unit_multiplier: f32) -> Result<i64, String> {
+    let trimmed = param.trim();
+    if (unit_multiplier - 25.4).abs() < 1e-4 {
+        parse_decimal_nanometers(trimmed, NANOMETERS_PER_INCH, "dimension")
+    } else if (unit_multiplier - 1.0).abs() < 1e-4 {
+        parse_decimal_nanometers(trimmed, NANOMETERS_PER_MM, "dimension")
+    } else {
+        let val = trimmed
+            .parse::<f64>()
+            .map_err(|_| format!("Invalid dimension `{trimmed}`"))?;
+        Ok((val * unit_multiplier as f64 * 1_000_000.0).round() as i64)
+    }
+}
+
+pub fn parse_dimension_mm(param: &str, unit_multiplier: f32) -> Result<f32, String> {
+    let trimmed = param.trim();
+    if (unit_multiplier - 25.4).abs() < 1e-4 {
+        let nm = parse_decimal_nanometers(trimmed, NANOMETERS_PER_INCH, "dimension")?;
+        Ok((nm as f64 / 1_000_000.0) as f32)
+    } else if (unit_multiplier - 1.0).abs() < 1e-4 {
+        let nm = parse_decimal_nanometers(trimmed, NANOMETERS_PER_MM, "dimension")?;
+        Ok((nm as f64 / 1_000_000.0) as f32)
+    } else {
+        let val = trimmed
+            .parse::<f32>()
+            .map_err(|_| format!("Invalid dimension `{trimmed}`"))?;
+        Ok(val * unit_multiplier)
+    }
+}
+
 pub fn parse_coordinate_number(
     token: &str,
     format: CoordinateFormat,

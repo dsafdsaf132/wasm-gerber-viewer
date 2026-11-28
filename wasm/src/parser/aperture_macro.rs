@@ -1,4 +1,6 @@
-use super::geometry::{line_to_triangles, rotate_point, triangulate_outline, Primitive};
+use super::geometry::{
+    line_to_triangles, rotate_point, rotate_primitive, triangulate_outline, Primitive,
+};
 use std::collections::HashMap;
 use std::mem::take;
 
@@ -448,15 +450,15 @@ pub fn parse_primitive_statement(
             };
             rotate_xy(&mut center_x, &mut center_y, rotation);
 
-            primitives.push(Primitive::Circle {
-                x: center_x,
-                y: center_y,
-                radius: diameter / 2.0,
+            primitives.push(Primitive::new_circle(
+                center_x,
+                center_y,
+                diameter / 2.0,
                 exposure,
-                hole_x: center_x,
-                hole_y: center_y,
-                hole_radius: 0.0, // Macros don't support holes in circle primitives
-            });
+                center_x,
+                center_y,
+                0.0,
+            ));
 
             Some(1)
         }
@@ -513,11 +515,7 @@ pub fn parse_primitive_statement(
                             let mut tri = triangle;
                             // Apply rotation
                             if rotation != 0.0 {
-                                if let Primitive::Triangle { vertices, .. } = &mut tri {
-                                    for vertex in vertices.iter_mut() {
-                                        rotate_point(vertex, rotation, 0.0, 0.0);
-                                    }
-                                }
+                                rotate_primitive(&mut tri, rotation);
                             }
                             primitives.push(tri);
                         }
@@ -566,21 +564,17 @@ pub fn parse_primitive_statement(
             // Fan triangulation: create triangles from center to all adjacent vertices
             for i in 0..num_vertices {
                 let next_i = (i + 1) % num_vertices;
-                let mut triangle = Primitive::Triangle {
-                    vertices: [[center_x, center_y], vertices[i], vertices[next_i]],
+                let mut triangle = Primitive::new_triangle(
+                    [[center_x, center_y], vertices[i], vertices[next_i]],
                     exposure,
-                    hole_x: 0.0,
-                    hole_y: 0.0,
-                    hole_radius: 0.0, // Macros don't support holes in outline primitives
-                };
+                    0.0,
+                    0.0,
+                    0.0,
+                );
 
                 // Apply rotation
                 if rotation != 0.0 {
-                    if let Primitive::Triangle { vertices, .. } = &mut triangle {
-                        for vertex in vertices.iter_mut() {
-                            rotate_point(vertex, rotation, 0.0, 0.0);
-                        }
-                    }
+                    rotate_primitive(&mut triangle, rotation);
                 }
 
                 primitives.push(triangle);
@@ -608,15 +602,15 @@ pub fn parse_primitive_statement(
             let mut rotated_center_y = center_y;
             rotate_xy(&mut rotated_center_x, &mut rotated_center_y, rotation);
 
-            primitives.push(Primitive::Thermal {
-                x: rotated_center_x,
-                y: rotated_center_y,
+            primitives.push(Primitive::new_thermal(
+                rotated_center_x,
+                rotated_center_y,
                 outer_diameter,
                 inner_diameter,
                 gap_thickness,
                 rotation,
-                exposure: 1.0, // Thermals are always positive
-            });
+                1.0, // Thermals are always positive
+            ));
 
             Some(7)
         }
@@ -643,11 +637,7 @@ pub fn parse_primitive_statement(
             for mut triangle in triangles {
                 // Apply rotation
                 if rotation != 0.0 {
-                    if let Primitive::Triangle { vertices, .. } = &mut triangle {
-                        for vertex in vertices.iter_mut() {
-                            rotate_point(vertex, rotation, 0.0, 0.0);
-                        }
-                    }
+                    rotate_primitive(&mut triangle, rotation);
                 }
                 primitives.push(triangle);
             }
@@ -680,33 +670,13 @@ pub fn parse_primitive_statement(
             let v4 = [center_x - half_width, center_y + half_height];
 
             // Two triangles: (v1, v2, v3), (v1, v3, v4)
-            let mut tri1 = Primitive::Triangle {
-                vertices: [v1, v2, v3],
-                exposure,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: 0.0,
-            };
-            let mut tri2 = Primitive::Triangle {
-                vertices: [v1, v3, v4],
-                exposure,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: 0.0,
-            };
+            let mut tri1 = Primitive::new_triangle([v1, v2, v3], exposure, 0.0, 0.0, 0.0);
+            let mut tri2 = Primitive::new_triangle([v1, v3, v4], exposure, 0.0, 0.0, 0.0);
 
             // Apply rotation
             if rotation != 0.0 {
-                if let Primitive::Triangle { vertices, .. } = &mut tri1 {
-                    for vertex in vertices.iter_mut() {
-                        rotate_point(vertex, rotation, 0.0, 0.0);
-                    }
-                }
-                if let Primitive::Triangle { vertices, .. } = &mut tri2 {
-                    for vertex in vertices.iter_mut() {
-                        rotate_point(vertex, rotation, 0.0, 0.0);
-                    }
-                }
+                rotate_primitive(&mut tri1, rotation);
+                rotate_primitive(&mut tri2, rotation);
             }
 
             primitives.push(tri1);
@@ -736,32 +706,12 @@ pub fn parse_primitive_statement(
             let v3 = [lower_left_x + width, lower_left_y + height];
             let v4 = [lower_left_x, lower_left_y + height];
 
-            let mut tri1 = Primitive::Triangle {
-                vertices: [v1, v2, v3],
-                exposure,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: 0.0,
-            };
-            let mut tri2 = Primitive::Triangle {
-                vertices: [v1, v3, v4],
-                exposure,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: 0.0,
-            };
+            let mut tri1 = Primitive::new_triangle([v1, v2, v3], exposure, 0.0, 0.0, 0.0);
+            let mut tri2 = Primitive::new_triangle([v1, v3, v4], exposure, 0.0, 0.0, 0.0);
 
             if rotation != 0.0 {
-                if let Primitive::Triangle { vertices, .. } = &mut tri1 {
-                    for vertex in vertices.iter_mut() {
-                        rotate_point(vertex, rotation, 0.0, 0.0);
-                    }
-                }
-                if let Primitive::Triangle { vertices, .. } = &mut tri2 {
-                    for vertex in vertices.iter_mut() {
-                        rotate_point(vertex, rotation, 0.0, 0.0);
-                    }
-                }
+                rotate_primitive(&mut tri1, rotation);
+                rotate_primitive(&mut tri2, rotation);
             }
 
             primitives.push(tri1);

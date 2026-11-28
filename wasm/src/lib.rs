@@ -91,8 +91,8 @@ pub fn reserve_input_capacity(byte_count: usize) -> Result<(), JsValue> {
 
 fn parse_layer_data(
     content: &str,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     preserve_region_source_contours: bool,
@@ -107,7 +107,7 @@ fn parse_layer_data(
 
     if offset_x != 0.0 || offset_y != 0.0 {
         for layer in &mut gerber_data_layers {
-            layer.translate(offset_x, offset_y);
+            layer.translate_f64(offset_x, offset_y);
         }
     }
 
@@ -127,8 +127,8 @@ fn parse_layer_data(
 
 fn parse_layer_payload_data(
     content: &str,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     collect_interactions: bool,
@@ -148,10 +148,10 @@ fn parse_layer_payload_data(
 
     if offset_x != 0.0 || offset_y != 0.0 {
         for layer in &mut payload.render_layers {
-            layer.translate(offset_x, offset_y);
+            layer.translate_f64(offset_x, offset_y);
         }
         if let Some(interaction_layer) = &mut payload.interaction_layer {
-            interaction_layer.translate(offset_x, offset_y);
+            interaction_layer.translate_f64(offset_x, offset_y);
         }
     }
 
@@ -169,8 +169,8 @@ fn parse_layer_payload_data(
 #[wasm_bindgen]
 pub fn parse_gerber_layer(
     content: String,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
 ) -> Result<JsValue, JsValue> {
     let gerber_data_layers = parse_layer_data(&content, offset_x, offset_y, true, 1, false)?;
     gerber_data_layers_to_js(&gerber_data_layers)
@@ -179,8 +179,8 @@ pub fn parse_gerber_layer(
 #[wasm_bindgen]
 pub fn parse_gerber_layer_with_options(
     content: String,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
 ) -> Result<JsValue, JsValue> {
@@ -198,8 +198,8 @@ pub fn parse_gerber_layer_with_options(
 #[wasm_bindgen]
 pub fn parse_gerber_layer_payload_with_options(
     content: String,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
 ) -> Result<JsValue, JsValue> {
@@ -225,8 +225,8 @@ pub fn parse_gerber_layer_payload_with_options(
 #[wasm_bindgen]
 pub fn parse_gerber_layer_payload_with_progress(
     content: String,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
     collect_interactions: bool,
@@ -322,8 +322,8 @@ pub fn take_last_odb_diagnostics() -> Option<String> {
 #[wasm_bindgen]
 pub fn parse_drill_layer(
     content: String,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
 ) -> Result<JsValue, JsValue> {
     let drill = parse_drill_with_offset(&content, DRILL_OUTLINE_WIDTH_MM, offset_x, offset_y)?;
     drill_parse_result_to_js(drill)
@@ -333,8 +333,8 @@ pub fn parse_drill_layer(
 #[wasm_bindgen]
 pub fn parse_drill_layer_payload(
     content: String,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
     collect_interactions: bool,
 ) -> Result<JsValue, JsValue> {
     let drill = if collect_interactions {
@@ -805,8 +805,8 @@ impl GerberProcessor {
     pub fn add_layer_with_offset(
         &mut self,
         content: String,
-        offset_x: f32,
-        offset_y: f32,
+        offset_x: f64,
+        offset_y: f64,
     ) -> Result<u32, JsValue> {
         if self.interaction_enabled {
             let payload = parse_layer_payload_data(
@@ -878,16 +878,16 @@ impl GerberProcessor {
     ) -> Result<u32, JsValue> {
         let target_layers = parse_layer_data(
             &target_content,
-            target_offset_x,
-            target_offset_y,
+            target_offset_x.into(),
+            target_offset_y.into(),
             target_preserve_arc_regions,
             target_arc_tessellation_quality,
             false,
         )?;
         let outline_layers = parse_layer_data(
             &outline_content,
-            outline_offset_x,
-            outline_offset_y,
+            outline_offset_x.into(),
+            outline_offset_y.into(),
             outline_preserve_arc_regions,
             outline_arc_tessellation_quality,
             true,
@@ -944,8 +944,8 @@ impl GerberProcessor {
     ) -> Result<u32, JsValue> {
         let target_layers = parse_layer_data(
             &target_content,
-            target_offset_x,
-            target_offset_y,
+            target_offset_x.into(),
+            target_offset_y.into(),
             target_preserve_arc_regions,
             target_arc_tessellation_quality,
             false,
@@ -977,8 +977,8 @@ impl GerberProcessor {
     pub fn add_drill_layer_with_offset(
         &mut self,
         content: String,
-        offset_x: f32,
-        offset_y: f32,
+        offset_x: f64,
+        offset_y: f64,
     ) -> Result<JsValue, JsValue> {
         let drill = if self.interaction_enabled {
             parse_drill_with_offset_and_interactions(
@@ -1157,8 +1157,8 @@ impl GerberProcessor {
         }
         let outline_layers = parse_layer_data(
             &outline_content,
-            outline_offset_x,
-            outline_offset_y,
+            outline_offset_x.into(),
+            outline_offset_y.into(),
             outline_preserve_arc_regions,
             outline_arc_tessellation_quality,
             true,
@@ -1563,8 +1563,8 @@ impl GerberProcessor {
         &mut self,
         layer_id: u32,
         content: String,
-        offset_x: f32,
-        offset_y: f32,
+        offset_x: f64,
+        offset_y: f64,
     ) -> Result<(), JsValue> {
         if !self.interaction_enabled {
             return Ok(());

@@ -20,8 +20,8 @@ use state::{
 use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive};
 use crate::geometry::RegionContour;
 use crate::geometry::{
-    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
-    Triangles,
+    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, PathRegionsBuilder, Thermals,
+    TriangleTemplateInstances, Triangles,
 };
 use crate::interaction::InteractionLayer;
 use crate::util::{format_bytes, format_count};
@@ -34,7 +34,7 @@ use wasm_bindgen::prelude::*;
 pub struct PolarityLayer {
     pub(crate) polarity: Polarity,
     pub(crate) primitives: Vec<Primitive>,
-    pub(crate) path_regions: PathRegions,
+    pub(crate) path_regions: PathRegionsBuilder,
 }
 
 pub struct ParsedGerberLayer {
@@ -440,7 +440,7 @@ fn primitive_is_renderable(primitive: &Primitive) -> bool {
                 && has_non_negative_extent(*width)
                 && points_are_distinct(*start_x, *start_y, *end_x, *end_y)
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => {
             finite_point(*x, *y) && template.len() >= 6 && template.len().is_multiple_of(6)
         }
     }
@@ -448,42 +448,42 @@ fn primitive_is_renderable(primitive: &Primitive) -> bool {
 
 struct TriangleTemplateOutputBuffers {
     vertices: Vec<f32>,
-    instance_x: Vec<f32>,
-    instance_y: Vec<f32>,
+    instance_x_nm: Vec<i32>,
+    instance_y_nm: Vec<i32>,
 }
 
 struct PrimitiveOutputBuffers {
     has_triangle_holes: bool,
-    triangle_vertices: Vec<f32>,
-    triangle_hole_x: Vec<f32>,
-    triangle_hole_y: Vec<f32>,
-    triangle_hole_radius: Vec<f32>,
+    triangle_vertices_nm: Vec<i32>,
+    triangle_hole_x_nm: Vec<i32>,
+    triangle_hole_y_nm: Vec<i32>,
+    triangle_hole_radius_nm: Vec<i32>,
     triangle_templates: Vec<TriangleTemplateOutputBuffers>,
     triangle_template_indices: HashMap<usize, usize>,
     triangle_template_instance_counts: HashMap<usize, usize>,
-    lines_start_x: Vec<f32>,
-    lines_start_y: Vec<f32>,
-    lines_end_x: Vec<f32>,
-    lines_end_y: Vec<f32>,
-    lines_width: Vec<f32>,
+    lines_start_x_nm: Vec<i32>,
+    lines_start_y_nm: Vec<i32>,
+    lines_end_x_nm: Vec<i32>,
+    lines_end_y_nm: Vec<i32>,
+    lines_width_nm: Vec<i32>,
     has_circle_holes: bool,
-    circles_x: Vec<f32>,
-    circles_y: Vec<f32>,
-    circles_radius: Vec<f32>,
-    circles_hole_x: Vec<f32>,
-    circles_hole_y: Vec<f32>,
-    circles_hole_radius: Vec<f32>,
-    arcs_x: Vec<f32>,
-    arcs_y: Vec<f32>,
-    arcs_radius: Vec<f32>,
+    circles_x_nm: Vec<i32>,
+    circles_y_nm: Vec<i32>,
+    circles_radius_nm: Vec<i32>,
+    circles_hole_x_nm: Vec<i32>,
+    circles_hole_y_nm: Vec<i32>,
+    circles_hole_radius_nm: Vec<i32>,
+    arcs_x_nm: Vec<i32>,
+    arcs_y_nm: Vec<i32>,
+    arcs_radius_nm: Vec<i32>,
     arcs_start_angle: Vec<f32>,
     arcs_sweep_angle: Vec<f32>,
-    arcs_thickness: Vec<f32>,
-    thermals_x: Vec<f32>,
-    thermals_y: Vec<f32>,
-    thermals_outer_diameter: Vec<f32>,
-    thermals_inner_diameter: Vec<f32>,
-    thermals_gap_thickness: Vec<f32>,
+    arcs_thickness_nm: Vec<i32>,
+    thermals_x_nm: Vec<i32>,
+    thermals_y_nm: Vec<i32>,
+    thermals_outer_diameter_nm: Vec<i32>,
+    thermals_inner_diameter_nm: Vec<i32>,
+    thermals_gap_thickness_nm: Vec<i32>,
     thermals_rotation: Vec<f32>,
 }
 
@@ -494,61 +494,61 @@ impl PrimitiveOutputBuffers {
 
         let mut buffers = Self {
             has_triangle_holes: counts.has_triangle_holes,
-            triangle_vertices: Vec::new(),
-            triangle_hole_x: Vec::new(),
-            triangle_hole_y: Vec::new(),
-            triangle_hole_radius: Vec::new(),
+            triangle_vertices_nm: Vec::new(),
+            triangle_hole_x_nm: Vec::new(),
+            triangle_hole_y_nm: Vec::new(),
+            triangle_hole_radius_nm: Vec::new(),
             triangle_templates: Vec::new(),
             triangle_template_indices: HashMap::new(),
             triangle_template_instance_counts: counts.triangle_template_instance_counts.clone(),
-            lines_start_x: Vec::new(),
-            lines_start_y: Vec::new(),
-            lines_end_x: Vec::new(),
-            lines_end_y: Vec::new(),
-            lines_width: Vec::new(),
+            lines_start_x_nm: Vec::new(),
+            lines_start_y_nm: Vec::new(),
+            lines_end_x_nm: Vec::new(),
+            lines_end_y_nm: Vec::new(),
+            lines_width_nm: Vec::new(),
             has_circle_holes: counts.has_circle_holes,
-            circles_x: Vec::new(),
-            circles_y: Vec::new(),
-            circles_radius: Vec::new(),
-            circles_hole_x: Vec::new(),
-            circles_hole_y: Vec::new(),
-            circles_hole_radius: Vec::new(),
-            arcs_x: Vec::new(),
-            arcs_y: Vec::new(),
-            arcs_radius: Vec::new(),
+            circles_x_nm: Vec::new(),
+            circles_y_nm: Vec::new(),
+            circles_radius_nm: Vec::new(),
+            circles_hole_x_nm: Vec::new(),
+            circles_hole_y_nm: Vec::new(),
+            circles_hole_radius_nm: Vec::new(),
+            arcs_x_nm: Vec::new(),
+            arcs_y_nm: Vec::new(),
+            arcs_radius_nm: Vec::new(),
             arcs_start_angle: Vec::new(),
             arcs_sweep_angle: Vec::new(),
-            arcs_thickness: Vec::new(),
-            thermals_x: Vec::new(),
-            thermals_y: Vec::new(),
-            thermals_outer_diameter: Vec::new(),
-            thermals_inner_diameter: Vec::new(),
-            thermals_gap_thickness: Vec::new(),
+            arcs_thickness_nm: Vec::new(),
+            thermals_x_nm: Vec::new(),
+            thermals_y_nm: Vec::new(),
+            thermals_outer_diameter_nm: Vec::new(),
+            thermals_inner_diameter_nm: Vec::new(),
+            thermals_gap_thickness_nm: Vec::new(),
             thermals_rotation: Vec::new(),
         };
 
         try_reserve_exact(
-            &mut buffers.triangle_vertices,
+            &mut buffers.triangle_vertices_nm,
             triangle_vertex_values,
-            "triangle vertex buffer",
+            "triangle vertex nm buffer",
         )?;
         if counts.has_triangle_holes {
             let triangle_vertex_count =
                 checked_capacity(counts.triangles, 3, "triangle hole buffer")?;
             try_reserve_exact(
-                &mut buffers.triangle_hole_x,
+                &mut buffers.triangle_hole_x_nm,
                 triangle_vertex_count,
-                "triangle hole X buffer",
+                "triangle hole X nm buffer",
             )?;
             try_reserve_exact(
-                &mut buffers.triangle_hole_y,
+                &mut buffers.triangle_hole_y_nm,
                 triangle_vertex_count,
-                "triangle hole Y buffer",
+                "triangle hole Y nm buffer",
             )?;
             try_reserve_exact(
-                &mut buffers.triangle_hole_radius,
+                &mut buffers.triangle_hole_radius_nm,
                 triangle_vertex_count,
-                "triangle hole radius buffer",
+                "triangle hole radius nm buffer",
             )?;
         }
         try_reserve_exact(
@@ -566,47 +566,71 @@ impl PrimitiveOutputBuffers {
             })?;
 
         try_reserve_exact(
-            &mut buffers.lines_start_x,
+            &mut buffers.lines_start_x_nm,
             counts.lines,
-            "line start X buffer",
+            "line start X nm buffer",
         )?;
         try_reserve_exact(
-            &mut buffers.lines_start_y,
+            &mut buffers.lines_start_y_nm,
             counts.lines,
-            "line start Y buffer",
+            "line start Y nm buffer",
         )?;
-        try_reserve_exact(&mut buffers.lines_end_x, counts.lines, "line end X buffer")?;
-        try_reserve_exact(&mut buffers.lines_end_y, counts.lines, "line end Y buffer")?;
-        try_reserve_exact(&mut buffers.lines_width, counts.lines, "line width buffer")?;
+        try_reserve_exact(
+            &mut buffers.lines_end_x_nm,
+            counts.lines,
+            "line end X nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_end_y_nm,
+            counts.lines,
+            "line end Y nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.lines_width_nm,
+            counts.lines,
+            "line width nm buffer",
+        )?;
 
-        try_reserve_exact(&mut buffers.circles_x, counts.circles, "circle X buffer")?;
-        try_reserve_exact(&mut buffers.circles_y, counts.circles, "circle Y buffer")?;
         try_reserve_exact(
-            &mut buffers.circles_radius,
+            &mut buffers.circles_x_nm,
             counts.circles,
-            "circle radius buffer",
+            "circle X nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.circles_y_nm,
+            counts.circles,
+            "circle Y nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.circles_radius_nm,
+            counts.circles,
+            "circle radius nm buffer",
         )?;
         if counts.has_circle_holes {
             try_reserve_exact(
-                &mut buffers.circles_hole_x,
+                &mut buffers.circles_hole_x_nm,
                 counts.circles,
-                "circle hole X buffer",
+                "circle hole X nm buffer",
             )?;
             try_reserve_exact(
-                &mut buffers.circles_hole_y,
+                &mut buffers.circles_hole_y_nm,
                 counts.circles,
-                "circle hole Y buffer",
+                "circle hole Y nm buffer",
             )?;
             try_reserve_exact(
-                &mut buffers.circles_hole_radius,
+                &mut buffers.circles_hole_radius_nm,
                 counts.circles,
-                "circle hole radius buffer",
+                "circle hole radius nm buffer",
             )?;
         }
 
-        try_reserve_exact(&mut buffers.arcs_x, counts.arcs, "arc X buffer")?;
-        try_reserve_exact(&mut buffers.arcs_y, counts.arcs, "arc Y buffer")?;
-        try_reserve_exact(&mut buffers.arcs_radius, counts.arcs, "arc radius buffer")?;
+        try_reserve_exact(&mut buffers.arcs_x_nm, counts.arcs, "arc X nm buffer")?;
+        try_reserve_exact(&mut buffers.arcs_y_nm, counts.arcs, "arc Y nm buffer")?;
+        try_reserve_exact(
+            &mut buffers.arcs_radius_nm,
+            counts.arcs,
+            "arc radius nm buffer",
+        )?;
         try_reserve_exact(
             &mut buffers.arcs_start_angle,
             counts.arcs,
@@ -618,27 +642,35 @@ impl PrimitiveOutputBuffers {
             "arc sweep angle buffer",
         )?;
         try_reserve_exact(
-            &mut buffers.arcs_thickness,
+            &mut buffers.arcs_thickness_nm,
             counts.arcs,
-            "arc thickness buffer",
+            "arc thickness nm buffer",
         )?;
 
-        try_reserve_exact(&mut buffers.thermals_x, counts.thermals, "thermal X buffer")?;
-        try_reserve_exact(&mut buffers.thermals_y, counts.thermals, "thermal Y buffer")?;
         try_reserve_exact(
-            &mut buffers.thermals_outer_diameter,
+            &mut buffers.thermals_x_nm,
             counts.thermals,
-            "thermal outer diameter buffer",
+            "thermal X nm buffer",
         )?;
         try_reserve_exact(
-            &mut buffers.thermals_inner_diameter,
+            &mut buffers.thermals_y_nm,
             counts.thermals,
-            "thermal inner diameter buffer",
+            "thermal Y nm buffer",
         )?;
         try_reserve_exact(
-            &mut buffers.thermals_gap_thickness,
+            &mut buffers.thermals_outer_diameter_nm,
             counts.thermals,
-            "thermal gap thickness buffer",
+            "thermal outer diameter nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.thermals_inner_diameter_nm,
+            counts.thermals,
+            "thermal inner diameter nm buffer",
+        )?;
+        try_reserve_exact(
+            &mut buffers.thermals_gap_thickness_nm,
+            counts.thermals,
+            "thermal gap thickness nm buffer",
         )?;
         try_reserve_exact(
             &mut buffers.thermals_rotation,
@@ -649,100 +681,132 @@ impl PrimitiveOutputBuffers {
         Ok(buffers)
     }
 
-    fn push_primitive(&mut self, primitive: Primitive) -> Result<(), JsValue> {
+    fn push_primitive(&mut self, primitive: Primitive, origin_nm: [i64; 2]) -> Result<(), JsValue> {
         if !primitive_is_renderable(&primitive) {
             return Ok(());
         }
 
-        // Unit conversion: aperture.rs already converts to mm using unit_multiplier.
-        const TO_MM: f32 = 1.0;
+        let to_rel_i32 = |coord_nm: i64, origin: i64| -> Result<i32, JsValue> {
+            i32::try_from(coord_nm - origin).map_err(|_| {
+                JsValue::from_str(
+                    "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates",
+                )
+            })
+        };
+        let to_dim_i32 = |dim_nm: i64| -> Result<i32, JsValue> {
+            i32::try_from(dim_nm).map_err(|_| {
+                JsValue::from_str(
+                    "Feature dimension exceeds maximum supported size (2.14 m) for integer nanometer coordinates",
+                )
+            })
+        };
 
         match primitive {
             Primitive::Triangle {
-                vertices,
-                hole_x,
-                hole_y,
-                hole_radius,
+                vertices_nm,
+                hole_x_nm,
+                hole_y_nm,
+                hole_radius_nm,
                 ..
             } => {
-                for vertex in vertices {
-                    self.triangle_vertices.push(vertex[0] * TO_MM);
-                    self.triangle_vertices.push(vertex[1] * TO_MM);
+                for vertex_nm in vertices_nm {
+                    self.triangle_vertices_nm
+                        .push(to_rel_i32(vertex_nm[0], origin_nm[0])?);
+                    self.triangle_vertices_nm
+                        .push(to_rel_i32(vertex_nm[1], origin_nm[1])?);
                 }
 
                 if self.has_triangle_holes {
+                    let hx = to_rel_i32(hole_x_nm, origin_nm[0])?;
+                    let hy = to_rel_i32(hole_y_nm, origin_nm[1])?;
+                    let hr = to_dim_i32(hole_radius_nm)?;
                     for _ in 0..3 {
-                        self.triangle_hole_x.push(hole_x * TO_MM);
-                        self.triangle_hole_y.push(hole_y * TO_MM);
-                        self.triangle_hole_radius.push(hole_radius * TO_MM);
+                        self.triangle_hole_x_nm.push(hx);
+                        self.triangle_hole_y_nm.push(hy);
+                        self.triangle_hole_radius_nm.push(hr);
                     }
                 }
             }
             Primitive::Circle {
-                x,
-                y,
-                radius,
-                hole_x,
-                hole_y,
-                hole_radius,
+                x_nm,
+                y_nm,
+                radius_nm,
+                hole_x_nm,
+                hole_y_nm,
+                hole_radius_nm,
                 ..
             } => {
-                self.circles_x.push(x * TO_MM);
-                self.circles_y.push(y * TO_MM);
-                self.circles_radius.push(radius * TO_MM);
+                self.circles_x_nm.push(to_rel_i32(x_nm, origin_nm[0])?);
+                self.circles_y_nm.push(to_rel_i32(y_nm, origin_nm[1])?);
+                self.circles_radius_nm.push(to_dim_i32(radius_nm)?);
                 if self.has_circle_holes {
-                    self.circles_hole_x.push(hole_x * TO_MM);
-                    self.circles_hole_y.push(hole_y * TO_MM);
-                    self.circles_hole_radius.push(hole_radius * TO_MM);
+                    self.circles_hole_x_nm
+                        .push(to_rel_i32(hole_x_nm, origin_nm[0])?);
+                    self.circles_hole_y_nm
+                        .push(to_rel_i32(hole_y_nm, origin_nm[1])?);
+                    self.circles_hole_radius_nm
+                        .push(to_dim_i32(hole_radius_nm)?);
                 }
             }
             Primitive::Arc {
-                x,
-                y,
-                radius,
                 start_angle,
                 end_angle,
-                thickness,
+                x_nm,
+                y_nm,
+                radius_nm,
+                thickness_nm,
                 ..
             } => {
-                self.arcs_x.push(x * TO_MM);
-                self.arcs_y.push(y * TO_MM);
-                self.arcs_radius.push(radius * TO_MM);
                 self.arcs_start_angle.push(start_angle);
                 self.arcs_sweep_angle.push(end_angle - start_angle);
-                self.arcs_thickness.push(thickness * TO_MM);
+                self.arcs_x_nm.push(to_rel_i32(x_nm, origin_nm[0])?);
+                self.arcs_y_nm.push(to_rel_i32(y_nm, origin_nm[1])?);
+                self.arcs_radius_nm.push(to_dim_i32(radius_nm)?);
+                self.arcs_thickness_nm.push(to_dim_i32(thickness_nm)?);
             }
             Primitive::Line {
-                start_x,
-                start_y,
-                end_x,
-                end_y,
-                width,
+                start_x_nm,
+                start_y_nm,
+                end_x_nm,
+                end_y_nm,
+                width_nm,
                 ..
             } => {
-                self.lines_start_x.push(start_x * TO_MM);
-                self.lines_start_y.push(start_y * TO_MM);
-                self.lines_end_x.push(end_x * TO_MM);
-                self.lines_end_y.push(end_y * TO_MM);
-                self.lines_width.push(width * TO_MM);
+                self.lines_start_x_nm
+                    .push(to_rel_i32(start_x_nm, origin_nm[0])?);
+                self.lines_start_y_nm
+                    .push(to_rel_i32(start_y_nm, origin_nm[1])?);
+                self.lines_end_x_nm
+                    .push(to_rel_i32(end_x_nm, origin_nm[0])?);
+                self.lines_end_y_nm
+                    .push(to_rel_i32(end_y_nm, origin_nm[1])?);
+                self.lines_width_nm.push(to_dim_i32(width_nm)?);
             }
             Primitive::Thermal {
-                x,
-                y,
-                outer_diameter,
-                inner_diameter,
-                gap_thickness,
                 rotation,
+                x_nm,
+                y_nm,
+                outer_diameter_nm,
+                inner_diameter_nm,
+                gap_thickness_nm,
                 ..
             } => {
-                self.thermals_x.push(x * TO_MM);
-                self.thermals_y.push(y * TO_MM);
-                self.thermals_outer_diameter.push(outer_diameter * TO_MM);
-                self.thermals_inner_diameter.push(inner_diameter * TO_MM);
-                self.thermals_gap_thickness.push(gap_thickness * TO_MM);
                 self.thermals_rotation.push(rotation);
+                self.thermals_x_nm.push(to_rel_i32(x_nm, origin_nm[0])?);
+                self.thermals_y_nm.push(to_rel_i32(y_nm, origin_nm[1])?);
+                self.thermals_outer_diameter_nm
+                    .push(to_dim_i32(outer_diameter_nm)?);
+                self.thermals_inner_diameter_nm
+                    .push(to_dim_i32(inner_diameter_nm)?);
+                self.thermals_gap_thickness_nm
+                    .push(to_dim_i32(gap_thickness_nm)?);
             }
-            Primitive::TriangleTemplateFlash { template, x, y } => {
+            Primitive::TriangleTemplateFlash {
+                template,
+                x_nm,
+                y_nm,
+                ..
+            } => {
                 let key = std::rc::Rc::as_ptr(&template) as usize;
                 let template_idx =
                     if let Some(index) = self.triangle_template_indices.get(&key).copied() {
@@ -761,118 +825,133 @@ impl PrimitiveOutputBuffers {
                         )?;
                         vertices.extend(template.iter().copied());
 
-                        let mut instance_x = Vec::new();
-                        let mut instance_y = Vec::new();
+                        let mut instance_x_nm = Vec::new();
+                        let mut instance_y_nm = Vec::new();
                         try_reserve_exact(
-                            &mut instance_x,
+                            &mut instance_x_nm,
                             expected_instances,
-                            "triangle template instance X buffer",
+                            "triangle template instance X nm buffer",
                         )?;
                         try_reserve_exact(
-                            &mut instance_y,
+                            &mut instance_y_nm,
                             expected_instances,
-                            "triangle template instance Y buffer",
+                            "triangle template instance Y nm buffer",
                         )?;
 
                         let index = self.triangle_templates.len();
                         self.triangle_templates.push(TriangleTemplateOutputBuffers {
                             vertices,
-                            instance_x,
-                            instance_y,
+                            instance_x_nm,
+                            instance_y_nm,
                         });
                         self.triangle_template_indices.insert(key, index);
                         index
                     };
 
                 let template = &mut self.triangle_templates[template_idx];
-                template.instance_x.push(x * TO_MM);
-                template.instance_y.push(y * TO_MM);
+                template.instance_x_nm.push(to_rel_i32(x_nm, origin_nm[0])?);
+                template.instance_y_nm.push(to_rel_i32(y_nm, origin_nm[1])?);
             }
         }
 
         Ok(())
     }
 
-    fn into_gerber_data(self, path_regions: PathRegions, is_negative: bool) -> GerberData {
-        let boundary = combined_boundary(self.boundary(), self.has_geometry(), &path_regions);
+    fn into_gerber_data(
+        self,
+        path_regions: PathRegions,
+        is_negative: bool,
+        origin_nm: [i64; 2],
+    ) -> GerberData {
+        let boundary = combined_boundary(
+            self.boundary(origin_nm),
+            self.has_geometry(),
+            &path_regions,
+            origin_nm,
+        );
         let triangle_templates = self
             .triangle_templates
             .into_iter()
             .map(|template| {
-                TriangleTemplateInstances::new(
+                TriangleTemplateInstances::new_with_nm(
                     template.vertices,
-                    template.instance_x,
-                    template.instance_y,
+                    template.instance_x_nm,
+                    template.instance_y_nm,
                 )
             })
             .collect();
 
-        GerberData::new(
-            Triangles::new(
-                self.triangle_vertices,
-                self.triangle_hole_x,
-                self.triangle_hole_y,
-                self.triangle_hole_radius,
+        GerberData::new_with_origin(
+            Triangles::new_with_nm(
+                self.triangle_vertices_nm,
+                self.triangle_hole_x_nm,
+                self.triangle_hole_y_nm,
+                self.triangle_hole_radius_nm,
             ),
             triangle_templates,
-            Lines::new(
-                self.lines_start_x,
-                self.lines_start_y,
-                self.lines_end_x,
-                self.lines_end_y,
-                self.lines_width,
+            Lines::new_with_nm(
+                self.lines_start_x_nm,
+                self.lines_start_y_nm,
+                self.lines_end_x_nm,
+                self.lines_end_y_nm,
+                self.lines_width_nm,
             ),
-            Circles::new(
-                self.circles_x,
-                self.circles_y,
-                self.circles_radius,
-                self.circles_hole_x,
-                self.circles_hole_y,
-                self.circles_hole_radius,
+            Circles::new_with_nm(
+                self.circles_x_nm,
+                self.circles_y_nm,
+                self.circles_radius_nm,
+                self.circles_hole_x_nm,
+                self.circles_hole_y_nm,
+                self.circles_hole_radius_nm,
             ),
-            Arcs::new(
-                self.arcs_x,
-                self.arcs_y,
-                self.arcs_radius,
+            Arcs::new_with_nm(
+                self.arcs_x_nm,
+                self.arcs_y_nm,
+                self.arcs_radius_nm,
                 self.arcs_start_angle,
                 self.arcs_sweep_angle,
-                self.arcs_thickness,
+                self.arcs_thickness_nm,
             ),
-            Thermals::new(
-                self.thermals_x,
-                self.thermals_y,
-                self.thermals_outer_diameter,
-                self.thermals_inner_diameter,
-                self.thermals_gap_thickness,
+            Thermals::new_with_nm(
+                self.thermals_x_nm,
+                self.thermals_y_nm,
+                self.thermals_outer_diameter_nm,
+                self.thermals_inner_diameter_nm,
+                self.thermals_gap_thickness_nm,
                 self.thermals_rotation,
             ),
             path_regions,
             boundary,
             is_negative,
+            origin_nm,
         )
     }
 
     fn has_geometry(&self) -> bool {
-        !self.triangle_vertices.is_empty()
+        !self.triangle_vertices_nm.is_empty()
             || self
                 .triangle_templates
                 .iter()
-                .any(|template| !template.vertices.is_empty() && !template.instance_x.is_empty())
-            || !self.lines_start_x.is_empty()
-            || !self.circles_x.is_empty()
-            || !self.arcs_x.is_empty()
-            || !self.thermals_x.is_empty()
+                .any(|template| !template.vertices.is_empty() && !template.instance_x_nm.is_empty())
+            || !self.lines_start_x_nm.is_empty()
+            || !self.circles_x_nm.is_empty()
+            || !self.arcs_x_nm.is_empty()
+            || !self.thermals_x_nm.is_empty()
     }
 
-    fn boundary(&self) -> Boundary {
+    fn boundary(&self, origin_nm: [i64; 2]) -> Boundary {
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut min_y = f32::INFINITY;
         let mut max_y = f32::NEG_INFINITY;
+        let to_world_x =
+            |x_rel: i32| -> f32 { ((origin_nm[0] + x_rel as i64) as f64 * 1e-6) as f32 };
+        let to_world_y =
+            |y_rel: i32| -> f32 { ((origin_nm[1] + y_rel as i64) as f64 * 1e-6) as f32 };
 
-        for point in self.triangle_vertices.chunks_exact(2) {
-            let x = point[0];
-            let y = point[1];
+        for point in self.triangle_vertices_nm.chunks_exact(2) {
+            let x = to_world_x(point[0]);
+            let y = to_world_y(point[1]);
             min_x = min_x.min(x);
             max_x = max_x.max(x);
             min_y = min_y.min(y);
@@ -895,9 +974,9 @@ impl PrimitiveOutputBuffers {
                 template_max_y = template_max_y.max(point[1]);
             }
 
-            for i in 0..template.instance_x.len() {
-                let x = template.instance_x[i];
-                let y = template.instance_y[i];
+            for i in 0..template.instance_x_nm.len() {
+                let x = to_world_x(template.instance_x_nm[i]);
+                let y = to_world_y(template.instance_y_nm[i]);
                 min_x = min_x.min(template_min_x + x);
                 max_x = max_x.max(template_max_x + x);
                 min_y = min_y.min(template_min_y + y);
@@ -905,33 +984,33 @@ impl PrimitiveOutputBuffers {
             }
         }
 
-        for i in 0..self.lines_start_x.len() {
-            let sx = self.lines_start_x[i];
-            let sy = self.lines_start_y[i];
-            let ex = self.lines_end_x[i];
-            let ey = self.lines_end_y[i];
-            let half_width = self.lines_width[i] * 0.5;
+        for i in 0..self.lines_start_x_nm.len() {
+            let sx = to_world_x(self.lines_start_x_nm[i]);
+            let sy = to_world_y(self.lines_start_y_nm[i]);
+            let ex = to_world_x(self.lines_end_x_nm[i]);
+            let ey = to_world_y(self.lines_end_y_nm[i]);
+            let half_width = (self.lines_width_nm[i] as f64 * 0.5e-6) as f32;
             min_x = min_x.min(sx.min(ex) - half_width);
             max_x = max_x.max(sx.max(ex) + half_width);
             min_y = min_y.min(sy.min(ey) - half_width);
             max_y = max_y.max(sy.max(ey) + half_width);
         }
 
-        for i in 0..self.circles_x.len() {
-            let x = self.circles_x[i];
-            let y = self.circles_y[i];
-            let r = self.circles_radius[i];
+        for i in 0..self.circles_x_nm.len() {
+            let x = to_world_x(self.circles_x_nm[i]);
+            let y = to_world_y(self.circles_y_nm[i]);
+            let r = (self.circles_radius_nm[i] as f64 * 1e-6) as f32;
             min_x = min_x.min(x - r);
             max_x = max_x.max(x + r);
             min_y = min_y.min(y - r);
             max_y = max_y.max(y + r);
         }
 
-        for i in 0..self.arcs_x.len() {
-            let x = self.arcs_x[i];
-            let y = self.arcs_y[i];
-            let r = self.arcs_radius[i];
-            let t = self.arcs_thickness[i];
+        for i in 0..self.arcs_x_nm.len() {
+            let x = to_world_x(self.arcs_x_nm[i]);
+            let y = to_world_y(self.arcs_y_nm[i]);
+            let r = (self.arcs_radius_nm[i] as f64 * 1e-6) as f32;
+            let t = (self.arcs_thickness_nm[i] as f64 * 1e-6) as f32;
             let half_width = t * 0.5;
             let (arc_min_x, arc_max_x, arc_min_y, arc_max_y) = arc_curve_bounds(
                 [x, y],
@@ -945,10 +1024,10 @@ impl PrimitiveOutputBuffers {
             max_y = max_y.max(arc_max_y + half_width);
         }
 
-        for i in 0..self.thermals_x.len() {
-            let x = self.thermals_x[i];
-            let y = self.thermals_y[i];
-            let r = self.thermals_outer_diameter[i] / 2.0;
+        for i in 0..self.thermals_x_nm.len() {
+            let x = to_world_x(self.thermals_x_nm[i]);
+            let y = to_world_y(self.thermals_y_nm[i]);
+            let r = (self.thermals_outer_diameter_nm[i] as f64 * 0.5e-6) as f32;
             min_x = min_x.min(x - r);
             max_x = max_x.max(x + r);
             min_y = min_y.min(y - r);
@@ -967,8 +1046,9 @@ fn combined_boundary(
     primitive_boundary: Boundary,
     has_primitives: bool,
     path_regions: &PathRegions,
+    origin_nm: [i64; 2],
 ) -> Boundary {
-    let Some(path_boundary) = path_regions_boundary(path_regions) else {
+    let Some(path_boundary) = path_regions_boundary(path_regions, origin_nm) else {
         return primitive_boundary;
     };
 
@@ -984,17 +1064,19 @@ fn combined_boundary(
     )
 }
 
-fn path_regions_boundary(path_regions: &PathRegions) -> Option<Boundary> {
+fn path_regions_boundary(path_regions: &PathRegions, origin_nm: [i64; 2]) -> Option<Boundary> {
     let mut min_x = f32::INFINITY;
     let mut max_x = f32::NEG_INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
 
-    for point in path_regions.cover_vertices.chunks_exact(2) {
-        min_x = min_x.min(point[0]);
-        max_x = max_x.max(point[0]);
-        min_y = min_y.min(point[1]);
-        max_y = max_y.max(point[1]);
+    for point in path_regions.cover_vertices_nm.chunks_exact(2) {
+        let x = ((origin_nm[0] + point[0] as i64) as f64 * 1e-6) as f32;
+        let y = ((origin_nm[1] + point[1] as i64) as f64 * 1e-6) as f32;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
     }
 
     min_x
@@ -1062,7 +1144,7 @@ pub struct GerberParser {
     // Store primitive batches in object-stream polarity order.
     pub polarity_layers: Vec<PolarityLayer>,
     pub current_primitives: Vec<Primitive>, // Accumulating primitives for current polarity
-    pub current_path_regions: PathRegions,
+    pub current_path_regions: PathRegionsBuilder,
     pub region_contours: Vec<RegionContour>, // Contours collected in Region mode
     pub interaction_layer: Option<InteractionLayer>,
     pub progress: Option<ParseProgress>,
@@ -1087,7 +1169,7 @@ impl GerberParser {
             arc_tessellation_quality,
             polarity_layers: Vec::new(),
             current_primitives: Vec::new(),
-            current_path_regions: PathRegions::empty(),
+            current_path_regions: PathRegionsBuilder::empty(),
             region_contours: Vec::new(),
             interaction_layer: collect_interactions.then(InteractionLayer::new),
             progress: None,
@@ -1210,6 +1292,8 @@ impl GerberParser {
         // Convert each polarity layer one at a time so parsed Primitive buffers
         // can be dropped as soon as their render buffers are built.
         let polarity_layers = take(&mut self.polarity_layers);
+        let origin_nm =
+            compute_layer_origin_nm(&polarity_layers).map_err(|msg| JsValue::from_str(&msg))?;
         let mut gerber_data_layers: Vec<GerberData> = Vec::new();
         let gerber_data_layer_capacity =
             checked_capacity(polarity_layers.len(), 2, "Gerber data layer list")?;
@@ -1235,10 +1319,15 @@ impl GerberParser {
         for layer in polarity_layers {
             let render_sublayer_idx = gerber_data_layers.len();
             let layer_shapes = layer.primitives.len();
+            let path_regions = layer
+                .path_regions
+                .finalize_origin_nm(origin_nm)
+                .map_err(|msg| JsValue::from_str(&msg))?;
             let mut gerber_data = Self::primitives_to_gerber_data(
                 layer.primitives,
-                layer.path_regions,
+                path_regions,
                 layer.polarity == Polarity::Negative,
+                origin_nm,
             )?;
             // Between polarity layers, because counting inside the loop that
             // moves the shapes would slow it down, and only after a step of
@@ -1278,6 +1367,7 @@ impl GerberParser {
         primitives: Vec<Primitive>,
         path_regions: PathRegions,
         is_negative: bool,
+        origin_nm: [i64; 2],
     ) -> Result<Vec<GerberData>, JsValue> {
         let counts = SplitPrimitiveBufferCounts::from_primitives(&primitives);
         let mut plain_buffers = PrimitiveOutputBuffers::reserved_for(&counts.plain)?;
@@ -1285,9 +1375,9 @@ impl GerberParser {
 
         for primitive in primitives {
             if primitive_has_hole(&primitive) {
-                holed_buffers.push_primitive(primitive)?;
+                holed_buffers.push_primitive(primitive, origin_nm)?;
             } else {
-                plain_buffers.push_primitive(primitive)?;
+                plain_buffers.push_primitive(primitive, origin_nm)?;
             }
         }
 
@@ -1301,15 +1391,125 @@ impl GerberParser {
         )?;
 
         if plain_buffers.has_geometry() || path_regions.has_geometry() {
-            gerber_data_layers.push(plain_buffers.into_gerber_data(path_regions, is_negative));
+            gerber_data_layers.push(plain_buffers.into_gerber_data(
+                path_regions,
+                is_negative,
+                origin_nm,
+            ));
         }
         if holed_buffers.has_geometry() {
-            gerber_data_layers
-                .push(holed_buffers.into_gerber_data(PathRegions::empty(), is_negative));
+            gerber_data_layers.push(holed_buffers.into_gerber_data(
+                PathRegions::empty(),
+                is_negative,
+                origin_nm,
+            ));
         }
 
         Ok(gerber_data_layers)
     }
+}
+
+fn compute_layer_origin_nm(polarity_layers: &[PolarityLayer]) -> Result<[i64; 2], String> {
+    let mut min_x = i64::MAX;
+    let mut max_x = i64::MIN;
+    let mut min_y = i64::MAX;
+    let mut max_y = i64::MIN;
+    let mut has_coords = false;
+
+    let mut include_point = |x: i64, y: i64| {
+        has_coords = true;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    };
+
+    for layer in polarity_layers {
+        for primitive in &layer.primitives {
+            if !primitive_is_renderable(primitive) {
+                continue;
+            }
+            match primitive {
+                Primitive::Triangle {
+                    vertices_nm,
+                    hole_x_nm,
+                    hole_y_nm,
+                    hole_radius_nm,
+                    ..
+                } => {
+                    for v in vertices_nm {
+                        include_point(v[0], v[1]);
+                    }
+                    if *hole_radius_nm > 0 {
+                        include_point(*hole_x_nm, *hole_y_nm);
+                    }
+                }
+                Primitive::Circle {
+                    x_nm,
+                    y_nm,
+                    hole_x_nm,
+                    hole_y_nm,
+                    hole_radius_nm,
+                    ..
+                } => {
+                    include_point(*x_nm, *y_nm);
+                    if *hole_radius_nm > 0 {
+                        include_point(*hole_x_nm, *hole_y_nm);
+                    }
+                }
+                Primitive::Arc { x_nm, y_nm, .. }
+                | Primitive::Thermal { x_nm, y_nm, .. }
+                | Primitive::TriangleTemplateFlash { x_nm, y_nm, .. } => {
+                    include_point(*x_nm, *y_nm);
+                }
+                Primitive::Line {
+                    start_x_nm,
+                    start_y_nm,
+                    end_x_nm,
+                    end_y_nm,
+                    ..
+                } => {
+                    include_point(*start_x_nm, *start_y_nm);
+                    include_point(*end_x_nm, *end_y_nm);
+                }
+            }
+        }
+
+        for point in layer.path_regions.cover_vertices_nm.chunks_exact(2) {
+            include_point(point[0], point[1]);
+        }
+        for point in layer.path_regions.clear_vertices_nm.chunks_exact(2) {
+            include_point(point[0], point[1]);
+        }
+        for point in layer.path_regions.wedge_vertices_nm.chunks_exact(2) {
+            include_point(point[0], point[1]);
+        }
+        for vertex in layer
+            .path_regions
+            .sector_vertices_nm
+            .chunks_exact(crate::geometry::PATH_SECTOR_VERTEX_FLOATS)
+        {
+            include_point(vertex[0], vertex[1]);
+            include_point(vertex[2], vertex[3]);
+        }
+    }
+
+    if !has_coords {
+        return Ok([0, 0]);
+    }
+
+    let span_x = max_x.saturating_sub(min_x);
+    let span_y = max_y.saturating_sub(min_y);
+    if span_x > u32::MAX as i64 || span_y > u32::MAX as i64 {
+        return Err(
+            "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates"
+                .to_string(),
+        );
+    }
+
+    let origin_x = min_x + ((span_x + 1) / 2);
+    let origin_y = min_y + ((span_y + 1) / 2);
+    Ok([origin_x, origin_y])
 }
 
 fn parse_command(
@@ -1319,7 +1519,7 @@ fn parse_command(
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
@@ -1418,7 +1618,7 @@ fn parse_command(
 
 fn flush_primitives(
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     polarity: Polarity,
 ) -> Result<(), JsValue> {
@@ -1466,7 +1666,7 @@ fn parse_aperture_block(
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
@@ -1485,7 +1685,7 @@ fn parse_aperture_block(
     )?;
 
     let mut block_primitives: Vec<Primitive> = Vec::new();
-    let mut block_path_regions = PathRegions::empty();
+    let mut block_path_regions = PathRegionsBuilder::empty();
     let mut block_layers: Vec<PolarityLayer> = Vec::new();
     let mut block_region_contours: Vec<RegionContour> = Vec::new();
 
@@ -1553,8 +1753,7 @@ fn parse_aperture_block(
         state.polarity,
     )?;
 
-    state.x = 0.0;
-    state.y = 0.0;
+    state.set_point(0.0, 0.0);
     state.pen_state = "up".to_string();
 
     apertures.insert(block_code, Aperture::new_block(block_layers));

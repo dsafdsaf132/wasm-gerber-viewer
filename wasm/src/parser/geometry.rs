@@ -1,10 +1,13 @@
-use crate::geometry::{Boundary, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
+use crate::geometry::{Boundary, PathRegions, PathRegionsBuilder, PATH_SECTOR_VERTEX_FLOATS};
 use crate::geometry::{RegionContour, RegionSegment};
 use crate::interaction::{
     aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
     InteractionFeature, InteractionLayer, PathRegionRef,
 };
-use crate::parser::common::{extract_command_tokens, parse_coordinate_number, parse_g_code};
+use crate::parser::common::{
+    extract_command_tokens, parse_coordinate_number, parse_coordinate_number_nm, parse_g_code,
+    NANOMETERS_PER_INCH, NANOMETERS_PER_MM,
+};
 use crate::parser::{Aperture, FormatSpec, ParserState, Polarity, PolarityLayer};
 use crate::util::{format_bytes, format_count};
 use i_overlay::core::fill_rule::FillRule;
@@ -287,6 +290,10 @@ pub enum Primitive {
         hole_x: f32,             // Hole center X (relative to triangle)
         hole_y: f32,             // Hole center Y (relative to triangle)
         hole_radius: f32,        // Hole radius (0.0 = no hole)
+        vertices_nm: [[i64; 2]; 3],
+        hole_x_nm: i64,
+        hole_y_nm: i64,
+        hole_radius_nm: i64,
     },
     Circle {
         x: f32,
@@ -296,6 +303,12 @@ pub enum Primitive {
         hole_x: f32,      // Hole center X (absolute position)
         hole_y: f32,      // Hole center Y (absolute position)
         hole_radius: f32, // Hole radius (0.0 = no hole)
+        x_nm: i64,
+        y_nm: i64,
+        radius_nm: i64,
+        hole_x_nm: i64,
+        hole_y_nm: i64,
+        hole_radius_nm: i64,
     },
     Arc {
         x: f32,
@@ -305,6 +318,10 @@ pub enum Primitive {
         end_angle: f32,
         thickness: f32,
         exposure: f32, // 1.0 = positive, 0.0 = negative
+        x_nm: i64,
+        y_nm: i64,
+        radius_nm: i64,
+        thickness_nm: i64,
     },
     Thermal {
         x: f32,
@@ -314,11 +331,18 @@ pub enum Primitive {
         gap_thickness: f32,
         rotation: f32,
         exposure: f32, // 1.0 = positive, 0.0 = negative
+        x_nm: i64,
+        y_nm: i64,
+        outer_diameter_nm: i64,
+        inner_diameter_nm: i64,
+        gap_thickness_nm: i64,
     },
     TriangleTemplateFlash {
         template: Rc<Vec<f32>>,
         x: f32,
         y: f32,
+        x_nm: i64,
+        y_nm: i64,
     },
     Line {
         start_x: f32,
@@ -327,7 +351,317 @@ pub enum Primitive {
         end_y: f32,
         width: f32,
         exposure: f32,
+        start_x_nm: i64,
+        start_y_nm: i64,
+        end_x_nm: i64,
+        end_y_nm: i64,
+        width_nm: i64,
     },
+}
+
+impl Primitive {
+    pub fn new_triangle(
+        vertices: [[f32; 2]; 3],
+        exposure: f32,
+        hole_x: f32,
+        hole_y: f32,
+        hole_radius: f32,
+    ) -> Self {
+        Primitive::Triangle {
+            vertices,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+            vertices_nm: [
+                [
+                    (vertices[0][0] as f64 * 1_000_000.0).round() as i64,
+                    (vertices[0][1] as f64 * 1_000_000.0).round() as i64,
+                ],
+                [
+                    (vertices[1][0] as f64 * 1_000_000.0).round() as i64,
+                    (vertices[1][1] as f64 * 1_000_000.0).round() as i64,
+                ],
+                [
+                    (vertices[2][0] as f64 * 1_000_000.0).round() as i64,
+                    (vertices[2][1] as f64 * 1_000_000.0).round() as i64,
+                ],
+            ],
+            hole_x_nm: (hole_x as f64 * 1_000_000.0).round() as i64,
+            hole_y_nm: (hole_y as f64 * 1_000_000.0).round() as i64,
+            hole_radius_nm: (hole_radius as f64 * 1_000_000.0).round() as i64,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_triangle_with_nm(
+        vertices: [[f32; 2]; 3],
+        exposure: f32,
+        hole_x: f32,
+        hole_y: f32,
+        hole_radius: f32,
+        vertices_nm: [[i64; 2]; 3],
+        hole_x_nm: i64,
+        hole_y_nm: i64,
+        hole_radius_nm: i64,
+    ) -> Self {
+        Primitive::Triangle {
+            vertices,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
+        }
+    }
+
+    pub fn new_circle(
+        x: f32,
+        y: f32,
+        radius: f32,
+        exposure: f32,
+        hole_x: f32,
+        hole_y: f32,
+        hole_radius: f32,
+    ) -> Self {
+        Primitive::Circle {
+            x,
+            y,
+            radius,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+            x_nm: (x as f64 * 1_000_000.0).round() as i64,
+            y_nm: (y as f64 * 1_000_000.0).round() as i64,
+            radius_nm: (radius as f64 * 1_000_000.0).round() as i64,
+            hole_x_nm: (hole_x as f64 * 1_000_000.0).round() as i64,
+            hole_y_nm: (hole_y as f64 * 1_000_000.0).round() as i64,
+            hole_radius_nm: (hole_radius as f64 * 1_000_000.0).round() as i64,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_circle_with_nm(
+        x: f32,
+        y: f32,
+        radius: f32,
+        exposure: f32,
+        hole_x: f32,
+        hole_y: f32,
+        hole_radius: f32,
+        x_nm: i64,
+        y_nm: i64,
+        radius_nm: i64,
+        hole_x_nm: i64,
+        hole_y_nm: i64,
+        hole_radius_nm: i64,
+    ) -> Self {
+        Primitive::Circle {
+            x,
+            y,
+            radius,
+            exposure,
+            hole_x,
+            hole_y,
+            hole_radius,
+            x_nm,
+            y_nm,
+            radius_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
+        }
+    }
+
+    pub fn new_arc(
+        x: f32,
+        y: f32,
+        radius: f32,
+        start_angle: f32,
+        end_angle: f32,
+        thickness: f32,
+        exposure: f32,
+    ) -> Self {
+        Primitive::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            exposure,
+            x_nm: (x as f64 * 1_000_000.0).round() as i64,
+            y_nm: (y as f64 * 1_000_000.0).round() as i64,
+            radius_nm: (radius as f64 * 1_000_000.0).round() as i64,
+            thickness_nm: (thickness as f64 * 1_000_000.0).round() as i64,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_arc_with_nm(
+        x: f32,
+        y: f32,
+        radius: f32,
+        start_angle: f32,
+        end_angle: f32,
+        thickness: f32,
+        exposure: f32,
+        x_nm: i64,
+        y_nm: i64,
+        radius_nm: i64,
+        thickness_nm: i64,
+    ) -> Self {
+        Primitive::Arc {
+            x,
+            y,
+            radius,
+            start_angle,
+            end_angle,
+            thickness,
+            exposure,
+            x_nm,
+            y_nm,
+            radius_nm,
+            thickness_nm,
+        }
+    }
+
+    pub fn new_thermal(
+        x: f32,
+        y: f32,
+        outer_diameter: f32,
+        inner_diameter: f32,
+        gap_thickness: f32,
+        rotation: f32,
+        exposure: f32,
+    ) -> Self {
+        Primitive::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            exposure,
+            x_nm: (x as f64 * 1_000_000.0).round() as i64,
+            y_nm: (y as f64 * 1_000_000.0).round() as i64,
+            outer_diameter_nm: (outer_diameter as f64 * 1_000_000.0).round() as i64,
+            inner_diameter_nm: (inner_diameter as f64 * 1_000_000.0).round() as i64,
+            gap_thickness_nm: (gap_thickness as f64 * 1_000_000.0).round() as i64,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_thermal_with_nm(
+        x: f32,
+        y: f32,
+        outer_diameter: f32,
+        inner_diameter: f32,
+        gap_thickness: f32,
+        rotation: f32,
+        exposure: f32,
+        x_nm: i64,
+        y_nm: i64,
+        outer_diameter_nm: i64,
+        inner_diameter_nm: i64,
+        gap_thickness_nm: i64,
+    ) -> Self {
+        Primitive::Thermal {
+            x,
+            y,
+            outer_diameter,
+            inner_diameter,
+            gap_thickness,
+            rotation,
+            exposure,
+            x_nm,
+            y_nm,
+            outer_diameter_nm,
+            inner_diameter_nm,
+            gap_thickness_nm,
+        }
+    }
+
+    pub fn new_line(
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        width: f32,
+        exposure: f32,
+    ) -> Self {
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+            start_x_nm: (start_x as f64 * 1_000_000.0).round() as i64,
+            start_y_nm: (start_y as f64 * 1_000_000.0).round() as i64,
+            end_x_nm: (end_x as f64 * 1_000_000.0).round() as i64,
+            end_y_nm: (end_y as f64 * 1_000_000.0).round() as i64,
+            width_nm: (width as f64 * 1_000_000.0).round() as i64,
+        }
+    }
+
+    pub fn new_line_with_nm(
+        start_x: f32,
+        start_y: f32,
+        end_x: f32,
+        end_y: f32,
+        width: f32,
+        exposure: f32,
+        start_x_nm: i64,
+        start_y_nm: i64,
+        end_x_nm: i64,
+        end_y_nm: i64,
+        width_nm: i64,
+    ) -> Self {
+        Primitive::Line {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            width,
+            exposure,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
+        }
+    }
+    pub fn new_triangle_template_flash(template: Rc<Vec<f32>>, x: f32, y: f32) -> Self {
+        Primitive::TriangleTemplateFlash {
+            template,
+            x,
+            y,
+            x_nm: (x as f64 * 1_000_000.0).round() as i64,
+            y_nm: (y as f64 * 1_000_000.0).round() as i64,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_triangle_template_flash_with_nm(
+        template: Rc<Vec<f32>>,
+        x: f32,
+        y: f32,
+        x_nm: i64,
+        y_nm: i64,
+    ) -> Self {
+        Primitive::TriangleTemplateFlash {
+            template,
+            x,
+            y,
+            x_nm,
+            y_nm,
+        }
+    }
 }
 
 /// Rotate point around given center
@@ -339,6 +673,17 @@ pub fn rotate_point(point: &mut [f32; 2], angle: f32, center_x: f32, center_y: f
     let y = point[1] - center_y;
     point[0] = center_x + x * cos_a - y * sin_a;
     point[1] = center_y + x * sin_a + y * cos_a;
+}
+
+/// Rotate integer point around given center (in nanometers)
+#[inline]
+pub fn rotate_point_i64(point: &mut [i64; 2], angle: f32, center_x: i64, center_y: i64) {
+    let cos_a = angle.cos() as f64;
+    let sin_a = angle.sin() as f64;
+    let x = (point[0] - center_x) as f64;
+    let y = (point[1] - center_y) as f64;
+    point[0] = center_x + (x * cos_a - y * sin_a).round() as i64;
+    point[1] = center_y + (x * sin_a + y * cos_a).round() as i64;
 }
 
 /// Scale a primitive by a given factor
@@ -355,6 +700,12 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             hole_x,
             hole_y,
             hole_radius,
+            x_nm,
+            y_nm,
+            radius_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
             ..
         } => {
             *x *= scale;
@@ -363,12 +714,22 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *hole_x *= scale;
             *hole_y *= scale;
             *hole_radius *= scale;
+            *x_nm = (*x_nm as f64 * scale as f64).round() as i64;
+            *y_nm = (*y_nm as f64 * scale as f64).round() as i64;
+            *radius_nm = (*radius_nm as f64 * scale as f64).round() as i64;
+            *hole_x_nm = (*hole_x_nm as f64 * scale as f64).round() as i64;
+            *hole_y_nm = (*hole_y_nm as f64 * scale as f64).round() as i64;
+            *hole_radius_nm = (*hole_radius_nm as f64 * scale as f64).round() as i64;
         }
         Primitive::Triangle {
             vertices,
             hole_x,
             hole_y,
             hole_radius,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
             ..
         } => {
             for vertex in vertices.iter_mut() {
@@ -378,18 +739,33 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *hole_x *= scale;
             *hole_y *= scale;
             *hole_radius *= scale;
+            for vertex_nm in vertices_nm.iter_mut() {
+                vertex_nm[0] = (vertex_nm[0] as f64 * scale as f64).round() as i64;
+                vertex_nm[1] = (vertex_nm[1] as f64 * scale as f64).round() as i64;
+            }
+            *hole_x_nm = (*hole_x_nm as f64 * scale as f64).round() as i64;
+            *hole_y_nm = (*hole_y_nm as f64 * scale as f64).round() as i64;
+            *hole_radius_nm = (*hole_radius_nm as f64 * scale as f64).round() as i64;
         }
         Primitive::Arc {
             x,
             y,
             radius,
             thickness,
+            x_nm,
+            y_nm,
+            radius_nm,
+            thickness_nm,
             ..
         } => {
             *x *= scale;
             *y *= scale;
             *radius *= scale;
             *thickness *= scale;
+            *x_nm = (*x_nm as f64 * scale as f64).round() as i64;
+            *y_nm = (*y_nm as f64 * scale as f64).round() as i64;
+            *radius_nm = (*radius_nm as f64 * scale as f64).round() as i64;
+            *thickness_nm = (*thickness_nm as f64 * scale as f64).round() as i64;
         }
         Primitive::Thermal {
             x,
@@ -397,6 +773,11 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             outer_diameter,
             inner_diameter,
             gap_thickness,
+            x_nm,
+            y_nm,
+            outer_diameter_nm,
+            inner_diameter_nm,
+            gap_thickness_nm,
             ..
         } => {
             *x *= scale;
@@ -404,13 +785,26 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *outer_diameter *= scale;
             *inner_diameter *= scale;
             *gap_thickness *= scale;
+            *x_nm = (*x_nm as f64 * scale as f64).round() as i64;
+            *y_nm = (*y_nm as f64 * scale as f64).round() as i64;
+            *outer_diameter_nm = (*outer_diameter_nm as f64 * scale as f64).round() as i64;
+            *inner_diameter_nm = (*inner_diameter_nm as f64 * scale as f64).round() as i64;
+            *gap_thickness_nm = (*gap_thickness_nm as f64 * scale as f64).round() as i64;
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash {
+            template,
+            x,
+            y,
+            x_nm,
+            y_nm,
+        } => {
             for value in Rc::make_mut(template).iter_mut() {
                 *value *= scale;
             }
             *x *= scale;
             *y *= scale;
+            *x_nm = (*x_nm as f64 * scale as f64).round() as i64;
+            *y_nm = (*y_nm as f64 * scale as f64).round() as i64;
         }
         Primitive::Line {
             start_x,
@@ -418,6 +812,11 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             end_x,
             end_y,
             width,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
             ..
         } => {
             *start_x *= scale;
@@ -425,6 +824,11 @@ pub fn scale_primitive(primitive: &mut Primitive, scale: f32) {
             *end_x *= scale;
             *end_y *= scale;
             *width *= scale;
+            *start_x_nm = (*start_x_nm as f64 * scale as f64).round() as i64;
+            *start_y_nm = (*start_y_nm as f64 * scale as f64).round() as i64;
+            *end_x_nm = (*end_x_nm as f64 * scale as f64).round() as i64;
+            *end_y_nm = (*end_y_nm as f64 * scale as f64).round() as i64;
+            *width_nm = (*width_nm as f64 * scale as f64).round() as i64;
         }
     }
 }
@@ -450,21 +854,32 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
             y,
             hole_x,
             hole_y,
+            x_nm,
+            y_nm,
+            hole_x_nm,
+            hole_y_nm,
             ..
         } => {
             if mirror_x {
                 *x = -*x;
                 *hole_x = -*hole_x;
+                *x_nm = x_nm.saturating_neg();
+                *hole_x_nm = hole_x_nm.saturating_neg();
             }
             if mirror_y {
                 *y = -*y;
                 *hole_y = -*hole_y;
+                *y_nm = y_nm.saturating_neg();
+                *hole_y_nm = hole_y_nm.saturating_neg();
             }
         }
         Primitive::Triangle {
             vertices,
             hole_x,
             hole_y,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
             ..
         } => {
             for vertex in vertices.iter_mut() {
@@ -475,14 +890,25 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
                     vertex[1] = -vertex[1];
                 }
             }
+            for vertex_nm in vertices_nm.iter_mut() {
+                if mirror_x {
+                    vertex_nm[0] = vertex_nm[0].saturating_neg();
+                }
+                if mirror_y {
+                    vertex_nm[1] = vertex_nm[1].saturating_neg();
+                }
+            }
             if mirror_x {
                 *hole_x = -*hole_x;
+                *hole_x_nm = hole_x_nm.saturating_neg();
             }
             if mirror_y {
                 *hole_y = -*hole_y;
+                *hole_y_nm = hole_y_nm.saturating_neg();
             }
             if mirror_x ^ mirror_y {
                 vertices.swap(1, 2);
+                vertices_nm.swap(1, 2);
             }
         }
         Primitive::Arc {
@@ -490,27 +916,46 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
             y,
             start_angle,
             end_angle,
+            x_nm,
+            y_nm,
             ..
         } => {
             if mirror_x {
                 *x = -*x;
+                *x_nm = x_nm.saturating_neg();
             }
             if mirror_y {
                 *y = -*y;
+                *y_nm = y_nm.saturating_neg();
             }
             mirror_angle(start_angle);
             mirror_angle(end_angle);
         }
-        Primitive::Thermal { x, y, rotation, .. } => {
+        Primitive::Thermal {
+            x,
+            y,
+            x_nm,
+            y_nm,
+            rotation,
+            ..
+        } => {
             if mirror_x {
                 *x = -*x;
+                *x_nm = x_nm.saturating_neg();
             }
             if mirror_y {
                 *y = -*y;
+                *y_nm = y_nm.saturating_neg();
             }
             mirror_angle(rotation);
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash {
+            template,
+            x,
+            y,
+            x_nm,
+            y_nm,
+        } => {
             let vertices = Rc::make_mut(template);
             for point in vertices.chunks_exact_mut(2) {
                 if mirror_x {
@@ -522,9 +967,11 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
             }
             if mirror_x {
                 *x = -*x;
+                *x_nm = x_nm.saturating_neg();
             }
             if mirror_y {
                 *y = -*y;
+                *y_nm = y_nm.saturating_neg();
             }
         }
         Primitive::Line {
@@ -532,15 +979,23 @@ pub fn mirror_primitive(primitive: &mut Primitive, mirror_x: bool, mirror_y: boo
             start_y,
             end_x,
             end_y,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
             ..
         } => {
             if mirror_x {
                 *start_x = -*start_x;
                 *end_x = -*end_x;
+                *start_x_nm = start_x_nm.saturating_neg();
+                *end_x_nm = end_x_nm.saturating_neg();
             }
             if mirror_y {
                 *start_y = -*start_y;
                 *end_y = -*end_y;
+                *start_y_nm = start_y_nm.saturating_neg();
+                *end_y_nm = end_y_nm.saturating_neg();
             }
         }
     }
@@ -562,6 +1017,10 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             y,
             hole_x,
             hole_y,
+            x_nm,
+            y_nm,
+            hole_x_nm,
+            hole_y_nm,
             ..
         } => {
             let mut center = [*x, *y];
@@ -573,11 +1032,24 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             rotate_point(&mut hole, angle, 0.0, 0.0);
             *hole_x = hole[0];
             *hole_y = hole[1];
+
+            let mut center_nm = [*x_nm, *y_nm];
+            rotate_point_i64(&mut center_nm, angle, 0, 0);
+            *x_nm = center_nm[0];
+            *y_nm = center_nm[1];
+
+            let mut hole_nm = [*hole_x_nm, *hole_y_nm];
+            rotate_point_i64(&mut hole_nm, angle, 0, 0);
+            *hole_x_nm = hole_nm[0];
+            *hole_y_nm = hole_nm[1];
         }
         Primitive::Triangle {
             vertices,
             hole_x,
             hole_y,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
             ..
         } => {
             for vertex in vertices.iter_mut() {
@@ -588,12 +1060,23 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             rotate_point(&mut hole, angle, 0.0, 0.0);
             *hole_x = hole[0];
             *hole_y = hole[1];
+
+            for vertex_nm in vertices_nm.iter_mut() {
+                rotate_point_i64(vertex_nm, angle, 0, 0);
+            }
+
+            let mut hole_nm = [*hole_x_nm, *hole_y_nm];
+            rotate_point_i64(&mut hole_nm, angle, 0, 0);
+            *hole_x_nm = hole_nm[0];
+            *hole_y_nm = hole_nm[1];
         }
         Primitive::Arc {
             x,
             y,
             start_angle,
             end_angle,
+            x_nm,
+            y_nm,
             ..
         } => {
             let mut center = [*x, *y];
@@ -602,15 +1085,38 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             *y = center[1];
             rotate_angle(start_angle);
             rotate_angle(end_angle);
+
+            let mut center_nm = [*x_nm, *y_nm];
+            rotate_point_i64(&mut center_nm, angle, 0, 0);
+            *x_nm = center_nm[0];
+            *y_nm = center_nm[1];
         }
-        Primitive::Thermal { x, y, rotation, .. } => {
+        Primitive::Thermal {
+            x,
+            y,
+            rotation,
+            x_nm,
+            y_nm,
+            ..
+        } => {
             let mut center = [*x, *y];
             rotate_point(&mut center, angle, 0.0, 0.0);
             *x = center[0];
             *y = center[1];
             rotate_angle(rotation);
+
+            let mut center_nm = [*x_nm, *y_nm];
+            rotate_point_i64(&mut center_nm, angle, 0, 0);
+            *x_nm = center_nm[0];
+            *y_nm = center_nm[1];
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => {
+        Primitive::TriangleTemplateFlash {
+            template,
+            x,
+            y,
+            x_nm,
+            y_nm,
+        } => {
             let vertices = Rc::make_mut(template);
             for point in vertices.chunks_exact_mut(2) {
                 let mut vertex = [point[0], point[1]];
@@ -622,12 +1128,21 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             rotate_point(&mut center, angle, 0.0, 0.0);
             *x = center[0];
             *y = center[1];
+
+            let mut center_nm = [*x_nm, *y_nm];
+            rotate_point_i64(&mut center_nm, angle, 0, 0);
+            *x_nm = center_nm[0];
+            *y_nm = center_nm[1];
         }
         Primitive::Line {
             start_x,
             start_y,
             end_x,
             end_y,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
             ..
         } => {
             let mut start = [*start_x, *start_y];
@@ -638,6 +1153,14 @@ pub fn rotate_primitive(primitive: &mut Primitive, angle: f32) {
             *start_y = start[1];
             *end_x = end[0];
             *end_y = end[1];
+            let mut start_nm = [*start_x_nm, *start_y_nm];
+            let mut end_nm = [*end_x_nm, *end_y_nm];
+            rotate_point_i64(&mut start_nm, angle, 0, 0);
+            rotate_point_i64(&mut end_nm, angle, 0, 0);
+            *start_x_nm = start_nm[0];
+            *start_y_nm = start_nm[1];
+            *end_x_nm = end_nm[0];
+            *end_y_nm = end_nm[1];
         }
     }
 }
@@ -666,17 +1189,17 @@ pub fn triangulate_outline(vertices: &[[f32; 2]], exposure: f32) -> Result<Vec<P
                     && i1 < tri_result.points.len()
                     && i2 < tri_result.points.len()
                 {
-                    triangles.push(Primitive::Triangle {
-                        vertices: [
+                    triangles.push(Primitive::new_triangle(
+                        [
                             tri_result.points[i0],
                             tri_result.points[i1],
                             tri_result.points[i2],
                         ],
                         exposure,
-                        hole_x: 0.0,
-                        hole_y: 0.0,
-                        hole_radius: 0.0,
-                    });
+                        0.0,
+                        0.0,
+                        0.0,
+                    ));
                 }
             }
         }
@@ -686,6 +1209,7 @@ pub fn triangulate_outline(vertices: &[[f32; 2]], exposure: f32) -> Result<Vec<P
 }
 
 /// Store a stroked straight line body for instanced rendering.
+#[allow(dead_code)]
 pub fn line_to_body(
     start_x: f32,
     start_y: f32,
@@ -694,18 +1218,42 @@ pub fn line_to_body(
     width: f32,
     exposure: f32,
 ) -> Option<Primitive> {
-    if !width.is_finite() || width < 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
-        return None;
-    }
-
-    Some(Primitive::Line {
+    line_to_body_with_nm(
         start_x,
         start_y,
         end_x,
         end_y,
         width,
         exposure,
-    })
+        (start_x as f64 * 1_000_000.0).round() as i64,
+        (start_y as f64 * 1_000_000.0).round() as i64,
+        (end_x as f64 * 1_000_000.0).round() as i64,
+        (end_y as f64 * 1_000_000.0).round() as i64,
+        (width as f64 * 1_000_000.0).round() as i64,
+    )
+}
+
+pub fn line_to_body_with_nm(
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    width: f32,
+    exposure: f32,
+    start_x_nm: i64,
+    start_y_nm: i64,
+    end_x_nm: i64,
+    end_y_nm: i64,
+    width_nm: i64,
+) -> Option<Primitive> {
+    if !width.is_finite() || width < 0.0 || points_coincide(start_x, start_y, end_x, end_y) {
+        return None;
+    }
+
+    Some(Primitive::new_line_with_nm(
+        start_x, start_y, end_x, end_y, width, exposure, start_x_nm, start_y_nm, end_x_nm,
+        end_y_nm, width_nm,
+    ))
 }
 
 /// Split a macro line primitive into two triangles.
@@ -735,20 +1283,8 @@ pub fn line_to_triangles(
     let v4 = [end_x - perp_x, end_y - perp_y];
 
     vec![
-        Primitive::Triangle {
-            vertices: [v1, v2, v3],
-            exposure,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        },
-        Primitive::Triangle {
-            vertices: [v2, v4, v3],
-            exposure,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        },
+        Primitive::new_triangle([v1, v2, v3], exposure, 0.0, 0.0, 0.0),
+        Primitive::new_triangle([v2, v4, v3], exposure, 0.0, 0.0, 0.0),
     ]
 }
 
@@ -820,7 +1356,7 @@ pub fn primitive_to_polygon(primitive: &Primitive) -> Vec<[f32; 2]> {
             }
             vertices
         }
-        Primitive::TriangleTemplateFlash { template, x, y } => template
+        Primitive::TriangleTemplateFlash { template, x, y, .. } => template
             .chunks_exact(2)
             .map(|point| [point[0] + *x, point[1] + *y])
             .collect(),
@@ -960,17 +1496,17 @@ pub fn triangulate_shape_with_holes(
                 && idx1 < tri_result.points.len()
                 && idx2 < tri_result.points.len()
             {
-                triangles.push(Primitive::Triangle {
-                    vertices: [
+                triangles.push(Primitive::new_triangle(
+                    [
                         tri_result.points[idx0],
                         tri_result.points[idx1],
                         tri_result.points[idx2],
                     ],
                     exposure,
-                    hole_x: 0.0,
-                    hole_y: 0.0,
-                    hole_radius: 0.0,
-                });
+                    0.0,
+                    0.0,
+                    0.0,
+                ));
             }
         }
     }
@@ -980,6 +1516,19 @@ pub fn triangulate_shape_with_holes(
 
 /// Offset a primitive by the given dx and dy
 pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive {
+    let dx_nm = (dx as f64 * 1_000_000.0).round() as i64;
+    let dy_nm = (dy as f64 * 1_000_000.0).round() as i64;
+    offset_primitive_by_nm(primitive, dx, dy, dx_nm, dy_nm)
+}
+
+/// Offset a primitive by the given dx/dy and exact nanometer offsets dx_nm/dy_nm
+pub fn offset_primitive_by_nm(
+    primitive: &Primitive,
+    dx: f32,
+    dy: f32,
+    dx_nm: i64,
+    dy_nm: i64,
+) -> Primitive {
     match primitive {
         Primitive::Circle {
             x,
@@ -989,6 +1538,12 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             hole_x,
             hole_y,
             hole_radius,
+            x_nm,
+            y_nm,
+            radius_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
         } => Primitive::Circle {
             x: x + dx,
             y: y + dy,
@@ -997,6 +1552,12 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             hole_x: hole_x + dx,
             hole_y: hole_y + dy,
             hole_radius: *hole_radius,
+            x_nm: x_nm.saturating_add(dx_nm),
+            y_nm: y_nm.saturating_add(dy_nm),
+            radius_nm: *radius_nm,
+            hole_x_nm: hole_x_nm.saturating_add(dx_nm),
+            hole_y_nm: hole_y_nm.saturating_add(dy_nm),
+            hole_radius_nm: *hole_radius_nm,
         },
         Primitive::Triangle {
             vertices,
@@ -1004,6 +1565,10 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             hole_x,
             hole_y,
             hole_radius,
+            vertices_nm,
+            hole_x_nm,
+            hole_y_nm,
+            hole_radius_nm,
         } => Primitive::Triangle {
             vertices: [
                 [vertices[0][0] + dx, vertices[0][1] + dy],
@@ -1014,6 +1579,23 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             hole_x: hole_x + dx,
             hole_y: hole_y + dy,
             hole_radius: *hole_radius,
+            vertices_nm: [
+                [
+                    vertices_nm[0][0].saturating_add(dx_nm),
+                    vertices_nm[0][1].saturating_add(dy_nm),
+                ],
+                [
+                    vertices_nm[1][0].saturating_add(dx_nm),
+                    vertices_nm[1][1].saturating_add(dy_nm),
+                ],
+                [
+                    vertices_nm[2][0].saturating_add(dx_nm),
+                    vertices_nm[2][1].saturating_add(dy_nm),
+                ],
+            ],
+            hole_x_nm: hole_x_nm.saturating_add(dx_nm),
+            hole_y_nm: hole_y_nm.saturating_add(dy_nm),
+            hole_radius_nm: *hole_radius_nm,
         },
         Primitive::Arc {
             x,
@@ -1023,6 +1605,10 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             end_angle,
             thickness,
             exposure,
+            x_nm,
+            y_nm,
+            radius_nm,
+            thickness_nm,
         } => Primitive::Arc {
             x: x + dx,
             y: y + dy,
@@ -1031,6 +1617,10 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             end_angle: *end_angle,
             thickness: *thickness,
             exposure: *exposure,
+            x_nm: x_nm.saturating_add(dx_nm),
+            y_nm: y_nm.saturating_add(dy_nm),
+            radius_nm: *radius_nm,
+            thickness_nm: *thickness_nm,
         },
         Primitive::Thermal {
             x,
@@ -1040,6 +1630,11 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             gap_thickness,
             rotation,
             exposure,
+            x_nm,
+            y_nm,
+            outer_diameter_nm,
+            inner_diameter_nm,
+            gap_thickness_nm,
         } => Primitive::Thermal {
             x: x + dx,
             y: y + dy,
@@ -1048,11 +1643,24 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             gap_thickness: *gap_thickness,
             rotation: *rotation,
             exposure: *exposure,
+            x_nm: x_nm.saturating_add(dx_nm),
+            y_nm: y_nm.saturating_add(dy_nm),
+            outer_diameter_nm: *outer_diameter_nm,
+            inner_diameter_nm: *inner_diameter_nm,
+            gap_thickness_nm: *gap_thickness_nm,
         },
-        Primitive::TriangleTemplateFlash { template, x, y } => Primitive::TriangleTemplateFlash {
+        Primitive::TriangleTemplateFlash {
+            template,
+            x,
+            y,
+            x_nm,
+            y_nm,
+        } => Primitive::TriangleTemplateFlash {
             template: Rc::clone(template),
             x: x + dx,
             y: y + dy,
+            x_nm: x_nm.saturating_add(dx_nm),
+            y_nm: y_nm.saturating_add(dy_nm),
         },
         Primitive::Line {
             start_x,
@@ -1061,6 +1669,11 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             end_y,
             width,
             exposure,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            width_nm,
         } => Primitive::Line {
             start_x: start_x + dx,
             start_y: start_y + dy,
@@ -1068,11 +1681,31 @@ pub fn offset_primitive_by(primitive: &Primitive, dx: f32, dy: f32) -> Primitive
             end_y: end_y + dy,
             width: *width,
             exposure: *exposure,
+            start_x_nm: start_x_nm.saturating_add(dx_nm),
+            start_y_nm: start_y_nm.saturating_add(dy_nm),
+            end_x_nm: end_x_nm.saturating_add(dx_nm),
+            end_y_nm: end_y_nm.saturating_add(dy_nm),
+            width_nm: *width_nm,
         },
     }
 }
 
 // (Replaced by extract_command_tokens in common.rs)
+
+pub fn convert_coordinate_nm(
+    coord_str: &str,
+    axis: char,
+    format_spec: &FormatSpec,
+    unit_multiplier: f32,
+) -> i64 {
+    let format = format_spec.coordinate_format(axis);
+    let mult_nm = if (unit_multiplier - 25.4).abs() < 1e-4 {
+        NANOMETERS_PER_INCH
+    } else {
+        NANOMETERS_PER_MM
+    };
+    parse_coordinate_number_nm(coord_str, format, mult_nm, "Gerber coordinate").unwrap_or(0)
+}
 
 /// Coordinate value conversion - decimal point processing according to format spec
 pub fn convert_coordinate(
@@ -1081,13 +1714,15 @@ pub fn convert_coordinate(
     format_spec: &FormatSpec,
     unit_multiplier: f32,
 ) -> f32 {
-    let result = parse_coordinate_number(
-        coord_str,
-        format_spec.coordinate_format(axis),
-        unit_multiplier,
-        "Gerber coordinate",
-    )
-    .unwrap_or(0.0);
+    let format = format_spec.coordinate_format(axis);
+    let result = if (unit_multiplier - 25.4).abs() < 1e-4 {
+        parse_coordinate_number_nm(coord_str, format, NANOMETERS_PER_INCH, "Gerber coordinate")
+            .map(|nm| (nm as f64 / 1_000_000.0) as f32)
+            .unwrap_or(0.0)
+    } else {
+        parse_coordinate_number(coord_str, format, unit_multiplier, "Gerber coordinate")
+            .unwrap_or(0.0)
+    };
 
     if result.is_finite() {
         result
@@ -1107,6 +1742,35 @@ fn flash_aperture_no_sr(
     mirror_y: bool,
     layer_rotation: f32,
 ) -> Result<(), String> {
+    let dx_nm = (x as f64 * 1_000_000.0).round() as i64;
+    let dy_nm = (y as f64 * 1_000_000.0).round() as i64;
+    flash_aperture_no_sr_with_nm(
+        aperture,
+        primitives,
+        x,
+        y,
+        dx_nm,
+        dy_nm,
+        layer_scale,
+        mirror_x,
+        mirror_y,
+        layer_rotation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flash_aperture_no_sr_with_nm(
+    aperture: &Aperture,
+    primitives: &mut Vec<Primitive>,
+    x: f32,
+    y: f32,
+    dx_nm: i64,
+    dy_nm: i64,
+    layer_scale: f32,
+    mirror_x: bool,
+    mirror_y: bool,
+    layer_rotation: f32,
+) -> Result<(), String> {
     // Use pre-calculated has_negative field for performance
     if aperture.has_negative {
         // Boolean operations with hole preservation
@@ -1119,7 +1783,7 @@ fn flash_aperture_no_sr(
                 scale_primitive(&mut scaled_primitive, layer_scale);
                 mirror_primitive(&mut scaled_primitive, mirror_x, mirror_y);
                 rotate_primitive(&mut scaled_primitive, layer_rotation);
-                let offset_p = offset_primitive_by(&scaled_primitive, x, y);
+                let offset_p = offset_primitive_by_nm(&scaled_primitive, x, y, dx_nm, dy_nm);
                 let poly = primitive_to_polygon(&offset_p);
                 let exposure = match &offset_p {
                     Primitive::Circle { exposure, .. } => *exposure,
@@ -1146,7 +1810,9 @@ fn flash_aperture_no_sr(
             layer_rotation,
         ) {
             try_reserve_primitives(primitives, 1, "aperture triangle template flash")?;
-            primitives.push(Primitive::TriangleTemplateFlash { template, x, y });
+            primitives.push(Primitive::new_triangle_template_flash_with_nm(
+                template, x, y, dx_nm, dy_nm,
+            ));
             return Ok(());
         }
 
@@ -1163,17 +1829,28 @@ fn flash_aperture_no_sr(
                     y: py,
                     hole_x: hx,
                     hole_y: hy,
+                    x_nm: px_nm,
+                    y_nm: py_nm,
+                    hole_x_nm: hx_nm,
+                    hole_y_nm: hy_nm,
                     ..
                 } => {
                     *px += x;
                     *py += y;
                     *hx += x;
                     *hy += y;
+                    *px_nm = px_nm.saturating_add(dx_nm);
+                    *py_nm = py_nm.saturating_add(dy_nm);
+                    *hx_nm = hx_nm.saturating_add(dx_nm);
+                    *hy_nm = hy_nm.saturating_add(dy_nm);
                 }
                 Primitive::Triangle {
                     vertices,
                     hole_x,
                     hole_y,
+                    vertices_nm,
+                    hole_x_nm,
+                    hole_y_nm,
                     ..
                 } => {
                     for vertex in vertices.iter_mut() {
@@ -1182,30 +1859,68 @@ fn flash_aperture_no_sr(
                     }
                     *hole_x += x;
                     *hole_y += y;
+                    for vertex_nm in vertices_nm.iter_mut() {
+                        vertex_nm[0] = vertex_nm[0].saturating_add(dx_nm);
+                        vertex_nm[1] = vertex_nm[1].saturating_add(dy_nm);
+                    }
+                    *hole_x_nm = hole_x_nm.saturating_add(dx_nm);
+                    *hole_y_nm = hole_y_nm.saturating_add(dy_nm);
                 }
-                Primitive::Arc { x: ax, y: ay, .. } => {
+                Primitive::Arc {
+                    x: ax,
+                    y: ay,
+                    x_nm: ax_nm,
+                    y_nm: ay_nm,
+                    ..
+                } => {
                     *ax += x;
                     *ay += y;
+                    *ax_nm = ax_nm.saturating_add(dx_nm);
+                    *ay_nm = ay_nm.saturating_add(dy_nm);
                 }
-                Primitive::Thermal { x: tx, y: ty, .. } => {
+                Primitive::Thermal {
+                    x: tx,
+                    y: ty,
+                    x_nm: tx_nm,
+                    y_nm: ty_nm,
+                    ..
+                } => {
                     *tx += x;
                     *ty += y;
+                    *tx_nm = tx_nm.saturating_add(dx_nm);
+                    *ty_nm = ty_nm.saturating_add(dy_nm);
                 }
-                Primitive::TriangleTemplateFlash { x: tx, y: ty, .. } => {
+                Primitive::TriangleTemplateFlash {
+                    x: tx,
+                    y: ty,
+                    x_nm: tx_nm,
+                    y_nm: ty_nm,
+                    ..
+                } => {
                     *tx += x;
                     *ty += y;
+                    *tx_nm = tx_nm.saturating_add(dx_nm);
+                    *ty_nm = ty_nm.saturating_add(dy_nm);
                 }
                 Primitive::Line {
                     start_x,
                     start_y,
                     end_x,
                     end_y,
+                    start_x_nm,
+                    start_y_nm,
+                    end_x_nm,
+                    end_y_nm,
                     ..
                 } => {
                     *start_x += x;
                     *start_y += y;
                     *end_x += x;
                     *end_y += y;
+                    *start_x_nm = start_x_nm.saturating_add(dx_nm);
+                    *start_y_nm = start_y_nm.saturating_add(dy_nm);
+                    *end_x_nm = end_x_nm.saturating_add(dx_nm);
+                    *end_y_nm = end_y_nm.saturating_add(dy_nm);
                 }
             }
             primitives.push(new_primitive);
@@ -1311,7 +2026,7 @@ fn combine_interaction_bounds(
 
 pub(crate) fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity: Polarity,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
@@ -1328,7 +2043,7 @@ pub(crate) fn flush_primitives_to_layer(
 }
 
 pub(crate) fn flush_path_regions_to_layer(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity: Polarity,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
@@ -1359,7 +2074,7 @@ fn flash_block_aperture(
     block_layers: &[PolarityLayer],
     state: &ParserState,
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
@@ -1469,9 +2184,7 @@ fn record_block_flash_interaction(
                     continue;
                 }
                 let path_region_bounds = has_path_regions
-                    .then(|| {
-                        InteractionFeature::bounds_for_geometry(&[], &block_layer.path_regions)
-                    })
+                    .then(|| block_layer.path_regions.bounds())
                     .flatten()
                     .map(|bounds| {
                         transformed_boundary_for_flash(
@@ -1503,7 +2216,7 @@ fn record_block_flash_interaction(
                     PathRegions::empty()
                 };
                 if has_path_regions {
-                    interaction_path_regions.transform_for_flash(
+                    interaction_path_regions.transform_pick_for_flash(
                         state.layer_scale,
                         state.mirror_x,
                         state.mirror_y,
@@ -1539,13 +2252,28 @@ pub fn flash_aperture(
     state: &ParserState,
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
 ) -> Result<(), String> {
     if let Some(aperture) = apertures.get(&state.current_aperture) {
         let repeat_count = state.step_repeat_count("aperture flash")?;
+        let calc_flash_pos = |sx: u32, sy: u32| -> (f32, f32, i64, i64) {
+            let (fx, fx_nm) = if sx == 0 {
+                (x, (x as f64 * 1_000_000.0).round() as i64)
+            } else {
+                let fx_f64 = x as f64 + (sx as f64) * (state.sr_i as f64);
+                (fx_f64 as f32, (fx_f64 * 1_000_000.0).round() as i64)
+            };
+            let (fy, fy_nm) = if sy == 0 {
+                (y, (y as f64 * 1_000_000.0).round() as i64)
+            } else {
+                let fy_f64 = y as f64 + (sy as f64) * (state.sr_j as f64);
+                (fy_f64 as f32, (fy_f64 * 1_000_000.0).round() as i64)
+            };
+            (fx, fy, fx_nm, fy_nm)
+        };
         if let Some(block_layers) = aperture.block_layers.as_ref() {
             consume_expansion(
                 state,
@@ -1575,11 +2303,14 @@ pub fn flash_aperture(
             try_reserve_primitives(primitives, repeat_count, "aperture triangle template flash")?;
             for sy in 0..state.sr_y {
                 for sx in 0..state.sr_x {
-                    primitives.push(Primitive::TriangleTemplateFlash {
-                        template: Rc::clone(&template),
-                        x: x + sx as f32 * state.sr_i,
-                        y: y + sy as f32 * state.sr_j,
-                    });
+                    let (flash_x, flash_y, flash_x_nm, flash_y_nm) = calc_flash_pos(sx, sy);
+                    primitives.push(Primitive::new_triangle_template_flash_with_nm(
+                        Rc::clone(&template),
+                        flash_x,
+                        flash_y,
+                        flash_x_nm,
+                        flash_y_nm,
+                    ));
                 }
             }
             return Ok(());
@@ -1627,10 +2358,11 @@ pub fn flash_aperture(
             try_reserve_primitives(primitives, additional, "aperture flash")?;
             for sy in 0..state.sr_y {
                 for sx in 0..state.sr_x {
-                    let flash_x = x + sx as f32 * state.sr_i;
-                    let flash_y = y + sy as f32 * state.sr_j;
+                    let (flash_x, flash_y, flash_x_nm, flash_y_nm) = calc_flash_pos(sx, sy);
                     for primitive in transformed {
-                        primitives.push(offset_primitive_by(primitive, flash_x, flash_y));
+                        primitives.push(offset_primitive_by_nm(
+                            primitive, flash_x, flash_y, flash_x_nm, flash_y_nm,
+                        ));
                     }
                 }
             }
@@ -1647,13 +2379,14 @@ pub fn flash_aperture(
         // Step and Repeat iteration
         for sy in 0..state.sr_y {
             for sx in 0..state.sr_x {
-                let flash_x = x + sx as f32 * state.sr_i;
-                let flash_y = y + sy as f32 * state.sr_j;
-                flash_aperture_no_sr(
+                let (flash_x, flash_y, flash_x_nm, flash_y_nm) = calc_flash_pos(sx, sy);
+                flash_aperture_no_sr_with_nm(
                     aperture,
                     primitives,
                     flash_x,
                     flash_y,
+                    flash_x_nm,
+                    flash_y_nm,
                     state.layer_scale,
                     state.mirror_x,
                     state.mirror_y,
@@ -1676,8 +2409,28 @@ pub fn execute_interpolation(
     i: f32,
     j: f32,
 ) -> Result<(), String> {
+    let end_x_nm = (end_x as f64 * 1_000_000.0).round() as i64;
+    let end_y_nm = (end_y as f64 * 1_000_000.0).round() as i64;
+    execute_interpolation_with_nm(
+        state, apertures, primitives, end_x, end_y, i, j, end_x_nm, end_y_nm,
+    )
+}
+
+pub fn execute_interpolation_with_nm(
+    state: &mut ParserState,
+    apertures: &HashMap<String, Aperture>,
+    primitives: &mut Vec<Primitive>,
+    end_x: f32,
+    end_y: f32,
+    i: f32,
+    j: f32,
+    end_x_nm: i64,
+    end_y_nm: i64,
+) -> Result<(), String> {
     let start_x = state.x;
     let start_y = state.y;
+    let start_x_nm = state.x_nm;
+    let start_y_nm = state.y_nm;
 
     if let Some(aperture) = apertures.get(&state.current_aperture) {
         let repeat_count = state.step_repeat_count("interpolation")?;
@@ -1695,7 +2448,9 @@ pub fn execute_interpolation(
             for sx in 0..state.sr_x {
                 let offset_x = sx as f32 * state.sr_i;
                 let offset_y = sy as f32 * state.sr_j;
-                append_interpolation_no_sr(
+                let offset_x_nm = (sx as f64 * state.sr_i as f64 * 1_000_000.0).round() as i64;
+                let offset_y_nm = (sy as f64 * state.sr_j as f64 * 1_000_000.0).round() as i64;
+                append_interpolation_no_sr_with_nm(
                     state,
                     aperture,
                     primitives,
@@ -1705,6 +2460,10 @@ pub fn execute_interpolation(
                     end_y + offset_y,
                     i,
                     j,
+                    start_x_nm + offset_x_nm,
+                    start_y_nm + offset_y_nm,
+                    end_x_nm + offset_x_nm,
+                    end_y_nm + offset_y_nm,
                 )?;
             }
         }
@@ -1723,6 +2482,38 @@ fn append_interpolation_no_sr(
     end_y: f32,
     i: f32,
     j: f32,
+) -> Result<(), String> {
+    append_interpolation_no_sr_with_nm(
+        state,
+        aperture,
+        primitives,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        i,
+        j,
+        (start_x as f64 * 1_000_000.0).round() as i64,
+        (start_y as f64 * 1_000_000.0).round() as i64,
+        (end_x as f64 * 1_000_000.0).round() as i64,
+        (end_y as f64 * 1_000_000.0).round() as i64,
+    )
+}
+
+fn append_interpolation_no_sr_with_nm(
+    state: &ParserState,
+    aperture: &Aperture,
+    primitives: &mut Vec<Primitive>,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    i: f32,
+    j: f32,
+    start_x_nm: i64,
+    start_y_nm: i64,
+    end_x_nm: i64,
+    end_y_nm: i64,
 ) -> Result<(), String> {
     match state.interpolation_mode.as_str() {
         "linear" | "linear_x10" | "linear_x01" | "linear_x001" => {
@@ -1760,16 +2551,36 @@ fn append_interpolation_no_sr(
             // Store line body separately from the two round cap flashes so
             // the renderer can keep it instanced and clamp screen thickness.
             let diameter = aperture.radius * 2.0 * state.layer_scale;
-            if let Some(line) = line_to_body(start_x, start_y, end_x, end_y, diameter, 1.0) {
+            let radius_nm = if aperture.radius_nm != 0 {
+                aperture.radius_nm
+            } else {
+                (aperture.radius as f64 * 1_000_000.0).round() as i64
+            };
+            let diameter_nm = ((radius_nm * 2) as f64 * state.layer_scale as f64).round() as i64;
+            if let Some(line) = line_to_body_with_nm(
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                diameter,
+                1.0,
+                start_x_nm,
+                start_y_nm,
+                end_x_nm,
+                end_y_nm,
+                diameter_nm,
+            ) {
                 try_reserve_primitives(primitives, 1, "linear interpolation")?;
                 primitives.push(line);
             }
 
-            flash_aperture_no_sr(
+            flash_aperture_no_sr_with_nm(
                 aperture,
                 primitives,
                 end_x,
                 end_y,
+                end_x_nm,
+                end_y_nm,
                 state.layer_scale,
                 state.mirror_x,
                 state.mirror_y,
@@ -1820,15 +2631,15 @@ fn append_interpolation_no_sr(
                 )?;
 
                 try_reserve_primitives(primitives, 1, "arc interpolation")?;
-                primitives.push(Primitive::Arc {
-                    x: center_x,
-                    y: center_y,
+                primitives.push(Primitive::new_arc(
+                    center_x,
+                    center_y,
                     radius,
                     start_angle,
-                    end_angle: start_angle + sweep_angle,
+                    start_angle + sweep_angle,
                     thickness,
-                    exposure: 1.0,
-                });
+                    1.0,
+                ));
 
                 flash_aperture_no_sr(
                     aperture,
@@ -2174,8 +2985,8 @@ pub fn build_path_regions(
     arc_tessellation_quality: u32,
     collect_pick_contours: bool,
     collect_source_contours: bool,
-) -> Result<PathRegions, String> {
-    let mut path_regions = PathRegions::empty();
+) -> Result<PathRegionsBuilder, String> {
+    let mut path_regions = PathRegionsBuilder::empty();
     let repeat_count = state.step_repeat_count("path region")?;
     let work_items = path_region_work_items_per_copy(
         region_contours,
@@ -2205,7 +3016,7 @@ pub fn build_path_regions(
 }
 
 fn append_path_region(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     region_contours: &[RegionContour],
     offset_x: f32,
     offset_y: f32,
@@ -2225,9 +3036,15 @@ fn append_path_region(
         path_region_stencil_bounds(region_contours, offset_x, offset_y, reference)
             .unwrap_or((min_x, max_x, min_y, max_y));
 
-    push_cover_quad(&mut path_regions.cover_vertices, min_x, max_x, min_y, max_y)?;
     push_cover_quad(
-        &mut path_regions.clear_vertices,
+        &mut path_regions.cover_vertices_nm,
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+    )?;
+    push_cover_quad(
+        &mut path_regions.clear_vertices_nm,
         clear_min_x,
         clear_max_x,
         clear_min_y,
@@ -2255,11 +3072,11 @@ fn append_path_region(
     }
 
     path_regions.wedge_vertex_offsets.push(path_vertex_offset(
-        path_regions.wedge_vertices.len() / 2,
+        path_regions.wedge_vertices_nm.len() / 2,
         "wedge",
     )?);
     path_regions.sector_vertex_offsets.push(path_vertex_offset(
-        path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+        path_regions.sector_vertices_nm.len() / PATH_SECTOR_VERTEX_FLOATS,
         "sector",
     )?);
 
@@ -2273,7 +3090,7 @@ fn path_vertex_offset(vertex_count: usize, kind: &str) -> Result<u32, String> {
 }
 
 fn append_region_source_contours(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     region_contours: &[RegionContour],
     state: &ParserState,
 ) -> Result<(), String> {
@@ -2399,7 +3216,7 @@ fn path_region_pick_contours(
 }
 
 fn append_contour_segments(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     contour: &RegionContour,
     reference: [f32; 2],
     offset_x: f32,
@@ -2409,7 +3226,7 @@ fn append_contour_segments(
         match *segment {
             RegionSegment::Line { start, end } => {
                 push_wedge_triangle(
-                    &mut path_regions.wedge_vertices,
+                    &mut path_regions.wedge_vertices_nm,
                     reference,
                     offset_point(start, offset_x, offset_y),
                     offset_point(end, offset_x, offset_y),
@@ -2444,7 +3261,7 @@ fn append_contour_segments(
     if let (Some(first), Some(last)) = (contour.points.first(), contour.points.last()) {
         if !points_coincide(first[0], first[1], last[0], last[1]) {
             push_wedge_triangle(
-                &mut path_regions.wedge_vertices,
+                &mut path_regions.wedge_vertices_nm,
                 reference,
                 offset_point(*last, offset_x, offset_y),
                 offset_point(*first, offset_x, offset_y),
@@ -2576,8 +3393,12 @@ fn offset_point(point: [f32; 2], offset_x: f32, offset_y: f32) -> [f32; 2] {
     [point[0] + offset_x, point[1] + offset_y]
 }
 
+fn f32_to_nm(value: f32) -> i64 {
+    (value as f64 * 1_000_000.0).round() as i64
+}
+
 fn push_wedge_triangle(
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<i64>,
     a: [f32; 2],
     b: [f32; 2],
     c: [f32; 2],
@@ -2587,12 +3408,19 @@ fn push_wedge_triangle(
         PATH_WEDGE_VERTEX_FLOATS,
         "path region wedge vertices",
     )?;
-    vertices.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
+    vertices.extend_from_slice(&[
+        f32_to_nm(a[0]),
+        f32_to_nm(a[1]),
+        f32_to_nm(b[0]),
+        f32_to_nm(b[1]),
+        f32_to_nm(c[0]),
+        f32_to_nm(c[1]),
+    ]);
     Ok(())
 }
 
 fn push_cover_quad(
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<i64>,
     min_x: f32,
     max_x: f32,
     min_y: f32,
@@ -2603,14 +3431,16 @@ fn push_cover_quad(
         PATH_COVER_VERTEX_FLOATS,
         "path region cover vertices",
     )?;
-    vertices.extend_from_slice(&[
-        min_x, min_y, max_x, min_y, min_x, max_y, min_x, max_y, max_x, min_y, max_x, max_y,
-    ]);
+    let x0 = f32_to_nm(min_x);
+    let x1 = f32_to_nm(max_x);
+    let y0 = f32_to_nm(min_y);
+    let y1 = f32_to_nm(max_y);
+    vertices.extend_from_slice(&[x0, y0, x1, y0, x0, y1, x0, y1, x1, y0, x1, y1]);
     Ok(())
 }
 
 fn append_arc_segment_caps(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     reference: [f32; 2],
     start: [f32; 2],
     end: [f32; 2],
@@ -2633,13 +3463,13 @@ fn append_arc_segment_caps(
         };
 
         push_wedge_triangle(
-            &mut path_regions.wedge_vertices,
+            &mut path_regions.wedge_vertices_nm,
             reference,
             chunk_start,
             chunk_end,
         )?;
         push_sector_cap_quad(
-            &mut path_regions.sector_vertices,
+            &mut path_regions.sector_vertices_nm,
             arc.center,
             arc.radius,
             chunk_start_angle,
@@ -2654,7 +3484,7 @@ fn append_arc_segment_caps(
 }
 
 fn push_sector_cap_quad(
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<i64>,
     center: [f32; 2],
     radius: f32,
     start_angle: f32,
@@ -2692,8 +3522,17 @@ fn push_sector_cap_quad(
         PATH_SECTOR_QUAD_VERTICES * PATH_SECTOR_VERTEX_FLOATS,
         "path region arc sector vertices",
     )?;
+    let center_x_nm = f32_to_nm(center[0]);
+    let center_y_nm = f32_to_nm(center[1]);
+    let radius_nm = f32_to_nm(radius);
     for point in [start, end, end_outer, start, end_outer, start_outer] {
-        vertices.extend_from_slice(&[point[0], point[1], center[0], center[1], radius]);
+        vertices.extend_from_slice(&[
+            f32_to_nm(point[0]),
+            f32_to_nm(point[1]),
+            center_x_nm,
+            center_y_nm,
+            radius_nm,
+        ]);
     }
 
     Ok(())
@@ -3141,7 +3980,7 @@ pub(crate) fn finish_region_contours(
     region_contours: &[RegionContour],
     state: &ParserState,
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     mut interaction_layer: Option<&mut InteractionLayer>,
     preserve_arc_regions: bool,
@@ -3177,8 +4016,7 @@ pub(crate) fn finish_region_contours(
                 path_regions.region_count(),
                 region_path_regions.region_count(),
             )?;
-            let interaction_bounds =
-                InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
+            let interaction_bounds = region_path_regions.bounds();
             let interaction_path_regions = region_path_regions.clone_for_interaction_pick();
             path_regions.append(region_path_regions)?;
             if let Some(bounds) = interaction_bounds {
@@ -3324,7 +4162,7 @@ pub fn parse_graphic_command(
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
     region_contours: &mut Vec<RegionContour>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     mut interaction_layer: Option<&mut InteractionLayer>,
     preserve_arc_regions: bool,
@@ -3428,28 +4266,52 @@ pub fn parse_graphic_command(
 
     let mut x = state.x;
     let mut y = state.y;
+    let mut x_nm = state.x_nm;
+    let mut y_nm = state.y_nm;
     let mut i = 0.0;
     let mut j = 0.0;
 
     // Process X coordinate
     if let Some(x_val) = tokens.x {
-        let new_x =
-            convert_coordinate(x_val, 'x', &state.format_spec, state.unit_multiplier) * state.scale;
-        x = if state.coordinate_mode == "absolute" {
-            new_x
+        let new_x_nm = convert_coordinate_nm(x_val, 'x', &state.format_spec, state.unit_multiplier);
+        let new_x = if (state.unit_multiplier - 25.4).abs() < 1e-4 {
+            (new_x_nm as f64 / 1_000_000.0) as f32
         } else {
-            state.x + new_x
+            convert_coordinate(x_val, 'x', &state.format_spec, state.unit_multiplier)
+        } * state.scale;
+        let scaled_x_nm = if state.scale == 1.0 {
+            new_x_nm
+        } else {
+            (new_x_nm as f64 * state.scale as f64).round() as i64
+        };
+        if state.coordinate_mode == "absolute" {
+            x = new_x;
+            x_nm = scaled_x_nm;
+        } else {
+            x = state.x + new_x;
+            x_nm = state.x_nm + scaled_x_nm;
         };
     }
 
     // Process Y coordinate
     if let Some(y_val) = tokens.y {
-        let new_y =
-            convert_coordinate(y_val, 'y', &state.format_spec, state.unit_multiplier) * state.scale;
-        y = if state.coordinate_mode == "absolute" {
-            new_y
+        let new_y_nm = convert_coordinate_nm(y_val, 'y', &state.format_spec, state.unit_multiplier);
+        let new_y = if (state.unit_multiplier - 25.4).abs() < 1e-4 {
+            (new_y_nm as f64 / 1_000_000.0) as f32
         } else {
-            state.y + new_y
+            convert_coordinate(y_val, 'y', &state.format_spec, state.unit_multiplier)
+        } * state.scale;
+        let scaled_y_nm = if state.scale == 1.0 {
+            new_y_nm
+        } else {
+            (new_y_nm as f64 * state.scale as f64).round() as i64
+        };
+        if state.coordinate_mode == "absolute" {
+            y = new_y;
+            y_nm = scaled_y_nm;
+        } else {
+            y = state.y + new_y;
+            y_nm = state.y_nm + scaled_y_nm;
         };
     }
 
@@ -3491,7 +4353,9 @@ pub fn parse_graphic_command(
                     } else {
                         flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
                         let primitive_start = primitives.len();
-                        execute_interpolation(state, apertures, primitives, x, y, i, j)?;
+                        execute_interpolation_with_nm(
+                            state, apertures, primitives, x, y, i, j, x_nm, y_nm,
+                        )?;
                         let aperture = apertures.get(&state.current_aperture);
                         let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
                         record_interpolation_interactions(
@@ -3597,7 +4461,7 @@ pub fn parse_graphic_command(
         } else {
             flush_path_regions_to_layer(path_regions, state.polarity, polarity_layers)?;
             let primitive_start = primitives.len();
-            execute_interpolation(state, apertures, primitives, x, y, i, j)?;
+            execute_interpolation_with_nm(state, apertures, primitives, x, y, i, j, x_nm, y_nm)?;
             let aperture = apertures.get(&state.current_aperture);
             let (kind, arc_command) = interpolation_feature_kind(state, x, y, i, j);
             record_interpolation_interactions(
@@ -3622,6 +4486,8 @@ pub fn parse_graphic_command(
     // Update state
     state.x = x;
     state.y = y;
+    state.x_nm = x_nm;
+    state.y_nm = y_nm;
     state.i = i;
     state.j = j;
 

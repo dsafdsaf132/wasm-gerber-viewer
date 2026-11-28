@@ -1686,35 +1686,35 @@ fn set_size(aperture: &mut Aperture, width: f32, height: f32) {
 }
 
 fn circle(aperture: &mut Aperture, diameter: f32, hole_diameter: f32) {
-    aperture.primitives.push(Primitive::Circle {
-        x: 0.0,
-        y: 0.0,
-        radius: diameter / 2.0,
-        exposure: 1.0,
-        hole_x: 0.0,
-        hole_y: 0.0,
-        hole_radius: hole_diameter / 2.0,
-    });
+    aperture.primitives.push(Primitive::new_circle(
+        0.0,
+        0.0,
+        diameter / 2.0,
+        1.0,
+        0.0,
+        0.0,
+        hole_diameter / 2.0,
+    ));
 }
 
 fn rect(aperture: &mut Aperture, width: f32, height: f32, hole_diameter: f32) {
     let hw = width / 2.0;
     let hh = height / 2.0;
     let hole_radius = hole_diameter / 2.0;
-    aperture.primitives.push(Primitive::Triangle {
-        vertices: [[-hw, -hh], [hw, -hh], [hw, hh]],
-        exposure: 1.0,
-        hole_x: 0.0,
-        hole_y: 0.0,
+    aperture.primitives.push(Primitive::new_triangle(
+        [[-hw, -hh], [hw, -hh], [hw, hh]],
+        1.0,
+        0.0,
+        0.0,
         hole_radius,
-    });
-    aperture.primitives.push(Primitive::Triangle {
-        vertices: [[-hw, -hh], [hw, hh], [-hw, hh]],
-        exposure: 1.0,
-        hole_x: 0.0,
-        hole_y: 0.0,
+    ));
+    aperture.primitives.push(Primitive::new_triangle(
+        [[-hw, -hh], [hw, hh], [-hw, hh]],
+        1.0,
+        0.0,
+        0.0,
         hole_radius,
-    });
+    ));
 }
 
 /// A solid obround: two end circles and the rectangle between them.
@@ -1733,15 +1733,15 @@ fn oval(aperture: &mut Aperture, width: f32, height: f32) {
         (0.0, (height - width) / 2.0, width, height - width)
     };
     for sign in [-1.0f32, 1.0] {
-        aperture.primitives.push(Primitive::Circle {
-            x: sign * dx,
-            y: sign * dy,
+        aperture.primitives.push(Primitive::new_circle(
+            sign * dx,
+            sign * dy,
             radius,
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        });
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        ));
     }
     rect(aperture, rect_w, rect_h, 0.0);
 }
@@ -1908,15 +1908,9 @@ fn moire(
         for _ in 0..rings {
             inner += ring_gap;
             let outer = inner + ring_width;
-            aperture.primitives.push(Primitive::Circle {
-                x: 0.0,
-                y: 0.0,
-                radius: outer,
-                exposure: 1.0,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: inner,
-            });
+            aperture
+                .primitives
+                .push(Primitive::new_circle(0.0, 0.0, outer, 1.0, 0.0, 0.0, inner));
             inner = outer;
         }
         // Highlight batches are drawn in primitive order. Draw the outer
@@ -1934,15 +1928,15 @@ fn moire(
                 .map(|[x, y]| [x * cos - y * sin, x * sin + y * cos]);
             outline(aperture, &corners);
             for end in [-hl, hl] {
-                aperture.primitives.push(Primitive::Circle {
-                    x: end * cos,
-                    y: end * sin,
-                    radius: hw,
-                    exposure: 1.0,
-                    hole_x: 0.0,
-                    hole_y: 0.0,
-                    hole_radius: 0.0,
-                });
+                aperture.primitives.push(Primitive::new_circle(
+                    end * cos,
+                    end * sin,
+                    hw,
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ));
             }
         }
     }
@@ -1993,15 +1987,15 @@ fn round_thermal_rounded(
         outline(aperture, &points);
         for angle in [start, end] {
             let radians = angle.to_radians();
-            aperture.primitives.push(Primitive::Circle {
-                x: mid_radius * radians.cos(),
-                y: mid_radius * radians.sin(),
-                radius: cap_radius,
-                exposure: 1.0,
-                hole_x: 0.0,
-                hole_y: 0.0,
-                hole_radius: 0.0,
-            });
+            aperture.primitives.push(Primitive::new_circle(
+                mid_radius * radians.cos(),
+                mid_radius * radians.sin(),
+                cap_radius,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+            ));
         }
     }
 }

@@ -33,7 +33,7 @@ fn sr_template_fallback_accounts_for_every_raw_primitive() {
             &state,
             &apertures,
             &mut primitives,
-            &mut PathRegions::empty(),
+            &mut crate::geometry::PathRegionsBuilder::empty(),
             &mut Vec::new(),
             0.0,
             0.0,
@@ -51,7 +51,7 @@ fn sr_template_fallback_accounts_for_every_raw_primitive() {
             &state,
             &apertures,
             &mut rejected,
-            &mut PathRegions::empty(),
+            &mut crate::geometry::PathRegionsBuilder::empty(),
             &mut Vec::new(),
             0.0,
             0.0,
@@ -64,54 +64,19 @@ fn sr_template_fallback_accounts_for_every_raw_primitive() {
 
 fn sr_circle_aperture() -> Aperture {
     let mut aperture = Aperture::new(0.005);
-    aperture.primitives.push(Primitive::Circle {
-        x: 0.3,
-        y: -0.2,
-        radius: 0.005,
-        exposure: 1.0,
-        hole_x: 0.3,
-        hole_y: -0.2,
-        hole_radius: 0.001,
-    });
+    aperture.primitives.push(Primitive::new_circle(
+        0.3, -0.2, 0.005, 1.0, 0.3, -0.2, 0.001,
+    ));
     aperture
 }
 
 fn sr_test_primitives() -> Vec<Primitive> {
     vec![
         sr_circle_aperture().primitives.remove(0),
-        Primitive::Arc {
-            x: 0.3,
-            y: -0.2,
-            radius: 0.7,
-            start_angle: -0.4,
-            end_angle: 2.1,
-            thickness: 0.15,
-            exposure: 1.0,
-        },
-        Primitive::Thermal {
-            x: 0.3,
-            y: -0.2,
-            outer_diameter: 1.4,
-            inner_diameter: 0.7,
-            gap_thickness: 0.16,
-            rotation: 0.31,
-            exposure: 1.0,
-        },
-        Primitive::Line {
-            start_x: -0.8,
-            start_y: 0.3,
-            end_x: 0.7,
-            end_y: -0.2,
-            width: 0.15,
-            exposure: 1.0,
-        },
-        Primitive::Triangle {
-            vertices: [[-0.3, 0.2], [0.7, -0.4], [0.6, 0.8]],
-            exposure: 1.0,
-            hole_x: 0.3,
-            hole_y: 0.2,
-            hole_radius: 0.03,
-        },
+        Primitive::new_arc(0.3, -0.2, 0.7, -0.4, 2.1, 0.15, 1.0),
+        Primitive::new_thermal(0.3, -0.2, 1.4, 0.7, 0.16, 0.31, 1.0),
+        Primitive::new_line(-0.8, 0.3, 0.7, -0.2, 0.15, 1.0),
+        Primitive::new_triangle([[-0.3, 0.2], [0.7, -0.4], [0.6, 0.8]], 1.0, 0.3, 0.2, 0.03),
     ]
 }
 
@@ -126,24 +91,8 @@ fn sr_all_primitives_match_reference_geometry_and_picking() {
         .chain(std::iter::once(shapes.clone()))
         .collect();
     cases.push(vec![
-        Primitive::Circle {
-            x: 0.3,
-            y: -0.2,
-            radius: 0.7,
-            exposure: 1.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        },
-        Primitive::Circle {
-            x: 0.4,
-            y: -0.1,
-            radius: 0.2,
-            exposure: 0.0,
-            hole_x: 0.0,
-            hole_y: 0.0,
-            hole_radius: 0.0,
-        },
+        Primitive::new_circle(0.3, -0.2, 0.7, 1.0, 0.0, 0.0, 0.0),
+        Primitive::new_circle(0.4, -0.1, 0.2, 0.0, 0.0, 0.0, 0.0),
     ]);
     for primitives in cases {
         let mut aperture = Aperture::new(0.7);
@@ -212,7 +161,7 @@ fn sr_all_primitives_match_reference_geometry_and_picking() {
                                 &state,
                                 &apertures,
                                 &mut actual,
-                                &mut PathRegions::empty(),
+                                &mut crate::geometry::PathRegionsBuilder::empty(),
                                 &mut Vec::new(),
                                 0.7,
                                 -0.4,
@@ -286,7 +235,7 @@ fn sr_flash_matches_per_copy_transform_and_preserves_order() {
                     &state,
                     &apertures,
                     &mut actual,
-                    &mut PathRegions::empty(),
+                    &mut crate::geometry::PathRegionsBuilder::empty(),
                     &mut Vec::new(),
                     0.7,
                     -0.4,
@@ -364,4 +313,54 @@ fn canonical_arc_preserves_clamped_mismatched_radius_sweep() {
     );
 
     assert!(arc.sweep_angle.abs() <= std::f32::consts::PI / 2.0 + 0.0001);
+}
+
+#[test]
+fn sr_integer_nanometer_coordinates_stay_exact_across_copies() {
+    let mut state = ParserState::default();
+    state.current_aperture = "10".into();
+    state.sr_x = 4;
+    state.sr_y = 3;
+    state.sr_i = 2.54; // 100 mils = 2.54 mm = 2,540,000 nm
+    state.sr_j = 1.27; // 50 mils = 1.27 mm = 1,270,000 nm
+    let mut aperture = Aperture::new(0.5);
+    aperture
+        .primitives
+        .push(Primitive::new_circle(0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0));
+    let apertures = HashMap::from([("10".into(), aperture)]);
+    let mut actual = Vec::new();
+    flash_aperture(
+        &state,
+        &apertures,
+        &mut actual,
+        &mut crate::geometry::PathRegionsBuilder::empty(),
+        &mut Vec::new(),
+        10.0,
+        20.0,
+    )
+    .unwrap();
+
+    assert_eq!(actual.len(), 12);
+    let mut idx = 0;
+    for sy in 0..3 {
+        for sx in 0..4 {
+            let prim = &actual[idx];
+            if let Primitive::Circle {
+                x_nm,
+                y_nm,
+                radius_nm,
+                ..
+            } = prim
+            {
+                let expected_x_nm = 10_000_000 + sx * 2_540_000;
+                let expected_y_nm = 20_000_000 + sy * 1_270_000;
+                assert_eq!(*x_nm, expected_x_nm);
+                assert_eq!(*y_nm, expected_y_nm);
+                assert_eq!(*radius_nm, 500_000);
+            } else {
+                panic!("Expected Circle primitive");
+            }
+            idx += 1;
+        }
+    }
 }
