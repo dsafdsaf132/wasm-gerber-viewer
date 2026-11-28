@@ -191,23 +191,31 @@ The shared geometry model is in `wasm/src/geometry/shape.rs`.
 
 Important types:
 
-- `GerberData`: one renderable polarity sublayer.
+- `GerberData`: one renderable polarity sublayer with a layer-wide `origin_nm: [i64; 2]`.
 - `Boundary`: min/max bounds.
 - `Lines`, `Circles`, `Arcs`, `Thermals`, `TriangleTemplateInstances`.
-- `PathRegions`: region/path based geometry.
+- `PathRegions` / `PathRegionsBuilder`: region/path based geometry.
 
-`PathRegions` is rendered with WebGL stencil state. `wedge_vertices` contains
-line and chord wedge triangles. `sector_vertices` contains analytic circular
-cap quads for arc segments. `cover_vertices` and `clear_vertices` define the
-quads used to apply and reset each stencil-filled region. Source contours may
-also be retained for interaction, outline, and inverted-layer workflows.
+Coordinates and dimensions across Gerber, ODB++, and Drill parsers are parsed
+in `i64` nanometers (`nm`), shifted relative to a layer-wide bounding center
+`origin_nm`, and stored in single `i32` (`Int32Array`) buffers (`*_nm`). Layers
+whose span exceeds `u32::MAX` (`4.29 m`) return an explicit error.
 
-`GerberData` supports JS render-payload conversion. This lets a worker, or a
-main-thread pre-parse helper, parse geometry outside the stateful renderer
-instance and pass render buffers into `add_render_payload()`. Feature picking
-data uses a separate compact interaction payload from `wasm/src/interaction/mod.rs`
-so aperture strings, descriptors, templates, primitives, and path-region data
-can remain table-based across the JS boundary.
+`PathRegions` is rendered with WebGL stencil state. `PathRegionsBuilder` stages
+world-space `i64` nm vertices during parsing before `origin_nm` finalization
+produces `i32` buffers: `wedge_vertices_nm` contains line and chord wedge
+triangles, `sector_vertices_nm` contains analytic circular cap quads for arc
+segments, and `cover_vertices_nm` / `clear_vertices_nm` define the quads used to
+apply and reset each stencil-filled region. Source contours may also be
+retained for interaction, outline, and inverted-layer workflows.
+
+`GerberData` supports JS render-payload conversion (including `originNmX` and
+`originNmY`). This lets a worker, or a main-thread pre-parse helper, parse
+geometry outside the stateful renderer instance and pass render buffers into
+`add_render_payload()`. Feature picking data uses a separate compact
+interaction payload from `wasm/src/interaction/mod.rs` so aperture strings,
+descriptors, templates, primitives, and path-region data can remain table-based
+across the JS boundary.
 
 ### 6. Processor State
 
@@ -436,7 +444,10 @@ When redrawing:
 
 1. Bind the layer FBO.
 2. Clear it to transparent black.
-3. Call `render_layer_geometry(layer_idx, transform, width, height)`.
+3. Call `render_layer_geometry(layer_idx, transform, width, height)`, which
+   computes an origin-relative RTE transform and `u_eye_nm` per sublayer so all
+   integer (`in int` / `in ivec2`) vertex shaders evaluate `coord - u_eye_nm`
+   via `sub_i32_to_f32` without signed 32-bit overflow.
 4. Mark the layer clean and cache the transform.
 
 ### 5. GPU Buffer and VAO Cache
