@@ -2398,7 +2398,7 @@ impl Renderer {
                 path_regions,
                 boundary,
                 data.is_negative,
-            ));
+            )?);
         }
 
         if fill_layers.is_empty() {
@@ -2481,7 +2481,7 @@ impl Renderer {
             ));
         }
 
-        let layer = Self::path_region_layer(path_regions, boundary, false);
+        let layer = Self::path_region_layer(path_regions, boundary, false)?;
         Ok((layer, contours))
     }
 
@@ -2496,23 +2496,26 @@ impl Renderer {
             ));
         }
 
-        let vertices = vec![
-            bounds.min_x,
-            bounds.min_y,
-            bounds.max_x,
-            bounds.min_y,
-            bounds.max_x,
-            bounds.max_y,
-            bounds.min_x,
-            bounds.min_y,
-            bounds.max_x,
-            bounds.max_y,
-            bounds.min_x,
-            bounds.max_y,
-        ];
+        let min_x_nm = (bounds.min_x as f64 * 1_000_000.0).round() as i64;
+        let max_x_nm = (bounds.max_x as f64 * 1_000_000.0).round() as i64;
+        let min_y_nm = (bounds.min_y as f64 * 1_000_000.0).round() as i64;
+        let max_y_nm = (bounds.max_y as f64 * 1_000_000.0).round() as i64;
+        let span_x = max_x_nm.saturating_sub(min_x_nm);
+        let span_y = max_y_nm.saturating_sub(min_y_nm);
+        if span_x > u32::MAX as i64 || span_y > u32::MAX as i64 {
+            return Err(JsValue::from_str(
+                "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates",
+            ));
+        }
+        let origin_nm = [min_x_nm + (span_x + 1) / 2, min_y_nm + (span_y + 1) / 2];
+        let x0 = (min_x_nm - origin_nm[0]) as i32;
+        let x1 = (max_x_nm - origin_nm[0]) as i32;
+        let y0 = (min_y_nm - origin_nm[1]) as i32;
+        let y1 = (max_y_nm - origin_nm[1]) as i32;
+        let vertices_nm = vec![x0, y0, x1, y0, x1, y1, x0, y0, x1, y1, x0, y1];
 
-        Ok(GerberData::new(
-            Triangles::new(vertices, Vec::new(), Vec::new(), Vec::new()),
+        Ok(GerberData::new_with_origin(
+            Triangles::new_with_nm(vertices_nm, Vec::new(), Vec::new(), Vec::new()),
             Vec::new(),
             Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Circles::new(
@@ -2542,6 +2545,7 @@ impl Renderer {
             PathRegions::empty(),
             bounds,
             false,
+            origin_nm,
         ))
     }
 
@@ -2575,15 +2579,31 @@ impl Renderer {
                 },
             )?;
 
-        Ok(Self::path_region_layer(path_regions, clip_boundary, true))
+        Self::path_region_layer(path_regions, clip_boundary, true)
     }
 
     fn path_region_layer(
-        path_regions: PathRegions,
+        mut path_regions: PathRegions,
         boundary: Boundary,
         is_negative: bool,
-    ) -> GerberData {
-        GerberData::new(
+    ) -> Result<GerberData, JsValue> {
+        let min_x_nm = (boundary.min_x as f64 * 1_000_000.0).round() as i64;
+        let max_x_nm = (boundary.max_x as f64 * 1_000_000.0).round() as i64;
+        let min_y_nm = (boundary.min_y as f64 * 1_000_000.0).round() as i64;
+        let max_y_nm = (boundary.max_y as f64 * 1_000_000.0).round() as i64;
+        let span_x = max_x_nm.saturating_sub(min_x_nm);
+        let span_y = max_y_nm.saturating_sub(min_y_nm);
+        let origin_nm = [min_x_nm + (span_x + 1) / 2, min_y_nm + (span_y + 1) / 2];
+        if !path_regions.wedge_vertices.is_empty()
+            || !path_regions.sector_vertices.is_empty()
+            || !path_regions.cover_vertices.is_empty()
+            || !path_regions.clear_vertices.is_empty()
+        {
+            path_regions
+                .finalize_origin_nm(origin_nm)
+                .map_err(|msg| JsValue::from_str(&msg))?;
+        }
+        Ok(GerberData::new_with_origin(
             Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Vec::new(),
             Lines::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
@@ -2614,7 +2634,8 @@ impl Renderer {
             path_regions,
             boundary,
             is_negative,
-        )
+            origin_nm,
+        ))
     }
 
     fn bounds_region_contour(bounds: &Boundary) -> Result<RegionContour, JsValue> {
