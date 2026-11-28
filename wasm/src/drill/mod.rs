@@ -4,17 +4,24 @@ use crate::geometry::{
 };
 use crate::interaction::{drill_hit_feature, drill_slot_feature, InteractionLayer};
 use crate::parser::common::{
-    find_g_code_index, line_has_g_code, parse_coordinate_number as parse_common_coordinate_number,
-    parse_decimal_number as parse_common_decimal_number, parse_g_code, read_number,
-    CoordinateFormat, ZeroSuppression,
+    find_g_code_index, line_has_g_code, parse_coordinate_number_nm, parse_decimal_nanometers,
+    parse_g_code, read_number, CoordinateFormat, ZeroSuppression, NANOMETERS_PER_INCH,
+    NANOMETERS_PER_MM,
 };
 use crate::parser::geometry::Primitive;
 use js_sys::{Array, Object, Reflect};
 use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
 
-const INCH_TO_MM: f32 = 25.4;
-const TWO_PI: f32 = std::f32::consts::PI * 2.0;
+const TWO_PI: f64 = std::f64::consts::PI * 2.0;
+
+fn mm_to_nm_f64(value: f64) -> i64 {
+    (value * 1_000_000.0).round() as i64
+}
+
+fn mm_to_nm_f32(value: f32) -> i64 {
+    mm_to_nm_f64(value as f64)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Unit {
@@ -23,10 +30,10 @@ enum Unit {
 }
 
 impl Unit {
-    fn multiplier(self) -> f32 {
+    fn multiplier_nm(self) -> i64 {
         match self {
-            Unit::Metric => 1.0,
-            Unit::Inch => INCH_TO_MM,
+            Unit::Metric => NANOMETERS_PER_MM,
+            Unit::Inch => NANOMETERS_PER_INCH,
         }
     }
 
@@ -78,6 +85,7 @@ impl RoutingInterpolation {
 #[derive(Clone, Debug)]
 struct Tool {
     diameter_mm: f32,
+    diameter_nm: i64,
     hit_count: u32,
     slot_count: u32,
 }
@@ -152,139 +160,156 @@ pub struct DrillParseResult {
 
 #[derive(Default)]
 struct DrillGeometry {
-    circle_x: Vec<f32>,
-    circle_y: Vec<f32>,
-    circle_radius: Vec<f32>,
-    line_start_x: Vec<f32>,
-    line_start_y: Vec<f32>,
-    line_end_x: Vec<f32>,
-    line_end_y: Vec<f32>,
-    line_width: Vec<f32>,
-    arc_x: Vec<f32>,
-    arc_y: Vec<f32>,
-    arc_radius: Vec<f32>,
+    circle_x_nm: Vec<i64>,
+    circle_y_nm: Vec<i64>,
+    circle_radius_nm: Vec<i64>,
+    line_start_x_nm: Vec<i64>,
+    line_start_y_nm: Vec<i64>,
+    line_end_x_nm: Vec<i64>,
+    line_end_y_nm: Vec<i64>,
+    line_width_nm: Vec<i64>,
+    arc_x_nm: Vec<i64>,
+    arc_y_nm: Vec<i64>,
+    arc_radius_nm: Vec<i64>,
     arc_start_angle: Vec<f32>,
     arc_sweep_angle: Vec<f32>,
-    arc_thickness: Vec<f32>,
-    min_x: f32,
-    max_x: f32,
-    min_y: f32,
-    max_y: f32,
+    arc_thickness_nm: Vec<i64>,
+    min_x_nm: i64,
+    max_x_nm: i64,
+    min_y_nm: i64,
+    max_y_nm: i64,
     has_geometry: bool,
 }
 
 impl DrillGeometry {
     fn new() -> Self {
         Self {
-            min_x: f32::INFINITY,
-            max_x: f32::NEG_INFINITY,
-            min_y: f32::INFINITY,
-            max_y: f32::NEG_INFINITY,
+            min_x_nm: i64::MAX,
+            max_x_nm: i64::MIN,
+            min_y_nm: i64::MAX,
+            max_y_nm: i64::MIN,
             ..Self::default()
         }
     }
 
-    fn push_circle(&mut self, x: f32, y: f32, radius: f32) {
-        self.circle_x.push(x);
-        self.circle_y.push(y);
-        self.circle_radius.push(radius);
-        self.include_circle_bounds(x, y, radius);
+    fn push_circle(&mut self, x_nm: i64, y_nm: i64, radius_nm: i64) {
+        self.circle_x_nm.push(x_nm);
+        self.circle_y_nm.push(y_nm);
+        self.circle_radius_nm.push(radius_nm);
+        self.include_circle_bounds(x_nm, y_nm, radius_nm);
     }
 
-    fn push_line(&mut self, start_x: f32, start_y: f32, end_x: f32, end_y: f32, width: f32) {
-        self.line_start_x.push(start_x);
-        self.line_start_y.push(start_y);
-        self.line_end_x.push(end_x);
-        self.line_end_y.push(end_y);
-        self.line_width.push(width);
+    fn push_line(
+        &mut self,
+        start_x_nm: i64,
+        start_y_nm: i64,
+        end_x_nm: i64,
+        end_y_nm: i64,
+        width_nm: i64,
+    ) {
+        self.line_start_x_nm.push(start_x_nm);
+        self.line_start_y_nm.push(start_y_nm);
+        self.line_end_x_nm.push(end_x_nm);
+        self.line_end_y_nm.push(end_y_nm);
+        self.line_width_nm.push(width_nm);
 
-        let radius = width / 2.0;
-        self.include_circle_bounds(start_x, start_y, radius);
-        self.include_circle_bounds(end_x, end_y, radius);
+        let radius_nm = (width_nm + 1) / 2;
+        self.include_circle_bounds(start_x_nm, start_y_nm, radius_nm);
+        self.include_circle_bounds(end_x_nm, end_y_nm, radius_nm);
     }
 
     fn push_arc(
         &mut self,
-        center_x: f32,
-        center_y: f32,
-        radius: f32,
-        start_angle: f32,
-        sweep_angle: f32,
-        thickness: f32,
+        center_x_nm: i64,
+        center_y_nm: i64,
+        radius_nm: i64,
+        start_angle: f64,
+        sweep_angle: f64,
+        thickness_nm: i64,
     ) {
-        self.arc_x.push(center_x);
-        self.arc_y.push(center_y);
-        self.arc_radius.push(radius);
-        self.arc_start_angle.push(start_angle);
-        self.arc_sweep_angle.push(sweep_angle);
-        self.arc_thickness.push(thickness);
+        self.arc_x_nm.push(center_x_nm);
+        self.arc_y_nm.push(center_y_nm);
+        self.arc_radius_nm.push(radius_nm);
+        self.arc_start_angle.push(start_angle as f32);
+        self.arc_sweep_angle.push(sweep_angle as f32);
+        self.arc_thickness_nm.push(thickness_nm);
         self.include_arc_bounds(
-            center_x,
-            center_y,
-            radius,
+            center_x_nm,
+            center_y_nm,
+            radius_nm,
             start_angle,
             sweep_angle,
-            thickness,
+            thickness_nm,
         );
     }
 
-    fn include_circle_bounds(&mut self, x: f32, y: f32, radius: f32) {
-        self.min_x = self.min_x.min(x - radius);
-        self.max_x = self.max_x.max(x + radius);
-        self.min_y = self.min_y.min(y - radius);
-        self.max_y = self.max_y.max(y + radius);
+    fn include_circle_bounds(&mut self, x_nm: i64, y_nm: i64, radius_nm: i64) {
+        self.min_x_nm = self.min_x_nm.min(x_nm.saturating_sub(radius_nm));
+        self.max_x_nm = self.max_x_nm.max(x_nm.saturating_add(radius_nm));
+        self.min_y_nm = self.min_y_nm.min(y_nm.saturating_sub(radius_nm));
+        self.max_y_nm = self.max_y_nm.max(y_nm.saturating_add(radius_nm));
         self.has_geometry = true;
     }
 
     fn include_arc_bounds(
         &mut self,
-        center_x: f32,
-        center_y: f32,
-        radius: f32,
-        start_angle: f32,
-        sweep_angle: f32,
-        thickness: f32,
+        center_x_nm: i64,
+        center_y_nm: i64,
+        radius_nm: i64,
+        start_angle: f64,
+        sweep_angle: f64,
+        thickness_nm: i64,
     ) {
-        let cap_radius = thickness / 2.0;
+        let cap_radius_nm = (thickness_nm + 1) / 2;
         if sweep_angle.abs() >= TWO_PI - 0.000001 {
-            self.include_circle_bounds(center_x, center_y, radius + cap_radius);
+            self.include_circle_bounds(center_x_nm, center_y_nm, radius_nm + cap_radius_nm);
             return;
         }
 
-        self.include_arc_point_bounds(center_x, center_y, radius, start_angle, cap_radius);
         self.include_arc_point_bounds(
-            center_x,
-            center_y,
-            radius,
+            center_x_nm,
+            center_y_nm,
+            radius_nm,
+            start_angle,
+            cap_radius_nm,
+        );
+        self.include_arc_point_bounds(
+            center_x_nm,
+            center_y_nm,
+            radius_nm,
             start_angle + sweep_angle,
-            cap_radius,
+            cap_radius_nm,
         );
 
         for angle in [
             0.0,
-            std::f32::consts::FRAC_PI_2,
-            std::f32::consts::PI,
-            std::f32::consts::PI * 1.5,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::PI,
+            std::f64::consts::PI * 1.5,
         ] {
             if angle_is_on_sweep(angle, start_angle, sweep_angle) {
-                self.include_arc_point_bounds(center_x, center_y, radius, angle, cap_radius);
+                self.include_arc_point_bounds(
+                    center_x_nm,
+                    center_y_nm,
+                    radius_nm,
+                    angle,
+                    cap_radius_nm,
+                );
             }
         }
     }
 
     fn include_arc_point_bounds(
         &mut self,
-        center_x: f32,
-        center_y: f32,
-        radius: f32,
-        angle: f32,
-        cap_radius: f32,
+        center_x_nm: i64,
+        center_y_nm: i64,
+        radius_nm: i64,
+        angle: f64,
+        cap_radius_nm: i64,
     ) {
-        self.include_circle_bounds(
-            center_x + angle.cos() * radius,
-            center_y + angle.sin() * radius,
-            cap_radius,
-        );
+        let px_nm = center_x_nm + (angle.cos() * radius_nm as f64).round() as i64;
+        let py_nm = center_y_nm + (angle.sin() * radius_nm as f64).round() as i64;
+        self.include_circle_bounds(px_nm, py_nm, cap_radius_nm);
     }
 
     fn boundary(&self) -> Boundary {
@@ -292,38 +317,116 @@ impl DrillGeometry {
             return Boundary::new(0.0, 0.0, 0.0, 0.0);
         }
 
-        Boundary::new(self.min_x, self.max_x, self.min_y, self.max_y)
+        Boundary::new(
+            (self.min_x_nm as f64 * 1e-6) as f32,
+            (self.max_x_nm as f64 * 1e-6) as f32,
+            (self.min_y_nm as f64 * 1e-6) as f32,
+            (self.max_y_nm as f64 * 1e-6) as f32,
+        )
     }
 
-    fn into_layer(self) -> GerberData {
+    fn into_layer(self) -> Result<GerberData, String> {
         let boundary = self.boundary();
-        GerberData::new(
-            Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        if !self.has_geometry {
+            return Ok(GerberData::new_with_origin(
+                Triangles::new_with_nm(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                Vec::<TriangleTemplateInstances>::new(),
+                Lines::new_with_nm(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                Circles::new_with_nm(
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                Arcs::new_with_nm(
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                Thermals::new_with_nm(
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                PathRegions::empty(),
+                boundary,
+                false,
+                [0, 0],
+            ));
+        }
+
+        let span_x = self.max_x_nm.saturating_sub(self.min_x_nm);
+        let span_y = self.max_y_nm.saturating_sub(self.min_y_nm);
+        if span_x > u32::MAX as i64 || span_y > u32::MAX as i64 {
+            return Err(
+                "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates"
+                    .to_string(),
+            );
+        }
+
+        let origin_nm = [
+            self.min_x_nm + ((span_x + 1) / 2),
+            self.min_y_nm + ((span_y + 1) / 2),
+        ];
+
+        let to_rel = |values: Vec<i64>, origin: i64| -> Result<Vec<i32>, String> {
+            values
+                .into_iter()
+                .map(|v| {
+                    i32::try_from(v - origin).map_err(|_| {
+                        "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates"
+                            .to_string()
+                    })
+                })
+                .collect()
+        };
+        let to_dim = |values: Vec<i64>| -> Result<Vec<i32>, String> {
+            values
+                .into_iter()
+                .map(|v| {
+                    i32::try_from(v).map_err(|_| {
+                        "Feature dimension exceeds maximum supported size (2.14 m) for integer nanometer coordinates"
+                            .to_string()
+                    })
+                })
+                .collect()
+        };
+
+        Ok(GerberData::new_with_origin(
+            Triangles::new_with_nm(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Vec::<TriangleTemplateInstances>::new(),
-            Lines::new(
-                self.line_start_x,
-                self.line_start_y,
-                self.line_end_x,
-                self.line_end_y,
-                self.line_width,
+            Lines::new_with_nm(
+                to_rel(self.line_start_x_nm, origin_nm[0])?,
+                to_rel(self.line_start_y_nm, origin_nm[1])?,
+                to_rel(self.line_end_x_nm, origin_nm[0])?,
+                to_rel(self.line_end_y_nm, origin_nm[1])?,
+                to_dim(self.line_width_nm)?,
             ),
-            Circles::new(
-                self.circle_x,
-                self.circle_y,
-                self.circle_radius,
+            Circles::new_with_nm(
+                to_rel(self.circle_x_nm, origin_nm[0])?,
+                to_rel(self.circle_y_nm, origin_nm[1])?,
+                to_dim(self.circle_radius_nm)?,
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
-            Arcs::new(
-                self.arc_x,
-                self.arc_y,
-                self.arc_radius,
+            Arcs::new_with_nm(
+                to_rel(self.arc_x_nm, origin_nm[0])?,
+                to_rel(self.arc_y_nm, origin_nm[1])?,
+                to_dim(self.arc_radius_nm)?,
                 self.arc_start_angle,
                 self.arc_sweep_angle,
-                self.arc_thickness,
+                to_dim(self.arc_thickness_nm)?,
             ),
-            Thermals::new(
+            Thermals::new_with_nm(
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
@@ -334,17 +437,18 @@ impl DrillGeometry {
             PathRegions::empty(),
             boundary,
             false,
-        )
+            origin_nm,
+        ))
     }
 }
 
 #[derive(Clone, Copy, Default, Debug)]
 struct CoordinateWords {
-    x: Option<f32>,
-    y: Option<f32>,
-    i: Option<f32>,
-    j: Option<f32>,
-    a: Option<f32>,
+    x: Option<i64>,
+    y: Option<i64>,
+    i: Option<i64>,
+    j: Option<i64>,
+    a: Option<i64>,
 }
 
 impl CoordinateWords {
@@ -367,23 +471,23 @@ pub(crate) struct DrillParser {
     is_absolute: bool,
     routing_down: bool,
     current_tool: Option<u32>,
-    current_x: f32,
-    current_y: f32,
-    last_hit: Option<(f32, f32)>,
+    current_x_nm: i64,
+    current_y_nm: i64,
+    last_hit_nm: Option<(i64, i64)>,
     tools: BTreeMap<u32, Tool>,
     fill: DrillGeometry,
     outline: DrillGeometry,
-    outline_width_mm: f32,
-    offset_x: f32,
-    offset_y: f32,
+    outline_width_nm: i64,
+    offset_x_nm: i64,
+    offset_y_nm: i64,
     interaction_layer: Option<InteractionLayer>,
 }
 
 impl DrillParser {
     fn new(
         outline_width_mm: f32,
-        offset_x: f32,
-        offset_y: f32,
+        offset_x: f64,
+        offset_y: f64,
         collect_interactions: bool,
     ) -> Result<Self, JsValue> {
         if !offset_x.is_finite() || !offset_y.is_finite() {
@@ -400,15 +504,15 @@ impl DrillParser {
             is_absolute: true,
             routing_down: false,
             current_tool: None,
-            current_x: 0.0,
-            current_y: 0.0,
-            last_hit: None,
+            current_x_nm: 0,
+            current_y_nm: 0,
+            last_hit_nm: None,
             tools: BTreeMap::new(),
             fill: DrillGeometry::new(),
             outline: DrillGeometry::new(),
-            outline_width_mm: outline_width_mm.max(0.0),
-            offset_x,
-            offset_y,
+            outline_width_nm: mm_to_nm_f32(outline_width_mm.max(0.0)),
+            offset_x_nm: mm_to_nm_f64(offset_x),
+            offset_y_nm: mm_to_nm_f64(offset_y),
             interaction_layer: collect_interactions.then(InteractionLayer::new),
         })
     }
@@ -459,8 +563,14 @@ impl DrillParser {
             .collect();
 
         Ok(DrillParseResult {
-            fill_layer: self.fill.into_layer(),
-            outline_layer: self.outline.into_layer(),
+            fill_layer: self
+                .fill
+                .into_layer()
+                .map_err(|msg| JsValue::from_str(&msg))?,
+            outline_layer: self
+                .outline
+                .into_layer()
+                .map_err(|msg| JsValue::from_str(&msg))?,
             metadata: DrillMetadata {
                 tools,
                 hit_count,
@@ -476,6 +586,7 @@ impl DrillParser {
             code,
             Tool {
                 diameter_mm,
+                diameter_nm: mm_to_nm_f32(diameter_mm),
                 hit_count: 0,
                 slot_count: 0,
             },
@@ -488,10 +599,12 @@ impl DrillParser {
 
     /// A drill hit at `(x, y)` in millimetres with the selected tool.
     pub(crate) fn add_hit(&mut self, x: f32, y: f32) -> Result<(), JsValue> {
+        let x_nm = mm_to_nm_f32(x);
+        let y_nm = mm_to_nm_f32(y);
         self.mode = Mode::Drill;
-        self.push_hit(x, y)?;
-        self.current_x = x;
-        self.current_y = y;
+        self.push_hit(x_nm, y_nm)?;
+        self.current_x_nm = x_nm;
+        self.current_y_nm = y_nm;
         Ok(())
     }
 
@@ -503,9 +616,13 @@ impl DrillParser {
         end_x: f32,
         end_y: f32,
     ) -> Result<(), JsValue> {
-        self.push_slot_between(start_x, start_y, end_x, end_y)?;
-        self.current_x = end_x;
-        self.current_y = end_y;
+        let start_x_nm = mm_to_nm_f32(start_x);
+        let start_y_nm = mm_to_nm_f32(start_y);
+        let end_x_nm = mm_to_nm_f32(end_x);
+        let end_y_nm = mm_to_nm_f32(end_y);
+        self.push_slot_between(start_x_nm, start_y_nm, end_x_nm, end_y_nm)?;
+        self.current_x_nm = end_x_nm;
+        self.current_y_nm = end_y_nm;
         Ok(())
     }
 
@@ -521,19 +638,25 @@ impl DrillParser {
         center_y: f32,
         counter_clockwise: bool,
     ) -> Result<(), JsValue> {
+        let start_x_nm = mm_to_nm_f32(start_x);
+        let start_y_nm = mm_to_nm_f32(start_y);
+        let end_x_nm = mm_to_nm_f32(end_x);
+        let end_y_nm = mm_to_nm_f32(end_y);
+        let center_x_nm = mm_to_nm_f32(center_x);
+        let center_y_nm = mm_to_nm_f32(center_y);
         self.mode = Mode::Rout;
-        self.current_x = start_x;
-        self.current_y = start_y;
+        self.current_x_nm = start_x_nm;
+        self.current_y_nm = start_y_nm;
         let words = CoordinateWords {
-            x: Some(end_x),
-            y: Some(end_y),
-            i: Some(center_x - start_x),
-            j: Some(center_y - start_y),
+            x: Some(end_x_nm),
+            y: Some(end_y_nm),
+            i: Some(center_x_nm - start_x_nm),
+            j: Some(center_y_nm - start_y_nm),
             a: None,
         };
-        self.push_arc(end_x, end_y, words, counter_clockwise)?;
-        self.current_x = end_x;
-        self.current_y = end_y;
+        self.push_arc(end_x_nm, end_y_nm, words, counter_clockwise)?;
+        self.current_x_nm = end_x_nm;
+        self.current_y_nm = end_y_nm;
         Ok(())
     }
 
@@ -601,11 +724,12 @@ impl DrillParser {
             return Ok(());
         }
 
-        if let Some((code, diameter)) = parse_tool_declaration(line, self.unit)? {
+        if let Some((code, diameter_mm, diameter_nm)) = parse_tool_declaration(line, self.unit)? {
             self.tools.insert(
                 code,
                 Tool {
-                    diameter_mm: diameter,
+                    diameter_mm,
+                    diameter_nm,
                     hit_count: 0,
                     slot_count: 0,
                 },
@@ -634,8 +758,8 @@ impl DrillParser {
             self.routing_interpolation = RoutingInterpolation::Linear;
             if let Some(words) = parse_coordinate_words(line, self.unit, self.coordinate_format)? {
                 let (x, y) = self.resolve_xy(words.x, words.y);
-                self.current_x = x;
-                self.current_y = y;
+                self.current_x_nm = x;
+                self.current_y_nm = y;
             }
             return Ok(());
         }
@@ -651,8 +775,8 @@ impl DrillParser {
                 self.mode = Mode::Rout;
                 self.push_slot(end_x, end_y)?;
             }
-            self.current_x = end_x;
-            self.current_y = end_y;
+            self.current_x_nm = end_x;
+            self.current_y_nm = end_y;
             return Ok(());
         }
 
@@ -664,7 +788,7 @@ impl DrillParser {
             };
             let (start_x, start_y) = start_words
                 .map(|words| self.resolve_xy(words.x, words.y))
-                .unwrap_or((self.current_x, self.current_y));
+                .unwrap_or((self.current_x_nm, self.current_y_nm));
             let (end_x, end_y) = if self.is_absolute {
                 (
                     end_words.x.unwrap_or(start_x),
@@ -672,13 +796,13 @@ impl DrillParser {
                 )
             } else {
                 (
-                    start_x + end_words.x.unwrap_or(0.0),
-                    start_y + end_words.y.unwrap_or(0.0),
+                    start_x + end_words.x.unwrap_or(0),
+                    start_y + end_words.y.unwrap_or(0),
                 )
             };
             self.push_slot_between(start_x, start_y, end_x, end_y)?;
-            self.current_x = end_x;
-            self.current_y = end_y;
+            self.current_x_nm = end_x;
+            self.current_y_nm = end_y;
             return Ok(());
         }
 
@@ -705,8 +829,8 @@ impl DrillParser {
                     self.routing_interpolation == RoutingInterpolation::CounterClockwiseArc,
                 )?;
             }
-            self.current_x = end_x;
-            self.current_y = end_y;
+            self.current_x_nm = end_x;
+            self.current_y_nm = end_y;
             return Ok(());
         }
 
@@ -735,8 +859,8 @@ impl DrillParser {
                 }
                 self.push_modal_rout(x, y, words)?;
             }
-            self.current_x = x;
-            self.current_y = y;
+            self.current_x_nm = x;
+            self.current_y_nm = y;
         }
 
         Ok(())
@@ -744,19 +868,19 @@ impl DrillParser {
 
     fn push_modal_rout(
         &mut self,
-        end_x: f32,
-        end_y: f32,
+        end_x_nm: i64,
+        end_y_nm: i64,
         words: CoordinateWords,
     ) -> Result<(), JsValue> {
         match self.routing_interpolation {
-            RoutingInterpolation::Linear => self.push_slot(end_x, end_y),
+            RoutingInterpolation::Linear => self.push_slot(end_x_nm, end_y_nm),
             RoutingInterpolation::ClockwiseArc => {
                 self.update_modal_arc_words(words);
-                self.push_arc(end_x, end_y, self.words_with_modal_arc(words), false)
+                self.push_arc(end_x_nm, end_y_nm, self.words_with_modal_arc(words), false)
             }
             RoutingInterpolation::CounterClockwiseArc => {
                 self.update_modal_arc_words(words);
-                self.push_arc(end_x, end_y, self.words_with_modal_arc(words), true)
+                self.push_arc(end_x_nm, end_y_nm, self.words_with_modal_arc(words), true)
             }
         }
     }
@@ -800,13 +924,16 @@ impl DrillParser {
         words
     }
 
-    fn resolve_xy(&self, x: Option<f32>, y: Option<f32>) -> (f32, f32) {
+    fn resolve_xy(&self, x: Option<i64>, y: Option<i64>) -> (i64, i64) {
         if self.is_absolute {
-            (x.unwrap_or(self.current_x), y.unwrap_or(self.current_y))
+            (
+                x.unwrap_or(self.current_x_nm),
+                y.unwrap_or(self.current_y_nm),
+            )
         } else {
             (
-                self.current_x + x.unwrap_or(0.0),
-                self.current_y + y.unwrap_or(0.0),
+                self.current_x_nm + x.unwrap_or(0),
+                self.current_y_nm + y.unwrap_or(0),
             )
         }
     }
@@ -839,20 +966,20 @@ impl DrillParser {
         self.unit = unit;
     }
 
-    fn selected_tool(&self) -> Result<(u32, f32), JsValue> {
+    fn selected_tool(&self) -> Result<(u32, f32, i64), JsValue> {
         let code = self
             .current_tool
             .ok_or_else(|| JsValue::from_str("Drill hit appears before tool selection"))?;
         let tool = self.tools.get(&code).ok_or_else(|| {
             JsValue::from_str(&format!("Selected drill tool T{code} is undefined"))
         })?;
-        Ok((code, tool.diameter_mm))
+        Ok((code, tool.diameter_mm, tool.diameter_nm))
     }
 
     fn push_repeated_hits(&mut self, count: u32, spacing: CoordinateWords) -> Result<(), JsValue> {
-        let dx = spacing.x.unwrap_or(0.0);
-        let dy = spacing.y.unwrap_or(0.0);
-        let Some((mut x, mut y)) = self.last_hit else {
+        let dx = spacing.x.unwrap_or(0);
+        let dy = spacing.y.unwrap_or(0);
+        let Some((mut x, mut y)) = self.last_hit_nm else {
             return Err(JsValue::from_str(
                 "Repeat drill record appears before an initial drill hit",
             ));
@@ -864,83 +991,136 @@ impl DrillParser {
             self.push_hit(x, y)?;
         }
 
-        self.current_x = x;
-        self.current_y = y;
-        self.last_hit = Some((x, y));
+        self.current_x_nm = x;
+        self.current_y_nm = y;
+        self.last_hit_nm = Some((x, y));
         Ok(())
     }
 
-    fn push_hit(&mut self, x: f32, y: f32) -> Result<(), JsValue> {
-        let (code, diameter_mm) = self.selected_tool()?;
-        if diameter_mm <= 0.0 || !diameter_mm.is_finite() {
+    fn push_hit(&mut self, x_nm: i64, y_nm: i64) -> Result<(), JsValue> {
+        let (code, diameter_mm, diameter_nm) = self.selected_tool()?;
+        if diameter_nm <= 0 || !diameter_mm.is_finite() {
             return Err(JsValue::from_str(&format!(
                 "Drill tool T{code} has invalid diameter"
             )));
         }
 
-        let x = x + self.offset_x;
-        let y = y + self.offset_y;
-        let radius = diameter_mm / 2.0;
+        let abs_x_nm = x_nm.saturating_add(self.offset_x_nm);
+        let abs_y_nm = y_nm.saturating_add(self.offset_y_nm);
+        let radius_nm = diameter_nm / 2;
         self.outline
-            .push_circle(x, y, radius + self.outline_width_mm);
-        self.fill.push_circle(x, y, radius);
+            .push_circle(abs_x_nm, abs_y_nm, radius_nm + self.outline_width_nm);
+        self.fill.push_circle(abs_x_nm, abs_y_nm, radius_nm);
         if let Some(interaction_layer) = &mut self.interaction_layer {
-            if let Some(feature) = drill_hit_feature(code, diameter_mm, x, y) {
+            if let Some(feature) = drill_hit_feature(
+                code,
+                diameter_mm,
+                (abs_x_nm as f64 * 1e-6) as f32,
+                (abs_y_nm as f64 * 1e-6) as f32,
+            ) {
                 interaction_layer.push(feature);
             }
         }
         if let Some(tool) = self.tools.get_mut(&code) {
             tool.hit_count = tool.hit_count.saturating_add(1);
         }
-        self.last_hit = Some((x - self.offset_x, y - self.offset_y));
+        self.last_hit_nm = Some((x_nm, y_nm));
         Ok(())
     }
 
-    fn push_slot(&mut self, end_x: f32, end_y: f32) -> Result<(), JsValue> {
-        self.push_slot_between(self.current_x, self.current_y, end_x, end_y)
+    fn push_slot(&mut self, end_x_nm: i64, end_y_nm: i64) -> Result<(), JsValue> {
+        self.push_slot_between(self.current_x_nm, self.current_y_nm, end_x_nm, end_y_nm)
     }
 
     fn push_slot_between(
         &mut self,
-        start_x: f32,
-        start_y: f32,
-        end_x: f32,
-        end_y: f32,
+        start_x_nm: i64,
+        start_y_nm: i64,
+        end_x_nm: i64,
+        end_y_nm: i64,
     ) -> Result<(), JsValue> {
-        let (code, diameter_mm) = self.selected_tool()?;
-        if diameter_mm <= 0.0 || !diameter_mm.is_finite() {
+        let (code, diameter_mm, diameter_nm) = self.selected_tool()?;
+        if diameter_nm <= 0 || !diameter_mm.is_finite() {
             return Err(JsValue::from_str(&format!(
                 "Drill tool T{code} has invalid diameter"
             )));
         }
 
-        let start_x = start_x + self.offset_x;
-        let start_y = start_y + self.offset_y;
-        let end_x = end_x + self.offset_x;
-        let end_y = end_y + self.offset_y;
-        let outline_radius = diameter_mm / 2.0 + self.outline_width_mm;
-        let fill_radius = diameter_mm / 2.0;
+        let start_x_nm = start_x_nm.saturating_add(self.offset_x_nm);
+        let start_y_nm = start_y_nm.saturating_add(self.offset_y_nm);
+        let end_x_nm = end_x_nm.saturating_add(self.offset_x_nm);
+        let end_y_nm = end_y_nm.saturating_add(self.offset_y_nm);
+        let fill_radius_nm = diameter_nm / 2;
+        let outline_radius_nm = fill_radius_nm + self.outline_width_nm;
         self.outline.push_line(
-            start_x,
-            start_y,
-            end_x,
-            end_y,
-            diameter_mm + self.outline_width_mm * 2.0,
+            start_x_nm,
+            start_y_nm,
+            end_x_nm,
+            end_y_nm,
+            diameter_nm + self.outline_width_nm * 2,
         );
-        self.outline.push_circle(start_x, start_y, outline_radius);
-        self.outline.push_circle(end_x, end_y, outline_radius);
+        self.outline
+            .push_circle(start_x_nm, start_y_nm, outline_radius_nm);
+        self.outline
+            .push_circle(end_x_nm, end_y_nm, outline_radius_nm);
         self.fill
-            .push_line(start_x, start_y, end_x, end_y, diameter_mm);
-        self.fill.push_circle(start_x, start_y, fill_radius);
-        self.fill.push_circle(end_x, end_y, fill_radius);
+            .push_line(start_x_nm, start_y_nm, end_x_nm, end_y_nm, diameter_nm);
+        self.fill
+            .push_circle(start_x_nm, start_y_nm, fill_radius_nm);
+        self.fill.push_circle(end_x_nm, end_y_nm, fill_radius_nm);
         if let Some(interaction_layer) = &mut self.interaction_layer {
+            let sx = (start_x_nm as f64 * 1e-6) as f32;
+            let sy = (start_y_nm as f64 * 1e-6) as f32;
+            let ex = (end_x_nm as f64 * 1e-6) as f32;
+            let ey = (end_y_nm as f64 * 1e-6) as f32;
+            let fill_radius = diameter_mm * 0.5;
             if let Some(feature) = drill_slot_feature(
                 code,
                 diameter_mm,
                 vec![
-                    Primitive::new_line(start_x, start_y, end_x, end_y, diameter_mm, 1.0),
-                    Primitive::new_circle(start_x, start_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
-                    Primitive::new_circle(end_x, end_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
+                    Primitive::new_line_with_nm(
+                        sx,
+                        sy,
+                        ex,
+                        ey,
+                        diameter_mm,
+                        1.0,
+                        start_x_nm,
+                        start_y_nm,
+                        end_x_nm,
+                        end_y_nm,
+                        diameter_nm,
+                    ),
+                    Primitive::new_circle_with_nm(
+                        sx,
+                        sy,
+                        fill_radius,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        start_x_nm,
+                        start_y_nm,
+                        fill_radius_nm,
+                        0,
+                        0,
+                        0,
+                    ),
+                    Primitive::new_circle_with_nm(
+                        ex,
+                        ey,
+                        fill_radius,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        end_x_nm,
+                        end_y_nm,
+                        fill_radius_nm,
+                        0,
+                        0,
+                        0,
+                    ),
                 ],
             ) {
                 interaction_layer.push(feature);
@@ -954,67 +1134,115 @@ impl DrillParser {
 
     fn push_arc(
         &mut self,
-        end_x: f32,
-        end_y: f32,
+        end_x_nm: i64,
+        end_y_nm: i64,
         words: CoordinateWords,
         ccw: bool,
     ) -> Result<(), JsValue> {
-        let (code, diameter_mm) = self.selected_tool()?;
-        if diameter_mm <= 0.0 || !diameter_mm.is_finite() {
+        let (code, diameter_mm, diameter_nm) = self.selected_tool()?;
+        if diameter_nm <= 0 || !diameter_mm.is_finite() {
             return Err(JsValue::from_str(&format!(
                 "Drill tool T{code} has invalid diameter"
             )));
         }
 
-        let arc = if let Some(radius) = words.a {
-            arc_from_radius(self.current_x, self.current_y, end_x, end_y, radius, ccw)?
-        } else if let (Some(i), Some(j)) = (words.i, words.j) {
-            arc_from_center_offset(self.current_x, self.current_y, end_x, end_y, i, j, ccw)?
+        let arc = if let Some(radius_nm) = words.a {
+            arc_from_radius(
+                self.current_x_nm,
+                self.current_y_nm,
+                end_x_nm,
+                end_y_nm,
+                radius_nm,
+                ccw,
+            )?
+        } else if let (Some(i_nm), Some(j_nm)) = (words.i, words.j) {
+            arc_from_center_offset(
+                self.current_x_nm,
+                self.current_y_nm,
+                end_x_nm,
+                end_y_nm,
+                i_nm,
+                j_nm,
+                ccw,
+            )?
         } else {
             return Err(JsValue::from_str(
                 "Circular drill rout requires A radius or I/J center offset",
             ));
         };
 
-        let center_x = arc.center_x + self.offset_x;
-        let center_y = arc.center_y + self.offset_y;
+        let center_x_nm = arc.center_x_nm.saturating_add(self.offset_x_nm);
+        let center_y_nm = arc.center_y_nm.saturating_add(self.offset_y_nm);
         self.outline.push_arc(
-            center_x,
-            center_y,
-            arc.radius,
+            center_x_nm,
+            center_y_nm,
+            arc.radius_nm,
             arc.start_angle,
             arc.sweep_angle,
-            diameter_mm + self.outline_width_mm * 2.0,
+            diameter_nm + self.outline_width_nm * 2,
         );
         self.fill.push_arc(
-            center_x,
-            center_y,
-            arc.radius,
+            center_x_nm,
+            center_y_nm,
+            arc.radius_nm,
             arc.start_angle,
             arc.sweep_angle,
-            diameter_mm,
+            diameter_nm,
         );
         if let Some(interaction_layer) = &mut self.interaction_layer {
-            let start_x = self.current_x + self.offset_x;
-            let start_y = self.current_y + self.offset_y;
-            let end_x = end_x + self.offset_x;
-            let end_y = end_y + self.offset_y;
+            let start_x_nm = self.current_x_nm.saturating_add(self.offset_x_nm);
+            let start_y_nm = self.current_y_nm.saturating_add(self.offset_y_nm);
+            let end_x_nm_off = end_x_nm.saturating_add(self.offset_x_nm);
+            let end_y_nm_off = end_y_nm.saturating_add(self.offset_y_nm);
+            let fill_radius_nm = diameter_nm / 2;
             let fill_radius = diameter_mm * 0.5;
             if let Some(feature) = drill_slot_feature(
                 code,
                 diameter_mm,
                 vec![
-                    Primitive::new_arc(
-                        center_x,
-                        center_y,
-                        arc.radius,
-                        arc.start_angle,
-                        arc.start_angle + arc.sweep_angle,
+                    Primitive::new_arc_with_nm(
+                        (center_x_nm as f64 * 1e-6) as f32,
+                        (center_y_nm as f64 * 1e-6) as f32,
+                        (arc.radius_nm as f64 * 1e-6) as f32,
+                        arc.start_angle as f32,
+                        (arc.start_angle + arc.sweep_angle) as f32,
                         diameter_mm,
                         1.0,
+                        center_x_nm,
+                        center_y_nm,
+                        arc.radius_nm,
+                        diameter_nm,
                     ),
-                    Primitive::new_circle(start_x, start_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
-                    Primitive::new_circle(end_x, end_y, fill_radius, 1.0, 0.0, 0.0, 0.0),
+                    Primitive::new_circle_with_nm(
+                        (start_x_nm as f64 * 1e-6) as f32,
+                        (start_y_nm as f64 * 1e-6) as f32,
+                        fill_radius,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        start_x_nm,
+                        start_y_nm,
+                        fill_radius_nm,
+                        0,
+                        0,
+                        0,
+                    ),
+                    Primitive::new_circle_with_nm(
+                        (end_x_nm_off as f64 * 1e-6) as f32,
+                        (end_y_nm_off as f64 * 1e-6) as f32,
+                        fill_radius,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        end_x_nm_off,
+                        end_y_nm_off,
+                        fill_radius_nm,
+                        0,
+                        0,
+                        0,
+                    ),
                 ],
             ) {
                 interaction_layer.push(feature);
@@ -1028,18 +1256,18 @@ impl DrillParser {
 }
 
 struct DrillArc {
-    center_x: f32,
-    center_y: f32,
-    radius: f32,
-    start_angle: f32,
-    sweep_angle: f32,
+    center_x_nm: i64,
+    center_y_nm: i64,
+    radius_nm: i64,
+    start_angle: f64,
+    sweep_angle: f64,
 }
 
 pub fn parse_drill_with_offset(
     content: &str,
     outline_width_mm: f32,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
 ) -> Result<DrillParseResult, JsValue> {
     DrillParser::new(outline_width_mm, offset_x, offset_y, false)?.parse(content)
 }
@@ -1047,8 +1275,8 @@ pub fn parse_drill_with_offset(
 pub fn parse_drill_with_offset_and_interactions(
     content: &str,
     outline_width_mm: f32,
-    offset_x: f32,
-    offset_y: f32,
+    offset_x: f64,
+    offset_y: f64,
 ) -> Result<DrillParseResult, JsValue> {
     DrillParser::new(outline_width_mm, offset_x, offset_y, true)?.parse(content)
 }
@@ -1082,7 +1310,7 @@ fn parse_file_format_comment(raw_line: &str) -> Option<(u32, u32)> {
     (integer_digits > 0 && decimal_digits > 0).then_some((integer_digits, decimal_digits))
 }
 
-fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, JsValue> {
+fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32, i64)>, JsValue> {
     if !line.starts_with('T') || !line.contains('C') {
         return Ok(None);
     }
@@ -1101,12 +1329,14 @@ fn parse_tool_declaration(line: &str, unit: Unit) -> Result<Option<(u32, f32)>, 
         .map_err(|_| JsValue::from_str("Invalid drill tool number"))?;
     let diameter_token = read_number(&line[c_index + 1..], true)
         .ok_or_else(|| JsValue::from_str("Invalid drill tool diameter"))?;
-    let diameter = parse_decimal_number(diameter_token)? * unit.multiplier();
-    if diameter <= 0.0 || !diameter.is_finite() {
+    let diameter_nm = parse_decimal_nanometers(diameter_token, unit.multiplier_nm(), "drill")
+        .map_err(|message| JsValue::from_str(&message))?;
+    let diameter_mm = (diameter_nm as f64 * 1e-6) as f32;
+    if diameter_nm <= 0 || !diameter_mm.is_finite() {
         return Err(JsValue::from_str("Drill tool diameter must be positive"));
     }
 
-    Ok(Some((code, diameter)))
+    Ok(Some((code, diameter_mm, diameter_nm)))
 }
 
 fn parse_tool_selection(line: &str) -> Result<Option<u32>, String> {
@@ -1342,7 +1572,7 @@ fn parse_word_value(
     word: char,
     unit: Unit,
     format: CoordinateFormat,
-) -> Result<Option<f32>, JsValue> {
+) -> Result<Option<i64>, JsValue> {
     let Some(index) = line.find(word) else {
         return Ok(None);
     };
@@ -1358,13 +1588,9 @@ fn parse_coordinate_number(
     token: &str,
     unit: Unit,
     format: CoordinateFormat,
-) -> Result<f32, JsValue> {
-    parse_common_coordinate_number(token, format, unit.multiplier(), "drill")
+) -> Result<i64, JsValue> {
+    parse_coordinate_number_nm(token, format, unit.multiplier_nm(), "drill")
         .map_err(|message| JsValue::from_str(&message))
-}
-
-fn parse_decimal_number(token: &str) -> Result<f32, JsValue> {
-    parse_common_decimal_number(token, "drill").map_err(|message| JsValue::from_str(&message))
 }
 
 fn parse_format_token(token: &str) -> Result<Option<(u32, u32)>, JsValue> {
@@ -1397,88 +1623,113 @@ fn parse_format_token(token: &str) -> Result<Option<(u32, u32)>, JsValue> {
 }
 
 fn arc_from_center_offset(
-    start_x: f32,
-    start_y: f32,
-    end_x: f32,
-    end_y: f32,
-    center_offset_x: f32,
-    center_offset_y: f32,
+    start_x_nm: i64,
+    start_y_nm: i64,
+    end_x_nm: i64,
+    end_y_nm: i64,
+    center_offset_x_nm: i64,
+    center_offset_y_nm: i64,
     ccw: bool,
 ) -> Result<DrillArc, JsValue> {
-    let center_x = start_x + center_offset_x;
-    let center_y = start_y + center_offset_y;
-    let radius = ((start_x - center_x).powi(2) + (start_y - center_y).powi(2)).sqrt();
-    if radius <= 0.0 || !radius.is_finite() {
+    let center_x_nm = start_x_nm.saturating_add(center_offset_x_nm);
+    let center_y_nm = start_y_nm.saturating_add(center_offset_y_nm);
+    let dx = (start_x_nm - center_x_nm) as f64;
+    let dy = (start_y_nm - center_y_nm) as f64;
+    let radius_nm_f = (dx * dx + dy * dy).sqrt();
+    let radius_nm = radius_nm_f.round() as i64;
+    if radius_nm <= 0 || !radius_nm_f.is_finite() {
         return Err(JsValue::from_str(
             "Circular drill rout radius must be positive",
         ));
     }
     Ok(arc_from_center(
-        start_x, start_y, end_x, end_y, center_x, center_y, radius, ccw,
+        start_x_nm,
+        start_y_nm,
+        end_x_nm,
+        end_y_nm,
+        center_x_nm,
+        center_y_nm,
+        radius_nm,
+        ccw,
     ))
 }
 
 fn arc_from_radius(
-    start_x: f32,
-    start_y: f32,
-    end_x: f32,
-    end_y: f32,
-    radius: f32,
+    start_x_nm: i64,
+    start_y_nm: i64,
+    end_x_nm: i64,
+    end_y_nm: i64,
+    radius_nm: i64,
     ccw: bool,
 ) -> Result<DrillArc, JsValue> {
-    if radius <= 0.0 || !radius.is_finite() {
+    if radius_nm <= 0 {
         return Err(JsValue::from_str(
             "Circular drill rout radius must be positive",
         ));
     }
 
-    let dx = end_x - start_x;
-    let dy = end_y - start_y;
+    let dx = (end_x_nm - start_x_nm) as f64;
+    let dy = (end_y_nm - start_y_nm) as f64;
+    let radius = radius_nm as f64;
     let chord = (dx * dx + dy * dy).sqrt();
-    if chord <= f32::EPSILON {
+    if chord <= 1.0 {
         return Err(JsValue::from_str(
             "Circular drill rout with A radius requires different start and end points",
         ));
     }
-    if chord > radius * 2.0 + 0.0001 {
+    if chord > radius * 2.0 + 100.0 {
         return Err(JsValue::from_str(
             "Circular drill rout radius is too small for its end points",
         ));
     }
 
-    let midpoint_x = (start_x + end_x) * 0.5;
-    let midpoint_y = (start_y + end_y) * 0.5;
+    let midpoint_x = (start_x_nm + end_x_nm) as f64 * 0.5;
+    let midpoint_y = (start_y_nm + end_y_nm) as f64 * 0.5;
     let height = (radius * radius - (chord * 0.5).powi(2)).max(0.0).sqrt();
     let perp_x = -dy / chord;
     let perp_y = dx / chord;
     let candidates = [
-        (midpoint_x + perp_x * height, midpoint_y + perp_y * height),
-        (midpoint_x - perp_x * height, midpoint_y - perp_y * height),
+        (
+            (midpoint_x + perp_x * height).round() as i64,
+            (midpoint_y + perp_y * height).round() as i64,
+        ),
+        (
+            (midpoint_x - perp_x * height).round() as i64,
+            (midpoint_y - perp_y * height).round() as i64,
+        ),
     ];
 
     candidates
         .into_iter()
-        .map(|(center_x, center_y)| {
+        .map(|(center_x_nm, center_y_nm)| {
             arc_from_center(
-                start_x, start_y, end_x, end_y, center_x, center_y, radius, ccw,
+                start_x_nm,
+                start_y_nm,
+                end_x_nm,
+                end_y_nm,
+                center_x_nm,
+                center_y_nm,
+                radius_nm,
+                ccw,
             )
         })
-        .find(|arc| arc.sweep_angle.abs() <= std::f32::consts::PI + 0.0001)
+        .find(|arc| arc.sweep_angle.abs() <= std::f64::consts::PI + 0.0001)
         .ok_or_else(|| JsValue::from_str("Circular drill rout arc exceeds 180 degrees"))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn arc_from_center(
-    start_x: f32,
-    start_y: f32,
-    end_x: f32,
-    end_y: f32,
-    center_x: f32,
-    center_y: f32,
-    radius: f32,
+    start_x_nm: i64,
+    start_y_nm: i64,
+    end_x_nm: i64,
+    end_y_nm: i64,
+    center_x_nm: i64,
+    center_y_nm: i64,
+    radius_nm: i64,
     ccw: bool,
 ) -> DrillArc {
-    let start_angle = (start_y - center_y).atan2(start_x - center_x);
-    let end_angle = (end_y - center_y).atan2(end_x - center_x);
+    let start_angle = ((start_y_nm - center_y_nm) as f64).atan2((start_x_nm - center_x_nm) as f64);
+    let end_angle = ((end_y_nm - center_y_nm) as f64).atan2((end_x_nm - center_x_nm) as f64);
     let ccw_sweep = positive_angle_delta(end_angle - start_angle);
     let sweep_angle = if ccw {
         if ccw_sweep == 0.0 {
@@ -1493,15 +1744,15 @@ fn arc_from_center(
     };
 
     DrillArc {
-        center_x,
-        center_y,
-        radius,
+        center_x_nm,
+        center_y_nm,
+        radius_nm,
         start_angle,
         sweep_angle,
     }
 }
 
-fn positive_angle_delta(angle: f32) -> f32 {
+fn positive_angle_delta(angle: f64) -> f64 {
     let mut normalized = angle % TWO_PI;
     if normalized < 0.0 {
         normalized += TWO_PI;
@@ -1513,7 +1764,7 @@ fn positive_angle_delta(angle: f32) -> f32 {
     }
 }
 
-fn angle_is_on_sweep(angle: f32, start_angle: f32, sweep_angle: f32) -> bool {
+fn angle_is_on_sweep(angle: f64, start_angle: f64, sweep_angle: f64) -> bool {
     let epsilon = 0.000001;
     if sweep_angle.abs() >= TWO_PI - epsilon {
         return true;

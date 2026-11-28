@@ -108,19 +108,23 @@ M30",
     assert_eq!(parsed.metadata.hit_count, 1);
     assert_eq!(parsed.metadata.slot_count, 1);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         1.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.start_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         4.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.end_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
@@ -151,19 +155,23 @@ M30",
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 1);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         1.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.start_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         4.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.end_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
 }
@@ -190,19 +198,23 @@ M30",
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 1);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         1.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.start_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         4.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.end_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
 }
@@ -228,35 +240,43 @@ M30",
     assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 2);
     assert_eq!(parsed.metadata.slot_count, 2);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         0.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.start_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         4.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.end_y_nm[0] as i64) as f64
+            * 1e-6) as f32,
         3.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
         4.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_y_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.start_y_nm[1] as i64) as f64
+            * 1e-6) as f32,
         5.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
         6.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_y_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.lines.end_y_nm[1] as i64) as f64
+            * 1e-6) as f32,
         5.0,
     );
 }
@@ -286,11 +306,13 @@ M30",
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 1);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         8.01,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         6.54,
     );
 }
@@ -315,7 +337,8 @@ M30",
     assert_eq!(parsed.fill_layer.circles.x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 1);
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         9.0,
     );
 }
@@ -379,11 +402,13 @@ M30",
         1.65,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         25.025,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.75,
     );
 }
@@ -448,19 +473,23 @@ M30",
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         1.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
         3.0,
     );
 }
@@ -490,8 +519,16 @@ M30",
     assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 2);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq((parsed.fill_layer.arcs.x_nm[1] as f64 * 1e-6) as f32, 0.0);
-    assert_approx_eq((parsed.fill_layer.arcs.y_nm[1] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.arcs.x_nm[1] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.arcs.y_nm[1] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -520,10 +557,26 @@ M30",
     assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 2);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq((parsed.fill_layer.arcs.x_nm[0] as f64 * 1e-6) as f32, 0.0);
-    assert_approx_eq((parsed.fill_layer.arcs.y_nm[0] as f64 * 1e-6) as f32, 0.0);
-    assert_approx_eq((parsed.fill_layer.arcs.x_nm[1] as f64 * 1e-6) as f32, 0.0);
-    assert_approx_eq((parsed.fill_layer.arcs.y_nm[1] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.arcs.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.arcs.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.arcs.x_nm[1] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.arcs.y_nm[1] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -551,8 +604,16 @@ M30",
     assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
     assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq((parsed.fill_layer.arcs.x_nm[0] as f64 * 1e-6) as f32, 0.0);
-    assert_approx_eq((parsed.fill_layer.arcs.y_nm[0] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.arcs.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.arcs.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -609,8 +670,16 @@ M30",
     assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
     assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq((parsed.fill_layer.arcs.x_nm[0] as f64 * 1e-6) as f32, 0.0);
-    assert_approx_eq((parsed.fill_layer.arcs.y_nm[0] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.arcs.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.arcs.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -638,19 +707,23 @@ M30",
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         0.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.start_x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.start_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
         2.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.lines.end_x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.lines.end_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
         3.0,
     );
 }
@@ -676,19 +749,23 @@ M30",
 
     assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         11.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
 }
@@ -716,27 +793,33 @@ M30",
 
     assert_eq!(parsed.fill_layer.circles.x_nm.len(), 3);
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         11.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[2] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[2] as i64) as f64 * 1e-6)
+            as f32,
         1.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[2] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[2] as i64) as f64 * 1e-6)
+            as f32,
         0.0,
     );
 }
@@ -781,11 +864,13 @@ M30",
     .expect("METRIC,LZ omitted-decimal coordinates should parse");
 
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         9.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
 }
@@ -808,11 +893,13 @@ M30",
     .expect("METRIC,TZ omitted-decimal coordinates should parse");
 
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         0.009,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         0.010,
     );
 }
@@ -839,19 +926,23 @@ M30",
 
     assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         9.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         0.011,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         0.012,
     );
 }
@@ -875,11 +966,13 @@ M30",
     .expect("FILE_FORMAT comment should set coordinate precision");
 
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         9.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
 }
@@ -905,35 +998,43 @@ M30",
     assert_eq!(parsed.fill_layer.circles.x_nm.len(), 4);
     assert_eq!(parsed.metadata.hit_count, 4);
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         9.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[1] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[2] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[2] as i64) as f64 * 1e-6)
+            as f32,
         11.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[2] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[2] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[3] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[3] as i64) as f64 * 1e-6)
+            as f32,
         12.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[3] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[3] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
 }
@@ -983,11 +1084,13 @@ M30",
 
     assert_eq!(parsed.fill_layer.circles.x_nm.len(), 1);
     assert_approx_eq(
-        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         9.0,
     );
     assert_approx_eq(
-        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        ((parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64) as f64 * 1e-6)
+            as f32,
         10.0,
     );
 }
@@ -1050,4 +1153,54 @@ M30",
     assert_approx_eq(parsed.fill_layer.boundary.max_x, 10.5);
     assert_approx_eq(parsed.fill_layer.boundary.min_y, -0.5);
     assert_approx_eq(parsed.fill_layer.boundary.max_y, 10.5);
+}
+
+#[test]
+fn large_drill_coordinates_and_offset_preserve_nanometer_origin() {
+    let parsed = parse_drill_with_offset(
+        "\
+M48
+METRIC
+T01C1.0
+%
+G05
+T01
+X5000.0Y3000.0
+X5010.0Y3020.0
+M30",
+        0.05,
+        125.123456,
+        -45.654321,
+    )
+    .expect("large drill coordinates with f64 offset should parse");
+
+    assert_eq!(parsed.fill_layer.origin_nm, [5_130_123_456, 2_964_345_679]);
+    assert_eq!(
+        parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[0] as i64,
+        5_125_123_456
+    );
+    assert_eq!(
+        parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[0] as i64,
+        2_954_345_679
+    );
+    assert_eq!(
+        parsed.fill_layer.origin_nm[0] + parsed.fill_layer.circles.x_nm[1] as i64,
+        5_135_123_456
+    );
+    assert_eq!(
+        parsed.fill_layer.origin_nm[1] + parsed.fill_layer.circles.y_nm[1] as i64,
+        2_974_345_679
+    );
+}
+
+#[test]
+fn drill_span_over_u32_max_nm_returns_explicit_error() {
+    let mut geometry = super::DrillGeometry::new();
+    geometry.push_circle(0, 0, 500_000);
+    geometry.push_circle(5_000_000_000, 0, 500_000);
+    let message = geometry
+        .into_layer()
+        .err()
+        .expect("drill span over 4.29 m should fail");
+    assert!(message.contains("4.29 m"), "{message}");
 }

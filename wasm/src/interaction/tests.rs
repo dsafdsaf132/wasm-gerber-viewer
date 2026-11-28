@@ -269,7 +269,7 @@ fn path_region_feature_bounds_can_use_conservative_render_bounds() {
         .path_regions
         .as_deref()
         .expect("pick contour should be retained");
-    assert!(stored_path_regions.cover_vertices.is_empty());
+    assert!(stored_path_regions.cover_vertices_nm.is_empty());
     assert_eq!(stored_path_regions.pick_contours[0][0][2], [0.0, 0.8]);
 }
 

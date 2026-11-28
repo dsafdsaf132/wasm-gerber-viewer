@@ -77,13 +77,6 @@ fn usize_property_from_js(value: &JsValue, key: &str) -> Result<usize, JsValue> 
     Ok(number as usize)
 }
 
-fn translate_point_pairs(values: &mut [f32], dx: f32, dy: f32) {
-    for point in values.chunks_exact_mut(2) {
-        point[0] += dx;
-        point[1] += dy;
-    }
-}
-
 /// Triangle mesh data structure
 pub struct Triangles {
     pub(crate) vertices_nm: Vec<i32>,
@@ -562,23 +555,33 @@ impl Thermals {
 
 /// Arc-containing region path data rendered by the WebGL stencil path renderer.
 ///
-/// Large regions are stored in flat buffers to avoid per-segment JS objects:
-/// - `wedge_vertices`: one or two stencil fan triangles per path segment
-/// - `sector_vertices`: analytic arc cap quads, 5 floats per vertex
-/// - `cover_vertices`: one screen-coverable bounding quad per region
-/// - `clear_vertices`: one quad covering all stencil writes per region
+/// Large regions are stored in flat `i32` nanometer buffers relative to the layer `origin_nm`:
+/// - `wedge_vertices_nm`: one or two stencil fan triangles per path segment
+/// - `sector_vertices_nm`: analytic arc cap quads, 5 `i32` values per vertex
+/// - `cover_vertices_nm`: one screen-coverable bounding quad per region
+/// - `clear_vertices_nm`: one quad covering all stencil writes per region
 #[derive(Clone, Debug)]
 pub struct PathRegions {
-    pub(crate) wedge_vertices: Vec<f32>,
     pub(crate) wedge_vertex_offsets: Vec<u32>,
-    pub(crate) sector_vertices: Vec<f32>,
     pub(crate) sector_vertex_offsets: Vec<u32>,
-    pub(crate) cover_vertices: Vec<f32>,
-    pub(crate) clear_vertices: Vec<f32>,
     pub(crate) wedge_vertices_nm: Vec<i32>,
     pub(crate) sector_vertices_nm: Vec<i32>,
     pub(crate) cover_vertices_nm: Vec<i32>,
     pub(crate) clear_vertices_nm: Vec<i32>,
+    pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
+    pub(crate) source_contours: Vec<Vec<RegionContour>>,
+}
+
+/// Staging builder for `PathRegions` that accumulates world-space `i64` nanometer
+/// coordinates before the layer-wide `origin_nm` and `4.29 m` span check are finalized.
+#[derive(Clone, Debug)]
+pub struct PathRegionsBuilder {
+    pub(crate) wedge_vertex_offsets: Vec<u32>,
+    pub(crate) sector_vertex_offsets: Vec<u32>,
+    pub(crate) wedge_vertices_nm: Vec<i64>,
+    pub(crate) sector_vertices_nm: Vec<i64>,
+    pub(crate) cover_vertices_nm: Vec<i64>,
+    pub(crate) clear_vertices_nm: Vec<i64>,
     pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
     pub(crate) source_contours: Vec<Vec<RegionContour>>,
 }
@@ -618,22 +621,21 @@ impl PathRegions {
         cover_vertices: Vec<f32>,
         clear_vertices: Vec<f32>,
     ) -> PathRegions {
-        let mut regions = PathRegions {
-            wedge_vertices,
+        let to_i32 = |src: &[f32]| -> Vec<i32> {
+            src.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
+        PathRegions {
             wedge_vertex_offsets: normalize_offsets(wedge_vertex_offsets),
-            sector_vertices,
             sector_vertex_offsets: normalize_offsets(sector_vertex_offsets),
-            cover_vertices,
-            clear_vertices,
-            wedge_vertices_nm: Vec::new(),
-            sector_vertices_nm: Vec::new(),
-            cover_vertices_nm: Vec::new(),
-            clear_vertices_nm: Vec::new(),
+            wedge_vertices_nm: to_i32(&wedge_vertices),
+            sector_vertices_nm: to_i32(&sector_vertices),
+            cover_vertices_nm: to_i32(&cover_vertices),
+            clear_vertices_nm: to_i32(&clear_vertices),
             pick_contours: Vec::new(),
             source_contours: Vec::new(),
-        };
-        let _ = regions.populate_nm_from_f32([0, 0]);
-        regions
+        }
     }
 
     pub fn new_with_nm(
@@ -645,12 +647,8 @@ impl PathRegions {
         clear_vertices_nm: Vec<i32>,
     ) -> PathRegions {
         PathRegions {
-            wedge_vertices: Vec::new(),
             wedge_vertex_offsets: normalize_offsets(wedge_vertex_offsets),
-            sector_vertices: Vec::new(),
             sector_vertex_offsets: normalize_offsets(sector_vertex_offsets),
-            cover_vertices: Vec::new(),
-            clear_vertices: Vec::new(),
             wedge_vertices_nm,
             sector_vertices_nm,
             cover_vertices_nm,
@@ -662,12 +660,8 @@ impl PathRegions {
 
     pub fn empty() -> PathRegions {
         PathRegions {
-            wedge_vertices: Vec::new(),
             wedge_vertex_offsets: vec![0],
-            sector_vertices: Vec::new(),
             sector_vertex_offsets: vec![0],
-            cover_vertices: Vec::new(),
-            clear_vertices: Vec::new(),
             wedge_vertices_nm: Vec::new(),
             sector_vertices_nm: Vec::new(),
             cover_vertices_nm: Vec::new(),
@@ -677,78 +671,8 @@ impl PathRegions {
         }
     }
 
-    fn populate_nm_from_f32(&mut self, origin_nm: [i64; 2]) -> Result<(), String> {
-        let to_rel_i32 = |val: f32, origin: i64| -> Result<i32, String> {
-            let nm = (val as f64 * 1_000_000.0).round() as i64;
-            i32::try_from(nm - origin).map_err(|_| {
-                "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates"
-                    .to_string()
-            })
-        };
-        let to_dim_i32 = |val: f32| -> Result<i32, String> {
-            let nm = (val as f64 * 1_000_000.0).round() as i64;
-            i32::try_from(nm).map_err(|_| {
-                "Feature dimension exceeds maximum supported size (2.14 m) for integer nanometer coordinates"
-                    .to_string()
-            })
-        };
-        let convert_pairs = |src: &[f32]| -> Result<Vec<i32>, String> {
-            let mut out = Vec::with_capacity(src.len());
-            for pair in src.chunks_exact(2) {
-                out.push(to_rel_i32(pair[0], origin_nm[0])?);
-                out.push(to_rel_i32(pair[1], origin_nm[1])?);
-            }
-            Ok(out)
-        };
-
-        self.wedge_vertices_nm = convert_pairs(&self.wedge_vertices)?;
-        self.cover_vertices_nm = convert_pairs(&self.cover_vertices)?;
-        self.clear_vertices_nm = convert_pairs(&self.clear_vertices)?;
-        let mut sector_out = Vec::with_capacity(self.sector_vertices.len());
-        for vertex in self.sector_vertices.chunks_exact(PATH_SECTOR_VERTEX_FLOATS) {
-            sector_out.push(to_rel_i32(vertex[0], origin_nm[0])?);
-            sector_out.push(to_rel_i32(vertex[1], origin_nm[1])?);
-            sector_out.push(to_rel_i32(vertex[2], origin_nm[0])?);
-            sector_out.push(to_rel_i32(vertex[3], origin_nm[1])?);
-            sector_out.push(to_dim_i32(vertex[4])?);
-        }
-        self.sector_vertices_nm = sector_out;
-        Ok(())
-    }
-
-    pub(crate) fn finalize_origin_nm(&mut self, origin_nm: [i64; 2]) -> Result<(), String> {
-        self.populate_nm_from_f32(origin_nm)?;
-        self.wedge_vertices = Vec::new();
-        self.sector_vertices = Vec::new();
-        self.cover_vertices = Vec::new();
-        self.clear_vertices = Vec::new();
-        Ok(())
-    }
-
     pub(crate) fn region_count(&self) -> usize {
         self.wedge_vertex_offsets.len().saturating_sub(1)
-    }
-
-    pub(crate) fn work_item_count(&self) -> usize {
-        self.wedge_vertices
-            .len()
-            .saturating_add(self.sector_vertices.len())
-            .saturating_add(self.cover_vertices.len())
-            .saturating_add(self.clear_vertices.len())
-            .saturating_add(
-                self.pick_contours
-                    .iter()
-                    .flat_map(|region| region.iter())
-                    .map(Vec::len)
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                self.source_contours
-                    .iter()
-                    .flat_map(|region| region.iter())
-                    .map(|contour| contour.points.len().saturating_add(contour.segments.len()))
-                    .sum::<usize>(),
-            )
     }
 
     pub(crate) fn has_geometry(&self) -> bool {
@@ -756,117 +680,10 @@ impl PathRegions {
             && (!self.wedge_vertices_nm.is_empty()
                 || !self.sector_vertices_nm.is_empty()
                 || !self.cover_vertices_nm.is_empty()
-                || !self.clear_vertices_nm.is_empty()
-                || !self.wedge_vertices.is_empty()
-                || !self.sector_vertices.is_empty()
-                || !self.cover_vertices.is_empty()
-                || !self.clear_vertices.is_empty())
-    }
-
-    /// Appends `other` and rebases its vertex offsets onto this buffer.
-    ///
-    /// Consecutive path regions of one polarity accumulate here, so the
-    /// buffers can grow large. Every buffer's extra capacity is reserved and
-    /// every rebased offset is checked before anything is copied: a failed
-    /// allocation or an offset beyond `u32` returns an error and leaves the
-    /// contents unchanged. `try_reserve` grows capacity geometrically, like
-    /// `extend`, so repeated appends stay amortised.
-    pub(crate) fn append(&mut self, other: PathRegions) -> Result<(), String> {
-        if !other.has_geometry() && !other.has_source_contours() {
-            return Ok(());
-        }
-
-        let wedge_base = rebase_start(
-            self.wedge_vertices.len() / 2,
-            &other.wedge_vertex_offsets,
-            "wedge",
-        )?;
-        let sector_base = rebase_start(
-            self.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
-            &other.sector_vertex_offsets,
-            "sector",
-        )?;
-        let new_wedge_offsets = other.wedge_vertex_offsets.len().saturating_sub(1);
-        let new_sector_offsets = other.sector_vertex_offsets.len().saturating_sub(1);
-        try_reserve_path_values(
-            &mut self.wedge_vertices,
-            other.wedge_vertices.len(),
-            "path region wedge vertices",
-        )?;
-        try_reserve_path_values(
-            &mut self.sector_vertices,
-            other.sector_vertices.len(),
-            "path region sector vertices",
-        )?;
-        try_reserve_path_values(
-            &mut self.cover_vertices,
-            other.cover_vertices.len(),
-            "path region cover vertices",
-        )?;
-        try_reserve_path_values(
-            &mut self.clear_vertices,
-            other.clear_vertices.len(),
-            "path region clear vertices",
-        )?;
-        try_reserve_path_values(
-            &mut self.pick_contours,
-            other.pick_contours.len(),
-            "path region pick contours",
-        )?;
-        try_reserve_path_values(
-            &mut self.source_contours,
-            other.source_contours.len(),
-            "path region source contours",
-        )?;
-        try_reserve_path_values(
-            &mut self.wedge_vertex_offsets,
-            new_wedge_offsets,
-            "path region wedge offsets",
-        )?;
-        try_reserve_path_values(
-            &mut self.sector_vertex_offsets,
-            new_sector_offsets,
-            "path region sector offsets",
-        )?;
-
-        self.wedge_vertices.extend(other.wedge_vertices);
-        self.sector_vertices.extend(other.sector_vertices);
-        self.cover_vertices.extend(other.cover_vertices);
-        self.clear_vertices.extend(other.clear_vertices);
-        self.pick_contours.extend(other.pick_contours);
-        self.source_contours.extend(other.source_contours);
-
-        for offset in other.wedge_vertex_offsets.iter().skip(1) {
-            self.wedge_vertex_offsets.push(wedge_base + offset);
-        }
-        for offset in other.sector_vertex_offsets.iter().skip(1) {
-            self.sector_vertex_offsets.push(sector_base + offset);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn clone_for_interaction_pick(&self) -> PathRegions {
-        PathRegions {
-            wedge_vertices: Vec::new(),
-            wedge_vertex_offsets: vec![0],
-            sector_vertices: Vec::new(),
-            sector_vertex_offsets: vec![0],
-            cover_vertices: Vec::new(),
-            clear_vertices: Vec::new(),
-            wedge_vertices_nm: Vec::new(),
-            sector_vertices_nm: Vec::new(),
-            cover_vertices_nm: Vec::new(),
-            clear_vertices_nm: Vec::new(),
-            pick_contours: self.pick_contours.clone(),
-            source_contours: Vec::new(),
-        }
+                || !self.clear_vertices_nm.is_empty())
     }
 
     pub(crate) fn release_cpu_geometry(&mut self) {
-        self.wedge_vertices = Vec::new();
-        self.sector_vertices = Vec::new();
-        self.cover_vertices = Vec::new();
-        self.clear_vertices = Vec::new();
         self.wedge_vertices_nm = Vec::new();
         self.sector_vertices_nm = Vec::new();
         self.cover_vertices_nm = Vec::new();
@@ -879,31 +696,21 @@ impl PathRegions {
         !self.source_contours.is_empty()
     }
 
-    pub(crate) fn has_geometry_or_source_contours(&self) -> bool {
-        self.has_geometry() || self.has_source_contours()
-    }
-
-    pub(crate) fn append_source_contours(&mut self, contours: Vec<RegionContour>) {
-        if !contours.is_empty() {
-            self.source_contours.push(contours);
+    #[cfg(test)]
+    pub(crate) fn clone_for_interaction_pick(&self) -> PathRegions {
+        PathRegions {
+            wedge_vertex_offsets: vec![0],
+            sector_vertex_offsets: vec![0],
+            wedge_vertices_nm: Vec::new(),
+            sector_vertices_nm: Vec::new(),
+            cover_vertices_nm: Vec::new(),
+            clear_vertices_nm: Vec::new(),
+            pick_contours: self.pick_contours.clone(),
+            source_contours: Vec::new(),
         }
     }
 
     pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_point_pairs(&mut self.wedge_vertices, dx, dy);
-
-        for vertex in self
-            .sector_vertices
-            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
-        {
-            vertex[0] += dx;
-            vertex[1] += dy;
-            vertex[2] += dx;
-            vertex[3] += dy;
-        }
-
-        translate_point_pairs(&mut self.cover_vertices, dx, dy);
-        translate_point_pairs(&mut self.clear_vertices, dx, dy);
         for region in &mut self.pick_contours {
             for contour in region {
                 for point in contour {
@@ -915,7 +722,7 @@ impl PathRegions {
         translate_region_contours(&mut self.source_contours, dx, dy);
     }
 
-    pub(crate) fn transform_for_flash(
+    pub(crate) fn transform_pick_for_flash(
         &mut self,
         scale: f32,
         mirror_x: bool,
@@ -924,49 +731,6 @@ impl PathRegions {
         dx: f32,
         dy: f32,
     ) {
-        for point in self.wedge_vertices.chunks_exact_mut(2) {
-            let (x, y) = transformed_point_for_flash(
-                point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
-            );
-            point[0] = x;
-            point[1] = y;
-        }
-
-        for vertex in self
-            .sector_vertices
-            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
-        {
-            let (position_x, position_y) = transformed_point_for_flash(
-                vertex[0], vertex[1], scale, mirror_x, mirror_y, rotation, dx, dy,
-            );
-            vertex[0] = position_x;
-            vertex[1] = position_y;
-
-            let (center_x, center_y) = transformed_point_for_flash(
-                vertex[2], vertex[3], scale, mirror_x, mirror_y, rotation, dx, dy,
-            );
-            vertex[2] = center_x;
-            vertex[3] = center_y;
-
-            vertex[4] *= scale.abs();
-        }
-
-        for point in self.cover_vertices.chunks_exact_mut(2) {
-            let (x, y) = transformed_point_for_flash(
-                point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
-            );
-            point[0] = x;
-            point[1] = y;
-        }
-
-        for point in self.clear_vertices.chunks_exact_mut(2) {
-            let (x, y) = transformed_point_for_flash(
-                point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
-            );
-            point[0] = x;
-            point[1] = y;
-        }
-
         for region in &mut self.pick_contours {
             for contour in region {
                 for point in contour {
@@ -1050,6 +814,316 @@ impl PathRegions {
 impl Default for PathRegions {
     fn default() -> Self {
         PathRegions::empty()
+    }
+}
+
+impl PathRegionsBuilder {
+    pub fn empty() -> PathRegionsBuilder {
+        PathRegionsBuilder {
+            wedge_vertex_offsets: vec![0],
+            sector_vertex_offsets: vec![0],
+            wedge_vertices_nm: Vec::new(),
+            sector_vertices_nm: Vec::new(),
+            cover_vertices_nm: Vec::new(),
+            clear_vertices_nm: Vec::new(),
+            pick_contours: Vec::new(),
+            source_contours: Vec::new(),
+        }
+    }
+
+    pub(crate) fn region_count(&self) -> usize {
+        self.wedge_vertex_offsets.len().saturating_sub(1)
+    }
+
+    pub(crate) fn work_item_count(&self) -> usize {
+        self.wedge_vertices_nm
+            .len()
+            .saturating_add(self.sector_vertices_nm.len())
+            .saturating_add(self.cover_vertices_nm.len())
+            .saturating_add(self.clear_vertices_nm.len())
+            .saturating_add(
+                self.pick_contours
+                    .iter()
+                    .flat_map(|region| region.iter())
+                    .map(Vec::len)
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.source_contours
+                    .iter()
+                    .flat_map(|region| region.iter())
+                    .map(|contour| contour.points.len().saturating_add(contour.segments.len()))
+                    .sum::<usize>(),
+            )
+    }
+
+    pub(crate) fn has_geometry(&self) -> bool {
+        self.region_count() > 0
+            && (!self.wedge_vertices_nm.is_empty()
+                || !self.sector_vertices_nm.is_empty()
+                || !self.cover_vertices_nm.is_empty()
+                || !self.clear_vertices_nm.is_empty())
+    }
+
+    pub(crate) fn has_source_contours(&self) -> bool {
+        !self.source_contours.is_empty()
+    }
+
+    pub(crate) fn has_geometry_or_source_contours(&self) -> bool {
+        self.has_geometry() || self.has_source_contours()
+    }
+
+    pub(crate) fn append_source_contours(&mut self, contours: Vec<RegionContour>) {
+        if !contours.is_empty() {
+            self.source_contours.push(contours);
+        }
+    }
+
+    pub(crate) fn append(&mut self, other: PathRegionsBuilder) -> Result<(), String> {
+        if !other.has_geometry() && !other.has_source_contours() {
+            return Ok(());
+        }
+
+        let wedge_base = rebase_start(
+            self.wedge_vertices_nm.len() / 2,
+            &other.wedge_vertex_offsets,
+            "wedge",
+        )?;
+        let sector_base = rebase_start(
+            self.sector_vertices_nm.len() / PATH_SECTOR_VERTEX_FLOATS,
+            &other.sector_vertex_offsets,
+            "sector",
+        )?;
+        let new_wedge_offsets = other.wedge_vertex_offsets.len().saturating_sub(1);
+        let new_sector_offsets = other.sector_vertex_offsets.len().saturating_sub(1);
+        try_reserve_path_values(
+            &mut self.wedge_vertices_nm,
+            other.wedge_vertices_nm.len(),
+            "path region wedge vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.sector_vertices_nm,
+            other.sector_vertices_nm.len(),
+            "path region sector vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.cover_vertices_nm,
+            other.cover_vertices_nm.len(),
+            "path region cover vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.clear_vertices_nm,
+            other.clear_vertices_nm.len(),
+            "path region clear vertices",
+        )?;
+        try_reserve_path_values(
+            &mut self.pick_contours,
+            other.pick_contours.len(),
+            "path region pick contours",
+        )?;
+        try_reserve_path_values(
+            &mut self.source_contours,
+            other.source_contours.len(),
+            "path region source contours",
+        )?;
+        try_reserve_path_values(
+            &mut self.wedge_vertex_offsets,
+            new_wedge_offsets,
+            "path region wedge offsets",
+        )?;
+        try_reserve_path_values(
+            &mut self.sector_vertex_offsets,
+            new_sector_offsets,
+            "path region sector offsets",
+        )?;
+
+        self.wedge_vertices_nm.extend(other.wedge_vertices_nm);
+        self.sector_vertices_nm.extend(other.sector_vertices_nm);
+        self.cover_vertices_nm.extend(other.cover_vertices_nm);
+        self.clear_vertices_nm.extend(other.clear_vertices_nm);
+        self.pick_contours.extend(other.pick_contours);
+        self.source_contours.extend(other.source_contours);
+
+        for offset in other.wedge_vertex_offsets.iter().skip(1) {
+            self.wedge_vertex_offsets.push(wedge_base + offset);
+        }
+        for offset in other.sector_vertex_offsets.iter().skip(1) {
+            self.sector_vertex_offsets.push(sector_base + offset);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clone_for_interaction_pick(&self) -> PathRegions {
+        PathRegions {
+            wedge_vertex_offsets: vec![0],
+            sector_vertex_offsets: vec![0],
+            wedge_vertices_nm: Vec::new(),
+            sector_vertices_nm: Vec::new(),
+            cover_vertices_nm: Vec::new(),
+            clear_vertices_nm: Vec::new(),
+            pick_contours: self.pick_contours.clone(),
+            source_contours: Vec::new(),
+        }
+    }
+
+    pub(crate) fn bounds(&self) -> Option<Boundary> {
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+
+        for point in self.cover_vertices_nm.chunks_exact(2) {
+            let x = (point[0] as f64 * 1e-6) as f32;
+            let y = (point[1] as f64 * 1e-6) as f32;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        for region in &self.pick_contours {
+            for contour in region {
+                for point in contour {
+                    min_x = min_x.min(point[0]);
+                    max_x = max_x.max(point[0]);
+                    min_y = min_y.min(point[1]);
+                    max_y = max_y.max(point[1]);
+                }
+            }
+        }
+        min_x
+            .is_finite()
+            .then_some(Boundary::new(min_x, max_x, min_y, max_y))
+    }
+
+    pub(crate) fn transform_for_flash(
+        &mut self,
+        scale: f32,
+        mirror_x: bool,
+        mirror_y: bool,
+        rotation: f32,
+        dx: f32,
+        dy: f32,
+    ) {
+        let transform_nm = |x_nm: i64, y_nm: i64| -> (i64, i64) {
+            let (tx, ty) = transformed_point_for_flash(
+                (x_nm as f64 * 1e-6) as f32,
+                (y_nm as f64 * 1e-6) as f32,
+                scale,
+                mirror_x,
+                mirror_y,
+                rotation,
+                dx,
+                dy,
+            );
+            (
+                (tx as f64 * 1_000_000.0).round() as i64,
+                (ty as f64 * 1_000_000.0).round() as i64,
+            )
+        };
+
+        for point in self.wedge_vertices_nm.chunks_exact_mut(2) {
+            let (x, y) = transform_nm(point[0], point[1]);
+            point[0] = x;
+            point[1] = y;
+        }
+        for vertex in self
+            .sector_vertices_nm
+            .chunks_exact_mut(PATH_SECTOR_VERTEX_FLOATS)
+        {
+            let (px, py) = transform_nm(vertex[0], vertex[1]);
+            vertex[0] = px;
+            vertex[1] = py;
+            let (cx, cy) = transform_nm(vertex[2], vertex[3]);
+            vertex[2] = cx;
+            vertex[3] = cy;
+            vertex[4] = (vertex[4] as f64 * scale.abs() as f64).round() as i64;
+        }
+        for point in self.cover_vertices_nm.chunks_exact_mut(2) {
+            let (x, y) = transform_nm(point[0], point[1]);
+            point[0] = x;
+            point[1] = y;
+        }
+        for point in self.clear_vertices_nm.chunks_exact_mut(2) {
+            let (x, y) = transform_nm(point[0], point[1]);
+            point[0] = x;
+            point[1] = y;
+        }
+
+        for region in &mut self.pick_contours {
+            for contour in region {
+                for point in contour {
+                    let (x, y) = transformed_point_for_flash(
+                        point[0], point[1], scale, mirror_x, mirror_y, rotation, dx, dy,
+                    );
+                    point[0] = x;
+                    point[1] = y;
+                }
+            }
+        }
+        transform_region_contours_for_flash(
+            &mut self.source_contours,
+            scale,
+            mirror_x,
+            mirror_y,
+            rotation,
+            dx,
+            dy,
+        );
+    }
+
+    pub(crate) fn finalize_origin_nm(self, origin_nm: [i64; 2]) -> Result<PathRegions, String> {
+        let to_rel_i32 = |nm: i64, origin: i64| -> Result<i32, String> {
+            i32::try_from(nm - origin).map_err(|_| {
+                "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates"
+                    .to_string()
+            })
+        };
+        let to_dim_i32 = |nm: i64| -> Result<i32, String> {
+            i32::try_from(nm).map_err(|_| {
+                "Feature dimension exceeds maximum supported size (2.14 m) for integer nanometer coordinates"
+                    .to_string()
+            })
+        };
+        let convert_pairs = |src: Vec<i64>| -> Result<Vec<i32>, String> {
+            let mut out = Vec::with_capacity(src.len());
+            for pair in src.chunks_exact(2) {
+                out.push(to_rel_i32(pair[0], origin_nm[0])?);
+                out.push(to_rel_i32(pair[1], origin_nm[1])?);
+            }
+            Ok(out)
+        };
+
+        let wedge_vertices_nm = convert_pairs(self.wedge_vertices_nm)?;
+        let cover_vertices_nm = convert_pairs(self.cover_vertices_nm)?;
+        let clear_vertices_nm = convert_pairs(self.clear_vertices_nm)?;
+        let mut sector_vertices_nm = Vec::with_capacity(self.sector_vertices_nm.len());
+        for vertex in self
+            .sector_vertices_nm
+            .chunks_exact(PATH_SECTOR_VERTEX_FLOATS)
+        {
+            sector_vertices_nm.push(to_rel_i32(vertex[0], origin_nm[0])?);
+            sector_vertices_nm.push(to_rel_i32(vertex[1], origin_nm[1])?);
+            sector_vertices_nm.push(to_rel_i32(vertex[2], origin_nm[0])?);
+            sector_vertices_nm.push(to_rel_i32(vertex[3], origin_nm[1])?);
+            sector_vertices_nm.push(to_dim_i32(vertex[4])?);
+        }
+
+        Ok(PathRegions {
+            wedge_vertex_offsets: self.wedge_vertex_offsets,
+            sector_vertex_offsets: self.sector_vertex_offsets,
+            wedge_vertices_nm,
+            sector_vertices_nm,
+            cover_vertices_nm,
+            clear_vertices_nm,
+            pick_contours: self.pick_contours,
+            source_contours: self.source_contours,
+        })
+    }
+}
+
+impl Default for PathRegionsBuilder {
+    fn default() -> Self {
+        PathRegionsBuilder::empty()
     }
 }
 
@@ -1390,13 +1464,18 @@ impl GerberData {
             || self.path_regions.has_geometry()
     }
 
+    #[allow(dead_code)]
     pub fn translate(&mut self, dx: f32, dy: f32) {
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i64;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i64;
+        self.translate_f64(dx as f64, dy as f64);
+    }
+
+    pub fn translate_f64(&mut self, dx: f64, dy: f64) {
+        let dx_nm = (dx * 1_000_000.0).round() as i64;
+        let dy_nm = (dy * 1_000_000.0).round() as i64;
         self.origin_nm[0] = self.origin_nm[0].saturating_add(dx_nm);
         self.origin_nm[1] = self.origin_nm[1].saturating_add(dy_nm);
-        self.path_regions.translate(dx, dy);
-        self.boundary.translate(dx, dy);
+        self.path_regions.translate(dx as f32, dy as f32);
+        self.boundary.translate(dx as f32, dy as f32);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -1488,22 +1567,24 @@ pub(crate) fn gerber_data_layers_from_js(value: &JsValue) -> Result<Vec<GerberDa
 
 #[cfg(test)]
 mod path_region_append_tests {
-    use super::{rebase_start, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
+    use super::{rebase_start, PathRegionsBuilder, PATH_SECTOR_VERTEX_FLOATS};
 
-    fn one_region(sector_quads: usize) -> PathRegions {
-        PathRegions::new(
-            vec![0.0; 6],
-            vec![0, 3],
-            vec![0.0; sector_quads * 6 * PATH_SECTOR_VERTEX_FLOATS],
-            vec![0, (sector_quads * 6) as u32],
-            vec![0.0; 12],
-            vec![0.0; 12],
-        )
+    fn one_region(sector_quads: usize) -> PathRegionsBuilder {
+        PathRegionsBuilder {
+            wedge_vertex_offsets: vec![0, 3],
+            sector_vertex_offsets: vec![0, (sector_quads * 6) as u32],
+            wedge_vertices_nm: vec![0; 6],
+            sector_vertices_nm: vec![0; sector_quads * 6 * PATH_SECTOR_VERTEX_FLOATS],
+            cover_vertices_nm: vec![0; 12],
+            clear_vertices_nm: vec![0; 12],
+            pick_contours: Vec::new(),
+            source_contours: Vec::new(),
+        }
     }
 
     #[test]
     fn append_rebases_offsets_onto_the_accumulated_buffers() {
-        let mut regions = PathRegions::empty();
+        let mut regions = PathRegionsBuilder::empty();
         regions.append(one_region(0)).unwrap();
         regions.append(one_region(1)).unwrap();
         regions.append(one_region(2)).unwrap();
@@ -1511,15 +1592,15 @@ mod path_region_append_tests {
         assert_eq!(regions.region_count(), 3);
         assert_eq!(regions.wedge_vertex_offsets, vec![0, 3, 6, 9]);
         assert_eq!(regions.sector_vertex_offsets, vec![0, 0, 6, 18]);
-        assert_eq!(regions.wedge_vertices.len(), 18);
+        assert_eq!(regions.wedge_vertices_nm.len(), 18);
         assert_eq!(
-            regions.sector_vertices.len(),
+            regions.sector_vertices_nm.len(),
             18 * PATH_SECTOR_VERTEX_FLOATS
         );
-        assert_eq!(regions.cover_vertices.len(), 36);
+        assert_eq!(regions.cover_vertices_nm.len(), 36);
 
         // An empty region set is a no-op.
-        regions.append(PathRegions::empty()).unwrap();
+        regions.append(PathRegionsBuilder::empty()).unwrap();
         assert_eq!(regions.region_count(), 3);
     }
 

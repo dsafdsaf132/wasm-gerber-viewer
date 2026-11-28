@@ -21,8 +21,8 @@ use shader::{
 };
 
 use crate::geometry::{
-    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
-    Triangles, PATH_SECTOR_VERTEX_FLOATS,
+    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, PathRegionsBuilder, Thermals,
+    TriangleTemplateInstances, Triangles, PATH_SECTOR_VERTEX_FLOATS,
 };
 use crate::geometry::{RegionContour, RegionSegment};
 use crate::interaction::{HighlightBatch, InteractionFeature, PathRegionRef};
@@ -2414,8 +2414,8 @@ impl Renderer {
 
     fn path_regions_from_source_groups(
         region_groups: &[Vec<RegionContour>],
-    ) -> Result<PathRegions, JsValue> {
-        let mut path_regions = PathRegions::empty();
+    ) -> Result<PathRegionsBuilder, JsValue> {
+        let mut path_regions = PathRegionsBuilder::empty();
         for group in region_groups {
             let group_regions = build_path_regions(group, &ParserState::default(), 1, false, false)
                 .map_err(|error| {
@@ -2583,7 +2583,7 @@ impl Renderer {
     }
 
     fn path_region_layer(
-        mut path_regions: PathRegions,
+        path_regions: PathRegionsBuilder,
         boundary: Boundary,
         is_negative: bool,
     ) -> Result<GerberData, JsValue> {
@@ -2593,16 +2593,15 @@ impl Renderer {
         let max_y_nm = (boundary.max_y as f64 * 1_000_000.0).round() as i64;
         let span_x = max_x_nm.saturating_sub(min_x_nm);
         let span_y = max_y_nm.saturating_sub(min_y_nm);
-        let origin_nm = [min_x_nm + (span_x + 1) / 2, min_y_nm + (span_y + 1) / 2];
-        if !path_regions.wedge_vertices.is_empty()
-            || !path_regions.sector_vertices.is_empty()
-            || !path_regions.cover_vertices.is_empty()
-            || !path_regions.clear_vertices.is_empty()
-        {
-            path_regions
-                .finalize_origin_nm(origin_nm)
-                .map_err(|msg| JsValue::from_str(&msg))?;
+        if span_x > u32::MAX as i64 || span_y > u32::MAX as i64 {
+            return Err(JsValue::from_str(
+                "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates",
+            ));
         }
+        let origin_nm = [min_x_nm + (span_x + 1) / 2, min_y_nm + (span_y + 1) / 2];
+        let path_regions = path_regions
+            .finalize_origin_nm(origin_nm)
+            .map_err(|msg| JsValue::from_str(&msg))?;
         Ok(GerberData::new_with_origin(
             Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             Vec::new(),
@@ -4763,7 +4762,7 @@ impl Renderer {
         path_regions: &PathRegions,
         sublayer_idx: usize,
     ) -> Result<(), JsValue> {
-        if !path_regions.wedge_vertices.len().is_multiple_of(2) {
+        if !path_regions.wedge_vertices_nm.len().is_multiple_of(2) {
             return Err(JsValue::from_str(&format!(
                 "Sublayer {} path wedge vertex buffer has an odd number of coordinates",
                 sublayer_idx

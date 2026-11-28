@@ -20,8 +20,8 @@ use state::{
 use self::geometry::{arc_curve_bounds, parse_graphic_command, Primitive};
 use crate::geometry::RegionContour;
 use crate::geometry::{
-    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, Thermals, TriangleTemplateInstances,
-    Triangles,
+    Arcs, Boundary, Circles, GerberData, Lines, PathRegions, PathRegionsBuilder, Thermals,
+    TriangleTemplateInstances, Triangles,
 };
 use crate::interaction::InteractionLayer;
 use crate::util::{format_bytes, format_count};
@@ -34,7 +34,7 @@ use wasm_bindgen::prelude::*;
 pub struct PolarityLayer {
     pub(crate) polarity: Polarity,
     pub(crate) primitives: Vec<Primitive>,
-    pub(crate) path_regions: PathRegions,
+    pub(crate) path_regions: PathRegionsBuilder,
 }
 
 pub struct ParsedGerberLayer {
@@ -1070,25 +1070,13 @@ fn path_regions_boundary(path_regions: &PathRegions, origin_nm: [i64; 2]) -> Opt
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
 
-    if !path_regions.cover_vertices_nm.is_empty() {
-        for point in path_regions.cover_vertices_nm.chunks_exact(2) {
-            let x = ((origin_nm[0] + point[0] as i64) as f64 * 1e-6) as f32;
-            let y = ((origin_nm[1] + point[1] as i64) as f64 * 1e-6) as f32;
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
-        }
-        return min_x
-            .is_finite()
-            .then_some(Boundary::new(min_x, max_x, min_y, max_y));
-    }
-
-    for point in path_regions.cover_vertices.chunks_exact(2) {
-        min_x = min_x.min(point[0]);
-        max_x = max_x.max(point[0]);
-        min_y = min_y.min(point[1]);
-        max_y = max_y.max(point[1]);
+    for point in path_regions.cover_vertices_nm.chunks_exact(2) {
+        let x = ((origin_nm[0] + point[0] as i64) as f64 * 1e-6) as f32;
+        let y = ((origin_nm[1] + point[1] as i64) as f64 * 1e-6) as f32;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
     }
 
     min_x
@@ -1156,7 +1144,7 @@ pub struct GerberParser {
     // Store primitive batches in object-stream polarity order.
     pub polarity_layers: Vec<PolarityLayer>,
     pub current_primitives: Vec<Primitive>, // Accumulating primitives for current polarity
-    pub current_path_regions: PathRegions,
+    pub current_path_regions: PathRegionsBuilder,
     pub region_contours: Vec<RegionContour>, // Contours collected in Region mode
     pub interaction_layer: Option<InteractionLayer>,
     pub progress: Option<ParseProgress>,
@@ -1181,7 +1169,7 @@ impl GerberParser {
             arc_tessellation_quality,
             polarity_layers: Vec::new(),
             current_primitives: Vec::new(),
-            current_path_regions: PathRegions::empty(),
+            current_path_regions: PathRegionsBuilder::empty(),
             region_contours: Vec::new(),
             interaction_layer: collect_interactions.then(InteractionLayer::new),
             progress: None,
@@ -1328,16 +1316,16 @@ impl GerberParser {
         let mut done_shapes = 0;
         let mut reported_shapes = 0;
         report_progress(&mut self.progress, ParseStage::Geometry, 0, total_shapes);
-        for mut layer in polarity_layers {
+        for layer in polarity_layers {
             let render_sublayer_idx = gerber_data_layers.len();
             let layer_shapes = layer.primitives.len();
-            layer
+            let path_regions = layer
                 .path_regions
                 .finalize_origin_nm(origin_nm)
                 .map_err(|msg| JsValue::from_str(&msg))?;
             let mut gerber_data = Self::primitives_to_gerber_data(
                 layer.primitives,
-                layer.path_regions,
+                path_regions,
                 layer.polarity == Polarity::Negative,
                 origin_nm,
             )?;
@@ -1487,17 +1475,22 @@ fn compute_layer_origin_nm(polarity_layers: &[PolarityLayer]) -> Result<[i64; 2]
             }
         }
 
-        for point in layer.path_regions.cover_vertices.chunks_exact(2) {
-            include_point(
-                (point[0] as f64 * 1_000_000.0).round() as i64,
-                (point[1] as f64 * 1_000_000.0).round() as i64,
-            );
+        for point in layer.path_regions.cover_vertices_nm.chunks_exact(2) {
+            include_point(point[0], point[1]);
         }
-        for point in layer.path_regions.wedge_vertices.chunks_exact(2) {
-            include_point(
-                (point[0] as f64 * 1_000_000.0).round() as i64,
-                (point[1] as f64 * 1_000_000.0).round() as i64,
-            );
+        for point in layer.path_regions.clear_vertices_nm.chunks_exact(2) {
+            include_point(point[0], point[1]);
+        }
+        for point in layer.path_regions.wedge_vertices_nm.chunks_exact(2) {
+            include_point(point[0], point[1]);
+        }
+        for vertex in layer
+            .path_regions
+            .sector_vertices_nm
+            .chunks_exact(crate::geometry::PATH_SECTOR_VERTEX_FLOATS)
+        {
+            include_point(vertex[0], vertex[1]);
+            include_point(vertex[2], vertex[3]);
         }
     }
 
@@ -1526,7 +1519,7 @@ fn parse_command(
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
@@ -1625,7 +1618,7 @@ fn parse_command(
 
 fn flush_primitives(
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     polarity: Polarity,
 ) -> Result<(), JsValue> {
@@ -1673,7 +1666,7 @@ fn parse_aperture_block(
     apertures: &mut HashMap<String, Aperture>,
     macros: &mut HashMap<String, ApertureMacro>,
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     preserve_arc_regions: bool,
     arc_tessellation_quality: u32,
@@ -1692,7 +1685,7 @@ fn parse_aperture_block(
     )?;
 
     let mut block_primitives: Vec<Primitive> = Vec::new();
-    let mut block_path_regions = PathRegions::empty();
+    let mut block_path_regions = PathRegionsBuilder::empty();
     let mut block_layers: Vec<PolarityLayer> = Vec::new();
     let mut block_region_contours: Vec<RegionContour> = Vec::new();
 

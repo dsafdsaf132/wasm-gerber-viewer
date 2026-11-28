@@ -829,8 +829,8 @@ M02*",
         .as_deref()
         .expect("region interaction should keep path regions");
     assert_eq!(path_regions.region_count(), 0);
-    assert!(path_regions.wedge_vertices.is_empty());
-    assert!(path_regions.sector_vertices.is_empty());
+    assert!(path_regions.wedge_vertices_nm.is_empty());
+    assert!(path_regions.sector_vertices_nm.is_empty());
     assert_eq!(path_regions.pick_contours.len(), 1);
     assert_eq!(
         feature.path_region_ref,
@@ -1334,12 +1334,12 @@ M02*";
         .expect("high quality path region arc should parse");
 
     assert_eq!(
-        high_layers[0].path_regions.wedge_vertices.len(),
-        low_layers[0].path_regions.wedge_vertices.len()
+        high_layers[0].path_regions.wedge_vertices_nm.len(),
+        low_layers[0].path_regions.wedge_vertices_nm.len()
     );
     assert_eq!(
-        high_layers[0].path_regions.sector_vertices.len(),
-        low_layers[0].path_regions.sector_vertices.len()
+        high_layers[0].path_regions.sector_vertices_nm.len(),
+        low_layers[0].path_regions.sector_vertices_nm.len()
     );
 }
 
@@ -1402,8 +1402,8 @@ M02*",
         .as_deref()
         .expect("aperture block region interaction should keep path regions");
     assert_eq!(path_regions.region_count(), 0);
-    assert!(path_regions.wedge_vertices.is_empty());
-    assert!(path_regions.sector_vertices.is_empty());
+    assert!(path_regions.wedge_vertices_nm.is_empty());
+    assert!(path_regions.sector_vertices_nm.is_empty());
     assert_eq!(path_regions.pick_contours.len(), 1);
     assert_eq!(
         feature.path_region_ref,
@@ -3850,7 +3850,7 @@ fn rejects_layer_exceeding_4_29m_span() {
                 0,
             ),
         ],
-        path_regions: super::PathRegions::empty(),
+        path_regions: super::PathRegionsBuilder::empty(),
     }];
     let err = super::compute_layer_origin_nm(&polarity_layers).unwrap_err();
     assert!(err.contains("4.29 m"));

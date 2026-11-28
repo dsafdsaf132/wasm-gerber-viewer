@@ -1,6 +1,6 @@
 use super::geometry::Primitive;
 use super::PolarityLayer;
-use crate::geometry::PathRegions;
+use crate::geometry::PathRegionsBuilder;
 use crate::parser::common::{
     read_word_value, CoordinateFormat as CommonCoordinateFormat,
     ZeroSuppression as CommonZeroSuppression,
@@ -380,7 +380,7 @@ pub fn parse_lp(
     line: &str,
     state: &mut ParserState,
     current_primitives: &mut Vec<Primitive>,
-    current_path_regions: &mut PathRegions,
+    current_path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
     // Extract D or C from %LPD* or %LPC* format

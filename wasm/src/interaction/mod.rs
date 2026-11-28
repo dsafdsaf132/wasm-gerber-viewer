@@ -271,16 +271,23 @@ impl InteractionLayer {
         shared
     }
 
+    #[allow(dead_code)]
     pub fn translate(&mut self, dx: f32, dy: f32) {
+        self.translate_f64(dx as f64, dy as f64);
+    }
+
+    pub fn translate_f64(&mut self, dx: f64, dy: f64) {
         if dx == 0.0 && dy == 0.0 {
             return;
         }
 
+        let dx_f32 = dx as f32;
+        let dy_f32 = dy as f32;
         for feature in &mut self.features {
-            feature.bounds.translate(dx, dy);
-            feature.primitives.translate(dx, dy);
+            feature.bounds.translate(dx_f32, dy_f32);
+            feature.primitives.translate(dx_f32, dy_f32);
             if let Some(path_regions) = &mut feature.path_regions {
-                path_regions.translate(dx, dy);
+                path_regions.translate(dx_f32, dy_f32);
             }
         }
     }
@@ -1334,7 +1341,7 @@ impl InteractionFeature {
         let mut path_regions =
             path_regions_has_interaction_geometry(&path_regions).then(|| Box::new(path_regions));
         if let Some(path_regions) = &mut path_regions {
-            path_regions.cover_vertices = Vec::new();
+            path_regions.cover_vertices_nm = Vec::new();
         }
         Self::from_parts(
             kind,
@@ -1691,9 +1698,14 @@ fn path_regions_bounds(path_regions: &PathRegions) -> Option<Boundary> {
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
 
-    for point in path_regions.cover_vertices.chunks_exact(2) {
+    for point in path_regions.cover_vertices_nm.chunks_exact(2) {
         include_point_bounds(
-            point[0], point[1], &mut min_x, &mut max_x, &mut min_y, &mut max_y,
+            (point[0] as f64 * 1e-6) as f32,
+            (point[1] as f64 * 1e-6) as f32,
+            &mut min_x,
+            &mut max_x,
+            &mut min_y,
+            &mut max_y,
         );
     }
     for region in &path_regions.pick_contours {

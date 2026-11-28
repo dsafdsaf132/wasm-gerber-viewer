@@ -1,4 +1,4 @@
-use crate::geometry::{Boundary, PathRegions, PATH_SECTOR_VERTEX_FLOATS};
+use crate::geometry::{Boundary, PathRegions, PathRegionsBuilder, PATH_SECTOR_VERTEX_FLOATS};
 use crate::geometry::{RegionContour, RegionSegment};
 use crate::interaction::{
     aperture_name, aperture_type, feature_from_primitive_delta, FeatureKind, FeatureProperties,
@@ -2026,7 +2026,7 @@ fn combine_interaction_bounds(
 
 pub(crate) fn flush_primitives_to_layer(
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity: Polarity,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
@@ -2043,7 +2043,7 @@ pub(crate) fn flush_primitives_to_layer(
 }
 
 pub(crate) fn flush_path_regions_to_layer(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity: Polarity,
     polarity_layers: &mut Vec<PolarityLayer>,
 ) -> Result<(), String> {
@@ -2074,7 +2074,7 @@ fn flash_block_aperture(
     block_layers: &[PolarityLayer],
     state: &ParserState,
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
@@ -2184,9 +2184,7 @@ fn record_block_flash_interaction(
                     continue;
                 }
                 let path_region_bounds = has_path_regions
-                    .then(|| {
-                        InteractionFeature::bounds_for_geometry(&[], &block_layer.path_regions)
-                    })
+                    .then(|| block_layer.path_regions.bounds())
                     .flatten()
                     .map(|bounds| {
                         transformed_boundary_for_flash(
@@ -2218,7 +2216,7 @@ fn record_block_flash_interaction(
                     PathRegions::empty()
                 };
                 if has_path_regions {
-                    interaction_path_regions.transform_for_flash(
+                    interaction_path_regions.transform_pick_for_flash(
                         state.layer_scale,
                         state.mirror_x,
                         state.mirror_y,
@@ -2254,7 +2252,7 @@ pub fn flash_aperture(
     state: &ParserState,
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     x: f32,
     y: f32,
@@ -2987,8 +2985,8 @@ pub fn build_path_regions(
     arc_tessellation_quality: u32,
     collect_pick_contours: bool,
     collect_source_contours: bool,
-) -> Result<PathRegions, String> {
-    let mut path_regions = PathRegions::empty();
+) -> Result<PathRegionsBuilder, String> {
+    let mut path_regions = PathRegionsBuilder::empty();
     let repeat_count = state.step_repeat_count("path region")?;
     let work_items = path_region_work_items_per_copy(
         region_contours,
@@ -3018,7 +3016,7 @@ pub fn build_path_regions(
 }
 
 fn append_path_region(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     region_contours: &[RegionContour],
     offset_x: f32,
     offset_y: f32,
@@ -3038,9 +3036,15 @@ fn append_path_region(
         path_region_stencil_bounds(region_contours, offset_x, offset_y, reference)
             .unwrap_or((min_x, max_x, min_y, max_y));
 
-    push_cover_quad(&mut path_regions.cover_vertices, min_x, max_x, min_y, max_y)?;
     push_cover_quad(
-        &mut path_regions.clear_vertices,
+        &mut path_regions.cover_vertices_nm,
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+    )?;
+    push_cover_quad(
+        &mut path_regions.clear_vertices_nm,
         clear_min_x,
         clear_max_x,
         clear_min_y,
@@ -3068,11 +3072,11 @@ fn append_path_region(
     }
 
     path_regions.wedge_vertex_offsets.push(path_vertex_offset(
-        path_regions.wedge_vertices.len() / 2,
+        path_regions.wedge_vertices_nm.len() / 2,
         "wedge",
     )?);
     path_regions.sector_vertex_offsets.push(path_vertex_offset(
-        path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+        path_regions.sector_vertices_nm.len() / PATH_SECTOR_VERTEX_FLOATS,
         "sector",
     )?);
 
@@ -3086,7 +3090,7 @@ fn path_vertex_offset(vertex_count: usize, kind: &str) -> Result<u32, String> {
 }
 
 fn append_region_source_contours(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     region_contours: &[RegionContour],
     state: &ParserState,
 ) -> Result<(), String> {
@@ -3212,7 +3216,7 @@ fn path_region_pick_contours(
 }
 
 fn append_contour_segments(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     contour: &RegionContour,
     reference: [f32; 2],
     offset_x: f32,
@@ -3222,7 +3226,7 @@ fn append_contour_segments(
         match *segment {
             RegionSegment::Line { start, end } => {
                 push_wedge_triangle(
-                    &mut path_regions.wedge_vertices,
+                    &mut path_regions.wedge_vertices_nm,
                     reference,
                     offset_point(start, offset_x, offset_y),
                     offset_point(end, offset_x, offset_y),
@@ -3257,7 +3261,7 @@ fn append_contour_segments(
     if let (Some(first), Some(last)) = (contour.points.first(), contour.points.last()) {
         if !points_coincide(first[0], first[1], last[0], last[1]) {
             push_wedge_triangle(
-                &mut path_regions.wedge_vertices,
+                &mut path_regions.wedge_vertices_nm,
                 reference,
                 offset_point(*last, offset_x, offset_y),
                 offset_point(*first, offset_x, offset_y),
@@ -3389,8 +3393,12 @@ fn offset_point(point: [f32; 2], offset_x: f32, offset_y: f32) -> [f32; 2] {
     [point[0] + offset_x, point[1] + offset_y]
 }
 
+fn f32_to_nm(value: f32) -> i64 {
+    (value as f64 * 1_000_000.0).round() as i64
+}
+
 fn push_wedge_triangle(
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<i64>,
     a: [f32; 2],
     b: [f32; 2],
     c: [f32; 2],
@@ -3400,12 +3408,19 @@ fn push_wedge_triangle(
         PATH_WEDGE_VERTEX_FLOATS,
         "path region wedge vertices",
     )?;
-    vertices.extend_from_slice(&[a[0], a[1], b[0], b[1], c[0], c[1]]);
+    vertices.extend_from_slice(&[
+        f32_to_nm(a[0]),
+        f32_to_nm(a[1]),
+        f32_to_nm(b[0]),
+        f32_to_nm(b[1]),
+        f32_to_nm(c[0]),
+        f32_to_nm(c[1]),
+    ]);
     Ok(())
 }
 
 fn push_cover_quad(
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<i64>,
     min_x: f32,
     max_x: f32,
     min_y: f32,
@@ -3416,14 +3431,16 @@ fn push_cover_quad(
         PATH_COVER_VERTEX_FLOATS,
         "path region cover vertices",
     )?;
-    vertices.extend_from_slice(&[
-        min_x, min_y, max_x, min_y, min_x, max_y, min_x, max_y, max_x, min_y, max_x, max_y,
-    ]);
+    let x0 = f32_to_nm(min_x);
+    let x1 = f32_to_nm(max_x);
+    let y0 = f32_to_nm(min_y);
+    let y1 = f32_to_nm(max_y);
+    vertices.extend_from_slice(&[x0, y0, x1, y0, x0, y1, x0, y1, x1, y0, x1, y1]);
     Ok(())
 }
 
 fn append_arc_segment_caps(
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     reference: [f32; 2],
     start: [f32; 2],
     end: [f32; 2],
@@ -3446,13 +3463,13 @@ fn append_arc_segment_caps(
         };
 
         push_wedge_triangle(
-            &mut path_regions.wedge_vertices,
+            &mut path_regions.wedge_vertices_nm,
             reference,
             chunk_start,
             chunk_end,
         )?;
         push_sector_cap_quad(
-            &mut path_regions.sector_vertices,
+            &mut path_regions.sector_vertices_nm,
             arc.center,
             arc.radius,
             chunk_start_angle,
@@ -3467,7 +3484,7 @@ fn append_arc_segment_caps(
 }
 
 fn push_sector_cap_quad(
-    vertices: &mut Vec<f32>,
+    vertices: &mut Vec<i64>,
     center: [f32; 2],
     radius: f32,
     start_angle: f32,
@@ -3505,8 +3522,17 @@ fn push_sector_cap_quad(
         PATH_SECTOR_QUAD_VERTICES * PATH_SECTOR_VERTEX_FLOATS,
         "path region arc sector vertices",
     )?;
+    let center_x_nm = f32_to_nm(center[0]);
+    let center_y_nm = f32_to_nm(center[1]);
+    let radius_nm = f32_to_nm(radius);
     for point in [start, end, end_outer, start, end_outer, start_outer] {
-        vertices.extend_from_slice(&[point[0], point[1], center[0], center[1], radius]);
+        vertices.extend_from_slice(&[
+            f32_to_nm(point[0]),
+            f32_to_nm(point[1]),
+            center_x_nm,
+            center_y_nm,
+            radius_nm,
+        ]);
     }
 
     Ok(())
@@ -3954,7 +3980,7 @@ pub(crate) fn finish_region_contours(
     region_contours: &[RegionContour],
     state: &ParserState,
     primitives: &mut Vec<Primitive>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     mut interaction_layer: Option<&mut InteractionLayer>,
     preserve_arc_regions: bool,
@@ -3990,8 +4016,7 @@ pub(crate) fn finish_region_contours(
                 path_regions.region_count(),
                 region_path_regions.region_count(),
             )?;
-            let interaction_bounds =
-                InteractionFeature::bounds_for_geometry(&[], &region_path_regions);
+            let interaction_bounds = region_path_regions.bounds();
             let interaction_path_regions = region_path_regions.clone_for_interaction_pick();
             path_regions.append(region_path_regions)?;
             if let Some(bounds) = interaction_bounds {
@@ -4137,7 +4162,7 @@ pub fn parse_graphic_command(
     apertures: &HashMap<String, Aperture>,
     primitives: &mut Vec<Primitive>,
     region_contours: &mut Vec<RegionContour>,
-    path_regions: &mut PathRegions,
+    path_regions: &mut PathRegionsBuilder,
     polarity_layers: &mut Vec<PolarityLayer>,
     mut interaction_layer: Option<&mut InteractionLayer>,
     preserve_arc_regions: bool,
