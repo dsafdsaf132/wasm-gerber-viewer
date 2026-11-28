@@ -29,11 +29,17 @@ M30",
     )
     .expect("XNC drill file should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 3);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 3);
     assert_eq!(parsed.metadata.hit_count, 3);
     assert_eq!(parsed.metadata.tools.len(), 2);
-    assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.3);
-    assert_approx_eq(parsed.outline_layer.circles.radius[0], 0.35);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.radius_nm[0] as f64 * 1e-6) as f32,
+        0.3,
+    );
+    assert_approx_eq(
+        (parsed.outline_layer.circles.radius_nm[0] as f64 * 1e-6) as f32,
+        0.35,
+    );
 }
 
 #[test]
@@ -56,15 +62,27 @@ M30",
     )
     .expect("XNC rout file should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 2);
-    assert_eq!(parsed.outline_layer.circles.x.len(), 2);
-    assert_eq!(parsed.outline_layer.arcs.x.len(), 0);
-    assert_approx_eq(parsed.outline_layer.circles.radius[0], 0.45);
-    assert_approx_eq(parsed.outline_layer.circles.radius[1], 0.45);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
+    assert_eq!(parsed.outline_layer.circles.x_nm.len(), 2);
+    assert_eq!(parsed.outline_layer.arcs.x_nm.len(), 0);
+    assert_approx_eq(
+        (parsed.outline_layer.circles.radius_nm[0] as f64 * 1e-6) as f32,
+        0.45,
+    );
+    assert_approx_eq(
+        (parsed.outline_layer.circles.radius_nm[1] as f64 * 1e-6) as f32,
+        0.45,
+    );
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);
-    assert_approx_eq(parsed.outline_layer.lines.width[0], 0.9);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.width_nm[0] as f64 * 1e-6) as f32,
+        0.8,
+    );
+    assert_approx_eq(
+        (parsed.outline_layer.lines.width_nm[0] as f64 * 1e-6) as f32,
+        0.9,
+    );
 }
 
 #[test]
@@ -85,15 +103,30 @@ M30",
     )
     .expect("G85 slot command should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 3);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 3);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.width[0], 0.8);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        4.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.width_nm[0] as f64 * 1e-6) as f32,
+        0.8,
+    );
 }
 
 #[test]
@@ -113,14 +146,26 @@ M30",
     )
     .expect("Inline G85 slot endpoints should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 2);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        4.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
 }
 
 #[test]
@@ -140,14 +185,26 @@ M30",
     )
     .expect("Embedded G85 slot endpoints should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 2);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_y[0], 2.0);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        4.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
 }
 
 #[test]
@@ -168,16 +225,40 @@ M30",
     )
     .expect("Embedded G85 omitted axes should parse from the G85 split point");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 2);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 2);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 0.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_y[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 4.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_y[0], 3.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[1], 4.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_y[1], 5.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[1], 6.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_y[1], 5.0);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_y_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        4.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_y_nm[0] as f64 * 1e-6) as f32,
+        3.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[1] as f64 * 1e-6) as f32,
+        4.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_y_nm[1] as f64 * 1e-6) as f32,
+        5.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[1] as f64 * 1e-6) as f32,
+        6.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_y_nm[1] as f64 * 1e-6) as f32,
+        5.0,
+    );
 }
 
 #[test]
@@ -200,12 +281,18 @@ M30",
     )
     .expect("Short Excellon rout commands should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 2);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 8.01);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 6.54);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        8.01,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        6.54,
+    );
 }
 
 #[test]
@@ -225,9 +312,12 @@ M30",
     )
     .expect("G54-prefixed tool selection should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 1);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        9.0,
+    );
 }
 
 #[test]
@@ -248,9 +338,12 @@ M30",
     )
     .expect("Tool selection with feed and speed words should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 1);
-    assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.6);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.radius_nm[0] as f64 * 1e-6) as f32,
+        0.6,
+    );
 }
 
 #[test]
@@ -277,10 +370,22 @@ M30",
 
     assert_eq!(parsed.metadata.hit_count, 2);
     assert_eq!(parsed.metadata.tools.len(), 2);
-    assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.1);
-    assert_approx_eq(parsed.fill_layer.circles.radius[1], 1.65);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 25.025);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.75);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.radius_nm[0] as f64 * 1e-6) as f32,
+        0.1,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.radius_nm[1] as f64 * 1e-6) as f32,
+        1.65,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        25.025,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.75,
+    );
 }
 
 #[test]
@@ -301,7 +406,10 @@ M30",
     .expect("Tool declaration with feed and speed after diameter should parse");
 
     assert_eq!(parsed.metadata.hit_count, 1);
-    assert_approx_eq(parsed.fill_layer.circles.radius[0], 0.3);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.radius_nm[0] as f64 * 1e-6) as f32,
+        0.3,
+    );
 }
 
 #[test]
@@ -335,14 +443,26 @@ M30",
     )
     .expect("Modal coordinate-only rout move should parse as a slot");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 4);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 2);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 4);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 2);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 1.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[1], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[1], 3.0);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[1] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[1] as f64 * 1e-6) as f32,
+        3.0,
+    );
 }
 
 #[test]
@@ -366,12 +486,12 @@ M30",
     )
     .expect("Modal coordinate-only arc rout move should parse as an arc");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 2);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 2);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq(parsed.fill_layer.arcs.x[1], 0.0);
-    assert_approx_eq(parsed.fill_layer.arcs.y[1], 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.x_nm[1] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.y_nm[1] as f64 * 1e-6) as f32, 0.0);
 }
 
 #[test]
@@ -396,14 +516,14 @@ M30",
     )
     .expect("Modal arc definition should apply to coordinate-only rout moves");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 2);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 2);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq(parsed.fill_layer.arcs.x[0], 0.0);
-    assert_approx_eq(parsed.fill_layer.arcs.y[0], 0.0);
-    assert_approx_eq(parsed.fill_layer.arcs.x[1], 0.0);
-    assert_approx_eq(parsed.fill_layer.arcs.y[1], 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.x_nm[0] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.y_nm[0] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.x_nm[1] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.y_nm[1] as f64 * 1e-6) as f32, 0.0);
 }
 
 #[test]
@@ -428,11 +548,11 @@ M30",
     )
     .expect("Arc definition-only rout records should update modal state");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.arcs.x[0], 0.0);
-    assert_approx_eq(parsed.fill_layer.arcs.y[0], 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.x_nm[0] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.y_nm[0] as f64 * 1e-6) as f32, 0.0);
 }
 
 #[test]
@@ -456,10 +576,13 @@ M30",
     )
     .expect("Arc definition-only records should be modal before G03");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.arcs.radius[0], 1.0);
+    assert_approx_eq(
+        (parsed.fill_layer.arcs.radius_nm[0] as f64 * 1e-6) as f32,
+        1.0,
+    );
 }
 
 #[test]
@@ -483,11 +606,11 @@ M30",
     )
     .expect("Partial modal I/J updates should retain the omitted companion word");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.arcs.x[0], 0.0);
-    assert_approx_eq(parsed.fill_layer.arcs.y[0], 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.x_nm[0] as f64 * 1e-6) as f32, 0.0);
+    assert_approx_eq((parsed.fill_layer.arcs.y_nm[0] as f64 * 1e-6) as f32, 0.0);
 }
 
 #[test]
@@ -510,14 +633,26 @@ M30",
     )
     .expect("G01 after M15 should start a routed slot");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 4);
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 2);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 4);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 2);
     assert_eq!(parsed.metadata.hit_count, 0);
     assert_eq!(parsed.metadata.slot_count, 2);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[0], 0.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[0], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.start_x[1], 2.0);
-    assert_approx_eq(parsed.fill_layer.lines.end_x[1], 3.0);
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[0] as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[0] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.start_x_nm[1] as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.lines.end_x_nm[1] as f64 * 1e-6) as f32,
+        3.0,
+    );
 }
 
 #[test]
@@ -539,11 +674,23 @@ M30",
     )
     .expect("Incremental omitted axes should preserve current coordinate");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 2);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[1], 11.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[1], 10.0);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        11.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        10.0,
+    );
 }
 
 #[test]
@@ -567,13 +714,31 @@ M30",
     )
     .expect("ICI incremental coordinate mode should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 3);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[1], 11.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[1], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[2], 1.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[2], 0.0);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 3);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        11.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[2] as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[2] as f64 * 1e-6) as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -594,7 +759,7 @@ M30",
     )
     .expect("T00 should unload the current drill tool");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 1);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 1);
     assert_eq!(parsed.metadata.hit_count, 1);
 }
 
@@ -615,8 +780,14 @@ M30",
     )
     .expect("METRIC,LZ omitted-decimal coordinates should parse");
 
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        9.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
 }
 
 #[test]
@@ -636,8 +807,14 @@ M30",
     )
     .expect("METRIC,TZ omitted-decimal coordinates should parse");
 
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 0.009);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 0.010);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        0.009,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        0.010,
+    );
 }
 
 #[test]
@@ -660,11 +837,23 @@ M30",
     )
     .expect("Standalone zero-suppression commands should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 2);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[1], 0.011);
-    assert_approx_eq(parsed.fill_layer.circles.y[1], 0.012);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 2);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        9.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        0.011,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        0.012,
+    );
 }
 
 #[test]
@@ -685,8 +874,14 @@ M30",
     )
     .expect("FILE_FORMAT comment should set coordinate precision");
 
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        9.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
 }
 
 #[test]
@@ -707,16 +902,40 @@ M30",
     )
     .expect("Repeat-hole records should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 4);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 4);
     assert_eq!(parsed.metadata.hit_count, 4);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[1], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[1], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[2], 11.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[2], 10.0);
-    assert_approx_eq(parsed.fill_layer.circles.x[3], 12.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[3], 10.0);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        9.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[1] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[1] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[2] as f64 * 1e-6) as f32,
+        11.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[2] as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[3] as f64 * 1e-6) as f32,
+        12.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[3] as f64 * 1e-6) as f32,
+        10.0,
+    );
 }
 
 #[test]
@@ -762,9 +981,15 @@ M30",
     )
     .expect("LibrePCB-style drill header should parse");
 
-    assert_eq!(parsed.fill_layer.circles.x.len(), 1);
-    assert_approx_eq(parsed.fill_layer.circles.x[0], 9.0);
-    assert_approx_eq(parsed.fill_layer.circles.y[0], 10.0);
+    assert_eq!(parsed.fill_layer.circles.x_nm.len(), 1);
+    assert_approx_eq(
+        (parsed.fill_layer.circles.x_nm[0] as f64 * 1e-6) as f32,
+        9.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.circles.y_nm[0] as f64 * 1e-6) as f32,
+        10.0,
+    );
 }
 
 #[test]
@@ -787,11 +1012,17 @@ M30",
     )
     .expect("XNC circular rout should parse as analytic arc");
 
-    assert_eq!(parsed.fill_layer.lines.start_x.len(), 0);
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+    assert_eq!(parsed.fill_layer.lines.start_x_nm.len(), 0);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_eq!(parsed.metadata.slot_count, 1);
-    assert_approx_eq(parsed.fill_layer.arcs.radius[0], 1.0);
-    assert_approx_eq(parsed.fill_layer.arcs.thickness[0], 0.8);
+    assert_approx_eq(
+        (parsed.fill_layer.arcs.radius_nm[0] as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        (parsed.fill_layer.arcs.thickness_nm[0] as f64 * 1e-6) as f32,
+        0.8,
+    );
 }
 
 #[test]
@@ -814,7 +1045,7 @@ M30",
     )
     .expect("Routed arc should parse");
 
-    assert_eq!(parsed.fill_layer.arcs.x.len(), 1);
+    assert_eq!(parsed.fill_layer.arcs.x_nm.len(), 1);
     assert_approx_eq(parsed.fill_layer.boundary.min_x, -0.5);
     assert_approx_eq(parsed.fill_layer.boundary.max_x, 10.5);
     assert_approx_eq(parsed.fill_layer.boundary.min_y, -0.5);

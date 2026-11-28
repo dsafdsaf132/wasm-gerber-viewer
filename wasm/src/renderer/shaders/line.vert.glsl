@@ -16,10 +16,14 @@ uniform float inner_outline_world;
 out highp float vSide;
 out highp float vInnerSide;
 
+float sub_i32_to_f32(int a, int b) {
+    return a >= b ? float(uint(a) - uint(b)) : -float(uint(b) - uint(a));
+}
+
 void main() {
-    // Relative-To-Eye: subtract u_eye_nm in integer space first
-    vec2 start = vec2(float(start_x_instance - u_eye_nm.x) * 0.000001, float(start_y_instance - u_eye_nm.y) * 0.000001);
-    vec2 end = vec2(float(end_x_instance - u_eye_nm.x) * 0.000001, float(end_y_instance - u_eye_nm.y) * 0.000001);
+    // Relative-To-Eye: subtract u_eye_nm in overflow-safe integer space first
+    vec2 start = vec2(sub_i32_to_f32(start_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(start_y_instance, u_eye_nm.y) * 0.000001);
+    vec2 end = vec2(sub_i32_to_f32(end_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(end_y_instance, u_eye_nm.y) * 0.000001);
 
     // Compute line segment direction and normal in world space
     vec2 lineWorld = end - start;
@@ -65,14 +69,14 @@ void main() {
         int half_w_bottom = width_instance / 2;
         int edge_y_nm = start_y_instance + (norm_y > 0.0 ? half_w_top : -half_w_bottom);
         int edge_x_nm = position.x < 0.0 ? start_x_instance : end_x_instance;
-        vertexWorld = vec2(float(edge_x_nm - u_eye_nm.x) * 0.000001, float(edge_y_nm - u_eye_nm.y) * 0.000001);
+        vertexWorld = vec2(sub_i32_to_f32(edge_x_nm, u_eye_nm.x) * 0.000001, sub_i32_to_f32(edge_y_nm, u_eye_nm.y) * 0.000001);
     } else if (useExactInteger && start_x_instance == end_x_instance) {
         float norm_x = worldNormal.x * position.y;
         int half_w_right = (width_instance + 1) / 2;
         int half_w_left = width_instance / 2;
         int edge_x_nm = start_x_instance + (norm_x > 0.0 ? half_w_right : -half_w_left);
         int edge_y_nm = position.x < 0.0 ? start_y_instance : end_y_instance;
-        vertexWorld = vec2(float(edge_x_nm - u_eye_nm.x) * 0.000001, float(edge_y_nm - u_eye_nm.y) * 0.000001);
+        vertexWorld = vec2(sub_i32_to_f32(edge_x_nm, u_eye_nm.x) * 0.000001, sub_i32_to_f32(edge_y_nm, u_eye_nm.y) * 0.000001);
     } else {
         vertexWorld = centerWorld + worldNormal * (position.y * totalHalfWidthWorld);
     }

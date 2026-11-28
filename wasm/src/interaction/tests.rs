@@ -205,7 +205,7 @@ fn thermal_highlight_batches_clear_hole_and_gaps() {
     assert_eq!(batches.len(), 2);
     assert!(!batches[0].clear);
     assert!(batches[1].clear);
-    assert!(batches[1].vertices.len() > CIRCLE_SEGMENTS * 6);
+    assert!(batches[1].vertices_nm.len() > CIRCLE_SEGMENTS * 6);
 }
 
 #[test]

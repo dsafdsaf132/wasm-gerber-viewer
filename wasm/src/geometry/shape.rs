@@ -84,39 +84,8 @@ fn translate_point_pairs(values: &mut [f32], dx: f32, dy: f32) {
     }
 }
 
-fn translate_point_pairs_i32(values: &mut [i32], dx: i32, dy: i32) {
-    for point in values.chunks_exact_mut(2) {
-        point[0] = point[0].saturating_add(dx);
-        point[1] = point[1].saturating_add(dy);
-    }
-}
-
-fn translate_components(xs: &mut [f32], ys: &mut [f32], dx: f32, dy: f32) {
-    for x in xs {
-        *x += dx;
-    }
-
-    for y in ys {
-        *y += dy;
-    }
-}
-
-fn translate_components_i32(xs: &mut [i32], ys: &mut [i32], dx: i32, dy: i32) {
-    for x in xs {
-        *x = x.saturating_add(dx);
-    }
-
-    for y in ys {
-        *y = y.saturating_add(dy);
-    }
-}
-
 /// Triangle mesh data structure
 pub struct Triangles {
-    pub(crate) vertices: Vec<f32>,
-    pub(crate) hole_x: Vec<f32>,
-    pub(crate) hole_y: Vec<f32>,
-    pub(crate) hole_radius: Vec<f32>,
     pub(crate) vertices_nm: Vec<i32>,
     pub(crate) hole_x_nm: Vec<i32>,
     pub(crate) hole_y_nm: Vec<i32>,
@@ -130,49 +99,26 @@ impl Triangles {
         hole_y: Vec<f32>,
         hole_radius: Vec<f32>,
     ) -> Triangles {
-        let vertices_nm = vertices
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let hole_x_nm = hole_x
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let hole_y_nm = hole_y
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let hole_radius_nm = hole_radius
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
+        let to_nm = |vals: &[f32]| -> Vec<i32> {
+            vals.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
         Triangles {
-            vertices,
-            hole_x,
-            hole_y,
-            hole_radius,
-            vertices_nm,
-            hole_x_nm,
-            hole_y_nm,
-            hole_radius_nm,
+            vertices_nm: to_nm(&vertices),
+            hole_x_nm: to_nm(&hole_x),
+            hole_y_nm: to_nm(&hole_y),
+            hole_radius_nm: to_nm(&hole_radius),
         }
     }
 
     pub fn new_with_nm(
-        vertices: Vec<f32>,
-        hole_x: Vec<f32>,
-        hole_y: Vec<f32>,
-        hole_radius: Vec<f32>,
         vertices_nm: Vec<i32>,
         hole_x_nm: Vec<i32>,
         hole_y_nm: Vec<i32>,
         hole_radius_nm: Vec<i32>,
     ) -> Triangles {
         Triangles {
-            vertices,
-            hole_x,
-            hole_y,
-            hole_radius,
             vertices_nm,
             hole_x_nm,
             hole_y_nm,
@@ -181,23 +127,10 @@ impl Triangles {
     }
 
     pub(crate) fn release_cpu_geometry(&mut self) {
-        self.vertices = Vec::new();
-        self.hole_x = Vec::new();
-        self.hole_y = Vec::new();
-        self.hole_radius = Vec::new();
         self.vertices_nm = Vec::new();
         self.hole_x_nm = Vec::new();
         self.hole_y_nm = Vec::new();
         self.hole_radius_nm = Vec::new();
-    }
-
-    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_point_pairs(&mut self.vertices, dx, dy);
-        translate_components(&mut self.hole_x, &mut self.hole_y, dx, dy);
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        translate_point_pairs_i32(&mut self.vertices_nm, dx_nm, dy_nm);
-        translate_components_i32(&mut self.hole_x_nm, &mut self.hole_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -214,21 +147,11 @@ impl Triangles {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Triangles, JsValue> {
-        let vertices_nm = i32_array_from_js(value, "vertices")?;
-        let hole_x_nm = i32_array_from_js(value, "holeX")?;
-        let hole_y_nm = i32_array_from_js(value, "holeY")?;
-        let hole_radius_nm = i32_array_from_js(value, "holeRadius")?;
-        let to_mm =
-            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Triangles::new_with_nm(
-            to_mm(&vertices_nm),
-            to_mm(&hole_x_nm),
-            to_mm(&hole_y_nm),
-            to_mm(&hole_radius_nm),
-            vertices_nm,
-            hole_x_nm,
-            hole_y_nm,
-            hole_radius_nm,
+            i32_array_from_js(value, "vertices")?,
+            i32_array_from_js(value, "holeX")?,
+            i32_array_from_js(value, "holeY")?,
+            i32_array_from_js(value, "holeRadius")?,
         ))
     }
 }
@@ -236,9 +159,6 @@ impl Triangles {
 /// Triangle mesh template rendered at many flash positions.
 pub struct TriangleTemplateInstances {
     pub(crate) vertices: Vec<f32>,
-    pub(crate) instance_x: Vec<f32>,
-    pub(crate) instance_y: Vec<f32>,
-    pub(crate) vertices_nm: Vec<i32>,
     pub(crate) instance_x_nm: Vec<i32>,
     pub(crate) instance_y_nm: Vec<i32>,
 }
@@ -249,41 +169,25 @@ impl TriangleTemplateInstances {
         instance_x: Vec<f32>,
         instance_y: Vec<f32>,
     ) -> TriangleTemplateInstances {
-        let vertices_nm = vertices
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let instance_x_nm = instance_x
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let instance_y_nm = instance_y
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
+        let to_nm = |vals: &[f32]| -> Vec<i32> {
+            vals.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
         TriangleTemplateInstances {
             vertices,
-            instance_x,
-            instance_y,
-            vertices_nm,
-            instance_x_nm,
-            instance_y_nm,
+            instance_x_nm: to_nm(&instance_x),
+            instance_y_nm: to_nm(&instance_y),
         }
     }
 
     pub fn new_with_nm(
         vertices: Vec<f32>,
-        instance_x: Vec<f32>,
-        instance_y: Vec<f32>,
-        vertices_nm: Vec<i32>,
         instance_x_nm: Vec<i32>,
         instance_y_nm: Vec<i32>,
     ) -> TriangleTemplateInstances {
         TriangleTemplateInstances {
             vertices,
-            instance_x,
-            instance_y,
-            vertices_nm,
             instance_x_nm,
             instance_y_nm,
         }
@@ -291,23 +195,8 @@ impl TriangleTemplateInstances {
 
     pub(crate) fn release_cpu_geometry(&mut self) {
         self.vertices = Vec::new();
-        self.instance_x = Vec::new();
-        self.instance_y = Vec::new();
-        self.vertices_nm = Vec::new();
         self.instance_x_nm = Vec::new();
         self.instance_y_nm = Vec::new();
-    }
-
-    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_components(&mut self.instance_x, &mut self.instance_y, dx, dy);
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        translate_components_i32(
-            &mut self.instance_x_nm,
-            &mut self.instance_y_nm,
-            dx_nm,
-            dy_nm,
-        );
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -319,33 +208,16 @@ impl TriangleTemplateInstances {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<TriangleTemplateInstances, JsValue> {
-        let vertices = f32_array_from_js(value, "vertices")?;
-        let instance_x_nm = i32_array_from_js(value, "instanceX")?;
-        let instance_y_nm = i32_array_from_js(value, "instanceY")?;
-        let vertices_nm = vertices
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let to_mm =
-            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(TriangleTemplateInstances::new_with_nm(
-            vertices,
-            to_mm(&instance_x_nm),
-            to_mm(&instance_y_nm),
-            vertices_nm,
-            instance_x_nm,
-            instance_y_nm,
+            f32_array_from_js(value, "vertices")?,
+            i32_array_from_js(value, "instanceX")?,
+            i32_array_from_js(value, "instanceY")?,
         ))
     }
 }
 
 /// Instanced straight line body rendered between two round caps.
 pub struct Lines {
-    pub(crate) start_x: Vec<f32>,
-    pub(crate) start_y: Vec<f32>,
-    pub(crate) end_x: Vec<f32>,
-    pub(crate) end_y: Vec<f32>,
-    pub(crate) width: Vec<f32>,
     pub(crate) start_x_nm: Vec<i32>,
     pub(crate) start_y_nm: Vec<i32>,
     pub(crate) end_x_nm: Vec<i32>,
@@ -361,46 +233,21 @@ impl Lines {
         end_y: Vec<f32>,
         width: Vec<f32>,
     ) -> Lines {
-        let start_x_nm = start_x
-            .iter()
-            .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let start_y_nm = start_y
-            .iter()
-            .map(|&y| (y as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let end_x_nm = end_x
-            .iter()
-            .map(|&x| (x as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let end_y_nm = end_y
-            .iter()
-            .map(|&y| (y as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let width_nm = width
-            .iter()
-            .map(|&w| (w as f64 * 1_000_000.0).round() as i32)
-            .collect();
+        let to_nm = |vals: &[f32]| -> Vec<i32> {
+            vals.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
         Lines {
-            start_x,
-            start_y,
-            end_x,
-            end_y,
-            width,
-            start_x_nm,
-            start_y_nm,
-            end_x_nm,
-            end_y_nm,
-            width_nm,
+            start_x_nm: to_nm(&start_x),
+            start_y_nm: to_nm(&start_y),
+            end_x_nm: to_nm(&end_x),
+            end_y_nm: to_nm(&end_y),
+            width_nm: to_nm(&width),
         }
     }
 
     pub fn new_with_nm(
-        start_x: Vec<f32>,
-        start_y: Vec<f32>,
-        end_x: Vec<f32>,
-        end_y: Vec<f32>,
-        width: Vec<f32>,
         start_x_nm: Vec<i32>,
         start_y_nm: Vec<i32>,
         end_x_nm: Vec<i32>,
@@ -408,11 +255,6 @@ impl Lines {
         width_nm: Vec<i32>,
     ) -> Lines {
         Lines {
-            start_x,
-            start_y,
-            end_x,
-            end_y,
-            width,
             start_x_nm,
             start_y_nm,
             end_x_nm,
@@ -422,25 +264,11 @@ impl Lines {
     }
 
     pub(crate) fn release_cpu_geometry(&mut self) {
-        self.start_x = Vec::new();
-        self.start_y = Vec::new();
-        self.end_x = Vec::new();
-        self.end_y = Vec::new();
-        self.width = Vec::new();
         self.start_x_nm = Vec::new();
         self.start_y_nm = Vec::new();
         self.end_x_nm = Vec::new();
         self.end_y_nm = Vec::new();
         self.width_nm = Vec::new();
-    }
-
-    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_components(&mut self.start_x, &mut self.start_y, dx, dy);
-        translate_components(&mut self.end_x, &mut self.end_y, dx, dy);
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        translate_components_i32(&mut self.start_x_nm, &mut self.start_y_nm, dx_nm, dy_nm);
-        translate_components_i32(&mut self.end_x_nm, &mut self.end_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -454,36 +282,18 @@ impl Lines {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Lines, JsValue> {
-        let start_x_nm = i32_array_from_js(value, "startX")?;
-        let start_y_nm = i32_array_from_js(value, "startY")?;
-        let end_x_nm = i32_array_from_js(value, "endX")?;
-        let end_y_nm = i32_array_from_js(value, "endY")?;
-        let width_nm = i32_array_from_js(value, "width")?;
-        let to_mm =
-            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Lines::new_with_nm(
-            to_mm(&start_x_nm),
-            to_mm(&start_y_nm),
-            to_mm(&end_x_nm),
-            to_mm(&end_y_nm),
-            to_mm(&width_nm),
-            start_x_nm,
-            start_y_nm,
-            end_x_nm,
-            end_y_nm,
-            width_nm,
+            i32_array_from_js(value, "startX")?,
+            i32_array_from_js(value, "startY")?,
+            i32_array_from_js(value, "endX")?,
+            i32_array_from_js(value, "endY")?,
+            i32_array_from_js(value, "width")?,
         ))
     }
 }
 
 /// Circle primitive data structure
 pub struct Circles {
-    pub(crate) x: Vec<f32>,
-    pub(crate) y: Vec<f32>,
-    pub(crate) radius: Vec<f32>,
-    pub(crate) hole_x: Vec<f32>,
-    pub(crate) hole_y: Vec<f32>,
-    pub(crate) hole_radius: Vec<f32>,
     pub(crate) x_nm: Vec<i32>,
     pub(crate) y_nm: Vec<i32>,
     pub(crate) radius_nm: Vec<i32>,
@@ -501,53 +311,22 @@ impl Circles {
         hole_y: Vec<f32>,
         hole_radius: Vec<f32>,
     ) -> Circles {
-        let x_nm = x
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let y_nm = y
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let radius_nm = radius
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let hole_x_nm = hole_x
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let hole_y_nm = hole_y
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let hole_radius_nm = hole_radius
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
+        let to_nm = |vals: &[f32]| -> Vec<i32> {
+            vals.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
         Circles {
-            x,
-            y,
-            radius,
-            hole_x,
-            hole_y,
-            hole_radius,
-            x_nm,
-            y_nm,
-            radius_nm,
-            hole_x_nm,
-            hole_y_nm,
-            hole_radius_nm,
+            x_nm: to_nm(&x),
+            y_nm: to_nm(&y),
+            radius_nm: to_nm(&radius),
+            hole_x_nm: to_nm(&hole_x),
+            hole_y_nm: to_nm(&hole_y),
+            hole_radius_nm: to_nm(&hole_radius),
         }
     }
 
     pub fn new_with_nm(
-        x: Vec<f32>,
-        y: Vec<f32>,
-        radius: Vec<f32>,
-        hole_x: Vec<f32>,
-        hole_y: Vec<f32>,
-        hole_radius: Vec<f32>,
         x_nm: Vec<i32>,
         y_nm: Vec<i32>,
         radius_nm: Vec<i32>,
@@ -556,12 +335,6 @@ impl Circles {
         hole_radius_nm: Vec<i32>,
     ) -> Circles {
         Circles {
-            x,
-            y,
-            radius,
-            hole_x,
-            hole_y,
-            hole_radius,
             x_nm,
             y_nm,
             radius_nm,
@@ -572,27 +345,12 @@ impl Circles {
     }
 
     pub(crate) fn release_cpu_geometry(&mut self) {
-        self.x = Vec::new();
-        self.y = Vec::new();
-        self.radius = Vec::new();
-        self.hole_x = Vec::new();
-        self.hole_y = Vec::new();
-        self.hole_radius = Vec::new();
         self.x_nm = Vec::new();
         self.y_nm = Vec::new();
         self.radius_nm = Vec::new();
         self.hole_x_nm = Vec::new();
         self.hole_y_nm = Vec::new();
         self.hole_radius_nm = Vec::new();
-    }
-
-    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_components(&mut self.x, &mut self.y, dx, dy);
-        translate_components(&mut self.hole_x, &mut self.hole_y, dx, dy);
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        translate_components_i32(&mut self.x_nm, &mut self.y_nm, dx_nm, dy_nm);
-        translate_components_i32(&mut self.hole_x_nm, &mut self.hole_y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -611,42 +369,24 @@ impl Circles {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Circles, JsValue> {
-        let x_nm = i32_array_from_js(value, "x")?;
-        let y_nm = i32_array_from_js(value, "y")?;
-        let radius_nm = i32_array_from_js(value, "radius")?;
-        let hole_x_nm = i32_array_from_js(value, "holeX")?;
-        let hole_y_nm = i32_array_from_js(value, "holeY")?;
-        let hole_radius_nm = i32_array_from_js(value, "holeRadius")?;
-        let to_mm =
-            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Circles::new_with_nm(
-            to_mm(&x_nm),
-            to_mm(&y_nm),
-            to_mm(&radius_nm),
-            to_mm(&hole_x_nm),
-            to_mm(&hole_y_nm),
-            to_mm(&hole_radius_nm),
-            x_nm,
-            y_nm,
-            radius_nm,
-            hole_x_nm,
-            hole_y_nm,
-            hole_radius_nm,
+            i32_array_from_js(value, "x")?,
+            i32_array_from_js(value, "y")?,
+            i32_array_from_js(value, "radius")?,
+            i32_array_from_js(value, "holeX")?,
+            i32_array_from_js(value, "holeY")?,
+            i32_array_from_js(value, "holeRadius")?,
         ))
     }
 }
 
 /// Arc primitive data structure
 pub struct Arcs {
-    pub(crate) x: Vec<f32>,
-    pub(crate) y: Vec<f32>,
-    pub(crate) radius: Vec<f32>,
-    pub(crate) start_angle: Vec<f32>,
-    pub(crate) sweep_angle: Vec<f32>,
-    pub(crate) thickness: Vec<f32>,
     pub(crate) x_nm: Vec<i32>,
     pub(crate) y_nm: Vec<i32>,
     pub(crate) radius_nm: Vec<i32>,
+    pub(crate) start_angle: Vec<f32>,
+    pub(crate) sweep_angle: Vec<f32>,
     pub(crate) thickness_nm: Vec<i32>,
 }
 
@@ -659,80 +399,46 @@ impl Arcs {
         sweep_angle: Vec<f32>,
         thickness: Vec<f32>,
     ) -> Arcs {
-        let x_nm = x
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let y_nm = y
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let radius_nm = radius
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let thickness_nm = thickness
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
+        let to_nm = |vals: &[f32]| -> Vec<i32> {
+            vals.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
         Arcs {
-            x,
-            y,
-            radius,
+            x_nm: to_nm(&x),
+            y_nm: to_nm(&y),
+            radius_nm: to_nm(&radius),
             start_angle,
             sweep_angle,
-            thickness,
-            x_nm,
-            y_nm,
-            radius_nm,
-            thickness_nm,
+            thickness_nm: to_nm(&thickness),
         }
     }
 
     pub fn new_with_nm(
-        x: Vec<f32>,
-        y: Vec<f32>,
-        radius: Vec<f32>,
-        start_angle: Vec<f32>,
-        sweep_angle: Vec<f32>,
-        thickness: Vec<f32>,
         x_nm: Vec<i32>,
         y_nm: Vec<i32>,
         radius_nm: Vec<i32>,
+        start_angle: Vec<f32>,
+        sweep_angle: Vec<f32>,
         thickness_nm: Vec<i32>,
     ) -> Arcs {
         Arcs {
-            x,
-            y,
-            radius,
-            start_angle,
-            sweep_angle,
-            thickness,
             x_nm,
             y_nm,
             radius_nm,
+            start_angle,
+            sweep_angle,
             thickness_nm,
         }
     }
 
     pub(crate) fn release_cpu_geometry(&mut self) {
-        self.x = Vec::new();
-        self.y = Vec::new();
-        self.radius = Vec::new();
-        self.start_angle = Vec::new();
-        self.sweep_angle = Vec::new();
-        self.thickness = Vec::new();
         self.x_nm = Vec::new();
         self.y_nm = Vec::new();
         self.radius_nm = Vec::new();
+        self.start_angle = Vec::new();
+        self.sweep_angle = Vec::new();
         self.thickness_nm = Vec::new();
-    }
-
-    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_components(&mut self.x, &mut self.y, dx, dy);
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        translate_components_i32(&mut self.x_nm, &mut self.y_nm, dx_nm, dy_nm);
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -747,42 +453,25 @@ impl Arcs {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Arcs, JsValue> {
-        let x_nm = i32_array_from_js(value, "x")?;
-        let y_nm = i32_array_from_js(value, "y")?;
-        let radius_nm = i32_array_from_js(value, "radius")?;
-        let start_angle = f32_array_from_js(value, "startAngle")?;
-        let sweep_angle = f32_array_from_js(value, "sweepAngle")?;
-        let thickness_nm = i32_array_from_js(value, "thickness")?;
-        let to_mm =
-            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Arcs::new_with_nm(
-            to_mm(&x_nm),
-            to_mm(&y_nm),
-            to_mm(&radius_nm),
-            start_angle,
-            sweep_angle,
-            to_mm(&thickness_nm),
-            x_nm,
-            y_nm,
-            radius_nm,
-            thickness_nm,
+            i32_array_from_js(value, "x")?,
+            i32_array_from_js(value, "y")?,
+            i32_array_from_js(value, "radius")?,
+            f32_array_from_js(value, "startAngle")?,
+            f32_array_from_js(value, "sweepAngle")?,
+            i32_array_from_js(value, "thickness")?,
         ))
     }
 }
 
 /// Thermal primitive data structure
 pub struct Thermals {
-    pub(crate) x: Vec<f32>,
-    pub(crate) y: Vec<f32>,
-    pub(crate) outer_diameter: Vec<f32>,
-    pub(crate) inner_diameter: Vec<f32>,
-    pub(crate) gap_thickness: Vec<f32>,
-    pub(crate) rotation: Vec<f32>,
     pub(crate) x_nm: Vec<i32>,
     pub(crate) y_nm: Vec<i32>,
     pub(crate) outer_diameter_nm: Vec<i32>,
     pub(crate) inner_diameter_nm: Vec<i32>,
     pub(crate) gap_thickness_nm: Vec<i32>,
+    pub(crate) rotation: Vec<f32>,
 }
 
 impl Thermals {
@@ -794,88 +483,46 @@ impl Thermals {
         gap_thickness: Vec<f32>,
         rotation: Vec<f32>,
     ) -> Thermals {
-        let x_nm = x
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let y_nm = y
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let outer_diameter_nm = outer_diameter
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let inner_diameter_nm = inner_diameter
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
-        let gap_thickness_nm = gap_thickness
-            .iter()
-            .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
-            .collect();
+        let to_nm = |vals: &[f32]| -> Vec<i32> {
+            vals.iter()
+                .map(|&v| (v as f64 * 1_000_000.0).round() as i32)
+                .collect()
+        };
         Thermals {
-            x,
-            y,
-            outer_diameter,
-            inner_diameter,
-            gap_thickness,
+            x_nm: to_nm(&x),
+            y_nm: to_nm(&y),
+            outer_diameter_nm: to_nm(&outer_diameter),
+            inner_diameter_nm: to_nm(&inner_diameter),
+            gap_thickness_nm: to_nm(&gap_thickness),
             rotation,
-            x_nm,
-            y_nm,
-            outer_diameter_nm,
-            inner_diameter_nm,
-            gap_thickness_nm,
         }
     }
 
     pub fn new_with_nm(
-        x: Vec<f32>,
-        y: Vec<f32>,
-        outer_diameter: Vec<f32>,
-        inner_diameter: Vec<f32>,
-        gap_thickness: Vec<f32>,
-        rotation: Vec<f32>,
         x_nm: Vec<i32>,
         y_nm: Vec<i32>,
         outer_diameter_nm: Vec<i32>,
         inner_diameter_nm: Vec<i32>,
         gap_thickness_nm: Vec<i32>,
+        rotation: Vec<f32>,
     ) -> Thermals {
         Thermals {
-            x,
-            y,
-            outer_diameter,
-            inner_diameter,
-            gap_thickness,
-            rotation,
             x_nm,
             y_nm,
             outer_diameter_nm,
             inner_diameter_nm,
             gap_thickness_nm,
+            rotation,
         }
     }
 
     pub(crate) fn release_cpu_geometry(&mut self) {
-        self.x = Vec::new();
-        self.y = Vec::new();
-        self.outer_diameter = Vec::new();
-        self.inner_diameter = Vec::new();
-        self.gap_thickness = Vec::new();
-        self.rotation = Vec::new();
         self.x_nm = Vec::new();
         self.y_nm = Vec::new();
         self.outer_diameter_nm = Vec::new();
         self.inner_diameter_nm = Vec::new();
         self.gap_thickness_nm = Vec::new();
-    }
-
-    pub(crate) fn translate(&mut self, dx: f32, dy: f32) {
-        translate_components(&mut self.x, &mut self.y, dx, dy);
-        let dx_nm = (dx as f64 * 1_000_000.0).round() as i32;
-        let dy_nm = (dy as f64 * 1_000_000.0).round() as i32;
-        translate_components_i32(&mut self.x_nm, &mut self.y_nm, dx_nm, dy_nm);
+        self.rotation = Vec::new();
     }
 
     pub(crate) fn to_js(&self) -> Result<JsValue, JsValue> {
@@ -902,26 +549,13 @@ impl Thermals {
     }
 
     pub(crate) fn from_js(value: &JsValue) -> Result<Thermals, JsValue> {
-        let x_nm = i32_array_from_js(value, "x")?;
-        let y_nm = i32_array_from_js(value, "y")?;
-        let outer_diameter_nm = i32_array_from_js(value, "outerDiameter")?;
-        let inner_diameter_nm = i32_array_from_js(value, "innerDiameter")?;
-        let gap_thickness_nm = i32_array_from_js(value, "gapThickness")?;
-        let rotation = f32_array_from_js(value, "rotation")?;
-        let to_mm =
-            |vals: &[i32]| -> Vec<f32> { vals.iter().map(|&v| (v as f64 * 1e-6) as f32).collect() };
         Ok(Thermals::new_with_nm(
-            to_mm(&x_nm),
-            to_mm(&y_nm),
-            to_mm(&outer_diameter_nm),
-            to_mm(&inner_diameter_nm),
-            to_mm(&gap_thickness_nm),
-            rotation,
-            x_nm,
-            y_nm,
-            outer_diameter_nm,
-            inner_diameter_nm,
-            gap_thickness_nm,
+            i32_array_from_js(value, "x")?,
+            i32_array_from_js(value, "y")?,
+            i32_array_from_js(value, "outerDiameter")?,
+            i32_array_from_js(value, "innerDiameter")?,
+            i32_array_from_js(value, "gapThickness")?,
+            f32_array_from_js(value, "rotation")?,
         ))
     }
 }
@@ -941,6 +575,10 @@ pub struct PathRegions {
     pub(crate) sector_vertex_offsets: Vec<u32>,
     pub(crate) cover_vertices: Vec<f32>,
     pub(crate) clear_vertices: Vec<f32>,
+    pub(crate) wedge_vertices_nm: Vec<i32>,
+    pub(crate) sector_vertices_nm: Vec<i32>,
+    pub(crate) cover_vertices_nm: Vec<i32>,
+    pub(crate) clear_vertices_nm: Vec<i32>,
     pub(crate) pick_contours: Vec<Vec<Vec<[f32; 2]>>>,
     pub(crate) source_contours: Vec<Vec<RegionContour>>,
 }
@@ -980,13 +618,43 @@ impl PathRegions {
         cover_vertices: Vec<f32>,
         clear_vertices: Vec<f32>,
     ) -> PathRegions {
-        PathRegions {
+        let mut regions = PathRegions {
             wedge_vertices,
             wedge_vertex_offsets: normalize_offsets(wedge_vertex_offsets),
             sector_vertices,
             sector_vertex_offsets: normalize_offsets(sector_vertex_offsets),
             cover_vertices,
             clear_vertices,
+            wedge_vertices_nm: Vec::new(),
+            sector_vertices_nm: Vec::new(),
+            cover_vertices_nm: Vec::new(),
+            clear_vertices_nm: Vec::new(),
+            pick_contours: Vec::new(),
+            source_contours: Vec::new(),
+        };
+        let _ = regions.populate_nm_from_f32([0, 0]);
+        regions
+    }
+
+    pub fn new_with_nm(
+        wedge_vertices_nm: Vec<i32>,
+        wedge_vertex_offsets: Vec<u32>,
+        sector_vertices_nm: Vec<i32>,
+        sector_vertex_offsets: Vec<u32>,
+        cover_vertices_nm: Vec<i32>,
+        clear_vertices_nm: Vec<i32>,
+    ) -> PathRegions {
+        PathRegions {
+            wedge_vertices: Vec::new(),
+            wedge_vertex_offsets: normalize_offsets(wedge_vertex_offsets),
+            sector_vertices: Vec::new(),
+            sector_vertex_offsets: normalize_offsets(sector_vertex_offsets),
+            cover_vertices: Vec::new(),
+            clear_vertices: Vec::new(),
+            wedge_vertices_nm,
+            sector_vertices_nm,
+            cover_vertices_nm,
+            clear_vertices_nm,
             pick_contours: Vec::new(),
             source_contours: Vec::new(),
         }
@@ -1000,9 +668,61 @@ impl PathRegions {
             sector_vertex_offsets: vec![0],
             cover_vertices: Vec::new(),
             clear_vertices: Vec::new(),
+            wedge_vertices_nm: Vec::new(),
+            sector_vertices_nm: Vec::new(),
+            cover_vertices_nm: Vec::new(),
+            clear_vertices_nm: Vec::new(),
             pick_contours: Vec::new(),
             source_contours: Vec::new(),
         }
+    }
+
+    fn populate_nm_from_f32(&mut self, origin_nm: [i64; 2]) -> Result<(), String> {
+        let to_rel_i32 = |val: f32, origin: i64| -> Result<i32, String> {
+            let nm = (val as f64 * 1_000_000.0).round() as i64;
+            i32::try_from(nm - origin).map_err(|_| {
+                "Layer dimensions exceed maximum supported span (4.29 m) for integer nanometer coordinates"
+                    .to_string()
+            })
+        };
+        let to_dim_i32 = |val: f32| -> Result<i32, String> {
+            let nm = (val as f64 * 1_000_000.0).round() as i64;
+            i32::try_from(nm).map_err(|_| {
+                "Feature dimension exceeds maximum supported size (2.14 m) for integer nanometer coordinates"
+                    .to_string()
+            })
+        };
+        let convert_pairs = |src: &[f32]| -> Result<Vec<i32>, String> {
+            let mut out = Vec::with_capacity(src.len());
+            for pair in src.chunks_exact(2) {
+                out.push(to_rel_i32(pair[0], origin_nm[0])?);
+                out.push(to_rel_i32(pair[1], origin_nm[1])?);
+            }
+            Ok(out)
+        };
+
+        self.wedge_vertices_nm = convert_pairs(&self.wedge_vertices)?;
+        self.cover_vertices_nm = convert_pairs(&self.cover_vertices)?;
+        self.clear_vertices_nm = convert_pairs(&self.clear_vertices)?;
+        let mut sector_out = Vec::with_capacity(self.sector_vertices.len());
+        for vertex in self.sector_vertices.chunks_exact(PATH_SECTOR_VERTEX_FLOATS) {
+            sector_out.push(to_rel_i32(vertex[0], origin_nm[0])?);
+            sector_out.push(to_rel_i32(vertex[1], origin_nm[1])?);
+            sector_out.push(to_rel_i32(vertex[2], origin_nm[0])?);
+            sector_out.push(to_rel_i32(vertex[3], origin_nm[1])?);
+            sector_out.push(to_dim_i32(vertex[4])?);
+        }
+        self.sector_vertices_nm = sector_out;
+        Ok(())
+    }
+
+    pub(crate) fn finalize_origin_nm(&mut self, origin_nm: [i64; 2]) -> Result<(), String> {
+        self.populate_nm_from_f32(origin_nm)?;
+        self.wedge_vertices = Vec::new();
+        self.sector_vertices = Vec::new();
+        self.cover_vertices = Vec::new();
+        self.clear_vertices = Vec::new();
+        Ok(())
     }
 
     pub(crate) fn region_count(&self) -> usize {
@@ -1033,7 +753,11 @@ impl PathRegions {
 
     pub(crate) fn has_geometry(&self) -> bool {
         self.region_count() > 0
-            && (!self.wedge_vertices.is_empty()
+            && (!self.wedge_vertices_nm.is_empty()
+                || !self.sector_vertices_nm.is_empty()
+                || !self.cover_vertices_nm.is_empty()
+                || !self.clear_vertices_nm.is_empty()
+                || !self.wedge_vertices.is_empty()
                 || !self.sector_vertices.is_empty()
                 || !self.cover_vertices.is_empty()
                 || !self.clear_vertices.is_empty())
@@ -1129,6 +853,10 @@ impl PathRegions {
             sector_vertex_offsets: vec![0],
             cover_vertices: Vec::new(),
             clear_vertices: Vec::new(),
+            wedge_vertices_nm: Vec::new(),
+            sector_vertices_nm: Vec::new(),
+            cover_vertices_nm: Vec::new(),
+            clear_vertices_nm: Vec::new(),
             pick_contours: self.pick_contours.clone(),
             source_contours: Vec::new(),
         }
@@ -1139,6 +867,10 @@ impl PathRegions {
         self.sector_vertices = Vec::new();
         self.cover_vertices = Vec::new();
         self.clear_vertices = Vec::new();
+        self.wedge_vertices_nm = Vec::new();
+        self.sector_vertices_nm = Vec::new();
+        self.cover_vertices_nm = Vec::new();
+        self.clear_vertices_nm = Vec::new();
         self.pick_contours = Vec::new();
         self.source_contours = Vec::new();
     }
@@ -1262,7 +994,7 @@ impl PathRegions {
         set_property(
             &object,
             "wedgeVertices",
-            &f32_array_to_js(&self.wedge_vertices)?,
+            &i32_array_to_js(&self.wedge_vertices_nm)?,
         )?;
         set_property(
             &object,
@@ -1272,7 +1004,7 @@ impl PathRegions {
         set_property(
             &object,
             "sectorVertices",
-            &f32_array_to_js(&self.sector_vertices)?,
+            &i32_array_to_js(&self.sector_vertices_nm)?,
         )?;
         set_property(
             &object,
@@ -1287,12 +1019,12 @@ impl PathRegions {
         set_property(
             &object,
             "coverVertices",
-            &f32_array_to_js(&self.cover_vertices)?,
+            &i32_array_to_js(&self.cover_vertices_nm)?,
         )?;
         set_property(
             &object,
             "clearVertices",
-            &f32_array_to_js(&self.clear_vertices)?,
+            &i32_array_to_js(&self.clear_vertices_nm)?,
         )?;
         Ok(object.into())
     }
@@ -1304,13 +1036,13 @@ impl PathRegions {
                 "Parsed layer path sector vertex stride is unsupported",
             ));
         }
-        Ok(PathRegions::new(
-            f32_array_from_js(value, "wedgeVertices")?,
+        Ok(PathRegions::new_with_nm(
+            i32_array_from_js(value, "wedgeVertices")?,
             u32_array_from_js(value, "wedgeVertexOffsets")?,
-            f32_array_from_js(value, "sectorVertices")?,
+            i32_array_from_js(value, "sectorVertices")?,
             u32_array_from_js(value, "sectorVertexOffsets")?,
-            f32_array_from_js(value, "coverVertices")?,
-            f32_array_from_js(value, "clearVertices")?,
+            i32_array_from_js(value, "coverVertices")?,
+            i32_array_from_js(value, "clearVertices")?,
         ))
     }
 }
@@ -1588,6 +1320,7 @@ pub struct GerberData {
     pub(crate) path_regions: PathRegions,
     pub(crate) boundary: Boundary,
     pub(crate) is_negative: bool,
+    pub(crate) origin_nm: [i64; 2],
 }
 
 impl GerberData {
@@ -1602,6 +1335,33 @@ impl GerberData {
         boundary: Boundary,
         is_negative: bool,
     ) -> GerberData {
+        Self::new_with_origin(
+            triangles,
+            triangle_templates,
+            lines,
+            circles,
+            arcs,
+            thermals,
+            path_regions,
+            boundary,
+            is_negative,
+            [0, 0],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_origin(
+        triangles: Triangles,
+        triangle_templates: Vec<TriangleTemplateInstances>,
+        lines: Lines,
+        circles: Circles,
+        arcs: Arcs,
+        thermals: Thermals,
+        path_regions: PathRegions,
+        boundary: Boundary,
+        is_negative: bool,
+        origin_nm: [i64; 2],
+    ) -> GerberData {
         GerberData {
             triangles,
             triangle_templates,
@@ -1612,32 +1372,29 @@ impl GerberData {
             path_regions,
             boundary,
             is_negative,
+            origin_nm,
         }
     }
 
     /// Check if this GerberData contains any geometry
     pub fn has_geometry(&self) -> bool {
-        !self.triangles.vertices.is_empty()
+        !self.triangles.vertices_nm.is_empty()
             || self
                 .triangle_templates
                 .iter()
-                .any(|template| !template.vertices.is_empty() && !template.instance_x.is_empty())
-            || !self.lines.start_x.is_empty()
-            || !self.circles.x.is_empty()
-            || !self.arcs.x.is_empty()
-            || !self.thermals.x.is_empty()
+                .any(|template| !template.vertices.is_empty() && !template.instance_x_nm.is_empty())
+            || !self.lines.start_x_nm.is_empty()
+            || !self.circles.x_nm.is_empty()
+            || !self.arcs.x_nm.is_empty()
+            || !self.thermals.x_nm.is_empty()
             || self.path_regions.has_geometry()
     }
 
     pub fn translate(&mut self, dx: f32, dy: f32) {
-        self.triangles.translate(dx, dy);
-        for template in &mut self.triangle_templates {
-            template.translate(dx, dy);
-        }
-        self.lines.translate(dx, dy);
-        self.circles.translate(dx, dy);
-        self.arcs.translate(dx, dy);
-        self.thermals.translate(dx, dy);
+        let dx_nm = (dx as f64 * 1_000_000.0).round() as i64;
+        let dy_nm = (dy as f64 * 1_000_000.0).round() as i64;
+        self.origin_nm[0] = self.origin_nm[0].saturating_add(dx_nm);
+        self.origin_nm[1] = self.origin_nm[1].saturating_add(dy_nm);
         self.path_regions.translate(dx, dy);
         self.boundary.translate(dx, dy);
     }
@@ -1658,6 +1415,16 @@ impl GerberData {
         set_property(&object, "pathRegions", &self.path_regions.to_js()?)?;
         set_property(&object, "boundary", &self.boundary.to_js()?)?;
         set_property(&object, "isNegative", &JsValue::from_bool(self.is_negative))?;
+        set_property(
+            &object,
+            "originNmX",
+            &JsValue::from_f64(self.origin_nm[0] as f64),
+        )?;
+        set_property(
+            &object,
+            "originNmY",
+            &JsValue::from_f64(self.origin_nm[1] as f64),
+        )?;
         Ok(object.into())
     }
 
@@ -1668,7 +1435,20 @@ impl GerberData {
             triangle_templates.push(TriangleTemplateInstances::from_js(&template_value)?);
         }
 
-        Ok(GerberData::new(
+        let origin_nm_x = get_property(value, "originNmX")
+            .ok()
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+            .unwrap_or(0);
+        let origin_nm_y = get_property(value, "originNmY")
+            .ok()
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+            .unwrap_or(0);
+
+        Ok(GerberData::new_with_origin(
             Triangles::from_js(&get_property(value, "triangles")?)?,
             triangle_templates,
             Lines::from_js(&get_property(value, "lines")?)?,
@@ -1680,6 +1460,7 @@ impl GerberData {
             get_property(value, "isNegative")?
                 .as_bool()
                 .unwrap_or(false),
+            [origin_nm_x, origin_nm_y],
         ))
     }
 }

@@ -17,8 +17,12 @@ out highp vec2 vHoleCenter;
 out highp float vHoleRadius;
 out highp float vEdgeWidth;
 
+float sub_i32_to_f32(int a, int b) {
+    return a >= b ? float(uint(a) - uint(b)) : -float(uint(b) - uint(a));
+}
+
 void main() {
-    vec2 center = vec2(float(center_x_instance - u_eye_nm.x) * 0.000001, float(center_y_instance - u_eye_nm.y) * 0.000001);
+    vec2 center = vec2(sub_i32_to_f32(center_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(center_y_instance, u_eye_nm.y) * 0.000001);
     float effectiveRadius = max(float(radius_instance) * 0.000001, 0.0);
     float drawnRadius = effectiveRadius;
     vPosition = position;

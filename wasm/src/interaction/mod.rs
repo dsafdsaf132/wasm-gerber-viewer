@@ -21,7 +21,8 @@ const PROPERTY_HEIGHT: u32 = 1 << 2;
 const PROPERTY_ROTATION: u32 = 1 << 3;
 
 pub struct HighlightBatch {
-    pub vertices: Vec<f32>,
+    pub vertices_nm: Vec<i32>,
+    pub origin_nm: [i64; 2],
     pub clear: bool,
 }
 
@@ -2094,14 +2095,51 @@ fn append_highlight_batch(batches: &mut Vec<HighlightBatch>, vertices: Vec<f32>,
         return;
     }
 
+    let mut min_x = i64::MAX;
+    let mut max_x = i64::MIN;
+    let mut min_y = i64::MAX;
+    let mut max_y = i64::MIN;
+    let mut coords_nm = Vec::with_capacity(vertices.len());
+    for pair in vertices.chunks_exact(2) {
+        let x_nm = (pair[0] as f64 * 1_000_000.0).round() as i64;
+        let y_nm = (pair[1] as f64 * 1_000_000.0).round() as i64;
+        min_x = min_x.min(x_nm);
+        max_x = max_x.max(x_nm);
+        min_y = min_y.min(y_nm);
+        max_y = max_y.max(y_nm);
+        coords_nm.push(x_nm);
+        coords_nm.push(y_nm);
+    }
+
     if let Some(last) = batches.last_mut() {
-        if last.clear == clear {
-            last.vertices.extend_from_slice(&vertices);
+        if last.clear == clear
+            && (min_x - last.origin_nm[0]) >= i32::MIN as i64
+            && (max_x - last.origin_nm[0]) <= i32::MAX as i64
+            && (min_y - last.origin_nm[1]) >= i32::MIN as i64
+            && (max_y - last.origin_nm[1]) <= i32::MAX as i64
+        {
+            for pair in coords_nm.chunks_exact(2) {
+                last.vertices_nm.push((pair[0] - last.origin_nm[0]) as i32);
+                last.vertices_nm.push((pair[1] - last.origin_nm[1]) as i32);
+            }
             return;
         }
     }
 
-    batches.push(HighlightBatch { vertices, clear });
+    let span_x = max_x.saturating_sub(min_x);
+    let span_y = max_y.saturating_sub(min_y);
+    let origin_nm = [min_x + (span_x + 1) / 2, min_y + (span_y + 1) / 2];
+    let mut vertices_nm = Vec::with_capacity(coords_nm.len());
+    for pair in coords_nm.chunks_exact(2) {
+        vertices_nm.push((pair[0] - origin_nm[0]) as i32);
+        vertices_nm.push((pair[1] - origin_nm[1]) as i32);
+    }
+
+    batches.push(HighlightBatch {
+        vertices_nm,
+        origin_nm,
+        clear,
+    });
 }
 
 fn primitive_exposure(primitive: &Primitive) -> f32 {
@@ -2553,11 +2591,18 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
         )?);
     }
 
+    let i32_array_to_js = |values: &[i32]| -> Result<JsValue, JsValue> {
+        let len = u32::try_from(values.len())
+            .map_err(|_| JsValue::from_str("Compact path region array exceeds u32 length"))?;
+        let array = js_sys::Int32Array::new_with_length(len);
+        array.copy_from(values);
+        Ok(array.into())
+    };
     let object = Object::new();
     set_property(
         &object,
         "wedgeVertices",
-        f32_array_to_js(&path_regions.wedge_vertices)?,
+        i32_array_to_js(&path_regions.wedge_vertices_nm)?,
     )?;
     set_property(
         &object,
@@ -2567,7 +2612,7 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
     set_property(
         &object,
         "sectorVertices",
-        f32_array_to_js(&path_regions.sector_vertices)?,
+        i32_array_to_js(&path_regions.sector_vertices_nm)?,
     )?;
     set_property(
         &object,
@@ -2582,12 +2627,12 @@ fn path_region_to_compact_js(path_regions: &PathRegions) -> Result<JsValue, JsVa
     set_property(
         &object,
         "coverVertices",
-        f32_array_to_js(&path_regions.cover_vertices)?,
+        i32_array_to_js(&path_regions.cover_vertices_nm)?,
     )?;
     set_property(
         &object,
         "clearVertices",
-        f32_array_to_js(&path_regions.clear_vertices)?,
+        i32_array_to_js(&path_regions.clear_vertices_nm)?,
     )?;
     set_property(
         &object,
@@ -2720,56 +2765,51 @@ fn validate_compact_path_region(path_regions: &PathRegions) -> Result<(), JsValu
 }
 
 fn validate_compact_path_region_invariant(path_regions: &PathRegions) -> Result<(), &'static str> {
-    if !path_regions.wedge_vertices.len().is_multiple_of(2) {
+    if !path_regions.wedge_vertices_nm.len().is_multiple_of(2) {
         return Err("Invalid compact path wedge vertex buffer length");
     }
     if !path_regions
-        .sector_vertices
+        .sector_vertices_nm
         .len()
         .is_multiple_of(PATH_SECTOR_VERTEX_FLOATS)
     {
         return Err("Invalid compact path sector vertex buffer length");
     }
-    if !path_regions.cover_vertices.len().is_multiple_of(12)
-        || !path_regions.clear_vertices.len().is_multiple_of(12)
+    if !path_regions.cover_vertices_nm.len().is_multiple_of(12)
+        || !path_regions.clear_vertices_nm.len().is_multiple_of(12)
     {
         return Err("Invalid compact path region quad data");
     }
 
     let region_count = path_regions.region_count();
-    if region_count > 0 && path_regions.cover_vertices.len() != path_regions.clear_vertices.len() {
+    if region_count > 0
+        && path_regions.cover_vertices_nm.len() != path_regions.clear_vertices_nm.len()
+    {
         return Err("Invalid compact path region quad data");
     }
-    if region_count > 0 && path_regions.cover_vertices.len() / 12 != region_count {
+    if region_count > 0 && path_regions.cover_vertices_nm.len() / 12 != region_count {
         return Err("Invalid compact path region quad data");
     }
-    if region_count > 0 && path_regions.clear_vertices.len() / 12 != region_count {
+    if region_count > 0 && path_regions.clear_vertices_nm.len() / 12 != region_count {
         return Err("Invalid compact path region quad data");
     }
     validate_compact_offsets(
         "compact path wedge offsets",
         &path_regions.wedge_vertex_offsets,
-        path_regions.wedge_vertices.len() / 2,
+        path_regions.wedge_vertices_nm.len() / 2,
         region_count,
     )?;
     validate_compact_offsets(
         "compact path sector offsets",
         &path_regions.sector_vertex_offsets,
-        path_regions.sector_vertices.len() / PATH_SECTOR_VERTEX_FLOATS,
+        path_regions.sector_vertices_nm.len() / PATH_SECTOR_VERTEX_FLOATS,
         region_count,
     )?;
-    validate_finite_slice("compact path wedge vertices", &path_regions.wedge_vertices)?;
-    validate_finite_slice(
-        "compact path sector vertices",
-        &path_regions.sector_vertices,
-    )?;
-    validate_finite_slice("compact path cover vertices", &path_regions.cover_vertices)?;
-    validate_finite_slice("compact path clear vertices", &path_regions.clear_vertices)?;
     for vertex in path_regions
-        .sector_vertices
+        .sector_vertices_nm
         .chunks_exact(PATH_SECTOR_VERTEX_FLOATS)
     {
-        if vertex[4] < 0.0 {
+        if vertex[4] < 0 {
             return Err("compact path sector radius contains a negative value");
         }
     }
@@ -2794,13 +2834,6 @@ fn validate_compact_offsets(
         previous = offset;
     }
     if previous != vertex_count {
-        return Err(label);
-    }
-    Ok(())
-}
-
-fn validate_finite_slice(label: &'static str, values: &[f32]) -> Result<(), &'static str> {
-    if values.iter().any(|value| !value.is_finite()) {
         return Err(label);
     }
     Ok(())

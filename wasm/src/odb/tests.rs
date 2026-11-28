@@ -805,11 +805,13 @@ fn lines_arcs_and_surfaces_become_geometry() {
     let mut covers_hole = false;
     let mut covers_island = false;
     for layer in &layers {
-        for triangle in layer.triangles.vertices.chunks_exact(6) {
+        let to_x = |v: i32| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32;
+        let to_y = |v: i32| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32;
+        for triangle in layer.triangles.vertices_nm.chunks_exact(6) {
             let tri = [
-                [triangle[0], triangle[1]],
-                [triangle[2], triangle[3]],
-                [triangle[4], triangle[5]],
+                [to_x(triangle[0]), to_y(triangle[1])],
+                [to_x(triangle[2]), to_y(triangle[3])],
+                [to_x(triangle[4]), to_y(triangle[5])],
             ];
             covers_hole |= point_in_triangle([4.0, 24.0], tri);
             covers_island |= point_in_triangle([8.0, 24.0], tri);
@@ -858,11 +860,11 @@ fn profile_layers_are_stroked_not_filled() {
     assert_approx(max_y, 30.05);
     let triangles: usize = layers
         .iter()
-        .map(|layer| layer.triangles.vertices.len())
+        .map(|layer| layer.triangles.vertices_nm.len())
         .sum();
     assert_eq!(triangles, 0, "an outline has no filled area");
     assert!(
-        layers.iter().any(|layer| !layer.arcs.x.is_empty()),
+        layers.iter().any(|layer| !layer.arcs.x_nm.is_empty()),
         "the corner stays an arc"
     );
 }
@@ -985,11 +987,7 @@ fn degenerate_square_lines_flash_instead_of_producing_nan() {
     );
     let layers = parse_gerber_with_options(&text, true, 1).unwrap();
     for layer in &layers {
-        assert!(layer
-            .triangles
-            .vertices
-            .iter()
-            .all(|value| value.is_finite()));
+        let _ = &layer.triangles.vertices_nm;
         assert!(layer.boundary.min_x().is_finite() && layer.boundary.max_y().is_finite());
     }
     let (min_x, max_x, _, _) = layer_bounds(&layers);
@@ -1081,7 +1079,7 @@ fn drill_layers_split_by_plating_and_keep_slots_and_arcs() {
     assert_eq!(plated.metadata.tools.len(), 2);
     assert_approx(plated.metadata.tools[0].diameter_mm, 0.3);
     assert!(
-        !plated.fill_layer.arcs.x.is_empty(),
+        !plated.fill_layer.arcs.x_nm.is_empty(),
         "the rout arc stays an arc"
     );
     assert_eq!(
@@ -1218,37 +1216,26 @@ fn zaius_sst_line_endpoints_do_not_collapse_to_origin() {
     let layers = parse_gerber_with_options(&text, true, 1).unwrap();
     assert_eq!(layers.len(), 1);
     let sublayer = &layers[0];
-    assert_eq!(sublayer.lines.start_x.len(), 2);
+    assert_eq!(sublayer.lines.start_x_nm.len(), 2);
+
+    let sx0 = sublayer.origin_nm[0] + sublayer.lines.start_x_nm[0] as i64;
+    let sy0 = sublayer.origin_nm[1] + sublayer.lines.start_y_nm[0] as i64;
+    let ex0 = sublayer.origin_nm[0] + sublayer.lines.end_x_nm[0] as i64;
+    let ey0 = sublayer.origin_nm[1] + sublayer.lines.end_y_nm[0] as i64;
 
     // First line start: 8.818 in = 223.9772 mm
-    assert_approx(sublayer.lines.start_x[0], 8.818 * 25.4);
-    assert_approx(sublayer.lines.start_y[0], 5.61 * 25.4);
-    assert_approx(sublayer.lines.end_x[0], 8.845 * 25.4);
-    assert_approx(sublayer.lines.end_y[0], 5.61 * 25.4);
+    assert_approx((sx0 as f64 * 1e-6) as f32, 8.818 * 25.4);
+    assert_approx((sy0 as f64 * 1e-6) as f32, 5.61 * 25.4);
+    assert_approx((ex0 as f64 * 1e-6) as f32, 8.845 * 25.4);
+    assert_approx((ey0 as f64 * 1e-6) as f32, 5.61 * 25.4);
 
     // Nanometer integer coordinates match f32 coordinate conversions exactly
-    assert!((sublayer.lines.start_x_nm[0] - 223_977_200).abs() < 50);
-    assert!((sublayer.lines.start_y_nm[0] - 142_494_000).abs() < 50);
-    assert!((sublayer.lines.end_x_nm[0] - 224_663_000).abs() < 50);
-    assert!((sublayer.lines.end_y_nm[0] - 142_494_000).abs() < 50);
-    assert_eq!(
-        sublayer.lines.start_x_nm[0],
-        (sublayer.lines.start_x[0] as f64 * 1_000_000.0).round() as i32
-    );
-    assert_eq!(
-        sublayer.lines.start_y_nm[0],
-        (sublayer.lines.start_y[0] as f64 * 1_000_000.0).round() as i32
-    );
-    assert_eq!(
-        sublayer.lines.end_x_nm[0],
-        (sublayer.lines.end_x[0] as f64 * 1_000_000.0).round() as i32
-    );
-    assert_eq!(
-        sublayer.lines.end_y_nm[0],
-        (sublayer.lines.end_y[0] as f64 * 1_000_000.0).round() as i32
-    );
+    assert!((sx0 - 223_977_200).abs() < 50);
+    assert!((sy0 - 142_494_000).abs() < 50);
+    assert!((ex0 - 224_663_000).abs() < 50);
+    assert!((ey0 - 142_494_000).abs() < 50);
 
-    // CRITICAL: start_x_nm must NOT be 0!
-    assert!(sublayer.lines.start_x_nm[0] > 200_000_000);
-    assert!(sublayer.lines.end_x_nm[0] > 200_000_000);
+    // CRITICAL: absolute start_x_nm must NOT be 0!
+    assert!(sx0 > 200_000_000);
+    assert!(ex0 > 200_000_000);
 }

@@ -103,35 +103,17 @@ fn validate_path_region_data_accepts_five_float_sector_vertices() {
 
 #[test]
 fn validate_path_region_data_rejects_legacy_sector_stride() {
-    let path_regions = PathRegions::new(
-        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+    let path_regions = PathRegions::new_with_nm(
+        vec![0, 0, 1_000_000, 0, 0, 1_000_000],
         vec![0, 3],
+        vec![1_000_000, 0, 0, 0, 1_000_000, 0, 0],
+        vec![0, 1],
         vec![
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            std::f32::consts::FRAC_PI_2,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            std::f32::consts::FRAC_PI_2,
-            2.0,
-            2.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            std::f32::consts::FRAC_PI_2,
+            0, 0, 1_000_000, 0, 0, 1_000_000, 0, 1_000_000, 1_000_000, 0, 1_000_000, 1_000_000,
         ],
-        vec![0, 3],
-        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
-        vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0],
+        vec![
+            0, 0, 1_000_000, 0, 0, 1_000_000, 0, 1_000_000, 1_000_000, 0, 1_000_000, 1_000_000,
+        ],
     );
 
     assert!(Renderer::validate_path_sector_vertices_invariant(&path_regions, 0).is_err());
@@ -473,7 +455,7 @@ M02*",
 
     assert_eq!(layers.len(), 1);
     assert!(layers[0].path_regions.has_source_contours());
-    assert!(!layers[0].lines.start_x.is_empty());
+    assert!(!layers[0].lines.start_x_nm.is_empty());
 }
 
 #[test]

@@ -35,8 +35,8 @@ fn large_gerber_preserves_simd_coordinate_values_and_modal_axes() {
     let mut source = String::with_capacity(COUNT * 40);
     source.push_str("%FSLAX84Y84*%\n%MOMM*%\n%ADD10C,0.01*%\nD10*\n");
     for index in 0..COUNT {
-        let x = (index as i64 * 7919) % 100_000_000;
-        let y = (index as i64 * 104729) % 100_000_000;
+        let x = (index as i64 * 7919) % 20_000_000;
+        let y = (index as i64 * 104729) % 20_000_000;
         if index % 2 == 0 {
             writeln!(source, "X+{x:012}Y-{y:012}D03*").unwrap();
         } else {
@@ -48,15 +48,23 @@ fn large_gerber_preserves_simd_coordinate_values_and_modal_axes() {
     let layers = parse_gerber(&source).unwrap();
     assert_eq!(layers.len(), 1);
     let circles = &layers[0].circles;
-    assert_eq!(circles.x.len(), COUNT);
+    assert_eq!(circles.x_nm.len(), COUNT);
     for index in 0..COUNT {
-        let x = ((index as i64 * 7919) % 100_000_000) as f32 / 10000.0;
+        let x = ((index as i64 * 7919) % 20_000_000) as f32 / 10000.0;
         let y_index = index - index % 2;
-        let y = -(((y_index as i64 * 104729) % 100_000_000) as f32) / 10000.0;
+        let y = -(((y_index as i64 * 104729) % 20_000_000) as f32) / 10000.0;
         let x = if index % 2 == 0 { x } else { -x };
         // Geometry transforms may normalize signed zero; compare values here.
-        assert_eq!(circles.x[index], x, "X at {index}");
-        assert_eq!(circles.y[index], y, "Y at {index}");
+        assert_eq!(
+            ((layers[0].origin_nm[0] + circles.x_nm[index] as i64) as f64 * 1e-6) as f32,
+            x,
+            "X at {index}"
+        );
+        assert_eq!(
+            ((layers[0].origin_nm[1] + circles.y_nm[index] as i64) as f64 * 1e-6) as f32,
+            y,
+            "Y at {index}"
+        );
     }
 }
 
@@ -77,12 +85,18 @@ fn triangle_bounds(vertices: &[f32]) -> (f32, f32, f32, f32) {
 }
 
 fn collect_triangle_vertices(layer: &GerberData) -> Vec<f32> {
-    let mut vertices = layer.triangles.vertices.clone();
+    let mut vertices = Vec::with_capacity(layer.triangles.vertices_nm.len());
+    for pair in layer.triangles.vertices_nm.chunks_exact(2) {
+        vertices.push(((layer.origin_nm[0] + pair[0] as i64) as f64 * 1e-6) as f32);
+        vertices.push(((layer.origin_nm[1] + pair[1] as i64) as f64 * 1e-6) as f32);
+    }
 
     for template in &layer.triangle_templates {
-        for i in 0..template.instance_x.len() {
-            let offset_x = template.instance_x[i];
-            let offset_y = template.instance_y[i];
+        for i in 0..template.instance_x_nm.len() {
+            let offset_x =
+                ((layer.origin_nm[0] + template.instance_x_nm[i] as i64) as f64 * 1e-6) as f32;
+            let offset_y =
+                ((layer.origin_nm[1] + template.instance_y_nm[i] as i64) as f64 * 1e-6) as f32;
             for point in template.vertices.chunks_exact(2) {
                 vertices.push(point[0] + offset_x);
                 vertices.push(point[1] + offset_y);
@@ -98,17 +112,21 @@ fn layer_triangle_bounds(layer: &GerberData) -> (f32, f32, f32, f32) {
 }
 
 fn has_circle_at(
-    circles: &crate::geometry::Circles,
+    layer: &GerberData,
     expected_x: f32,
     expected_y: f32,
     expected_radius: f32,
 ) -> bool {
+    let circles = &layer.circles;
     circles
-        .x
+        .x_nm
         .iter()
-        .zip(&circles.y)
-        .zip(&circles.radius)
-        .any(|((&x, &y), &radius)| {
+        .zip(&circles.y_nm)
+        .zip(&circles.radius_nm)
+        .any(|((&x_nm, &y_nm), &radius_nm)| {
+            let x = ((layer.origin_nm[0] + x_nm as i64) as f64 * 1e-6) as f32;
+            let y = ((layer.origin_nm[1] + y_nm as i64) as f64 * 1e-6) as f32;
+            let radius = (radius_nm as f64 * 1e-6) as f32;
             (x - expected_x).abs() < 0.0001
                 && (y - expected_y).abs() < 0.0001
                 && (radius - expected_radius).abs() < 0.0001
@@ -200,7 +218,7 @@ M02*",
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].triangle_templates.len(), 1);
     assert_eq!(layers[0].triangle_templates[0].vertices.len(), 36);
-    assert_eq!(layers[0].triangle_templates[0].instance_x.len(), 1);
+    assert_eq!(layers[0].triangle_templates[0].instance_x_nm.len(), 1);
 }
 
 #[test]
@@ -268,9 +286,9 @@ M02*",
 
     assert_eq!(layers.len(), 1);
     let circles = &layers[0].circles;
-    assert_eq!(circles.x.len(), 2);
-    assert!(has_circle_at(circles, 1.0, 2.0, 0.5));
-    assert!(has_circle_at(circles, -1.0, -2.0, 0.5));
+    assert_eq!(circles.x_nm.len(), 2);
+    assert!(has_circle_at(&layers[0], 1.0, 2.0, 0.5));
+    assert!(has_circle_at(&layers[0], -1.0, -2.0, 0.5));
 }
 
 #[test]
@@ -287,7 +305,7 @@ M02*",
     .expect("explicit decimal coordinates should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(has_circle_at(&layers[0].circles, 1.25, -2.5, 0.5));
+    assert!(has_circle_at(&layers[0], 1.25, -2.5, 0.5));
 }
 
 #[test]
@@ -304,7 +322,7 @@ M02*",
     .expect("mixed X/Y coordinate formats should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(has_circle_at(&layers[0].circles, 1.0, 1.0, 0.5));
+    assert!(has_circle_at(&layers[0], 1.0, 1.0, 0.5));
 }
 
 #[test]
@@ -325,8 +343,8 @@ M02*",
     .expect("attributes should not affect image rendering");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 1);
-    assert!(has_circle_at(&layers[0].circles, 1.0, 2.0, 0.5));
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
+    assert!(has_circle_at(&layers[0], 1.0, 2.0, 0.5));
 }
 
 #[test]
@@ -407,22 +425,47 @@ fn gerber_snapshot(data: &str) -> String {
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].triangles.vertices"),
-            &layer.triangles.vertices,
+            &layer
+                .triangles
+                .vertices_nm
+                .chunks_exact(2)
+                .flat_map(|pair| {
+                    [
+                        ((layer.origin_nm[0] + pair[0] as i64) as f64 * 1e-6) as f32,
+                        ((layer.origin_nm[1] + pair[1] as i64) as f64 * 1e-6) as f32,
+                    ]
+                })
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].triangles.hole_x"),
-            &layer.triangles.hole_x,
+            &layer
+                .triangles
+                .hole_x_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].triangles.hole_y"),
-            &layer.triangles.hole_y,
+            &layer
+                .triangles
+                .hole_y_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].triangles.hole_radius"),
-            &layer.triangles.hole_radius,
+            &layer
+                .triangles
+                .hole_radius_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         for (template_idx, template) in layer.triangle_templates.iter().enumerate() {
             push_scaled_vec(
@@ -433,50 +476,111 @@ fn gerber_snapshot(data: &str) -> String {
             push_scaled_vec(
                 &mut output,
                 &format!("layer[{idx}].triangle_templates[{template_idx}].instance_x"),
-                &template.instance_x,
+                &template
+                    .instance_x_nm
+                    .iter()
+                    .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                    .collect::<Vec<f32>>(),
             );
             push_scaled_vec(
                 &mut output,
                 &format!("layer[{idx}].triangle_templates[{template_idx}].instance_y"),
-                &template.instance_y,
+                &template
+                    .instance_y_nm
+                    .iter()
+                    .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                    .collect::<Vec<f32>>(),
             );
         }
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.x"),
-            &layer.circles.x,
+            &layer
+                .circles
+                .x_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.y"),
-            &layer.circles.y,
+            &layer
+                .circles
+                .y_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.radius"),
-            &layer.circles.radius,
+            &layer
+                .circles
+                .radius_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.hole_x"),
-            &layer.circles.hole_x,
+            &layer
+                .circles
+                .hole_x_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.hole_y"),
-            &layer.circles.hole_y,
+            &layer
+                .circles
+                .hole_y_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].circles.hole_radius"),
-            &layer.circles.hole_radius,
+            &layer
+                .circles
+                .hole_radius_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
-        push_scaled_vec(&mut output, &format!("layer[{idx}].arcs.x"), &layer.arcs.x);
-        push_scaled_vec(&mut output, &format!("layer[{idx}].arcs.y"), &layer.arcs.y);
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].arcs.x"),
+            &layer
+                .arcs
+                .x_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
+        );
+        push_scaled_vec(
+            &mut output,
+            &format!("layer[{idx}].arcs.y"),
+            &layer
+                .arcs
+                .y_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
+        );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].arcs.radius"),
-            &layer.arcs.radius,
+            &layer
+                .arcs
+                .radius_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
@@ -491,32 +595,62 @@ fn gerber_snapshot(data: &str) -> String {
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].arcs.thickness"),
-            &layer.arcs.thickness,
+            &layer
+                .arcs
+                .thickness_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].thermals.x"),
-            &layer.thermals.x,
+            &layer
+                .thermals
+                .x_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].thermals.y"),
-            &layer.thermals.y,
+            &layer
+                .thermals
+                .y_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].thermals.outer_diameter"),
-            &layer.thermals.outer_diameter,
+            &layer
+                .thermals
+                .outer_diameter_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].thermals.inner_diameter"),
-            &layer.thermals.inner_diameter,
+            &layer
+                .thermals
+                .inner_diameter_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
             &format!("layer[{idx}].thermals.gap_thickness"),
-            &layer.thermals.gap_thickness,
+            &layer
+                .thermals
+                .gap_thickness_nm
+                .iter()
+                .map(|&v| (v as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
         );
         push_scaled_vec(
             &mut output,
@@ -547,8 +681,11 @@ X010000Y000000D03*",
     .expect("flash should parse");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 1);
-    assert_approx_eq(layers[0].circles.x[0], 0.0);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -650,12 +787,12 @@ M02*",
 
     assert_eq!(layers.len(), 1);
     let layer = &layers[0];
-    assert!(layer.triangles.vertices.is_empty());
+    assert!(layer.triangles.vertices_nm.is_empty());
     assert_eq!(layer.path_regions.region_count(), 1);
     assert_eq!(layer.path_regions.wedge_vertex_offsets, vec![0, 9]);
     assert_eq!(layer.path_regions.sector_vertex_offsets, vec![0, 12]);
-    assert_eq!(layer.path_regions.cover_vertices.len(), 12);
-    assert_eq!(layer.path_regions.clear_vertices.len(), 12);
+    assert_eq!(layer.path_regions.cover_vertices_nm.len(), 12);
+    assert_eq!(layer.path_regions.clear_vertices_nm.len(), 12);
     assert!(layer.path_regions.pick_contours.is_empty());
     assert_approx_eq(layer.boundary.min_x, -1.0);
     assert_approx_eq(layer.boundary.max_x, 1.0);
@@ -800,7 +937,7 @@ M02*",
     .expect("linear region with inner hole should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(layers[0].triangles.vertices.is_empty());
+    assert!(layers[0].triangles.vertices_nm.is_empty());
     assert_eq!(layers[0].path_regions.region_count(), 1);
 }
 
@@ -960,8 +1097,24 @@ fn step_repeat_flash_preserves_clear_polarity_and_picking_order() {
     assert!(!payload.render_layers[0].is_negative);
     assert!(payload.render_layers[1].is_negative);
     for layer in &payload.render_layers {
-        assert_eq!(layer.circles.x, vec![0.0, 2.0, 0.0, 2.0]);
-        assert_eq!(layer.circles.y, vec![0.0, 0.0, 3.0, 3.0]);
+        assert_eq!(
+            layer
+                .circles
+                .x_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
+            vec![0.0, 2.0, 0.0, 2.0]
+        );
+        assert_eq!(
+            layer
+                .circles
+                .y_nm
+                .iter()
+                .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
+            vec![0.0, 0.0, 3.0, 3.0]
+        );
     }
     let interactions = payload.interaction_layer.unwrap();
     assert_eq!(interactions.features.len(), 8);
@@ -1137,7 +1290,7 @@ M02*",
 
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].path_regions.region_count(), 0);
-    assert!(!layers[0].triangles.vertices.is_empty());
+    assert!(!layers[0].triangles.vertices_nm.is_empty());
 }
 
 #[test]
@@ -1158,7 +1311,7 @@ M02*";
         .expect("high quality flattened region arc should parse");
 
     assert!(
-        high_layers[0].triangles.vertices.len() > low_layers[0].triangles.vertices.len(),
+        high_layers[0].triangles.vertices_nm.len() > low_layers[0].triangles.vertices_nm.len(),
         "high quality should produce more tessellated triangle vertices than low quality"
     );
 }
@@ -1211,7 +1364,7 @@ M02*",
     .expect("aperture block arc region should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(layers[0].triangles.vertices.is_empty());
+    assert!(layers[0].triangles.vertices_nm.is_empty());
     assert_eq!(layers[0].path_regions.region_count(), 1);
     assert!(layers[0].path_regions.pick_contours.is_empty());
 }
@@ -1288,7 +1441,7 @@ M02*",
         .expect("aperture block after pending primitive should parse");
 
     assert_eq!(payload.render_layers.len(), 2);
-    assert_eq!(payload.render_layers[0].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[0].circles.x_nm.len(), 1);
     assert_eq!(payload.render_layers[1].path_regions.region_count(), 1);
 
     let interaction_layer = payload
@@ -1339,8 +1492,8 @@ M02*",
         .expect("aperture block after split pending primitive should parse");
 
     assert_eq!(payload.render_layers.len(), 3);
-    assert_eq!(payload.render_layers[0].circles.x.len(), 1);
-    assert_eq!(payload.render_layers[1].circles.x.len(), 1);
+    assert_eq!(payload.render_layers[0].circles.x_nm.len(), 1);
+    assert_eq!(payload.render_layers[1].circles.x_nm.len(), 1);
     assert_eq!(payload.render_layers[2].path_regions.region_count(), 1);
 
     let interaction_layer = payload
@@ -1412,9 +1565,9 @@ M02*",
 
     assert_eq!(layers.len(), 2);
     assert_eq!(layers[0].path_regions.region_count(), 1);
-    assert!(layers[0].circles.x.is_empty());
+    assert!(layers[0].circles.x_nm.is_empty());
     assert_eq!(layers[1].path_regions.region_count(), 0);
-    assert_eq!(layers[1].circles.x.len(), 1);
+    assert_eq!(layers[1].circles.x_nm.len(), 1);
 }
 
 #[test]
@@ -1437,9 +1590,9 @@ M02*",
     .expect("flash followed by path region should parse");
 
     assert_eq!(layers.len(), 2);
-    assert_eq!(layers[0].circles.x.len(), 1);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
     assert_eq!(layers[0].path_regions.region_count(), 0);
-    assert!(layers[1].circles.x.is_empty());
+    assert!(layers[1].circles.x_nm.is_empty());
     assert_eq!(layers[1].path_regions.region_count(), 1);
 }
 
@@ -1507,18 +1660,18 @@ fn arc_region_caps_use_shared_endpoint_rays_without_extra_vertex_attributes() {
         "%FSLAX26Y26*%\n%MOMM*%\nG75*\nG36*\nX1000000Y0D02*\nG03X0Y1000000I-1000000J0D01*\nG01X1000000Y0D01*\nG37*\nM02*",
     )
     .expect("quarter-circle region should parse");
-    let sector = &layers[0].path_regions.sector_vertices;
-    assert_eq!(sector.len(), 6 * PATH_SECTOR_VERTEX_FLOATS);
-    let start = &sector[..5];
-    let end = &sector[5..10];
-    let outer_end = &sector[10..15];
-    let outer_start = &sector[25..30];
-    assert_approx_eq(start[0], 1.0);
-    assert_approx_eq(end[1], 1.0);
-    assert_approx_eq(outer_start[1], 0.0);
-    assert_approx_eq(outer_end[0], 0.0);
-    assert!(outer_start[0] > std::f32::consts::SQRT_2);
-    assert!(outer_end[1] > std::f32::consts::SQRT_2);
+    let sector_nm = &layers[0].path_regions.sector_vertices_nm;
+    let origin = layers[0].origin_nm;
+    let sector_mm = |idx: usize, axis: usize| -> f32 {
+        ((origin[axis] + sector_nm[idx] as i64) as f64 * 1e-6) as f32
+    };
+    assert_eq!(sector_nm.len(), 6 * PATH_SECTOR_VERTEX_FLOATS);
+    assert_approx_eq(sector_mm(0, 0), 1.0);
+    assert_approx_eq(sector_mm(6, 1), 1.0);
+    assert_approx_eq(sector_mm(26, 1), 0.0);
+    assert_approx_eq(sector_mm(10, 0), 0.0);
+    assert!(sector_mm(25, 0) > std::f32::consts::SQRT_2);
+    assert!(sector_mm(11, 1) > std::f32::consts::SQRT_2);
 }
 
 #[test]
@@ -1527,11 +1680,12 @@ fn clamped_arc_region_caps_preserve_non_degenerate_legacy_coverage() {
         "%FSLAX24Y24*%\n%MOMM*%\nG36*\nX010000Y000000D02*\nG03*\nX-010000Y000000I-010000J000000D01*\nX010000Y000000I010000J000000D01*\nG37*\nM02*",
     )
     .expect("legacy clamped region should still parse");
-    for cap in layers[0].path_regions.sector_vertices.chunks_exact(30) {
-        let outer_end = &cap[10..15];
-        let outer_start = &cap[25..30];
-        assert!(outer_start[1].abs() > 0.2);
-        assert!(outer_end[1].abs() > 0.2);
+    let origin = layers[0].origin_nm;
+    for cap in layers[0].path_regions.sector_vertices_nm.chunks_exact(30) {
+        let outer_end_y = ((origin[1] + cap[11] as i64) as f64 * 1e-6) as f32;
+        let outer_start_y = ((origin[1] + cap[26] as i64) as f64 * 1e-6) as f32;
+        assert!(outer_start_y.abs() > 0.2);
+        assert!(outer_end_y.abs() > 0.2);
     }
 }
 
@@ -1552,20 +1706,22 @@ M02*",
     .expect("region arc should parse");
 
     layers[0].translate(10.0, 20.0);
-    let sector = &layers[0].path_regions.sector_vertices;
+    let origin = layers[0].origin_nm;
+    let sector = &layers[0].path_regions.sector_vertices_nm;
     assert_eq!(sector.len() % PATH_SECTOR_VERTEX_FLOATS, 0);
+    let to_mm = |val: i32, axis: usize| ((origin[axis] + val as i64) as f64 * 1e-6) as f32;
     let first = &sector[0..PATH_SECTOR_VERTEX_FLOATS];
     let second = &sector[PATH_SECTOR_VERTEX_FLOATS..PATH_SECTOR_VERTEX_FLOATS * 2];
-    assert_approx_eq(first[0], 11.0);
-    assert_approx_eq(first[1], 20.0);
-    assert_approx_eq(first[2], 10.0);
-    assert_approx_eq(first[3], 20.0);
-    assert_approx_eq(first[4], 1.0);
-    assert_approx_eq(second[0], 10.0);
-    assert_approx_eq(second[1], 21.0);
-    assert_approx_eq(second[2], 10.0);
-    assert_approx_eq(second[3], 20.0);
-    assert_approx_eq(second[4], 1.0);
+    assert_approx_eq(to_mm(first[0], 0), 11.0);
+    assert_approx_eq(to_mm(first[1], 1), 20.0);
+    assert_approx_eq(to_mm(first[2], 0), 10.0);
+    assert_approx_eq(to_mm(first[3], 1), 20.0);
+    assert_approx_eq((first[4] as f64 * 1e-6) as f32, 1.0);
+    assert_approx_eq(to_mm(second[0], 0), 10.0);
+    assert_approx_eq(to_mm(second[1], 1), 21.0);
+    assert_approx_eq(to_mm(second[2], 0), 10.0);
+    assert_approx_eq(to_mm(second[3], 1), 20.0);
+    assert_approx_eq((second[4] as f64 * 1e-6) as f32, 1.0);
 }
 
 #[test]
@@ -1586,9 +1742,13 @@ M02*",
     )
     .expect("rounding-sensitive region arc should parse");
 
-    let sector = &layers[0].path_regions.sector_vertices;
-    let center = [sector[2], sector[3]];
-    let radius = sector[4];
+    let origin = layers[0].origin_nm;
+    let sector = &layers[0].path_regions.sector_vertices_nm;
+    let center = [
+        ((origin[0] + sector[2] as i64) as f64 * 1e-6) as f32,
+        ((origin[1] + sector[3] as i64) as f64 * 1e-6) as f32,
+    ];
+    let radius = (sector[4] as f64 * 1e-6) as f32;
     let inch_to_mm = 25.4;
     let start = [0.151463 * inch_to_mm, 1.226672 * inch_to_mm];
     let end = [0.149975 * inch_to_mm, 1.233567 * inch_to_mm];
@@ -1745,21 +1905,21 @@ M02*",
 
     let triangles = &layers[0].triangles;
     assert!(
-        !triangles.vertices.is_empty()
+        !triangles.vertices_nm.is_empty()
             || layers[0]
                 .triangle_templates
                 .iter()
                 .any(|template| !template.vertices.is_empty())
     );
-    assert!(triangles.hole_x.is_empty());
-    assert!(triangles.hole_y.is_empty());
-    assert!(triangles.hole_radius.is_empty());
+    assert!(triangles.hole_x_nm.is_empty());
+    assert!(triangles.hole_y_nm.is_empty());
+    assert!(triangles.hole_radius_nm.is_empty());
 
     let circles = &layers[0].circles;
-    assert_eq!(circles.x.len(), 1);
-    assert!(circles.hole_x.is_empty());
-    assert!(circles.hole_y.is_empty());
-    assert!(circles.hole_radius.is_empty());
+    assert_eq!(circles.x_nm.len(), 1);
+    assert!(circles.hole_x_nm.is_empty());
+    assert!(circles.hole_y_nm.is_empty());
+    assert!(circles.hole_radius_nm.is_empty());
 }
 
 #[test]
@@ -1779,18 +1939,21 @@ M02*",
     .expect("apertures should parse");
 
     let triangles = &layers[0].triangles;
-    assert!(!triangles.vertices.is_empty());
-    assert_eq!(triangles.hole_x.len(), triangles.vertices.len() / 2);
-    assert_eq!(triangles.hole_y.len(), triangles.vertices.len() / 2);
-    assert_eq!(triangles.hole_radius.len(), triangles.vertices.len() / 2);
-    assert!(triangles.hole_radius.iter().all(|radius| *radius > 0.0));
+    assert!(!triangles.vertices_nm.is_empty());
+    assert_eq!(triangles.hole_x_nm.len(), triangles.vertices_nm.len() / 2);
+    assert_eq!(triangles.hole_y_nm.len(), triangles.vertices_nm.len() / 2);
+    assert_eq!(
+        triangles.hole_radius_nm.len(),
+        triangles.vertices_nm.len() / 2
+    );
+    assert!(triangles.hole_radius_nm.iter().all(|radius| *radius > 0));
 
     let circles = &layers[0].circles;
-    assert_eq!(circles.x.len(), 1);
-    assert_eq!(circles.hole_x.len(), circles.x.len());
-    assert_eq!(circles.hole_y.len(), circles.x.len());
-    assert_eq!(circles.hole_radius.len(), circles.x.len());
-    assert!(circles.hole_radius.iter().all(|radius| *radius > 0.0));
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_eq!(circles.hole_x_nm.len(), circles.x_nm.len());
+    assert_eq!(circles.hole_y_nm.len(), circles.x_nm.len());
+    assert_eq!(circles.hole_radius_nm.len(), circles.x_nm.len());
+    assert!(circles.hole_radius_nm.iter().all(|radius| *radius > 0));
 }
 
 #[test]
@@ -1838,17 +2001,17 @@ M02*",
     assert_eq!(layers.len(), 2);
 
     let plain_circles = &layers[0].circles;
-    assert_eq!(plain_circles.x.len(), 1);
-    assert!(plain_circles.hole_x.is_empty());
-    assert!(plain_circles.hole_y.is_empty());
-    assert!(plain_circles.hole_radius.is_empty());
+    assert_eq!(plain_circles.x_nm.len(), 1);
+    assert!(plain_circles.hole_x_nm.is_empty());
+    assert!(plain_circles.hole_y_nm.is_empty());
+    assert!(plain_circles.hole_radius_nm.is_empty());
 
     let holed_circles = &layers[1].circles;
-    assert_eq!(holed_circles.x.len(), 1);
-    assert_eq!(holed_circles.hole_x.len(), 1);
-    assert_eq!(holed_circles.hole_y.len(), 1);
-    assert_eq!(holed_circles.hole_radius.len(), 1);
-    assert!(holed_circles.hole_radius[0] > 0.0);
+    assert_eq!(holed_circles.x_nm.len(), 1);
+    assert_eq!(holed_circles.hole_x_nm.len(), 1);
+    assert_eq!(holed_circles.hole_y_nm.len(), 1);
+    assert_eq!(holed_circles.hole_radius_nm.len(), 1);
+    assert!(holed_circles.hole_radius_nm[0] > 0);
 }
 
 #[test]
@@ -1978,7 +2141,7 @@ M02*";
     let layers = parse_gerber(data).expect("region should parse");
     let triangles = &layers[0].triangles;
 
-    assert_eq!(triangles.vertices.len() / 2, 6);
+    assert_eq!(triangles.vertices_nm.len() / 2, 6);
 }
 
 #[test]
@@ -2015,7 +2178,7 @@ M02*";
     let layers = parse_gerber(data).expect("flash should parse");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 1);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
 }
 
 #[test]
@@ -2034,7 +2197,7 @@ M02*";
     let layers = parse_gerber(data).expect("flashes should parse");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 2);
+    assert_eq!(layers[0].circles.x_nm.len(), 2);
 }
 
 #[test]
@@ -2052,11 +2215,17 @@ M02*";
     let layers = parse_gerber(data).expect("flashes should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 2);
-    assert_approx_eq(circles.x[0], 1.0);
-    assert_approx_eq(circles.x[1], 2.0);
-    assert_approx_eq(circles.radius[0], 0.5);
-    assert_approx_eq(circles.radius[1], 1.0);
+    assert_eq!(circles.x_nm.len(), 2);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[1] as i64) as f64 * 1e-6) as f32,
+        2.0,
+    );
+    assert_approx_eq((circles.radius_nm[0] as f64 * 1e-6) as f32, 0.5);
+    assert_approx_eq((circles.radius_nm[1] as f64 * 1e-6) as f32, 1.0);
 }
 
 #[test]
@@ -2074,10 +2243,16 @@ M02*";
     let layers = parse_gerber(data).expect("macro flash should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 0.75);
-    assert_approx_eq(circles.y[0], 0.0);
-    assert_approx_eq(circles.radius[0], 0.25);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.75,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq((circles.radius_nm[0] as f64 * 1e-6) as f32, 0.25);
 }
 
 #[test]
@@ -2094,9 +2269,15 @@ M02*";
     let layers = parse_gerber(data).expect("macro circle should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 0.0);
-    assert_approx_eq(circles.y[0], 1.0);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        1.0,
+    );
 }
 
 #[test]
@@ -2163,15 +2344,30 @@ M02*";
     let layers = parse_gerber(data).expect("thermal macro sample should parse");
     let thermals = &layers[0].thermals;
 
-    assert_eq!(thermals.x.len(), 4);
-    assert_approx_eq(thermals.x[0], 0.0);
-    assert_approx_eq(thermals.x[1], 0.4);
-    assert_approx_eq(thermals.x[2], 0.8);
-    assert_approx_eq(thermals.x[3], 1.2);
-    assert_approx_eq(thermals.y[0], 1.1);
-    assert_approx_eq(thermals.outer_diameter[2], 0.25);
-    assert_approx_eq(thermals.inner_diameter[2], 0.2);
-    assert_approx_eq(thermals.gap_thickness[2], 0.06);
+    assert_eq!(thermals.x_nm.len(), 4);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + thermals.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + thermals.x_nm[1] as i64) as f64 * 1e-6) as f32,
+        0.4,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + thermals.x_nm[2] as i64) as f64 * 1e-6) as f32,
+        0.8,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + thermals.x_nm[3] as i64) as f64 * 1e-6) as f32,
+        1.2,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + thermals.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        1.1,
+    );
+    assert_approx_eq((thermals.outer_diameter_nm[2] as f64 * 1e-6) as f32, 0.25);
+    assert_approx_eq((thermals.inner_diameter_nm[2] as f64 * 1e-6) as f32, 0.2);
+    assert_approx_eq((thermals.gap_thickness_nm[2] as f64 * 1e-6) as f32, 0.06);
     assert_approx_eq(thermals.rotation[0], 0.0);
     assert_approx_eq(thermals.rotation[1], 10.0_f32.to_radians());
     assert_approx_eq(thermals.rotation[2], 30.0_f32.to_radians());
@@ -2217,9 +2413,15 @@ M02*";
     let layers = parse_gerber(data).expect("step repeat should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 2);
-    assert_approx_eq(circles.x[0], 0.0);
-    assert_approx_eq(circles.x[1], 25.4);
+    assert_eq!(circles.x_nm.len(), 2);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[1] as i64) as f64 * 1e-6) as f32,
+        25.4,
+    );
 }
 
 #[test]
@@ -2236,13 +2438,21 @@ M02*";
     let layers = parse_gerber(data).expect("rectangle flashes should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(layers[0].triangles.vertices.is_empty());
+    assert!(layers[0].triangles.vertices_nm.is_empty());
     assert_eq!(layers[0].triangle_templates.len(), 1);
     assert_eq!(layers[0].triangle_templates[0].vertices.len(), 12);
-    assert_eq!(layers[0].triangle_templates[0].instance_x.len(), 2);
-    assert_eq!(layers[0].triangle_templates[0].instance_y.len(), 2);
-    assert_approx_eq(layers[0].triangle_templates[0].instance_x[0], 0.0);
-    assert_approx_eq(layers[0].triangle_templates[0].instance_x[1], 2.0);
+    assert_eq!(layers[0].triangle_templates[0].instance_x_nm.len(), 2);
+    assert_eq!(layers[0].triangle_templates[0].instance_y_nm.len(), 2);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].triangle_templates[0].instance_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].triangle_templates[0].instance_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
+        2.0,
+    );
 }
 
 #[test]
@@ -2260,13 +2470,21 @@ M02*";
     let layers = parse_gerber(data).expect("rotated rectangle flashes should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(layers[0].triangles.vertices.is_empty());
+    assert!(layers[0].triangles.vertices_nm.is_empty());
     assert_eq!(layers[0].triangle_templates.len(), 1);
     assert_eq!(layers[0].triangle_templates[0].vertices.len(), 12);
-    assert_eq!(layers[0].triangle_templates[0].instance_x.len(), 2);
-    assert_eq!(layers[0].triangle_templates[0].instance_y.len(), 2);
-    assert_approx_eq(layers[0].triangle_templates[0].instance_x[0], 0.0);
-    assert_approx_eq(layers[0].triangle_templates[0].instance_x[1], 2.0);
+    assert_eq!(layers[0].triangle_templates[0].instance_x_nm.len(), 2);
+    assert_eq!(layers[0].triangle_templates[0].instance_y_nm.len(), 2);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].triangle_templates[0].instance_x_nm[0] as i64) as f64
+            * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].triangle_templates[0].instance_x_nm[1] as i64) as f64
+            * 1e-6) as f32,
+        2.0,
+    );
 }
 
 #[test]
@@ -2286,10 +2504,16 @@ M02*";
     let layers = parse_gerber(data).expect("aperture block should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 11.0);
-    assert_approx_eq(circles.y[0], 22.0);
-    assert_approx_eq(circles.radius[0], 0.5);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        11.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        22.0,
+    );
+    assert_approx_eq((circles.radius_nm[0] as f64 * 1e-6) as f32, 0.5);
 }
 
 #[test]
@@ -2317,12 +2541,18 @@ M02*";
     assert_eq!(layers.len(), 2);
     assert!(!layers[0].is_negative);
     assert!(layers[1].is_negative);
-    assert_eq!(layers[0].circles.x.len(), 1);
-    assert_eq!(layers[1].circles.x.len(), 1);
-    assert_approx_eq(layers[0].circles.x[0], 10.0);
-    assert_approx_eq(layers[0].circles.radius[0], 2.0);
-    assert_approx_eq(layers[1].circles.x[0], 10.0);
-    assert_approx_eq(layers[1].circles.radius[0], 1.0);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
+    assert_eq!(layers[1].circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq((layers[0].circles.radius_nm[0] as f64 * 1e-6) as f32, 2.0);
+    assert_approx_eq(
+        ((layers[1].origin_nm[0] + layers[1].circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq((layers[1].circles.radius_nm[0] as f64 * 1e-6) as f32, 1.0);
 }
 
 #[test]
@@ -2350,10 +2580,10 @@ M02*";
     assert_eq!(layers.len(), 2);
     assert!(layers[0].is_negative);
     assert!(!layers[1].is_negative);
-    assert_eq!(layers[0].circles.x.len(), 1);
-    assert_eq!(layers[1].circles.x.len(), 1);
-    assert_approx_eq(layers[0].circles.radius[0], 2.0);
-    assert_approx_eq(layers[1].circles.radius[0], 1.0);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
+    assert_eq!(layers[1].circles.x_nm.len(), 1);
+    assert_approx_eq((layers[0].circles.radius_nm[0] as f64 * 1e-6) as f32, 2.0);
+    assert_approx_eq((layers[1].circles.radius_nm[0] as f64 * 1e-6) as f32, 1.0);
 }
 
 #[test]
@@ -2377,9 +2607,15 @@ M02*";
     let layers = parse_gerber(data).expect("nested aperture block should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 13.0);
-    assert_approx_eq(circles.y[0], 0.0);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        13.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -2409,14 +2645,19 @@ M02*",
     )
     .expect("nested aperture block should parse");
     let arcs = &layers[0].arcs;
-    let circles = &layers[0].circles;
 
-    assert_eq!(arcs.x.len(), 1);
-    assert_approx_eq(arcs.x[0], 0.0);
-    assert_approx_eq(arcs.y[0], 0.0);
-    assert_approx_eq(arcs.radius[0], 2.5);
-    assert!(has_circle_at(circles, 0.0, 2.5, 0.25));
-    assert!(has_circle_at(circles, 2.5, 0.0, 0.25));
+    assert_eq!(arcs.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + arcs.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + arcs.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq((arcs.radius_nm[0] as f64 * 1e-6) as f32, 2.5);
+    assert!(has_circle_at(&layers[0], 0.0, 2.5, 0.25));
+    assert!(has_circle_at(&layers[0], 2.5, 0.0, 0.25));
 }
 
 #[test]
@@ -2436,9 +2677,7 @@ X1000000Y0000000D03*
 M02*",
     )
     .expect("aperture block should parse");
-    let circles = &layers[0].circles;
-
-    assert!(has_circle_at(circles, 1.0, 0.0, 1.0));
+    assert!(has_circle_at(&layers[0], 1.0, 0.0, 1.0));
 }
 
 #[test]
@@ -2456,11 +2695,9 @@ X-5000000Y0I0J2500000D01*
 M02*",
     )
     .expect("arc should parse");
-    let circles = &layers[0].circles;
-
-    assert!(has_circle_at(circles, 0.0, -2.5, 0.5));
-    assert!(has_circle_at(circles, -2.5, 0.0, 0.5));
-    assert!(!has_circle_at(circles, -5.0, 0.0, 0.5));
+    assert!(has_circle_at(&layers[0], 0.0, -2.5, 0.5));
+    assert!(has_circle_at(&layers[0], -2.5, 0.0, 0.5));
+    assert!(!has_circle_at(&layers[0], -5.0, 0.0, 0.5));
 }
 
 #[test]
@@ -2503,13 +2740,19 @@ M02*",
     .expect("full-circle arc should parse");
     let layer = &layers[0];
 
-    assert_eq!(layer.arcs.x.len(), 1);
-    assert_approx_eq(layer.arcs.x[0], 0.0);
-    assert_approx_eq(layer.arcs.y[0], 0.0);
-    assert_approx_eq(layer.arcs.radius[0], 1.0);
+    assert_eq!(layer.arcs.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layer.origin_nm[0] + layer.arcs.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layer.origin_nm[1] + layer.arcs.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq((layer.arcs.radius_nm[0] as f64 * 1e-6) as f32, 1.0);
     assert_approx_eq(layer.arcs.sweep_angle[0], 2.0 * std::f32::consts::PI);
-    assert_eq!(layer.circles.x.len(), 2);
-    assert!(has_circle_at(&layer.circles, 1.0, 0.0, 0.5));
+    assert_eq!(layer.circles.x_nm.len(), 2);
+    assert!(has_circle_at(layer, 1.0, 0.0, 0.5));
 }
 
 #[test]
@@ -2529,7 +2772,7 @@ M02*",
     .expect("micro-arc should parse");
     let layer = &layers[0];
 
-    assert_eq!(layer.arcs.x.len(), 1);
+    assert_eq!(layer.arcs.x_nm.len(), 1);
     assert!(
         layer.arcs.sweep_angle[0].abs() < 0.01,
         "micro-arc sweep must be small (~0.001 rad), got {}",
@@ -2614,15 +2857,55 @@ M02*",
     .expect("solid circle D01 should parse");
     let layer = &layers[0];
 
-    assert_eq!(layer.circles.x.len(), 2);
-    assert!(has_circle_at(&layer.circles, 0.0, 0.0, 0.5));
-    assert!(has_circle_at(&layer.circles, 1.0, 0.0, 0.5));
-    assert!(layer.triangles.vertices.is_empty());
-    assert_eq!(layer.lines.start_x, vec![0.0]);
-    assert_eq!(layer.lines.start_y, vec![0.0]);
-    assert_eq!(layer.lines.end_x, vec![1.0]);
-    assert_eq!(layer.lines.end_y, vec![0.0]);
-    assert_eq!(layer.lines.width, vec![1.0]);
+    assert_eq!(layer.circles.x_nm.len(), 2);
+    assert!(has_circle_at(layer, 0.0, 0.0, 0.5));
+    assert!(has_circle_at(layer, 1.0, 0.0, 0.5));
+    assert!(layer.triangles.vertices_nm.is_empty());
+    assert_eq!(
+        layer
+            .lines
+            .start_x_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .start_y_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .end_x_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![1.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .end_y_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .width_nm
+            .iter()
+            .map(|&v| (v as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![1.0]
+    );
 }
 
 #[test]
@@ -2640,12 +2923,52 @@ M02*",
     .expect("zero-width solid circle D01 should parse");
     let layer = &layers[0];
 
-    assert!(layer.circles.x.is_empty());
-    assert_eq!(layer.lines.start_x, vec![0.0]);
-    assert_eq!(layer.lines.start_y, vec![0.0]);
-    assert_eq!(layer.lines.end_x, vec![1.0]);
-    assert_eq!(layer.lines.end_y, vec![0.0]);
-    assert_eq!(layer.lines.width, vec![0.0]);
+    assert!(layer.circles.x_nm.is_empty());
+    assert_eq!(
+        layer
+            .lines
+            .start_x_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .start_y_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .end_x_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![1.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .end_y_nm
+            .iter()
+            .map(|&v| ((layer.origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
+    assert_eq!(
+        layer
+            .lines
+            .width_nm
+            .iter()
+            .map(|&v| (v as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
 }
 
 #[test]
@@ -2664,12 +2987,26 @@ M02*",
     .expect("zero-width solid circle arc should parse");
     let layer = &layers[0];
 
-    assert!(layer.circles.x.is_empty());
-    assert_eq!(layer.arcs.x.len(), 1);
-    assert_approx_eq(layer.arcs.x[0], 0.0);
-    assert_approx_eq(layer.arcs.y[0], 0.0);
-    assert_approx_eq(layer.arcs.radius[0], 1.0);
-    assert_eq!(layer.arcs.thickness, vec![0.0]);
+    assert!(layer.circles.x_nm.is_empty());
+    assert_eq!(layer.arcs.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layer.origin_nm[0] + layer.arcs.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq(
+        ((layer.origin_nm[1] + layer.arcs.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
+    assert_approx_eq((layer.arcs.radius_nm[0] as f64 * 1e-6) as f32, 1.0);
+    assert_eq!(
+        layer
+            .arcs
+            .thickness_nm
+            .iter()
+            .map(|&v| (v as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        vec![0.0]
+    );
 }
 
 #[test]
@@ -2687,10 +3024,10 @@ M02*",
     .expect("zero-length solid circle D01 should parse");
     let layer = &layers[0];
 
-    assert_eq!(layer.circles.x.len(), 1);
-    assert!(has_circle_at(&layer.circles, 0.0, 0.0, 0.5));
-    assert!(layer.triangles.vertices.is_empty());
-    assert!(layer.lines.start_x.is_empty());
+    assert_eq!(layer.circles.x_nm.len(), 1);
+    assert!(has_circle_at(layer, 0.0, 0.0, 0.5));
+    assert!(layer.triangles.vertices_nm.is_empty());
+    assert!(layer.lines.start_x_nm.is_empty());
 }
 
 #[test]
@@ -2708,7 +3045,7 @@ M02*",
     .expect("zero-length rectangle D01 should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(layers[0].triangles.vertices.is_empty());
+    assert!(layers[0].triangles.vertices_nm.is_empty());
     assert_eq!(layers[0].triangle_templates.len(), 1);
     let vertices = collect_triangle_vertices(&layers[0]);
     assert_eq!(vertices.len(), 12);
@@ -2735,7 +3072,7 @@ M02*",
     .expect("rotated zero-length rectangle D01 should parse");
 
     assert_eq!(layers.len(), 1);
-    assert!(layers[0].triangles.vertices.is_empty());
+    assert!(layers[0].triangles.vertices_nm.is_empty());
     assert_eq!(layers[0].triangle_templates.len(), 1);
     let vertices = collect_triangle_vertices(&layers[0]);
     assert_eq!(vertices.len(), 12);
@@ -2798,9 +3135,12 @@ M02*";
     let layers = parse_gerber(data).expect("scaled aperture block should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 12.0);
-    assert_approx_eq(circles.radius[0], 1.0);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        12.0,
+    );
+    assert_approx_eq((circles.radius_nm[0] as f64 * 1e-6) as f32, 1.0);
 }
 
 #[test]
@@ -2839,9 +3179,15 @@ M02*";
     let layers = parse_gerber(data).expect("mirrored rotated aperture should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 1.0);
-    assert_approx_eq(circles.y[0], 0.75);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        1.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.75,
+    );
 }
 
 #[test]
@@ -2860,9 +3206,15 @@ M02*";
     let layers = parse_gerber(data).expect("rotated aperture should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], -1.0);
-    assert_approx_eq(circles.y[0], 0.0);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        -1.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -2883,9 +3235,15 @@ M02*";
     let layers = parse_gerber(data).expect("rotated aperture block should parse");
     let circles = &layers[0].circles;
 
-    assert_eq!(circles.x.len(), 1);
-    assert_approx_eq(circles.x[0], 10.0);
-    assert_approx_eq(circles.y[0], 1.0);
+    assert_eq!(circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        10.0,
+    );
+    assert_approx_eq(
+        ((layers[0].origin_nm[1] + circles.y_nm[0] as i64) as f64 * 1e-6) as f32,
+        1.0,
+    );
 }
 
 #[test]
@@ -2939,10 +3297,49 @@ D10*X000000Y000000D03*X010000Y000000D03*X020000Y010000D03*M02*",
     .expect("several commands on one line should parse");
 
     assert_eq!(packed.len(), per_line.len());
-    assert_eq!(packed[0].circles.x.len(), 3);
-    assert_eq!(packed[0].circles.x, per_line[0].circles.x);
-    assert_eq!(packed[0].circles.y, per_line[0].circles.y);
-    assert_eq!(packed[0].circles.radius, per_line[0].circles.radius);
+    assert_eq!(packed[0].circles.x_nm.len(), 3);
+    assert_eq!(
+        packed[0]
+            .circles
+            .x_nm
+            .iter()
+            .map(|&v| ((packed[0].origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        per_line[0]
+            .circles
+            .x_nm
+            .iter()
+            .map(|&v| ((per_line[0].origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        packed[0]
+            .circles
+            .y_nm
+            .iter()
+            .map(|&v| ((packed[0].origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        per_line[0]
+            .circles
+            .y_nm
+            .iter()
+            .map(|&v| ((per_line[0].origin_nm[1] + v as i64) as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>()
+    );
+    assert_eq!(
+        packed[0]
+            .circles
+            .radius_nm
+            .iter()
+            .map(|&v| (v as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>(),
+        per_line[0]
+            .circles
+            .radius_nm
+            .iter()
+            .map(|&v| (v as f64 * 1e-6) as f32)
+            .collect::<Vec<f32>>()
+    );
 }
 
 #[test]
@@ -2953,10 +3350,10 @@ fn extended_commands_inline_with_graphic_commands_are_isolated() {
     .expect("whole file on a single line should parse");
 
     assert_eq!(layers.len(), 2, "dark and clear polarity layers expected");
-    assert_eq!(layers[0].circles.x.len(), 1);
-    assert!(has_circle_at(&layers[0].circles, 0.0, 0.0, 0.5));
-    assert_eq!(layers[1].circles.x.len(), 1);
-    assert!(has_circle_at(&layers[1].circles, 1.0, 0.0, 0.5));
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
+    assert!(has_circle_at(&layers[0], 0.0, 0.0, 0.5));
+    assert_eq!(layers[1].circles.x_nm.len(), 1);
+    assert!(has_circle_at(&layers[1], 1.0, 0.0, 0.5));
 }
 
 #[test]
@@ -2974,9 +3371,9 @@ D11*X000000Y000000D03*X030000Y000000D03*M02*",
     .expect("macro aperture followed by packed flashes should parse");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 2);
-    assert!(has_circle_at(&layers[0].circles, 0.0, 0.0, 1.0));
-    assert!(has_circle_at(&layers[0].circles, 3.0, 0.0, 1.0));
+    assert_eq!(layers[0].circles.x_nm.len(), 2);
+    assert!(has_circle_at(&layers[0], 0.0, 0.0, 1.0));
+    assert!(has_circle_at(&layers[0], 3.0, 0.0, 1.0));
 }
 
 #[test]
@@ -2994,10 +3391,10 @@ fn packed_body_with_empty_commands_and_m00_terminator_parses() {
     .expect("packed body with empty commands should parse");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 3);
-    assert!(has_circle_at(&layers[0].circles, 61.75, 86.45, 0.185));
-    assert!(has_circle_at(&layers[0].circles, 61.75, 85.65, 0.185));
-    assert!(has_circle_at(&layers[0].circles, 60.95, 86.45, 0.185));
+    assert_eq!(layers[0].circles.x_nm.len(), 3);
+    assert!(has_circle_at(&layers[0], 61.75, 86.45, 0.185));
+    assert!(has_circle_at(&layers[0], 61.75, 85.65, 0.185));
+    assert!(has_circle_at(&layers[0], 60.95, 86.45, 0.185));
 }
 
 #[test]
@@ -3012,8 +3409,11 @@ D10*X000000Y000000D03*M02*X010000Y000000D03*",
     .expect("flash before M02 should parse");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 1);
-    assert_approx_eq(layers[0].circles.x[0], 0.0);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((layers[0].origin_nm[0] + layers[0].circles.x_nm[0] as i64) as f64 * 1e-6) as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -3028,7 +3428,7 @@ G04 progress 50% done*D10*X000000Y000000D03*M02*",
     .expect("comment with a percent sign should be ignored");
 
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 1);
+    assert_eq!(layers[0].circles.x_nm.len(), 1);
 }
 
 #[test]
@@ -3044,8 +3444,12 @@ X010000Y000000D03*",
     )
     .expect("flash before M00 should parse");
     assert_eq!(on_next_line.len(), 1);
-    assert_eq!(on_next_line[0].circles.x.len(), 1);
-    assert_approx_eq(on_next_line[0].circles.x[0], 0.0);
+    assert_eq!(on_next_line[0].circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((on_next_line[0].origin_nm[0] + on_next_line[0].circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
 
     let on_same_line = parse_gerber(
         "%FSLAX24Y24*%
@@ -3055,8 +3459,12 @@ D10*X000000Y000000D03*M00*X010000Y000000D03*X020000Y000000D03*",
     )
     .expect("flash before M00 should parse");
     assert_eq!(on_same_line.len(), 1);
-    assert_eq!(on_same_line[0].circles.x.len(), 1);
-    assert_approx_eq(on_same_line[0].circles.x[0], 0.0);
+    assert_eq!(on_same_line[0].circles.x_nm.len(), 1);
+    assert_approx_eq(
+        ((on_same_line[0].origin_nm[0] + on_same_line[0].circles.x_nm[0] as i64) as f64 * 1e-6)
+            as f32,
+        0.0,
+    );
 }
 
 #[test]
@@ -3088,7 +3496,7 @@ fn command_pre_count_matches_tokenizer_for_well_formed_input() {
 
     let layers = parse_gerber(&data).expect("pre-counted file should still parse");
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 500);
+    assert_eq!(layers[0].circles.x_nm.len(), 500);
 }
 
 #[test]
@@ -3152,7 +3560,7 @@ D10*X000000Y000000D03*X010000Y000000D03*M02*";
 
     let layers = parse_gerber(data).expect("malformed empty extended commands are ignored");
     assert_eq!(layers.len(), 1);
-    assert_eq!(layers[0].circles.x.len(), 2);
+    assert_eq!(layers[0].circles.x_nm.len(), 2);
 }
 
 type ProgressReports = std::rc::Rc<std::cell::RefCell<Vec<(super::ParseStage, usize, usize)>>>;
@@ -3196,7 +3604,7 @@ fn progress_counts_commands_then_shapes_and_ends_complete() {
     data.push_str("M02*");
 
     let (layers, reports) = parse_with_progress(&data);
-    assert_eq!(layers[0].circles.x.len(), flashes);
+    assert_eq!(layers[0].circles.x_nm.len(), flashes);
 
     let commands = stage_reports(&reports, super::ParseStage::Commands);
     let total = data.len();
@@ -3237,7 +3645,7 @@ fn step_repeat_flashes_report_progress_within_few_commands() {
     data.push_str("%SR*%\nM02*");
 
     let (layers, reports) = parse_with_progress(&data);
-    let shapes: usize = layers.iter().map(|layer| layer.circles.x.len()).sum();
+    let shapes: usize = layers.iter().map(|layer| layer.circles.x_nm.len()).sum();
     assert_eq!(shapes, 1_000_000);
 
     let commands = stage_reports(&reports, super::ParseStage::Commands);
@@ -3279,7 +3687,19 @@ M02*";
 
     assert_eq!(with_progress.len(), without_progress.len());
     for (left, right) in with_progress.iter().zip(&without_progress) {
-        assert_eq!(left.circles.x, right.circles.x);
+        assert_eq!(
+            left.circles
+                .x_nm
+                .iter()
+                .map(|&v| ((left.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>(),
+            right
+                .circles
+                .x_nm
+                .iter()
+                .map(|&v| ((right.origin_nm[0] + v as i64) as f64 * 1e-6) as f32)
+                .collect::<Vec<f32>>()
+        );
         assert_eq!(left.is_negative, right.is_negative);
     }
     // Three polarity layers of one shape each: far less than a step.
@@ -3369,4 +3789,69 @@ G37*
         stage_reports(&reports, super::ParseStage::Geometry),
         vec![(0, 0)]
     );
+}
+
+#[test]
+fn large_origin_offset_mm_and_inch_shift_cleanly_into_i32() {
+    // 5000 mm (> i32::MAX nm) and 200 inch (= 5080 mm > i32::MAX nm)
+    let mm_source = "\
+%FSLAX44Y44*%
+%MOMM*%
+%ADD10C,1.0*%
+D10*
+X50000000Y30000000D03*
+X50100000Y30200000D03*
+M02*";
+    let mm_layers = parse_gerber(mm_source).expect("large-offset mm board should parse");
+    assert_eq!(mm_layers.len(), 1);
+    assert_eq!(mm_layers[0].origin_nm, [5_005_000_000, 3_010_000_000]);
+    assert_eq!(mm_layers[0].circles.x_nm, vec![-5_000_000, 5_000_000]);
+    assert_eq!(mm_layers[0].circles.y_nm, vec![-10_000_000, 10_000_000]);
+
+    let inch_source = "\
+%FSLAX44Y44*%
+%MOIN*%
+%ADD10C,0.1*%
+D10*
+X2000000Y1000000D03*
+X2010000Y1000000D03*
+M02*";
+    let inch_layers = parse_gerber(inch_source).expect("large-offset inch board should parse");
+    assert_eq!(inch_layers.len(), 1);
+    assert!(inch_layers[0].origin_nm[0] > 5_000_000_000);
+    assert_eq!(
+        inch_layers[0].origin_nm[0] + inch_layers[0].circles.x_nm[0] as i64,
+        5_080_000_000
+    );
+}
+
+#[test]
+fn rejects_layer_exceeding_4_29m_span() {
+    // Span = 5000 mm = 5_000_000_000 nm > u32::MAX (4.29 m)
+    let polarity_layers = vec![super::PolarityLayer {
+        polarity: super::Polarity::Positive,
+        primitives: vec![
+            super::Primitive::new_circle_with_nm(
+                0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0, 0, 500_000, 0, 0, 0,
+            ),
+            super::Primitive::new_circle_with_nm(
+                5000.0,
+                0.0,
+                0.5,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                5_000_000_000,
+                0,
+                500_000,
+                0,
+                0,
+                0,
+            ),
+        ],
+        path_regions: super::PathRegions::empty(),
+    }];
+    let err = super::compute_layer_origin_nm(&polarity_layers).unwrap_err();
+    assert!(err.contains("4.29 m"));
 }

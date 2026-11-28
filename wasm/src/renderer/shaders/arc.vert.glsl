@@ -24,6 +24,10 @@ out highp float vSweepAngle;
 out highp float vThickness;
 out highp float vOutlineThickness;
 
+float sub_i32_to_f32(int a, int b) {
+    return a >= b ? float(uint(a) - uint(b)) : -float(uint(b) - uint(a));
+}
+
 float weakestPixelsPerWorld() {
     vec2 pixelScale = viewport_size * 0.5;
     vec2 axisX = (mat2(transform) * vec2(1.0, 0.0)) * pixelScale;
@@ -53,7 +57,7 @@ void main() {
         vWorldPerPixel = 1.0 / pixels_per_world;
         drawnRadius = maxRadius + 0.5 * vWorldPerPixel;
     }
-    vec2 center = vec2(float(center_x_instance - u_eye_nm.x) * 0.000001, float(center_y_instance - u_eye_nm.y) * 0.000001);
+    vec2 center = vec2(sub_i32_to_f32(center_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(center_y_instance, u_eye_nm.y) * 0.000001);
     vec2 scaledPos = position * drawnRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);

@@ -29,8 +29,12 @@ float weakestPixelsPerWorld() {
     return sqrt(weakestScaleSquared);
 }
 
+float sub_i32_to_f32(int a, int b) {
+    return a >= b ? float(uint(a) - uint(b)) : -float(uint(b) - uint(a));
+}
+
 void main() {
-    vec2 center = vec2(float(center_x_instance - u_eye_nm.x) * 0.000001, float(center_y_instance - u_eye_nm.y) * 0.000001);
+    vec2 center = vec2(sub_i32_to_f32(center_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(center_y_instance, u_eye_nm.y) * 0.000001);
     float pixelsPerWorld = weakestPixelsPerWorld();
     float outlineWorldRadius = inner_outline_world
         + inner_outline_pixels / max(pixelsPerWorld, 0.000001);

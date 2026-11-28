@@ -1,4 +1,4 @@
-use super::{compute_rte_transform_and_eye, Camera};
+use super::{compute_rte_transform_and_eye, compute_rte_transform_and_eye_for_origin, Camera};
 
 #[test]
 fn transform_matrix_preserves_signed_axis_zoom() {
@@ -81,4 +81,26 @@ fn rte_transform_matches_standard_transform_with_extreme_precision() {
         clip_y,
         rte_clip_y
     );
+}
+
+#[test]
+fn rte_transform_for_origin_handles_large_world_offset() {
+    // Small board located at X = 5000 mm (beyond i32::MAX nm = 2147.48 mm)
+    let origin_nm = [5_000_000_000_i64, -3_000_000_000_i64];
+    let zoom = 50.0_f32;
+    let camera = Camera {
+        zoom_x: zoom,
+        zoom_y: zoom,
+        offset_x: -5000.0 * zoom,
+        offset_y: 3000.0 * zoom,
+    };
+
+    let transform = camera.get_transform_matrix(1920, 1080);
+    let (rte_transform, eye_rel) = compute_rte_transform_and_eye_for_origin(&transform, origin_nm);
+
+    // eye_rel should be near 0 relative to origin_nm
+    assert!(eye_rel[0].abs() <= 1_000_000);
+    assert!(eye_rel[1].abs() <= 1_000_000);
+    assert!(rte_transform[6].abs() < 1.0);
+    assert!(rte_transform[7].abs() < 1.0);
 }
