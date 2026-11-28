@@ -57,29 +57,7 @@ void main() {
     // Compute vertex in world coordinates
     float t = position.x * 0.5 + 0.5;
     vec2 centerWorld = mix(start, end, t);
-    vec2 vertexWorld;
-
-    // When unclamped and no outline, horizontal and vertical raster lines
-    // use exact integer nanometer edge alignment to prevent 1-ULP raster seams
-    bool useExactInteger = (clampedHalfWidthPixels <= halfWidthPixels) && (outlineWorld == 0.0);
-
-    if (useExactInteger && start_y_instance == end_y_instance) {
-        float norm_y = worldNormal.y * position.y;
-        int half_w_top = (width_instance + 1) / 2;
-        int half_w_bottom = width_instance / 2;
-        int edge_y_nm = start_y_instance + (norm_y > 0.0 ? half_w_top : -half_w_bottom);
-        int edge_x_nm = position.x < 0.0 ? start_x_instance : end_x_instance;
-        vertexWorld = vec2(sub_i32_to_f32(edge_x_nm, u_eye_nm.x) * 0.000001, sub_i32_to_f32(edge_y_nm, u_eye_nm.y) * 0.000001);
-    } else if (useExactInteger && start_x_instance == end_x_instance) {
-        float norm_x = worldNormal.x * position.y;
-        int half_w_right = (width_instance + 1) / 2;
-        int half_w_left = width_instance / 2;
-        int edge_x_nm = start_x_instance + (norm_x > 0.0 ? half_w_right : -half_w_left);
-        int edge_y_nm = position.x < 0.0 ? start_y_instance : end_y_instance;
-        vertexWorld = vec2(sub_i32_to_f32(edge_x_nm, u_eye_nm.x) * 0.000001, sub_i32_to_f32(edge_y_nm, u_eye_nm.y) * 0.000001);
-    } else {
-        vertexWorld = centerWorld + worldNormal * (position.y * totalHalfWidthWorld);
-    }
+    vec2 vertexWorld = centerWorld + worldNormal * (position.y * totalHalfWidthWorld);
 
     // Transform directly to clip space
     vec3 transformed = transform * vec3(vertexWorld, 1.0);

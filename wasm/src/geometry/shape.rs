@@ -1398,6 +1398,8 @@ pub struct GerberData {
 }
 
 impl GerberData {
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         triangles: Triangles,
         triangle_templates: Vec<TriangleTemplateInstances>,

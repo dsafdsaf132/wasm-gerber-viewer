@@ -23,8 +23,12 @@ void main() {
     vec3 transformed = transform * vec3(pos_rel, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
     vPosition = pos_rel;
-    vec2 hole_rel = vec2(sub_i32_to_f32(hole_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(hole_y_instance, u_eye_nm.y) * 0.000001);
-    vHoleCenter = hole_rel;
-    vHoleRadius = float(hole_radius_instance) * 0.000001;
+    if (hole_radius_instance > 0) {
+        vHoleCenter = vec2(sub_i32_to_f32(hole_x_instance, u_eye_nm.x) * 0.000001, sub_i32_to_f32(hole_y_instance, u_eye_nm.y) * 0.000001);
+        vHoleRadius = float(hole_radius_instance) * 0.000001;
+    } else {
+        vHoleCenter = vec2(0.0);
+        vHoleRadius = 0.0;
+    }
     vWorldPerPixel = anti_aliasing > 0.5 ? 1.0 / pixels_per_world : 0.0;
 }

@@ -3292,12 +3292,14 @@ impl Renderer {
                     return Err(error);
                 }
             };
+            let origin_nm = Self::decode_render_payload_origin_nm(&sublayer);
             buffer_caches.push(buffer_cache);
             gerber_data.push(Self::placeholder_gerber_data(
                 boundary,
                 Self::js_bool_property(&sublayer, "isNegative"),
                 template_count,
                 path_regions,
+                origin_nm,
             ));
         }
 
@@ -3374,13 +3376,30 @@ impl Renderer {
         Ok(boundary)
     }
 
+    fn decode_render_payload_origin_nm(sublayer: &JsValue) -> [i64; 2] {
+        let origin_x = Reflect::get(sublayer, &JsValue::from_str("originNmX"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+            .unwrap_or(0);
+        let origin_y = Reflect::get(sublayer, &JsValue::from_str("originNmY"))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+            .map(|v| v.round() as i64)
+            .unwrap_or(0);
+        [origin_x, origin_y]
+    }
+
     fn placeholder_gerber_data(
         boundary: Boundary,
         is_negative: bool,
         template_count: usize,
         path_regions: PathRegions,
+        origin_nm: [i64; 2],
     ) -> GerberData {
-        GerberData::new(
+        GerberData::new_with_origin(
             Triangles::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             (0..template_count)
                 .map(|_| TriangleTemplateInstances::new(Vec::new(), Vec::new(), Vec::new()))
@@ -3413,6 +3432,7 @@ impl Renderer {
             path_regions,
             boundary,
             is_negative,
+            origin_nm,
         )
     }
 

@@ -36,6 +36,11 @@ void main() {
     vec2 scaledPos = position * drawnRadius + center;
     vec3 transformed = transform * vec3(scaledPos, 1.0);
     gl_Position = vec4(transformed.xy, 0.0, 1.0);
-    vHoleCenter = vec2(float(hole_x_instance - center_x_instance) * 0.000001, float(hole_y_instance - center_y_instance) * 0.000001) / safeRadius;
-    vHoleRadius = (float(hole_radius_instance) * 0.000001) / safeRadius;
+    if (hole_radius_instance > 0) {
+        vHoleCenter = vec2(float(hole_x_instance - center_x_instance) * 0.000001, float(hole_y_instance - center_y_instance) * 0.000001) / safeRadius;
+        vHoleRadius = (float(hole_radius_instance) * 0.000001) / safeRadius;
+    } else {
+        vHoleCenter = vec2(0.0);
+        vHoleRadius = 0.0;
+    }
 }
